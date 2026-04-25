@@ -11,7 +11,7 @@ use crate::model::protocol::{ModelAction, ModelRequest, Observation};
 use crate::skills::registry::SkillRegistry;
 use crate::skills::resolver::resolve_skill;
 use crate::skills::schema::SkillSpec;
-use crate::tools::registry::default_registry;
+use crate::tools::registry::{default_registry, ExecutionPolicy};
 use crate::ui::render::print_banner;
 
 pub struct AgentLoop {
@@ -30,6 +30,7 @@ impl AgentLoop {
         let registry = default_registry();
         let skills = SkillRegistry::load_dir("skills")?;
         let skill = resolve_skill(&skills, context.skill.as_deref());
+        let policy = ExecutionPolicy::new(&self.config.approval, skill);
         let memory = MemoryState::new(profile.name.clone());
         let primary_file = primary_file(&profile).map(str::to_string);
         let suggested_test_command = default_test_command(&profile).map(str::to_string);
@@ -39,7 +40,10 @@ impl AgentLoop {
 
         println!("Task: {}", context.task);
         println!("Profile: {}", profile.name);
-        println!("Available tools: {}", registry.names().join(", "));
+        println!(
+            "Available tools: {}",
+            registry.names_for_policy(&policy).join(", ")
+        );
 
         if let Some(skill) = skill {
             println!("Skill: {}", skill.name);
@@ -62,7 +66,11 @@ impl AgentLoop {
                 profile_name: profile.name.clone(),
                 primary_file: primary_file.clone(),
                 suggested_test_command: suggested_test_command.clone(),
-                available_tools: registry.names().into_iter().map(str::to_string).collect(),
+                available_tools: registry
+                    .names_for_policy(&policy)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
                 observations: observations.clone(),
             };
 
@@ -72,7 +80,7 @@ impl AgentLoop {
 
             match response.action {
                 ModelAction::CallTool { tool_name, input } => {
-                    let output = registry.execute(&tool_name, input)?;
+                    let output = registry.execute_with_policy(&tool_name, input, &policy)?;
                     let summary = limit_summary(&output.summary, 40);
                     println!("Tool `{tool_name}` output:");
                     println!("{summary}");

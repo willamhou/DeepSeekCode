@@ -16,7 +16,7 @@ impl Tool for RunShellTool {
             .ok_or_else(|| app_error("run_shell requires a command"))?;
         let cwd = input.get("cwd").unwrap_or(".");
 
-        if !is_allowed(command) {
+        if !is_safe_shell_command(command) {
             return Err(app_error(format!("command not allowed: {command}")));
         }
 
@@ -46,7 +46,7 @@ impl Tool for RunShellTool {
     }
 }
 
-fn is_allowed(command: &str) -> bool {
+pub fn is_safe_shell_command(command: &str) -> bool {
     let command = command.trim();
     let allowlist = [
         "cargo test",
