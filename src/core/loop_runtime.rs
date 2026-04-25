@@ -5,10 +5,12 @@ use crate::core::session::{SessionSnapshot, SessionStore};
 use crate::error::AppResult;
 use crate::language::detect::detect_profile;
 use crate::language::infer::default_test_command;
+use crate::model::client::ModelClient;
+use crate::model::deepseek::DeepSeekClient;
+use crate::model::protocol::{ModelAction, ModelRequest, Observation};
 use crate::skills::registry::SkillRegistry;
 use crate::skills::resolver::resolve_skill;
 use crate::tools::registry::default_registry;
-use crate::tools::types::ToolInput;
 use crate::ui::render::print_banner;
 
 pub struct AgentLoop {
@@ -28,6 +30,11 @@ impl AgentLoop {
         let skills = SkillRegistry::load_dir("skills")?;
         let skill = resolve_skill(&skills, context.skill.as_deref());
         let memory = MemoryState::new(profile.name.clone());
+        let primary_file = primary_file(&profile).map(str::to_string);
+        let suggested_test_command = default_test_command(&profile).map(str::to_string);
+        let client = DeepSeekClient {
+            config: self.config.model.clone(),
+        };
 
         println!("Task: {}", context.task);
         println!("Profile: {}", profile.name);
@@ -38,36 +45,38 @@ impl AgentLoop {
         }
 
         println!("Memory summary: {}", memory.summary());
-        println!();
-        println!("Repository snapshot:");
-        println!(
-            "{}",
-            registry.execute(
-                "list_files",
-                ToolInput::new()
-                    .with_arg("root", ".")
-                    .with_arg("max_depth", "2")
-                    .with_arg("limit", "12")
-            )?
-            .summary
-        );
 
-        if let Some(primary_file) = primary_file(&profile) {
+        let mut observations = Vec::new();
+        for step in 0..4 {
+            let request = ModelRequest {
+                system_prompt: build_system_prompt(skill.map(|item| item.name.as_str())),
+                task: context.task.clone(),
+                profile_name: profile.name.clone(),
+                primary_file: primary_file.clone(),
+                suggested_test_command: suggested_test_command.clone(),
+                available_tools: registry.names().into_iter().map(str::to_string).collect(),
+                observations: observations.clone(),
+            };
+
+            let response = client.respond(request)?;
             println!();
-            println!("Primary file excerpt: {primary_file}");
-            println!(
-                "{}",
-                registry.execute(
-                    "read_file",
-                    ToolInput::new()
-                        .with_arg("path", primary_file)
-                        .with_arg("max_lines", "20")
-                )?
-                .summary
-            );
+            println!("Step {}: {}", step + 1, response.message);
+
+            match response.action {
+                ModelAction::CallTool { tool_name, input } => {
+                    let output = registry.execute(&tool_name, input)?;
+                    let summary = limit_summary(&output.summary, 40);
+                    println!("Tool `{tool_name}` output:");
+                    println!("{summary}");
+                    observations.push(Observation { tool_name, summary });
+                }
+                ModelAction::Finish => {
+                    break;
+                }
+            }
         }
 
-        if let Some(test_command) = default_test_command(&profile) {
+        if let Some(test_command) = suggested_test_command.as_deref() {
             println!();
             println!("Suggested validation command: {test_command}");
         }
@@ -89,4 +98,23 @@ fn primary_file(profile: &crate::language::profile::LanguageProfile) -> Option<&
             None
         }
     })
+}
+
+fn build_system_prompt(skill_name: Option<&str>) -> String {
+    let mut prompt = String::from(
+        "You are the offline planning layer for DeepseekCode. Prefer repository inspection before edits.",
+    );
+    if let Some(skill_name) = skill_name {
+        prompt.push_str(&format!(" Active skill: {skill_name}."));
+    }
+    prompt
+}
+
+fn limit_summary(summary: &str, max_lines: usize) -> String {
+    let lines = summary.lines().take(max_lines).collect::<Vec<_>>();
+    let mut output = lines.join("\n");
+    if summary.lines().count() > max_lines {
+        output.push_str("\n... truncated ...");
+    }
+    output
 }
