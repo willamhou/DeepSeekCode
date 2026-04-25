@@ -120,6 +120,6 @@
 
 - [架构设计](./docs/architecture.md)
 - [MVP 与路线图](./docs/mvp.md)
+- [状态与完整 Roadmap](./docs/roadmap.md)
 - [Skill 与 Language Profile 设计](./docs/skills-and-profiles.md)
 - [Rust 技术选型](./docs/rust-stack.md)
-

@@ -1,0 +1,312 @@
+# Roadmap 与状态
+
+最后更新：`2026-04-25`
+
+## 当前状态
+
+`DeepseekCode` 已经从纯设计文档阶段进入到“可运行的本地 agent 原型”阶段。
+
+当前代码具备这些基础能力：
+
+- Rust CLI 骨架可运行
+- 本地 `skill` / `profile` 可加载
+- 可执行基础工具：
+  - `list_files`
+  - `read_file`
+  - `search_text`
+  - `apply_patch`
+  - `run_shell`
+  - `git_diff`
+- 可运行离线 planner loop
+- DeepSeek 远端传输层已接入：
+  - `OpenAI-compatible` 路径支持正式 `tools` / function-calling
+  - `Anthropic-compatible` 路径保留 JSON plan 回退
+- 工具执行受策略约束：
+  - `allowed_tools`
+  - `shell_allowlist`
+  - 写入/命令审批要求
+
+## 已完成
+
+### 基础工程
+
+- 初始化 git 仓库与项目文档
+- 建立 Rust 项目目录结构
+- 建立 `cli / core / model / tools / language / skills / config / ui` 模块边界
+- 在无外网依赖场景下保持工程可离线构建和测试
+
+### CLI 与配置
+
+- 支持：
+  - `dscode`
+  - `dscode "task"`
+  - `dscode run "task"`
+  - `dscode diff`
+  - `dscode resume`
+  - `dscode config`
+  - `dscode doctor`
+- 支持 `--skill`
+- 支持简单 `.dscode/config.toml` 配置读取：
+  - `model.base_url`
+  - `model.model`
+  - `model.api_key_env`
+  - `approval.require_write_confirmation`
+  - `approval.require_shell_confirmation`
+  - `workspace.config_dir`
+  - `workspace.session_dir`
+
+### Tooling
+
+- `list_files`
+  - 目录扫描
+  - 深度和数量限制
+  - 常见目录跳过
+- `read_file`
+  - 读取文本文件并返回带行号片段
+- `search_text`
+  - 仓库全文搜索
+  - 结果数量限制
+- `run_shell`
+  - 本地受控执行
+  - 内建安全前缀限制
+- `git_diff`
+  - 查看工作区 diff
+- `apply_patch`
+  - 文本替换模式
+  - unified diff patch 模式
+  - patch dry-run 校验
+  - patch 头路径归一化
+
+### Planner / Runtime
+
+- 已实现本地离线 planner loop：
+  - 组装任务上下文
+  - 基于 profile 和 observations 决策下一步
+  - 执行工具
+  - 回填 observation
+  - 最终结束
+- 已支持简单编辑任务：
+  - `replace "a" with "b" in path`
+- 已支持 skill 提示增强
+- 已支持 session snapshot 保存
+
+### Skill / Policy
+
+- 本地 `skills/*.toml` 可解析：
+  - `name`
+  - `description`
+  - `allowed_tools`
+  - `system_append`
+  - `suggested_steps`
+  - `policy.require_write_confirmation`
+  - `policy.require_shell_confirmation`
+  - `policy.shell_allowlist`
+- `allowed_tools` 已接入工具可见性控制
+- `policy` 已接入执行约束
+- 环境变量支持：
+  - `DSCODE_AUTO_APPROVE_WRITES=1`
+  - `DSCODE_AUTO_APPROVE_SHELL=1`
+
+### DeepSeek 远端传输
+
+- 已接入 `DEEPSEEK_API_KEY` 检测
+- 远端调用失败时自动回退离线 planner
+- `OpenAI-compatible` 路径：
+  - `/chat/completions`
+  - 正式 `tools` / function-calling
+- `Anthropic-compatible` 路径：
+  - `/messages`
+  - 当前走 JSON plan 回退
+
+## 当前限制
+
+这些是已经明确存在、但还未完成的部分：
+
+- 当前执行环境无法直接验证外网访问
+  - 真实 DeepSeek 在线调用代码已接好，但未在当前会话里做 live API 验证
+- `Anthropic-compatible` 路径还没有升级到正式 tool use
+- `apply_patch` 仍偏最小实现
+  - 还缺更强的多文件 patch 诊断和更严格的路径控制
+- 审批还不是交互式 UI
+  - 目前主要依赖 policy 和环境变量放行
+- 观测上下文裁剪还比较粗
+- 还没有真实的“失败后重新规划和继续修复”重试策略
+- 没有专门的远端 smoke test 命令
+- `doctor` 还没有覆盖联网与 API 可用性检查
+
+## 已验证
+
+这些能力已经在当前本地环境里验证过：
+
+- `cargo check --offline`
+- `cargo test --offline`
+- `cargo run --offline -- doctor`
+- `cargo run --offline -- "inspect repository"`
+- `cargo run --offline -- run --skill fix-tests "fix tests"`
+- 文本替换式编辑在放行写入审批时可执行
+- unified diff patch 的基础单测已通过
+
+这些能力已经接入代码，但尚未在当前会话里完成在线验证：
+
+- DeepSeek `OpenAI-compatible` 真实远端 tool-calling
+- DeepSeek `Anthropic-compatible` 真实远端调用
+- GitHub 远端创建与推送
+
+原因：
+
+- 当前执行环境的外网访问受限，无法直接访问 `api.deepseek.com` 或 `api.github.com`
+
+## 近期计划
+
+### P0: 本机可验证性
+
+这部分优先级最高，直接决定这个项目能不能在真实环境里快速试用。
+
+- 扩展 `doctor`
+  - 检查 `DEEPSEEK_API_KEY`
+  - 显示当前 `base_url` 模式
+  - 提示 OpenAI / Anthropic 兼容路径
+  - 检查联网前置条件
+- 增加 `smoke` 命令
+  - 单次最小远端调用
+  - 单独验证 OpenAI-compatible 和 Anthropic-compatible 路径
+- 提供 `.dscode/config.toml` 示例文件
+
+### P1: 真实编辑能力增强
+
+- 扩展 `apply_patch`
+  - 更清晰的 patch 失败诊断
+  - 多文件 patch 支持
+  - 更明确的路径范围限制
+- 让 planner 能生成 patch 模式编辑，而不是只会直接替换
+- 在 patch 应用后自动查看 diff、必要时继续修复
+
+### P2: Anthropic 兼容路径补齐
+
+- 将 Anthropic 路径从 JSON plan 回退升级为正式 tool use
+- 对齐 OpenAI-compatible 路径的能力边界
+- 统一远端结果到同一个 `ModelAction` 抽象
+
+### P3: 审批与执行体验
+
+- 增加真正的审批交互
+  - 写入确认
+  - 命令确认
+- 增加更清晰的错误输出
+- 区分“策略拒绝”和“工具失败”
+
+### P4: 上下文与稳定性
+
+- 更细的 observation 类型划分
+  - 文件片段
+  - shell 输出
+  - diff
+  - 搜索结果
+- 更稳定的摘要与裁剪策略
+- 降低大输出反复回填造成的上下文污染
+
+## 完整 Roadmap
+
+### Phase 0: 项目打底
+
+- 项目定位和范围确定
+- 架构分层
+- 文档建立
+
+状态：已完成
+
+### Phase 1: Rust CLI 骨架
+
+- CLI 命令入口
+- 配置和 session 基础设施
+- 模块边界和目录结构
+
+状态：已完成
+
+### Phase 2: 本地工具闭环
+
+- 文件读取
+- 搜索
+- patch
+- shell
+- diff
+
+状态：已完成基础版
+
+### Phase 3: 离线 planner loop
+
+- 任务输入
+- observation 回填
+- 工具调用循环
+- skill 提示增强
+
+状态：已完成基础版
+
+### Phase 4: DeepSeek 远端能力
+
+- 远端调用接入
+- OpenAI-compatible path
+- Anthropic-compatible path
+- 回退机制
+
+状态：
+
+- OpenAI-compatible：已完成基础版，已接正式 tool-calling
+- Anthropic-compatible：已完成基础版，但仍需升级到正式 tool use
+
+### Phase 5: 执行策略与安全
+
+- `allowed_tools`
+- `shell_allowlist`
+- 写入/命令审批
+
+状态：已完成基础版
+
+### Phase 6: 体验打磨
+
+- doctor
+- smoke
+- diff 展示
+- 更好的报错
+- 更好的上下文摘要
+
+状态：未完成
+
+### Phase 7: 更强编辑能力
+
+- 多文件 patch
+- 更稳定的 edit-retry loop
+- 更像真实 code agent 的最小步编辑策略
+
+状态：未完成
+
+### Phase 8: 高级能力
+
+- PR/CI 集成
+- 更强语言特化
+- IDE 集成
+- 多 agent
+
+状态：未开始
+
+## 建议的下一个顺序
+
+建议严格按下面顺序推进：
+
+1. `doctor` 扩展
+2. `smoke` 命令
+3. `Anthropic-compatible` 正式 tool use
+4. `apply_patch` 多文件和失败诊断
+5. 审批交互
+6. observation / context 管理增强
+
+## 最近里程碑
+
+- `d9b3ae4` `Initialize project docs`
+- `589a5c6` `Bootstrap Rust CLI scaffold`
+- `5cd434a` `Implement basic repository tools`
+- `f20534f` `Add offline planning loop`
+- `3a8d633` `Wire skills into CLI flow`
+- `6d01256` `Add DeepSeek transport and policy enforcement`
+- `efdb191` `Upgrade patching and remote protocol parsing`
+- `a1c45fb` `Use tool calling for OpenAI-compatible DeepSeek`
