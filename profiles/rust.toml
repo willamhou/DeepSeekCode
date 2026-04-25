@@ -1,0 +1,8 @@
+name = "rust"
+file_priority = ["Cargo.toml", "src/main.rs", "src/lib.rs", "tests/"]
+ignore_patterns = [".git/", "target/"]
+test_commands = ["cargo test"]
+lint_commands = ["cargo clippy --all-targets --all-features"]
+build_commands = ["cargo build"]
+hints = ["Prefer minimal compile-safe changes."]
+

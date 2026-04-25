@@ -1,0 +1,8 @@
+name = "python"
+file_priority = ["pyproject.toml", "requirements.txt", "src/", "tests/"]
+ignore_patterns = [".git/", ".venv/", "__pycache__/"]
+test_commands = ["pytest"]
+lint_commands = ["ruff check ."]
+build_commands = ["python -m build"]
+hints = ["Prefer minimal runtime-safe changes and rerun only relevant tests."]
+

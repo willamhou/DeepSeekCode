@@ -1,0 +1,8 @@
+name = "go"
+file_priority = ["go.mod", "cmd/", "pkg/", "internal/"]
+ignore_patterns = [".git/", "vendor/"]
+test_commands = ["go test ./..."]
+lint_commands = ["go vet ./..."]
+build_commands = ["go build ./..."]
+hints = ["Preserve package boundaries and prefer direct fixes over abstractions."]
+

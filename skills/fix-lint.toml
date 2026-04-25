@@ -1,0 +1,18 @@
+name = "fix-lint"
+description = "Focus on lint and typecheck fixes with the smallest safe diff"
+allowed_tools = ["list_files", "read_file", "search_text", "apply_patch", "run_shell", "git_diff"]
+system_append = """
+Prefer deterministic fixes. Avoid broad refactors unless they are required to remove the reported errors.
+"""
+suggested_steps = [
+  "Find the lint or typecheck command",
+  "Reproduce the diagnostics",
+  "Modify the smallest relevant code path",
+  "Rerun only the failing command"
+]
+
+[policy]
+require_write_confirmation = true
+require_shell_confirmation = false
+shell_allowlist = ["cargo clippy", "cargo check", "ruff check", "mypy", "pnpm lint", "npm run lint", "go vet"]
+

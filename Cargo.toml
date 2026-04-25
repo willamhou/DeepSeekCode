@@ -1,0 +1,11 @@
+[package]
+name = "deepseek_code"
+version = "0.1.0"
+edition = "2021"
+default-run = "dscode"
+
+[[bin]]
+name = "dscode"
+path = "src/main.rs"
+
+[dependencies]

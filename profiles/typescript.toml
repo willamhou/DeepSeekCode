@@ -1,0 +1,8 @@
+name = "typescript"
+file_priority = ["package.json", "tsconfig.json", "src/", "test/"]
+ignore_patterns = [".git/", "node_modules/", "dist/"]
+test_commands = ["pnpm test", "npm test"]
+lint_commands = ["pnpm lint", "npm run lint"]
+build_commands = ["pnpm build", "npm run build"]
+hints = ["Keep changes narrow and respect the package manager already in use."]
+

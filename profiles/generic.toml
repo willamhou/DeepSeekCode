@@ -1,0 +1,8 @@
+name = "generic"
+file_priority = ["README.md", "docs/", "src/"]
+ignore_patterns = [".git/", "node_modules/", "target/", "dist/"]
+test_commands = []
+lint_commands = []
+build_commands = []
+hints = ["Start with repository structure and the smallest relevant files."]
+

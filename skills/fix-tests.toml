@@ -1,0 +1,20 @@
+name = "fix-tests"
+description = "Focus on reproducing and fixing failing tests with minimal edits"
+allowed_tools = ["list_files", "read_file", "search_text", "apply_patch", "run_shell", "git_diff"]
+system_append = """
+Reproduce failures first. Prefer the smallest safe code change.
+Rerun only relevant tests before broad test suites.
+"""
+suggested_steps = [
+  "Find the test command",
+  "Reproduce the failure",
+  "Inspect the smallest relevant code path",
+  "Apply a minimal patch",
+  "Rerun the relevant tests"
+]
+
+[policy]
+require_write_confirmation = true
+require_shell_confirmation = false
+shell_allowlist = ["cargo test", "pytest", "pnpm test", "npm test", "go test", "mvn test", "gradle test"]
+

@@ -1,0 +1,7 @@
+name = "java"
+file_priority = ["pom.xml", "build.gradle", "src/main/", "src/test/"]
+ignore_patterns = [".git/", "target/", "build/"]
+test_commands = ["mvn test", "gradle test"]
+lint_commands = []
+build_commands = ["mvn package -DskipTests", "gradle build -x test"]
+hints = ["Respect the existing build tool and minimize package-level churn."]
