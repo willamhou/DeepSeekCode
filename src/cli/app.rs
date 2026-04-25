@@ -17,8 +17,12 @@ impl Cli {
         let first = args.remove(0);
         let command = match first.as_str() {
             "run" => {
-                let task = args.first().cloned().unwrap_or_else(|| "Run task".to_string());
-                Command::Run(RunArgs { task, skill: None })
+                let (skill, positional) = parse_common_flags(args);
+                let task = positional
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "Run task".to_string());
+                Command::Run(RunArgs { task, skill })
             }
             "diff" => Command::Diff(DiffArgs {}),
             "resume" => Command::Resume(ResumeArgs { session: None }),
@@ -27,9 +31,12 @@ impl Cli {
             }),
             "doctor" => Command::Doctor(DoctorArgs {}),
             _ => {
-                let task = std::iter::once(first).chain(args).collect::<Vec<_>>().join(" ");
+                let mut combined = vec![first];
+                combined.extend(args);
+                let (skill, positional) = parse_common_flags(combined);
+                let task = positional.join(" ");
                 let task = if task.is_empty() { None } else { Some(task) };
-                Command::Chat(ChatArgs { task, skill: None })
+                Command::Chat(ChatArgs { task, skill })
             }
         };
 
@@ -82,3 +89,24 @@ pub struct ConfigArgs {
 
 #[derive(Debug)]
 pub struct DoctorArgs {}
+
+fn parse_common_flags(args: Vec<String>) -> (Option<String>, Vec<String>) {
+    let mut skill = None;
+    let mut positional = Vec::new();
+    let mut index = 0;
+
+    while index < args.len() {
+        if args[index] == "--skill" {
+            if index + 1 < args.len() {
+                skill = Some(args[index + 1].clone());
+                index += 2;
+                continue;
+            }
+        }
+
+        positional.push(args[index].clone());
+        index += 1;
+    }
+
+    (skill, positional)
+}

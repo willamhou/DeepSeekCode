@@ -10,6 +10,7 @@ use crate::model::deepseek::DeepSeekClient;
 use crate::model::protocol::{ModelAction, ModelRequest, Observation};
 use crate::skills::registry::SkillRegistry;
 use crate::skills::resolver::resolve_skill;
+use crate::skills::schema::SkillSpec;
 use crate::tools::registry::default_registry;
 use crate::ui::render::print_banner;
 
@@ -42,6 +43,13 @@ impl AgentLoop {
 
         if let Some(skill) = skill {
             println!("Skill: {}", skill.name);
+            println!("Skill description: {}", skill.description);
+            if !skill.suggested_steps.is_empty() {
+                println!("Suggested steps:");
+                for step in &skill.suggested_steps {
+                    println!("- {}", step);
+                }
+            }
         }
 
         println!("Memory summary: {}", memory.summary());
@@ -49,7 +57,7 @@ impl AgentLoop {
         let mut observations = Vec::new();
         for step in 0..4 {
             let request = ModelRequest {
-                system_prompt: build_system_prompt(skill.map(|item| item.name.as_str())),
+                system_prompt: build_system_prompt(skill),
                 task: context.task.clone(),
                 profile_name: profile.name.clone(),
                 primary_file: primary_file.clone(),
@@ -100,12 +108,19 @@ fn primary_file(profile: &crate::language::profile::LanguageProfile) -> Option<&
     })
 }
 
-fn build_system_prompt(skill_name: Option<&str>) -> String {
+fn build_system_prompt(skill_name: Option<&SkillSpec>) -> String {
     let mut prompt = String::from(
         "You are the offline planning layer for DeepseekCode. Prefer repository inspection before edits.",
     );
-    if let Some(skill_name) = skill_name {
-        prompt.push_str(&format!(" Active skill: {skill_name}."));
+    if let Some(skill) = skill_name {
+        prompt.push_str(&format!(" Active skill: {}.", skill.name));
+        if !skill.description.is_empty() {
+            prompt.push_str(&format!(" Skill description: {}.", skill.description));
+        }
+        if !skill.system_append.is_empty() {
+            prompt.push(' ');
+            prompt.push_str(skill.system_append.trim());
+        }
     }
     prompt
 }
