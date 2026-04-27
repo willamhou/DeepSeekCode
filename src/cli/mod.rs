@@ -12,5 +12,8 @@ pub fn run(cli: app::Cli) -> AppResult<()> {
         app::Command::Config(args) => commands::config::run(args),
         app::Command::Doctor(args) => commands::doctor::run(args),
         app::Command::Smoke(args) => commands::smoke::run(args),
+        app::Command::Pr(_) => Err(crate::error::app_error(
+            "dscode pr is implemented in Task 9",
+        )),
     }
 }
