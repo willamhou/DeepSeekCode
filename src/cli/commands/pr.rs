@@ -5,7 +5,8 @@ use crate::core::context::TaskContext;
 use crate::core::loop_runtime::AgentLoopOptions;
 use crate::error::AppResult;
 use crate::integrations::github::{
-    ensure_gh_auth, fetch_pr, parse_pr_ref, post_pr_comment, PrContext,
+    ensure_gh_auth, fetch_first_failed_job, fetch_pr, parse_pr_ref, post_pr_comment,
+    require_on_branch, CiFailure, PrContext,
 };
 use crate::model::protocol::Observation;
 
@@ -14,9 +15,7 @@ pub fn run(action: PrAction) -> AppResult<()> {
         PrAction::Review { reference, post, out } => {
             run_review(&reference, post, out.as_deref())
         }
-        PrAction::Fix { .. } => Err(crate::error::app_error(
-            "pr fix is implemented in a later task",
-        )),
+        PrAction::Fix { reference, job } => run_fix(&reference, job.as_deref()),
         PrAction::Patch { .. } => Err(crate::error::app_error(
             "pr patch is implemented in a later task",
         )),
@@ -98,5 +97,90 @@ mod tests {
         assert!(text.contains("#12"));
         assert!(text.contains("Add feature X"));
         assert!(text.contains("owner/repo"));
+    }
+}
+
+fn run_fix(reference: &str, job_filter: Option<&str>) -> AppResult<()> {
+    ensure_gh_auth()?;
+    let pr_ref = parse_pr_ref(reference)?;
+    let pr = fetch_pr(&pr_ref)?;
+    require_on_branch(&pr.branch)?;
+
+    let failure = match fetch_first_failed_job(&pr, job_filter)? {
+        Some(failure) => failure,
+        None => {
+            println!("no failed CI jobs on PR #{}", pr.number);
+            return Ok(());
+        }
+    };
+
+    let task = build_fix_task_text(&pr, &failure);
+    let context = TaskContext::new(task, None);
+    let observations = vec![Observation::ok("run_shell", failure.log_tail.clone())];
+
+    let config = load_or_default()?;
+    let mut agent = Agent::new(config);
+    agent.run_with(
+        context,
+        AgentLoopOptions {
+            steps: 12,
+            initial_observations: observations,
+        },
+    )?;
+
+    println!(
+        "fix attempt complete for job `{}` (run #{}); review `git diff HEAD` and rerun if needed",
+        failure.job_name, failure.run_id
+    );
+    Ok(())
+}
+
+fn build_fix_task_text(pr: &PrContext, failure: &CiFailure) -> String {
+    let step_clause = failure
+        .failed_step
+        .as_ref()
+        .map(|step| format!(" at step `{step}`"))
+        .unwrap_or_default();
+    format!(
+        "CI job `{job}` (run #{run_id}) on PR #{number} failed{step_clause}. Reproduce locally, fix the root cause, and rerun the failing test. Failed log tail follows.",
+        job = failure.job_name,
+        run_id = failure.run_id,
+        number = pr.number,
+    )
+}
+
+#[cfg(test)]
+mod fix_tests {
+    use super::*;
+
+    fn fixture_pr() -> PrContext {
+        PrContext {
+            number: 12,
+            repo: "owner/repo".to_string(),
+            title: "Some PR".to_string(),
+            branch: "feat/x".to_string(),
+            base_branch: "main".to_string(),
+            diff: String::new(),
+            changed_files: Vec::new(),
+        }
+    }
+
+    fn fixture_failure() -> CiFailure {
+        CiFailure {
+            run_id: 555,
+            job_name: "test-rust".to_string(),
+            job_id: 7,
+            log_tail: "FAILED at line 42".to_string(),
+            failed_step: Some("cargo test".to_string()),
+        }
+    }
+
+    #[test]
+    fn fix_task_text_includes_run_id_and_step() {
+        let text = build_fix_task_text(&fixture_pr(), &fixture_failure());
+        assert!(text.contains("run #555"));
+        assert!(text.contains("test-rust"));
+        assert!(text.contains("cargo test"));
+        assert!(text.contains("PR #12"));
     }
 }
