@@ -386,6 +386,34 @@ fn tail_lines(text: &str, max: usize) -> String {
     format!("... truncated {dropped} earlier lines ...\n{tail}")
 }
 
+pub fn current_branch() -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+pub fn require_on_branch(expected: &str) -> AppResult<()> {
+    match current_branch() {
+        Some(actual) if actual == expected => Ok(()),
+        Some(actual) => Err(crate::error::policy_denied(format!(
+            "expected branch `{expected}`, but currently on `{actual}`; run `git checkout {expected}` first"
+        ))),
+        None => Err(crate::error::policy_denied(format!(
+            "could not determine current git branch; run `git checkout {expected}` first"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,5 +576,27 @@ mod tests {
     #[test]
     fn extract_run_id_returns_none_for_unrelated_link() {
         assert_eq!(extract_run_id_from_link("https://example.com/foo"), None);
+    }
+
+    #[test]
+    fn current_branch_returns_some_for_a_git_repo() {
+        let branch = current_branch();
+        assert!(branch.is_some());
+        let name = branch.unwrap();
+        assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn require_on_branch_passes_when_branch_matches() {
+        let here = current_branch().unwrap();
+        assert!(require_on_branch(&here).is_ok());
+    }
+
+    #[test]
+    fn require_on_branch_fails_with_clear_error_when_branch_differs() {
+        let error = require_on_branch("definitely-not-a-real-branch").unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("definitely-not-a-real-branch"));
+        assert!(message.contains("checkout"));
     }
 }
