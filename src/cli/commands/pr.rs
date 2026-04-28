@@ -48,7 +48,7 @@ fn run_review(config: AppConfig, reference: &str, post: bool, out: Option<&str>)
     ];
 
     let runtime = AgentLoop::new(config);
-    runtime.run_with(
+    let final_message = runtime.run_with(
         context,
         AgentLoopOptions {
             steps: 4,
@@ -56,12 +56,23 @@ fn run_review(config: AppConfig, reference: &str, post: bool, out: Option<&str>)
         },
     )?;
 
-    let body = format!(
-        "DeepseekCode review of PR #{} ({})\n\nSee terminal trace above for the full review.",
-        pr.number, pr.title
-    );
+    let body = build_review_body(&pr, &final_message);
     deliver_review(&pr, &body, post, out)?;
     Ok(())
+}
+
+fn build_review_body(pr: &PrContext, planner_output: &str) -> String {
+    let header = format!(
+        "## DeepseekCode review of PR #{} ({})\n\n",
+        pr.number, pr.title
+    );
+    let trimmed = planner_output.trim();
+    if trimmed.is_empty() {
+        return format!(
+            "{header}_The planner returned no review content. See the terminal trace for the full session._\n"
+        );
+    }
+    format!("{header}{trimmed}\n")
 }
 
 fn build_review_task_text(pr: &PrContext) -> String {
@@ -214,6 +225,24 @@ mod tests {
         assert!(text.contains("#12"));
         assert!(text.contains("Add feature X"));
         assert!(text.contains("owner/repo"));
+    }
+
+    #[test]
+    fn review_body_inlines_planner_output_when_present() {
+        let pr = fixture_pr(7, "Tighten retry");
+        let planner = "## Summary\n\nLooks good. One nit: ...";
+        let body = build_review_body(&pr, planner);
+        assert!(body.contains("PR #7"));
+        assert!(body.contains("Tighten retry"));
+        assert!(body.contains("## Summary"));
+        assert!(body.contains("One nit"));
+    }
+
+    #[test]
+    fn review_body_falls_back_when_planner_output_empty() {
+        let pr = fixture_pr(7, "Empty");
+        let body = build_review_body(&pr, "   \n  \n");
+        assert!(body.contains("planner returned no review content"));
     }
 
     #[test]

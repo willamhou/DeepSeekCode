@@ -39,10 +39,14 @@ impl AgentLoop {
     }
 
     pub fn run(&self, context: TaskContext) -> AppResult<()> {
-        self.run_with(context, AgentLoopOptions::default())
+        self.run_with(context, AgentLoopOptions::default()).map(|_| ())
     }
 
-    pub fn run_with(&self, context: TaskContext, options: AgentLoopOptions) -> AppResult<()> {
+    pub fn run_with(
+        &self,
+        context: TaskContext,
+        options: AgentLoopOptions,
+    ) -> AppResult<String> {
         let AgentLoopOptions {
             steps,
             initial_observations,
@@ -88,6 +92,7 @@ impl AgentLoop {
         println!("Memory summary: {}", memory.summary());
 
         let mut observations = initial_observations;
+        let mut last_message = String::new();
         for step in 0..steps {
             let request = ModelRequest {
                 system_prompt: build_system_prompt(skill),
@@ -107,6 +112,7 @@ impl AgentLoop {
             let response = client.respond(request)?;
             println!();
             println!("Step {}: {}", step + 1, response.message);
+            last_message = response.message.clone();
 
             match response.action {
                 ModelAction::CallTool { tool_name, input } => {
@@ -146,7 +152,7 @@ impl AgentLoop {
         let snapshot = SessionSnapshot::new(context.task, profile.name);
         store.save(&snapshot)?;
 
-        Ok(())
+        Ok(last_message)
     }
 }
 
