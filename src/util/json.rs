@@ -196,6 +196,13 @@ pub fn json_as_array(value: &JsonValue) -> Option<&Vec<JsonValue>> {
     }
 }
 
+pub fn json_as_u64(value: &JsonValue) -> Option<u64> {
+    match value {
+        JsonValue::Number(text) => text.parse().ok(),
+        _ => None,
+    }
+}
+
 pub fn parse_root_object(input: &str) -> AppResult<BTreeMap<String, JsonValue>> {
     let value = parse_json_value(input.trim())?;
     let JsonValue::Object(root) = value else {

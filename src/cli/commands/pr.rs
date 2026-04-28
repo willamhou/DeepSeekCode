@@ -1,31 +1,29 @@
 use crate::cli::app::PrAction;
 use crate::config::load::load_or_default;
+use crate::config::types::AppConfig;
 use crate::core::agent::Agent;
 use crate::core::context::TaskContext;
 use crate::core::loop_runtime::AgentLoopOptions;
 use crate::error::AppResult;
 use crate::integrations::github::{
     ensure_gh_auth, fetch_first_failed_job, fetch_pr, parse_pr_ref, post_pr_comment,
-    require_on_branch, CiFailure, PrContext,
+    require_on_branch, worktree_is_clean, CiFailure, PrContext,
 };
 use crate::model::protocol::Observation;
 
 pub fn run(action: PrAction) -> AppResult<()> {
-    warn_if_offline_planner();
+    let config = load_or_default()?;
+    warn_if_offline_planner(&config);
     match action {
         PrAction::Review { reference, post, out } => {
-            run_review(&reference, post, out.as_deref())
+            run_review(config, &reference, post, out.as_deref())
         }
-        PrAction::Fix { reference, job } => run_fix(&reference, job.as_deref()),
-        PrAction::Patch { reference, commit } => run_patch(&reference, commit),
+        PrAction::Fix { reference, job } => run_fix(config, &reference, job.as_deref()),
+        PrAction::Patch { reference, commit } => run_patch(config, &reference, commit),
     }
 }
 
-fn warn_if_offline_planner() {
-    let config = match load_or_default() {
-        Ok(config) => config,
-        Err(_) => return,
-    };
+fn warn_if_offline_planner(config: &AppConfig) {
     let api_key_present = std::env::var(&config.model.api_key_env)
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
@@ -37,7 +35,7 @@ fn warn_if_offline_planner() {
     }
 }
 
-fn run_review(reference: &str, post: bool, out: Option<&str>) -> AppResult<()> {
+fn run_review(config: AppConfig, reference: &str, post: bool, out: Option<&str>) -> AppResult<()> {
     ensure_gh_auth()?;
     let pr_ref = parse_pr_ref(reference)?;
     let pr = fetch_pr(&pr_ref)?;
@@ -50,7 +48,6 @@ fn run_review(reference: &str, post: bool, out: Option<&str>) -> AppResult<()> {
         Observation::ok("list_files", pr.changed_files.join("\n")),
     ];
 
-    let config = load_or_default()?;
     let mut agent = Agent::new(config);
     agent.run_with(
         context,
@@ -115,7 +112,7 @@ mod tests {
     }
 }
 
-fn run_fix(reference: &str, job_filter: Option<&str>) -> AppResult<()> {
+fn run_fix(config: AppConfig, reference: &str, job_filter: Option<&str>) -> AppResult<()> {
     ensure_gh_auth()?;
     let pr_ref = parse_pr_ref(reference)?;
     let pr = fetch_pr(&pr_ref)?;
@@ -133,7 +130,6 @@ fn run_fix(reference: &str, job_filter: Option<&str>) -> AppResult<()> {
     let context = TaskContext::new(task, None);
     let observations = vec![Observation::ok("run_shell", failure.log_tail.clone())];
 
-    let config = load_or_default()?;
     let mut agent = Agent::new(config);
     agent.run_with(
         context,
@@ -200,9 +196,7 @@ mod fix_tests {
     }
 }
 
-use crate::integrations::github::worktree_is_clean;
-
-fn run_patch(reference: &str, commit: bool) -> AppResult<()> {
+fn run_patch(config: AppConfig, reference: &str, commit: bool) -> AppResult<()> {
     ensure_gh_auth()?;
     let pr_ref = parse_pr_ref(reference)?;
     let pr = fetch_pr(&pr_ref)?;
@@ -217,7 +211,6 @@ fn run_patch(reference: &str, commit: bool) -> AppResult<()> {
     let context = TaskContext::new(task, None);
     let observations = vec![Observation::ok("git_diff", pr.diff.clone())];
 
-    let config = load_or_default()?;
     let mut agent = Agent::new(config);
     agent.run_with(
         context,

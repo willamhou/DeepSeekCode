@@ -43,6 +43,10 @@ impl AgentLoop {
     }
 
     pub fn run_with(&self, context: TaskContext, options: AgentLoopOptions) -> AppResult<()> {
+        let AgentLoopOptions {
+            steps,
+            initial_observations,
+        } = options;
         print_banner("DeepseekCode");
 
         let profile = detect_profile(".")?;
@@ -77,8 +81,8 @@ impl AgentLoop {
 
         println!("Memory summary: {}", memory.summary());
 
-        let mut observations = options.initial_observations.clone();
-        for step in 0..options.steps {
+        let mut observations = initial_observations;
+        for step in 0..steps {
             let request = ModelRequest {
                 system_prompt: build_system_prompt(skill),
                 task: context.task.clone(),

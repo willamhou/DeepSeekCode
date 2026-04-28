@@ -80,7 +80,7 @@ fn head_trim(raw: &str, max_lines: usize) -> String {
     output
 }
 
-fn tail_trim(raw: &str, max_lines: usize) -> String {
+pub fn tail_trim(raw: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = raw.lines().collect();
     if lines.len() <= max_lines {
         return raw.trim_end_matches('\n').to_string();

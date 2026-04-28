@@ -1,6 +1,6 @@
 use crate::error::{app_error, AppResult};
 use crate::util::json::{
-    json_as_array, json_as_object, json_as_string, parse_root_object, JsonValue,
+    json_as_array, json_as_object, json_as_string, json_as_u64, parse_root_object, JsonValue,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,10 +72,7 @@ pub fn parse_pr_view_json(body: &str) -> AppResult<PrContext> {
 
     let number = root
         .get("number")
-        .and_then(|value| match value {
-            JsonValue::Number(text) => text.parse().ok(),
-            _ => None,
-        })
+        .and_then(json_as_u64)
         .ok_or_else(|| app_error("pr view: missing or non-numeric `number`"))?;
     let title = root
         .get("title")
@@ -213,10 +210,7 @@ pub fn parse_failed_job_from_run(
         }
         let database_id = map
             .get("databaseId")
-            .and_then(|value| match value {
-                JsonValue::Number(text) => text.parse().ok(),
-                _ => None,
-            })
+            .and_then(json_as_u64)
             .ok_or_else(|| app_error(format!("run view: job `{job_name}` missing databaseId")))?;
         let failed_step = map
             .get("steps")
@@ -351,7 +345,7 @@ pub fn fetch_first_failed_job(
         &job_id.to_string(),
         "--log-failed",
     ])?;
-    let log_tail = tail_lines(&log, 200);
+    let log_tail = crate::core::observations::tail_trim(&log, 200);
 
     Ok(Some(CiFailure {
         run_id,
@@ -383,20 +377,11 @@ pub fn post_pr_comment(repo: &str, number: u64, body: &str) -> AppResult<()> {
     let target = format!("{repo}#{number}");
     let path_str = path.to_string_lossy().into_owned();
     let result = run_gh(&["pr", "comment", &target, "--body-file", &path_str])
-        .and_then(|_| Ok(()));
+        .map(|_| ());
     let _ = std::fs::remove_file(&path);
     result
 }
 
-fn tail_lines(text: &str, max: usize) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.len() <= max {
-        return text.trim_end_matches('\n').to_string();
-    }
-    let dropped = lines.len() - max;
-    let tail = lines[dropped..].join("\n");
-    format!("... truncated {dropped} earlier lines ...\n{tail}")
-}
 
 pub fn current_branch() -> Option<String> {
     let output = Command::new("git")
@@ -581,20 +566,6 @@ mod tests {
         assert!(parse_failed_job_from_run(body, "test").is_err());
     }
 
-    #[test]
-    fn tail_lines_keeps_short_input_intact() {
-        let raw = "one\ntwo\nthree";
-        assert_eq!(tail_lines(raw, 200), "one\ntwo\nthree");
-    }
-
-    #[test]
-    fn tail_lines_truncates_when_over_limit() {
-        let raw: String = (1..=300).map(|n| format!("line{n}\n")).collect();
-        let trimmed = tail_lines(&raw, 100);
-        assert!(trimmed.starts_with("... truncated 200 earlier lines ..."));
-        assert!(trimmed.contains("line300"));
-        assert!(!trimmed.contains("\nline100\n"));
-    }
 
     #[test]
     fn extracts_run_id_from_actions_link() {
