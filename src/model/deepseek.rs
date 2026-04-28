@@ -426,6 +426,12 @@ fn build_user_prompt(input: &ModelRequest) -> String {
     let mut prompt = String::new();
     prompt.push_str(&format!("Task: {}\n", input.task));
     prompt.push_str(&format!("Profile: {}\n", input.profile_name));
+    if !input.profile_hints.is_empty() {
+        prompt.push_str("Profile hints:\n");
+        for hint in &input.profile_hints {
+            prompt.push_str(&format!("- {hint}\n"));
+        }
+    }
     if let Some(primary_file) = input.primary_file.as_deref() {
         prompt.push_str(&format!("Primary file: {primary_file}\n"));
     }
@@ -1006,6 +1012,7 @@ mod tests {
             system_prompt: String::new(),
             task: format!("replace \"gamma\" with \"GAMMA\" in {path}"),
             profile_name: "generic".to_string(),
+            profile_hints: Vec::new(),
             primary_file: None,
             suggested_test_command: None,
             available_tools: vec!["apply_patch".to_string(), "read_file".to_string(), "list_files".to_string()],
@@ -1045,6 +1052,7 @@ mod tests {
             system_prompt: String::new(),
             task: format!("replace \"gamma\" with \"GAMMA\" in {path}"),
             profile_name: "generic".to_string(),
+            profile_hints: Vec::new(),
             primary_file: None,
             suggested_test_command: None,
             available_tools: vec!["apply_patch".to_string(), "read_file".to_string(), "list_files".to_string()],
@@ -1080,6 +1088,7 @@ mod tests {
             system_prompt: String::new(),
             task: format!("replace \"alpha\" with \"ALPHA\" in {path}"),
             profile_name: "generic".to_string(),
+            profile_hints: Vec::new(),
             primary_file: None,
             suggested_test_command: None,
             available_tools: vec!["apply_patch".to_string(), "read_file".to_string(), "list_files".to_string()],
@@ -1115,6 +1124,7 @@ mod tests {
             system_prompt: String::new(),
             task: format!("replace \"gamma\" with \"GAMMA\" in {path}"),
             profile_name: "generic".to_string(),
+            profile_hints: Vec::new(),
             primary_file: None,
             suggested_test_command: None,
             available_tools: vec!["apply_patch".to_string(), "read_file".to_string(), "list_files".to_string()],
@@ -1154,6 +1164,7 @@ mod tests {
             system_prompt: String::new(),
             task: format!("replace \"missing\" with \"x\" in {path}"),
             profile_name: "generic".to_string(),
+            profile_hints: Vec::new(),
             primary_file: None,
             suggested_test_command: None,
             available_tools: vec![

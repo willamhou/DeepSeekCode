@@ -5,6 +5,7 @@ pub struct ModelRequest {
     pub system_prompt: String,
     pub task: String,
     pub profile_name: String,
+    pub profile_hints: Vec<String>,
     pub primary_file: Option<String>,
     pub suggested_test_command: Option<String>,
     pub available_tools: Vec<String>,

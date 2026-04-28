@@ -63,6 +63,12 @@ impl AgentLoop {
 
         println!("Task: {}", context.task);
         println!("Profile: {}", profile.name);
+        if !profile.hints.is_empty() {
+            println!("Profile hints:");
+            for hint in &profile.hints {
+                println!("- {hint}");
+            }
+        }
         println!(
             "Available tools: {}",
             registry.names_for_policy(&policy).join(", ")
@@ -87,6 +93,7 @@ impl AgentLoop {
                 system_prompt: build_system_prompt(skill),
                 task: context.task.clone(),
                 profile_name: profile.name.clone(),
+                profile_hints: profile.hints.clone(),
                 primary_file: primary_file.clone(),
                 suggested_test_command: suggested_test_command.clone(),
                 available_tools: registry
