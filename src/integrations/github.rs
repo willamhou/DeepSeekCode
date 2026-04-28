@@ -60,6 +60,8 @@ pub struct PrContext {
     pub repo: String,
     pub title: String,
     pub branch: String,
+    #[allow(dead_code)]
+    // reserved for v2 base-vs-head diff display; populated today, unread
     pub base_branch: String,
     pub diff: String,
     pub changed_files: Vec<String>,
@@ -136,6 +138,8 @@ pub fn parse_pr_view_json(body: &str) -> AppResult<PrContext> {
 pub struct CiFailure {
     pub run_id: u64,
     pub job_name: String,
+    #[allow(dead_code)]
+    // reserved for v2 deep-link to GitHub Actions UI; consumed only by fetch path today
     pub job_id: u64,
     pub log_tail: String,
     pub failed_step: Option<String>,

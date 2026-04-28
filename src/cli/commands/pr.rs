@@ -11,12 +11,29 @@ use crate::integrations::github::{
 use crate::model::protocol::Observation;
 
 pub fn run(action: PrAction) -> AppResult<()> {
+    warn_if_offline_planner();
     match action {
         PrAction::Review { reference, post, out } => {
             run_review(&reference, post, out.as_deref())
         }
         PrAction::Fix { reference, job } => run_fix(&reference, job.as_deref()),
         PrAction::Patch { reference, commit } => run_patch(&reference, commit),
+    }
+}
+
+fn warn_if_offline_planner() {
+    let config = match load_or_default() {
+        Ok(config) => config,
+        Err(_) => return,
+    };
+    let api_key_present = std::env::var(&config.model.api_key_env)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    if !api_key_present {
+        eprintln!(
+            "[offline] {} is not set; the offline planner will produce a shallow report. Export it for a real LLM-driven review.",
+            config.model.api_key_env
+        );
     }
 }
 
