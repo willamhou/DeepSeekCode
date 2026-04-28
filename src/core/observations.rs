@@ -7,7 +7,6 @@ const PATCH_LINES: usize = 40;
 const DIFF_LINES: usize = 80;
 const SHELL_TAIL_LINES: usize = 60;
 const OTHER_LINES: usize = 40;
-const SUPERSEDED_PREFIX: &str = "(superseded by a later observation of the same kind; full content dropped to free context budget)";
 
 pub fn summarize_for_kind(raw: &str, kind: ObservationKind) -> String {
     match kind {
@@ -39,15 +38,34 @@ pub fn compact_observations(observations: &[Observation]) -> Vec<Observation> {
             }
             if latest_for_kind[kind_index(observation.kind)] != Some(index) {
                 let mut stub = observation.clone();
-                stub.summary = format!(
-                    "{SUPERSEDED_PREFIX} (kind={})",
-                    observation.kind.label()
-                );
+                stub.summary = supersede_stub(&observation.summary, observation.kind);
                 return stub;
             }
             observation.clone()
         })
         .collect()
+}
+
+fn supersede_stub(summary: &str, kind: ObservationKind) -> String {
+    let total_lines = summary.lines().count();
+    let first_line = summary
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    let preview = if first_line.chars().count() > 80 {
+        let head: String = first_line.chars().take(80).collect();
+        format!("{head}…")
+    } else {
+        first_line.to_string()
+    };
+    if preview.is_empty() {
+        format!("(superseded; kind={}, was {total_lines} line(s))", kind.label())
+    } else {
+        format!(
+            "(superseded; kind={}, was {total_lines} line(s), first: {preview:?})",
+            kind.label()
+        )
+    }
 }
 
 const KIND_COUNT: usize = 7;
@@ -258,6 +276,33 @@ mod tests {
         assert!(compacted[0].summary.contains("file_excerpt"));
         assert_eq!(compacted[1].summary, "directory listing");
         assert_eq!(compacted[2].summary, "second read content");
+    }
+
+    #[test]
+    fn supersede_stub_includes_first_line_and_count() {
+        let original = "fn main() {\n    println!(\"hello\");\n}\n";
+        let observations = vec![
+            Observation::ok("read_file", original),
+            Observation::ok("read_file", "second"),
+        ];
+        let compacted = compact_observations(&observations);
+        let stub = &compacted[0].summary;
+        assert!(stub.contains("file_excerpt"));
+        assert!(stub.contains("3 line(s)"));
+        assert!(stub.contains("fn main()"));
+    }
+
+    #[test]
+    fn supersede_stub_truncates_long_first_line() {
+        let long_line = "x".repeat(200);
+        let observations = vec![
+            Observation::ok("read_file", long_line.clone()),
+            Observation::ok("read_file", "second"),
+        ];
+        let compacted = compact_observations(&observations);
+        let stub = &compacted[0].summary;
+        assert!(stub.contains("…"));
+        assert!(!stub.contains(&"x".repeat(120)));
     }
 
     #[test]
