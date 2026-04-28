@@ -90,13 +90,21 @@ pub fn parse_pr_view_json(body: &str) -> AppResult<PrContext> {
         .and_then(json_as_string)
         .ok_or_else(|| app_error("pr view: missing string `baseRefName`"))?
         .to_string();
-    let repo = root
+    let repo_name = root
         .get("headRepository")
         .and_then(json_as_object)
-        .and_then(|map| map.get("nameWithOwner"))
+        .and_then(|map| map.get("name"))
         .and_then(json_as_string)
-        .ok_or_else(|| app_error("pr view: missing string `headRepository.nameWithOwner`"))?
+        .ok_or_else(|| app_error("pr view: missing string `headRepository.name`"))?
         .to_string();
+    let repo_owner = root
+        .get("headRepositoryOwner")
+        .and_then(json_as_object)
+        .and_then(|map| map.get("login"))
+        .and_then(json_as_string)
+        .ok_or_else(|| app_error("pr view: missing string `headRepositoryOwner.login`"))?
+        .to_string();
+    let repo = format!("{repo_owner}/{repo_name}");
     let changed_files = root
         .get("files")
         .and_then(json_as_array)
@@ -292,7 +300,7 @@ pub fn fetch_pr(reference: &PrRef) -> AppResult<PrContext> {
         "view",
         &pr_ref_arg(reference),
         "--json",
-        "number,title,headRefName,baseRefName,headRepository,files",
+        "number,title,headRefName,baseRefName,headRepository,headRepositoryOwner,files",
     ])?;
     let mut context = parse_pr_view_json(&view)?;
 
@@ -486,7 +494,8 @@ mod tests {
             "title": "Add CRLF round-trip",
             "headRefName": "feat/crlf",
             "baseRefName": "main",
-            "headRepository": {"nameWithOwner": "willamhou/DeepseekCode"},
+            "headRepository": {"name": "DeepseekCode"},
+            "headRepositoryOwner": {"login": "willamhou"},
             "files": [
                 {"path": "src/tools/apply_patch.rs"},
                 {"path": "docs/roadmap.md"}
