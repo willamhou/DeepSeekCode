@@ -5,6 +5,7 @@ mod error;
 mod integrations;
 mod language;
 mod model;
+mod repl;
 mod skills;
 mod tools;
 mod ui;
