@@ -9,7 +9,7 @@ use crate::model::client::ModelClient;
 use crate::model::protocol::{ModelAction, ModelRequest, ModelResponse};
 use crate::tools::types::ToolInput;
 use crate::util::json::{
-    json_as_array, json_as_object, json_as_string, parse_root_object, JsonValue,
+    json_as_array, json_as_object, json_as_string, json_escape, parse_root_object, JsonValue,
 };
 
 pub struct DeepSeekClient {
@@ -704,21 +704,6 @@ fn json_object_to_string_args(value: &JsonValue) -> AppResult<BTreeMap<String, S
 fn parse_tool_arguments(input: &str) -> AppResult<BTreeMap<String, String>> {
     let root = parse_root_object(input)?;
     json_object_to_string_args(&JsonValue::Object(root))
-}
-
-fn json_escape(value: &str) -> String {
-    let mut output = String::new();
-    for ch in value.chars() {
-        match ch {
-            '"' => output.push_str("\\\""),
-            '\\' => output.push_str("\\\\"),
-            '\n' => output.push_str("\\n"),
-            '\r' => output.push_str("\\r"),
-            '\t' => output.push_str("\\t"),
-            _ => output.push(ch),
-        }
-    }
-    output
 }
 
 fn derive_search_query(task: &str) -> Option<String> {
