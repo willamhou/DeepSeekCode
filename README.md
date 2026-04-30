@@ -124,3 +124,4 @@
 - [Skill 与 Language Profile 设计](./docs/skills-and-profiles.md)
 - [Rust 技术选型](./docs/rust-stack.md)
 - [PR / CI 集成指南](./docs/pr-integration.md)
+- [REPL 模式 (`dscode chat`)](./docs/repl.md)

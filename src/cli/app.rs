@@ -163,6 +163,7 @@ impl Default for Command {
 
 #[derive(Debug, Default)]
 pub struct ChatArgs {
+    #[allow(dead_code)]
     pub task: Option<String>,
     pub skill: Option<String>,
 }

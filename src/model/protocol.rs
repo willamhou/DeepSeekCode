@@ -102,3 +102,9 @@ pub enum ModelAction {
     CallTool { tool_name: String, input: ToolInput },
     Finish,
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct TokenUsage {
+    pub prompt: u64,
+    pub completion: u64,
+}

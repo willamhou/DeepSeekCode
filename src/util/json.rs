@@ -210,3 +210,99 @@ pub fn parse_root_object(input: &str) -> AppResult<BTreeMap<String, JsonValue>> 
     };
     Ok(root)
 }
+
+pub fn json_escape(value: &str) -> String {
+    let mut output = String::new();
+    for ch in value.chars() {
+        match ch {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            _ => output.push(ch),
+        }
+    }
+    output
+}
+
+pub fn write_quoted(out: &mut String, value: &str) {
+    out.push('"');
+    out.push_str(&json_escape(value));
+    out.push('"');
+}
+
+pub fn write_kv_string(out: &mut String, key: &str, value: &str, leading_comma: bool) {
+    if leading_comma {
+        out.push(',');
+    }
+    write_quoted(out, key);
+    out.push(':');
+    write_quoted(out, value);
+}
+
+pub fn write_kv_u64(out: &mut String, key: &str, value: u64, leading_comma: bool) {
+    if leading_comma {
+        out.push(',');
+    }
+    write_quoted(out, key);
+    out.push(':');
+    out.push_str(&value.to_string());
+}
+
+pub fn write_kv_null(out: &mut String, key: &str, leading_comma: bool) {
+    if leading_comma {
+        out.push(',');
+    }
+    write_quoted(out, key);
+    out.push_str(":null");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_escape_handles_quotes_and_backslashes() {
+        assert_eq!(json_escape(r#"a"b\c"#), r#"a\"b\\c"#);
+    }
+
+    #[test]
+    fn json_escape_handles_control_chars() {
+        assert_eq!(json_escape("a\nb\rc\td"), "a\\nb\\rc\\td");
+    }
+
+    #[test]
+    fn write_quoted_emits_quoted_string() {
+        let mut out = String::new();
+        write_quoted(&mut out, "hello");
+        assert_eq!(out, "\"hello\"");
+    }
+
+    #[test]
+    fn write_kv_string_round_trips_via_parser() {
+        let mut out = String::from("{");
+        write_kv_string(&mut out, "k", "v", false);
+        out.push('}');
+        let root = parse_root_object(&out).unwrap();
+        assert_eq!(root.get("k").and_then(json_as_string), Some("v"));
+    }
+
+    #[test]
+    fn write_kv_u64_round_trips_via_parser() {
+        let mut out = String::from("{");
+        write_kv_u64(&mut out, "n", 42, false);
+        out.push('}');
+        let root = parse_root_object(&out).unwrap();
+        assert_eq!(root.get("n").and_then(json_as_u64), Some(42));
+    }
+
+    #[test]
+    fn write_kv_with_leading_comma_separates_pairs() {
+        let mut out = String::from("{");
+        write_kv_string(&mut out, "a", "1", false);
+        write_kv_string(&mut out, "b", "2", true);
+        out.push('}');
+        assert_eq!(out, r#"{"a":"1","b":"2"}"#);
+    }
+}

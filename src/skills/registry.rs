@@ -32,4 +32,12 @@ impl SkillRegistry {
     pub fn all(&self) -> &[SkillSpec] {
         &self.skills
     }
+
+    pub fn find(&self, name: &str) -> Option<&SkillSpec> {
+        self.skills.iter().find(|s| s.name == name)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &SkillSpec> {
+        self.skills.iter()
+    }
 }
