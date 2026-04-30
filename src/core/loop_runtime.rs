@@ -29,6 +29,20 @@ impl Default for AgentLoopOptions {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ToolEvent {
+    pub tool_name: String,
+    pub input: std::collections::BTreeMap<String, String>,
+    pub output: String,
+    pub status: crate::model::protocol::ObservationStatus,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RunResult {
+    pub final_message: String,
+    pub tool_events: Vec<ToolEvent>,
+}
+
 pub struct AgentLoop {
     config: AppConfig,
 }
@@ -46,7 +60,7 @@ impl AgentLoop {
         &self,
         context: TaskContext,
         options: AgentLoopOptions,
-    ) -> AppResult<String> {
+    ) -> AppResult<RunResult> {
         let AgentLoopOptions {
             steps,
             initial_observations,
@@ -93,6 +107,7 @@ impl AgentLoop {
 
         let mut observations = initial_observations;
         let mut last_message = String::new();
+        let mut tool_events: Vec<ToolEvent> = Vec::new();
         for step in 0..steps {
             let request = ModelRequest {
                 system_prompt: build_system_prompt(skill),
@@ -116,13 +131,22 @@ impl AgentLoop {
 
             match response.action {
                 ModelAction::CallTool { tool_name, input } => {
+                    let event_input = input.args.clone();
                     match registry.execute_with_policy(&tool_name, input, &policy) {
                         Ok(output) => {
                             let kind = ObservationKind::from_tool_name(&tool_name);
                             let summary = summarize_for_kind(&output.summary, kind);
                             println!("Tool `{tool_name}` output [{}]:", kind.label());
                             println!("{summary}");
+                            let event_output = summary.clone();
+                            let event_name = tool_name.clone();
                             observations.push(Observation::ok(tool_name, summary));
+                            tool_events.push(ToolEvent {
+                                tool_name: event_name,
+                                input: event_input,
+                                output: event_output,
+                                status: crate::model::protocol::ObservationStatus::Ok,
+                            });
                         }
                         Err(error) => {
                             let kind = ObservationKind::from_tool_name(&tool_name);
@@ -133,7 +157,15 @@ impl AgentLoop {
                             let summary = summarize_for_kind(&error.to_string(), kind);
                             println!("Tool `{tool_name}` {label} [{}]:", kind.label());
                             println!("{summary}");
+                            let event_output = summary.clone();
+                            let event_name = tool_name.clone();
                             observations.push(Observation::failed(tool_name, summary));
+                            tool_events.push(ToolEvent {
+                                tool_name: event_name,
+                                input: event_input,
+                                output: event_output,
+                                status: crate::model::protocol::ObservationStatus::Failed,
+                            });
                         }
                     }
                 }
@@ -152,7 +184,10 @@ impl AgentLoop {
         let snapshot = SessionSnapshot::new(context.task, profile.name);
         store.save(&snapshot)?;
 
-        Ok(last_message)
+        Ok(RunResult {
+            final_message: last_message,
+            tool_events,
+        })
     }
 }
 

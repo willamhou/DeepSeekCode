@@ -48,13 +48,14 @@ fn run_review(config: AppConfig, reference: &str, post: bool, out: Option<&str>)
     ];
 
     let runtime = AgentLoop::new(config);
-    let final_message = runtime.run_with(
+    let result = runtime.run_with(
         context,
         AgentLoopOptions {
             steps: 4,
             initial_observations: observations,
         },
     )?;
+    let final_message = result.final_message;
 
     let body = build_review_body(&pr, &final_message);
     deliver_review(&pr, &body, post, out)?;

@@ -73,8 +73,31 @@ impl Repl {
             crate::repl::slash::SlashOutcome::Continue => return Ok(ControlFlow::Continue),
             crate::repl::slash::SlashOutcome::NotASlash => {}
         }
+
         self.transcript.push_user(line);
-        println!("(received {} chars; LLM dispatch not yet wired)", line.len());
+        let prompt = self.transcript.render_for_prompt();
+        let context =
+            crate::core::context::TaskContext::new(prompt, self.skill.clone());
+        let runtime = crate::core::loop_runtime::AgentLoop::new(self.config.clone());
+        let result = runtime.run_with(
+            context,
+            crate::core::loop_runtime::AgentLoopOptions {
+                steps: self.budget,
+                initial_observations: Vec::new(),
+            },
+        )?;
+
+        for event in result.tool_events {
+            self.transcript.push_tool(
+                event.tool_name,
+                event.input,
+                event.output,
+                event.status,
+            );
+        }
+        if !result.final_message.is_empty() {
+            self.transcript.push_assistant(result.final_message);
+        }
         Ok(ControlFlow::Continue)
     }
 }
@@ -119,11 +142,10 @@ mod tests {
     }
 
     #[test]
-    fn handle_line_records_user_turn_for_plain_text() {
+    fn handle_line_routes_help_slash_to_continue() {
         let mut r = Repl::new(AppConfig::default(), None);
-        r.handle_line("hello world").unwrap();
-        assert_eq!(r.transcript.turns.len(), 1);
-        assert_eq!(r.transcript.turns[0].content, "hello world");
+        let cf = r.handle_line("/help").unwrap();
+        assert!(matches!(cf, ControlFlow::Continue));
     }
 
     #[test]
@@ -134,15 +156,12 @@ mod tests {
     }
 
     #[test]
-    fn run_with_reader_processes_two_lines_and_quits_on_eof() {
+    fn run_with_reader_processes_slash_commands_and_quits() {
         use std::io::Cursor;
-        let mut input = Cursor::new(b"hello\nbye\n".to_vec());
+        let mut input = Cursor::new(b"/help\n/quit\n".to_vec());
         let mut output = Vec::new();
         let mut r = Repl::new(AppConfig::default(), None);
         r.run_with_reader(&mut input, &mut output).unwrap();
-        assert_eq!(r.transcript.turns.len(), 2);
-        assert_eq!(r.transcript.turns[0].content, "hello");
-        assert_eq!(r.transcript.turns[1].content, "bye");
         let prompt = String::from_utf8(output).unwrap();
         assert!(prompt.contains("> "));
     }
