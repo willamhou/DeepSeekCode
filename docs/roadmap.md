@@ -1,6 +1,6 @@
 # Roadmap 与状态
 
-最后更新：`2026-04-25`
+最后更新：`2026-04-30`
 
 ## 当前状态
 
@@ -150,7 +150,7 @@
 这些能力已经在当前本地环境里验证过：
 
 - `cargo check --offline`
-- `cargo test --offline`（62 项单测全部通过）
+- `cargo test --offline`（198 项单测全部通过）
 - `cargo run --offline -- doctor` 输出五段诊断（workspace / model / api key / network / hints）
 - `cargo run --offline -- smoke` 与 `cargo run --offline -- smoke --flavor anthropic` 在缺少 key 时给出预检失败
 - `cargo run --offline -- "inspect repository"`
@@ -332,13 +332,19 @@
   - JSON 单文件 session 持久化（`/save` 原子写入；`/load` 严格校验）
   - Token usage 累计（OpenAI / Anthropic 兼容路径）
   - 老 turn 裁剪：assistant 保留最新 3 条全文；tool 输出走 `summarize_for_kind`
-- v2 候选（未开始）：
-  - 流式 token 输出（DeepSeek SSE）
+- v2 已完成：流式 token 输出（DeepSeek SSE，2026-04-30）
+  - `util::sse::read_frame` 通用 SSE 框解析器
+  - `StreamEvents` trait + `TtyRenderer`（cyan / yellow / green / red ANSI conditional on TTY）
+  - `ModelClient::respond` 接收 `&mut dyn StreamEvents`
+  - DeepSeek 流式 OpenAI + Anthropic 双协议（curl `-N`）
+  - 离线 planner 也走 `StreamEvents`，颜色一致
+  - 175 → 198 测试，0 新依赖
+- v3 候选（未开始）：
   - 上下箭头历史（rustyline 或自写 raw mode）
   - Ctrl+C 优雅中断
   - 自动保存 / `/sessions` 列表
 
-状态：v1 完成
+状态：v2 完成（streaming SSE）
 
 ## 建议的下一个顺序
 
@@ -364,3 +370,4 @@
 - `6d01256` `Add DeepSeek transport and policy enforcement`
 - `efdb191` `Upgrade patching and remote protocol parsing`
 - `a1c45fb` `Use tool calling for OpenAI-compatible DeepSeek`
+- `046106c` `Document roadmap and project status`
