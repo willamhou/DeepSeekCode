@@ -1,4 +1,4 @@
-#![allow(dead_code)] // remove when M3 wires up consumers
+#![allow(dead_code)] // remove when M5 wires up TtyRenderer::from_stdout
 
 use std::collections::BTreeMap;
 use std::io::Write;

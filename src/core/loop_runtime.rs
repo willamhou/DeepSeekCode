@@ -126,7 +126,8 @@ impl AgentLoop {
                 observations: compact_observations(&observations),
             };
 
-            let (response, step_usage) = client.respond(request)?;
+            let mut events = crate::ui::stream::NoopStreamEvents;
+            let (response, step_usage) = client.respond(request, &mut events)?;
             if let Some(usage) = step_usage {
                 total_usage.prompt += usage.prompt;
                 total_usage.completion += usage.completion;

@@ -18,7 +18,11 @@ pub struct DeepSeekClient {
 }
 
 impl ModelClient for DeepSeekClient {
-    fn respond(&self, input: ModelRequest) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
+    fn respond(
+        &self,
+        input: ModelRequest,
+        _events: &mut dyn crate::ui::stream::StreamEvents,
+    ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
         if let Ok(api_key) = env::var(&self.config.api_key_env) {
             if !api_key.trim().is_empty() {
                 if let Ok(pair) = self.respond_remote(&input, &api_key) {
@@ -1028,7 +1032,7 @@ mod tests {
             ],
         };
 
-        let response = planner().respond(request).unwrap().0;
+        let response = planner().respond(request, &mut crate::ui::stream::NoopStreamEvents).unwrap().0;
         match response.action {
             ModelAction::CallTool { tool_name, input } => {
                 assert_eq!(tool_name, "apply_patch");
@@ -1065,7 +1069,7 @@ mod tests {
             observations: vec![],
         };
 
-        let response = planner().respond(request).unwrap().0;
+        let response = planner().respond(request, &mut crate::ui::stream::NoopStreamEvents).unwrap().0;
         match response.action {
             ModelAction::CallTool { tool_name, input } => {
                 assert_eq!(tool_name, "apply_patch");
@@ -1104,7 +1108,7 @@ mod tests {
             ],
         };
 
-        let response = planner().respond(request).unwrap().0;
+        let response = planner().respond(request, &mut crate::ui::stream::NoopStreamEvents).unwrap().0;
         match response.action {
             ModelAction::CallTool { tool_name, input } => {
                 assert_eq!(tool_name, "apply_patch");
@@ -1144,7 +1148,7 @@ mod tests {
             ],
         };
 
-        let response = planner().respond(request).unwrap().0;
+        let response = planner().respond(request, &mut crate::ui::stream::NoopStreamEvents).unwrap().0;
         match response.action {
             ModelAction::CallTool { tool_name, input } => {
                 assert_eq!(tool_name, "apply_patch");
@@ -1189,7 +1193,7 @@ mod tests {
             ],
         };
 
-        let response = planner().respond(request).unwrap().0;
+        let response = planner().respond(request, &mut crate::ui::stream::NoopStreamEvents).unwrap().0;
         match response.action {
             ModelAction::CallTool { tool_name, .. } => {
                 assert_ne!(
