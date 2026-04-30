@@ -6,10 +6,11 @@ use crate::config::types::ModelConfig;
 use crate::error::AppResult;
 use crate::error::app_error;
 use crate::model::client::ModelClient;
-use crate::model::protocol::{ModelAction, ModelRequest, ModelResponse};
+use crate::model::protocol::{ModelAction, ModelRequest, ModelResponse, TokenUsage};
 use crate::tools::types::ToolInput;
 use crate::util::json::{
-    json_as_array, json_as_object, json_as_string, json_escape, parse_root_object, JsonValue,
+    json_as_array, json_as_object, json_as_string, json_as_u64, json_escape, parse_root_object,
+    JsonValue,
 };
 
 pub struct DeepSeekClient {
@@ -17,28 +18,27 @@ pub struct DeepSeekClient {
 }
 
 impl ModelClient for DeepSeekClient {
-    fn respond(&self, input: ModelRequest) -> AppResult<ModelResponse> {
+    fn respond(&self, input: ModelRequest) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
         if let Ok(api_key) = env::var(&self.config.api_key_env) {
             if !api_key.trim().is_empty() {
-                if let Ok(response) = self.respond_remote(&input, &api_key) {
-                    return Ok(response);
+                if let Ok(pair) = self.respond_remote(&input, &api_key) {
+                    return Ok(pair);
                 }
             }
         }
-
-        Ok(self.respond_offline(input))
+        Ok((self.respond_offline(input), None))
     }
 }
 
 impl DeepSeekClient {
-    fn respond_remote(&self, input: &ModelRequest, api_key: &str) -> AppResult<ModelResponse> {
+    fn respond_remote(&self, input: &ModelRequest, api_key: &str) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
         match api_flavor(&self.config.base_url) {
             ApiFlavor::OpenAi => self.respond_remote_openai(input, api_key),
             ApiFlavor::Anthropic => self.respond_remote_anthropic(input, api_key),
         }
     }
 
-    fn respond_remote_openai(&self, input: &ModelRequest, api_key: &str) -> AppResult<ModelResponse> {
+    fn respond_remote_openai(&self, input: &ModelRequest, api_key: &str) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
         let endpoint = format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'));
         let system_prompt = build_openai_tool_system_prompt(&input.system_prompt);
         let user_prompt = build_user_prompt(input);
@@ -85,11 +85,13 @@ impl DeepSeekClient {
             )));
         }
 
-        let body = String::from_utf8_lossy(&output.stdout);
-        parse_openai_chat_completion(&body)
+        let body_str = String::from_utf8_lossy(&output.stdout);
+        let response = parse_openai_chat_completion(&body_str)?;
+        let usage = parse_openai_usage(&body_str);
+        Ok((response, usage))
     }
 
-    fn respond_remote_anthropic(&self, input: &ModelRequest, api_key: &str) -> AppResult<ModelResponse> {
+    fn respond_remote_anthropic(&self, input: &ModelRequest, api_key: &str) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
         let endpoint = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
         let system_prompt = build_anthropic_tool_system_prompt(&input.system_prompt);
         let user_prompt = build_user_prompt(input);
@@ -137,8 +139,10 @@ impl DeepSeekClient {
             )));
         }
 
-        let body = String::from_utf8_lossy(&output.stdout);
-        parse_anthropic_messages(&body)
+        let body_str = String::from_utf8_lossy(&output.stdout);
+        let response = parse_anthropic_messages(&body_str)?;
+        let usage = parse_anthropic_usage(&body_str);
+        Ok((response, usage))
     }
 
     fn respond_offline(&self, input: ModelRequest) -> ModelResponse {
@@ -605,6 +609,14 @@ fn parse_openai_chat_completion(body: &str) -> AppResult<ModelResponse> {
     })
 }
 
+fn parse_openai_usage(body: &str) -> Option<TokenUsage> {
+    let root = parse_root_object(body).ok()?;
+    let usage = json_as_object(root.get("usage")?)?;
+    let prompt = json_as_u64(usage.get("prompt_tokens")?)?;
+    let completion = json_as_u64(usage.get("completion_tokens")?)?;
+    Some(TokenUsage { prompt, completion })
+}
+
 fn parse_anthropic_messages(body: &str) -> AppResult<ModelResponse> {
     let root = parse_root_object(body)?;
 
@@ -669,6 +681,14 @@ fn parse_anthropic_messages(body: &str) -> AppResult<ModelResponse> {
         message,
         action: ModelAction::Finish,
     })
+}
+
+fn parse_anthropic_usage(body: &str) -> Option<TokenUsage> {
+    let root = parse_root_object(body).ok()?;
+    let usage = json_as_object(root.get("usage")?)?;
+    let prompt = json_as_u64(usage.get("input_tokens")?)?;
+    let completion = json_as_u64(usage.get("output_tokens")?)?;
+    Some(TokenUsage { prompt, completion })
 }
 
 fn json_object_to_string_args(value: &JsonValue) -> AppResult<BTreeMap<String, String>> {
@@ -792,7 +812,8 @@ fn quoted_segments(task: &str) -> Vec<String> {
 mod tests {
     use super::{
         api_flavor, build_anthropic_tools, build_openai_tools, parse_anthropic_messages,
-        parse_openai_chat_completion, ApiFlavor, DeepSeekClient,
+        parse_anthropic_usage, parse_openai_chat_completion, parse_openai_usage, ApiFlavor,
+        DeepSeekClient,
     };
     use crate::config::types::ModelConfig;
     use crate::model::client::ModelClient;
@@ -1007,7 +1028,7 @@ mod tests {
             ],
         };
 
-        let response = planner().respond(request).unwrap();
+        let response = planner().respond(request).unwrap().0;
         match response.action {
             ModelAction::CallTool { tool_name, input } => {
                 assert_eq!(tool_name, "apply_patch");
@@ -1044,7 +1065,7 @@ mod tests {
             observations: vec![],
         };
 
-        let response = planner().respond(request).unwrap();
+        let response = planner().respond(request).unwrap().0;
         match response.action {
             ModelAction::CallTool { tool_name, input } => {
                 assert_eq!(tool_name, "apply_patch");
@@ -1083,7 +1104,7 @@ mod tests {
             ],
         };
 
-        let response = planner().respond(request).unwrap();
+        let response = planner().respond(request).unwrap().0;
         match response.action {
             ModelAction::CallTool { tool_name, input } => {
                 assert_eq!(tool_name, "apply_patch");
@@ -1123,7 +1144,7 @@ mod tests {
             ],
         };
 
-        let response = planner().respond(request).unwrap();
+        let response = planner().respond(request).unwrap().0;
         match response.action {
             ModelAction::CallTool { tool_name, input } => {
                 assert_eq!(tool_name, "apply_patch");
@@ -1168,7 +1189,7 @@ mod tests {
             ],
         };
 
-        let response = planner().respond(request).unwrap();
+        let response = planner().respond(request).unwrap().0;
         match response.action {
             ModelAction::CallTool { tool_name, .. } => {
                 assert_ne!(
@@ -1180,5 +1201,33 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn parse_openai_usage_extracts_prompt_and_completion() {
+        let body = r#"{
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 5}
+        }"#;
+        let usage = parse_openai_usage(body).unwrap();
+        assert_eq!(usage.prompt, 12);
+        assert_eq!(usage.completion, 5);
+    }
+
+    #[test]
+    fn parse_openai_usage_returns_none_when_missing() {
+        let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#;
+        assert!(parse_openai_usage(body).is_none());
+    }
+
+    #[test]
+    fn parse_anthropic_usage_extracts_input_and_output() {
+        let body = r#"{
+            "content": [{"type":"text","text":"ok"}],
+            "usage": {"input_tokens": 30, "output_tokens": 11}
+        }"#;
+        let usage = parse_anthropic_usage(body).unwrap();
+        assert_eq!(usage.prompt, 30);
+        assert_eq!(usage.completion, 11);
     }
 }

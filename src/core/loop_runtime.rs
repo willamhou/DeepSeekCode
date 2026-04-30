@@ -41,6 +41,7 @@ pub struct ToolEvent {
 pub struct RunResult {
     pub final_message: String,
     pub tool_events: Vec<ToolEvent>,
+    pub usage: crate::model::protocol::TokenUsage,
 }
 
 pub struct AgentLoop {
@@ -108,6 +109,7 @@ impl AgentLoop {
         let mut observations = initial_observations;
         let mut last_message = String::new();
         let mut tool_events: Vec<ToolEvent> = Vec::new();
+        let mut total_usage = crate::model::protocol::TokenUsage::default();
         for step in 0..steps {
             let request = ModelRequest {
                 system_prompt: build_system_prompt(skill),
@@ -124,7 +126,11 @@ impl AgentLoop {
                 observations: compact_observations(&observations),
             };
 
-            let response = client.respond(request)?;
+            let (response, step_usage) = client.respond(request)?;
+            if let Some(usage) = step_usage {
+                total_usage.prompt += usage.prompt;
+                total_usage.completion += usage.completion;
+            }
             println!();
             println!("Step {}: {}", step + 1, response.message);
             last_message = response.message.clone();
@@ -187,6 +193,7 @@ impl AgentLoop {
         Ok(RunResult {
             final_message: last_message,
             tool_events,
+            usage: total_usage,
         })
     }
 }

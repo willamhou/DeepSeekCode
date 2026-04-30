@@ -41,6 +41,14 @@ pub fn try_handle_slash(repl: &mut Repl, line: &str) -> AppResult<SlashOutcome> 
             handle_skill(repl, &args);
             Ok(SlashOutcome::Continue)
         }
+        "/diff" => {
+            handle_diff();
+            Ok(SlashOutcome::Continue)
+        }
+        "/cost" => {
+            handle_cost(repl);
+            Ok(SlashOutcome::Continue)
+        }
         other => {
             println!("unknown slash command `{other}`; type /help for the list");
             Ok(SlashOutcome::Continue)
@@ -55,10 +63,10 @@ fn print_help() {
     println!("  /clear                        wipe transcript + token counters");
     println!("  /budget [N]                   show or set per-turn step budget (1..200)");
     println!("  /skill [name|-]               show, switch, or clear the active skill");
-    println!("  /diff                         show pending git diff (later task)");
+    println!("  /diff                         show pending git diff");
     println!("  /save <name>                  save the session (later task)");
     println!("  /load <name>                  restore a saved session (later task)");
-    println!("  /cost                         show prompt/completion token totals (later task)");
+    println!("  /cost                         show prompt/completion token totals");
 }
 
 fn handle_budget(repl: &mut Repl, args: &[&str]) {
@@ -120,6 +128,36 @@ fn handle_skill(repl: &mut Repl, args: &[&str]) {
             }
         );
     }
+}
+
+fn handle_diff() {
+    match crate::util::process::run_capture("git", &["diff"]) {
+        Ok(captured) => {
+            if !captured.success {
+                println!("git diff failed: {}", captured.stderr.trim());
+                return;
+            }
+            let body = captured.stdout;
+            if body.trim().is_empty() {
+                println!("no pending changes");
+            } else {
+                println!("{body}");
+            }
+        }
+        Err(error) => println!("could not run git diff: {error}"),
+    }
+}
+
+fn handle_cost(repl: &Repl) {
+    if repl.tokens_prompt == 0 && repl.tokens_completion == 0 {
+        println!("no remote calls yet");
+        return;
+    }
+    let total = repl.tokens_prompt + repl.tokens_completion;
+    println!(
+        "prompt: {}, completion: {}, total: {}",
+        repl.tokens_prompt, repl.tokens_completion, total
+    );
 }
 
 pub fn validate_session_name(name: &str) -> Result<(), String> {
@@ -266,5 +304,34 @@ mod tests {
     fn validate_session_name_accepts_normal_name() {
         assert!(validate_session_name("fix-pr-42").is_ok());
         assert!(validate_session_name("session_2026").is_ok());
+    }
+
+    #[test]
+    fn cost_with_no_calls_returns_continue() {
+        let mut r = fresh_repl();
+        assert!(matches!(
+            try_handle_slash(&mut r, "/cost").unwrap(),
+            SlashOutcome::Continue,
+        ));
+    }
+
+    #[test]
+    fn cost_with_accumulated_tokens_returns_continue() {
+        let mut r = fresh_repl();
+        r.tokens_prompt = 100;
+        r.tokens_completion = 50;
+        assert!(matches!(
+            try_handle_slash(&mut r, "/cost").unwrap(),
+            SlashOutcome::Continue,
+        ));
+    }
+
+    #[test]
+    fn diff_returns_continue() {
+        let mut r = fresh_repl();
+        assert!(matches!(
+            try_handle_slash(&mut r, "/diff").unwrap(),
+            SlashOutcome::Continue,
+        ));
     }
 }

@@ -87,6 +87,8 @@ impl Repl {
             },
         )?;
 
+        self.tokens_prompt += result.usage.prompt;
+        self.tokens_completion += result.usage.completion;
         for event in result.tool_events {
             self.transcript.push_tool(
                 event.tool_name,
