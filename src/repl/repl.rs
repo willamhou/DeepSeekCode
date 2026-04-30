@@ -68,8 +68,11 @@ impl Repl {
         if line.trim().is_empty() {
             return Ok(ControlFlow::Continue);
         }
-        // Slash dispatch lands in Task 4. LLM dispatch lands in Task 5.
-        // For now: record the user turn and print a stub acknowledgement.
+        match crate::repl::slash::try_handle_slash(self, line)? {
+            crate::repl::slash::SlashOutcome::Quit => return Ok(ControlFlow::Quit),
+            crate::repl::slash::SlashOutcome::Continue => return Ok(ControlFlow::Continue),
+            crate::repl::slash::SlashOutcome::NotASlash => {}
+        }
         self.transcript.push_user(line);
         println!("(received {} chars; LLM dispatch not yet wired)", line.len());
         Ok(ControlFlow::Continue)
@@ -121,6 +124,13 @@ mod tests {
         r.handle_line("hello world").unwrap();
         assert_eq!(r.transcript.turns.len(), 1);
         assert_eq!(r.transcript.turns[0].content, "hello world");
+    }
+
+    #[test]
+    fn handle_line_routes_quit_slash_to_quit_control_flow() {
+        let mut r = Repl::new(AppConfig::default(), None);
+        let cf = r.handle_line("/quit").unwrap();
+        assert!(matches!(cf, ControlFlow::Quit));
     }
 
     #[test]
