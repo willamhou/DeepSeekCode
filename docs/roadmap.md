@@ -322,6 +322,24 @@
 
 状态：进行中（PR/CI 一项基础版完成）
 
+### Phase 9: 交互式体验
+
+- REPL (`dscode chat`)：v1 已完成
+  - 持久化 stdin 循环 + `> ` 提示符 + TTY 守门
+  - 跨轮 transcript 完整传给 LLM (user / assistant / tool 三类 turn)
+  - 9 个 slash 命令：`/quit /help /clear /budget /skill /diff /save /load /cost`
+  - 默认 20 步预算，`/budget N` 可调 (1..200)
+  - JSON 单文件 session 持久化（`/save` 原子写入；`/load` 严格校验）
+  - Token usage 累计（OpenAI / Anthropic 兼容路径）
+  - 老 turn 裁剪：assistant 保留最新 3 条全文；tool 输出走 `summarize_for_kind`
+- v2 候选（未开始）：
+  - 流式 token 输出（DeepSeek SSE）
+  - 上下箭头历史（rustyline 或自写 raw mode）
+  - Ctrl+C 优雅中断
+  - 自动保存 / `/sessions` 列表
+
+状态：v1 完成
+
 ## 建议的下一个顺序
 
 建议严格按下面顺序推进：
