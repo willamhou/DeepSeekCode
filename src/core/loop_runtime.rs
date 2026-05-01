@@ -12,12 +12,13 @@ use crate::model::protocol::{ModelAction, ModelRequest, Observation, Observation
 use crate::skills::registry::SkillRegistry;
 use crate::skills::resolver::resolve_skill;
 use crate::skills::schema::SkillSpec;
-use crate::tools::registry::{default_registry, ExecutionPolicy};
+use crate::tools::registry::ExecutionPolicy;
 use crate::ui::render::print_banner;
 
 pub struct AgentLoopOptions {
     pub steps: usize,
     pub initial_observations: Vec<Observation>,
+    pub todos: std::rc::Rc<std::cell::RefCell<crate::core::todos::TodoList>>,
 }
 
 impl Default for AgentLoopOptions {
@@ -25,6 +26,9 @@ impl Default for AgentLoopOptions {
         Self {
             steps: 4,
             initial_observations: Vec::new(),
+            todos: std::rc::Rc::new(std::cell::RefCell::new(
+                crate::core::todos::TodoList::default(),
+            )),
         }
     }
 }
@@ -63,23 +67,33 @@ impl AgentLoop {
         context: TaskContext,
         options: AgentLoopOptions,
     ) -> AppResult<RunResult> {
+        let client = DeepSeekClient {
+            config: self.config.model.clone(),
+        };
+        self.run_with_client(context, options, &client)
+    }
+
+    pub fn run_with_client<C: ModelClient>(
+        &self,
+        context: TaskContext,
+        options: AgentLoopOptions,
+        client: &C,
+    ) -> AppResult<RunResult> {
         let AgentLoopOptions {
             steps,
             initial_observations,
+            todos,
         } = options;
         print_banner("DeepseekCode");
 
         let profile = detect_profile(".")?;
-        let registry = default_registry();
+        let registry = crate::tools::registry::default_registry_with_todos(todos.clone());
         let skills = SkillRegistry::load_dir("skills")?;
         let skill = resolve_skill(&skills, context.skill.as_deref());
         let policy = ExecutionPolicy::new(&self.config.approval, skill);
         let memory = MemoryState::new(profile.name.clone());
         let primary_file = primary_file(&profile).map(str::to_string);
         let suggested_test_command = default_test_command(&profile).map(str::to_string);
-        let client = DeepSeekClient {
-            config: self.config.model.clone(),
-        };
 
         println!("Task: {}", context.task);
         println!("Profile: {}", profile.name);
@@ -126,7 +140,7 @@ impl AgentLoop {
                     .map(str::to_string)
                     .collect(),
                 observations: compact_observations(&observations),
-                todos: Vec::new(),
+                todos: todos.borrow().snapshot(),
             };
 
             renderer.paint_step_divider(step + 1);
@@ -143,45 +157,43 @@ impl AgentLoop {
                     match registry.execute_with_policy(&tool_name, input, &policy) {
                         Ok(output) => {
                             let kind = ObservationKind::from_tool_name(&tool_name);
-                            let summary = summarize_for_kind(&output.summary, kind);
+                            let observation_summary = summarize_for_kind(&output.summary, kind);
+                            // CR-1: user sees full body (output.summary), observation/transcript get trim.
                             renderer.paint_tool_result(
                                 crate::ui::stream::ToolResultKind::Ok,
                                 &tool_name,
                                 kind.label(),
-                                &summary,
+                                &output.summary,
                             );
-                            let event_output = summary.clone();
                             let event_name = tool_name.clone();
-                            observations.push(Observation::ok(tool_name, summary));
+                            observations
+                                .push(Observation::ok(tool_name, observation_summary.clone()));
                             tool_events.push(ToolEvent {
                                 tool_name: event_name,
                                 input: event_input,
-                                output: event_output,
+                                output: observation_summary,
                                 status: crate::model::protocol::ObservationStatus::Ok,
                             });
                         }
                         Err(error) => {
                             let kind = ObservationKind::from_tool_name(&tool_name);
-                            let summary = summarize_for_kind(&error.to_string(), kind);
+                            let raw = error.to_string();
+                            let observation_summary = summarize_for_kind(&raw, kind);
                             let result_kind = match crate::error::classify(error.as_ref()) {
                                 crate::error::AppErrorKind::PolicyDenied => {
                                     crate::ui::stream::ToolResultKind::Denied
                                 }
                                 _ => crate::ui::stream::ToolResultKind::Failed,
                             };
-                            renderer.paint_tool_result(
-                                result_kind,
-                                &tool_name,
-                                kind.label(),
-                                &summary,
-                            );
-                            let event_output = summary.clone();
+                            // CR-1: user sees full error text, observation/transcript get trim.
+                            renderer.paint_tool_result(result_kind, &tool_name, kind.label(), &raw);
                             let event_name = tool_name.clone();
-                            observations.push(Observation::failed(tool_name, summary));
+                            observations
+                                .push(Observation::failed(tool_name, observation_summary.clone()));
                             tool_events.push(ToolEvent {
                                 tool_name: event_name,
                                 input: event_input,
-                                output: event_output,
+                                output: observation_summary,
                                 status: crate::model::protocol::ObservationStatus::Failed,
                             });
                         }
@@ -221,6 +233,8 @@ fn primary_file(profile: &crate::language::profile::LanguageProfile) -> Option<&
     })
 }
 
+const TODO_NUDGE: &str = "\n\nYou have access to a todo_write tool. Use it proactively when the request:\n- involves three or more distinct steps,\n- spans multiple files or non-trivial refactoring,\n- requires running tests or shell commands as part of completion.\n\nEach todo has fields: content (imperative, e.g. \"Run tests\"), activeForm (present continuous, e.g. \"Running tests\"), status (\"pending\" | \"in_progress\" | \"completed\").\n\nMark exactly one todo as in_progress at a time. Update the list (mark completed, add discovered tasks) before moving to the next step. Skip todo_write only for trivial single-step requests.";
+
 fn build_system_prompt(skill_name: Option<&SkillSpec>) -> String {
     let mut prompt = String::from(
         "You are the offline planning layer for DeepseekCode. Prefer repository inspection before edits.",
@@ -235,5 +249,132 @@ fn build_system_prompt(skill_name: Option<&SkillSpec>) -> String {
             prompt.push_str(skill.system_append.trim());
         }
     }
+    prompt.push_str(TODO_NUDGE);
     prompt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_system_prompt_includes_todo_nudge() {
+        let prompt = super::build_system_prompt(None);
+        assert!(prompt.contains("todo_write"));
+        assert!(prompt.contains("in_progress"));
+        assert!(prompt.contains("Skip todo_write only for trivial"));
+    }
+
+    #[test]
+    fn build_system_prompt_places_nudge_after_skill_append() {
+        use crate::skills::schema::{SkillPolicy, SkillSpec};
+        // SkillPolicy has no Default impl in this codebase; construct explicitly.
+        let skill = SkillSpec {
+            name: "demo".to_string(),
+            description: "demo skill".to_string(),
+            allowed_tools: Vec::new(),
+            system_append: "ZZZ_SKILL_HINT".to_string(),
+            suggested_steps: Vec::new(),
+            policy: SkillPolicy {
+                require_write_confirmation: false,
+                require_shell_confirmation: false,
+                shell_allowlist: Vec::new(),
+            },
+        };
+        let prompt = super::build_system_prompt(Some(&skill));
+        let skill_pos = prompt.find("ZZZ_SKILL_HINT").expect("skill hint present");
+        let nudge_pos = prompt.find("todo_write").expect("nudge present");
+        assert!(nudge_pos > skill_pos, "nudge must come after skill_append");
+    }
+
+    #[test]
+    fn agent_loop_options_default_provides_empty_todo_list() {
+        let opts = AgentLoopOptions::default();
+        assert_eq!(opts.steps, 4);
+        assert!(opts.todos.borrow().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cr1_regression_test {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use crate::core::context::TaskContext;
+    use crate::core::todos::{TodoList, TodoStatus};
+    use crate::model::client::ModelClient;
+    use crate::model::protocol::{ModelAction, ModelRequest, ModelResponse, TokenUsage};
+    use crate::tools::types::ToolInput;
+    use crate::ui::stream::StreamEvents;
+
+    struct ScriptedClient {
+        calls: RefCell<u32>,
+    }
+
+    impl ModelClient for ScriptedClient {
+        fn respond(
+            &self,
+            _input: ModelRequest,
+            _events: &mut dyn StreamEvents,
+        ) -> crate::error::AppResult<(ModelResponse, Option<TokenUsage>)> {
+            let n = *self.calls.borrow();
+            *self.calls.borrow_mut() = n + 1;
+            let action = if n == 0 {
+                let mut input = ToolInput::new();
+                let items = r#"[{"content":"A","activeForm":"Aing","status":"pending"},{"content":"B","activeForm":"Bing","status":"in_progress"},{"content":"C","activeForm":"Cing","status":"completed"}]"#;
+                input.args.insert("items".to_string(), items.to_string());
+                ModelAction::CallTool {
+                    tool_name: "todo_write".to_string(),
+                    input,
+                }
+            } else {
+                ModelAction::Finish
+            };
+            Ok((
+                ModelResponse {
+                    message: "scripted".to_string(),
+                    action,
+                },
+                None,
+            ))
+        }
+    }
+
+    #[test]
+    fn run_with_client_decouples_user_display_from_observation_summary() {
+        // CR-1 regression: ToolEvent.output is the trim version (one line),
+        // proving the user-display path (output.summary) is decoupled from
+        // the observation/transcript path (summarize_for_kind).
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("dummy".to_string(), None);
+        let todos = Rc::new(RefCell::new(TodoList::default()));
+        let options = AgentLoopOptions {
+            steps: 2,
+            initial_observations: Vec::new(),
+            todos: todos.clone(),
+        };
+        let client = ScriptedClient {
+            calls: RefCell::new(0),
+        };
+
+        let result = agent.run_with_client(context, options, &client).unwrap();
+
+        // The TodoList was actually mutated (proving the registry got the same Rc):
+        let inner = todos.borrow();
+        assert_eq!(inner.items.len(), 3);
+        assert_eq!(inner.items[1].status, TodoStatus::InProgress);
+        drop(inner);
+
+        // The ToolEvent.output must be the trim version (one line, summary-only):
+        assert_eq!(result.tool_events.len(), 1);
+        let observed = &result.tool_events[0].output;
+        assert_eq!(
+            observed.lines().count(),
+            1,
+            "observation must be one line: {observed}"
+        );
+        assert!(observed.starts_with("3 todos"), "observed: {observed}");
+    }
 }

@@ -85,6 +85,7 @@ impl Repl {
             crate::core::loop_runtime::AgentLoopOptions {
                 steps: self.budget,
                 initial_observations: Vec::new(),
+                ..crate::core::loop_runtime::AgentLoopOptions::default()
             },
         )?;
 

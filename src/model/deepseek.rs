@@ -499,6 +499,16 @@ fn build_user_prompt(input: &ModelRequest) -> String {
         prompt.push_str(&format!("Suggested test command: {command}\n"));
     }
     prompt.push_str(&format!("Available tools: {}\n", input.available_tools.join(", ")));
+    if !input.todos.is_empty() {
+        prompt.push_str("Todos:\n");
+        for todo in &input.todos {
+            prompt.push_str(&format!(
+                "- [{}] {}\n",
+                todo.status.label(),
+                todo.content,
+            ));
+        }
+    }
     prompt.push_str("Observations:\n");
     if input.observations.is_empty() {
         prompt.push_str("- none\n");
@@ -602,6 +612,12 @@ const TOOL_SPECS: &[ToolSpec] = &[
         description: "Show the current git diff for the workspace.",
         properties_json: r#"{}"#,
         required_json: r#"[]"#,
+    },
+    ToolSpec {
+        name: "todo_write",
+        description: "Replace the entire todo list with a new set of items. Use proactively for tasks with 3+ steps; mark exactly one item as in_progress at a time.",
+        properties_json: r#"{"items":{"type":"string","description":"JSON array of objects with fields {content: string, activeForm: string, status: \"pending\"|\"in_progress\"|\"completed\"}. content is imperative form (e.g. \"Run tests\"); activeForm is present continuous (e.g. \"Running tests\")."}}"#,
+        required_json: r#"["items"]"#,
     },
 ];
 
@@ -1275,6 +1291,78 @@ mod tests {
         assert!(tools.contains("\"name\":\"apply_patch\""));
         assert!(tools.contains("\"input_schema\":"));
         assert!(!tools.contains("\"function\":"));
+    }
+
+    #[test]
+    fn build_openai_tools_includes_todo_write() {
+        let tools = build_openai_tools(&["todo_write".to_string()]);
+        assert!(tools.contains("\"name\":\"todo_write\""));
+        assert!(tools.contains("\"items\""));
+    }
+
+    #[test]
+    fn build_anthropic_tools_includes_todo_write() {
+        let tools = build_anthropic_tools(&["todo_write".to_string()]);
+        assert!(tools.contains("\"name\":\"todo_write\""));
+        assert!(tools.contains("\"items\""));
+    }
+
+    fn empty_request_with_todos(todos: Vec<crate::core::todos::Todo>) -> ModelRequest {
+        ModelRequest {
+            system_prompt: String::new(),
+            task: "test".to_string(),
+            profile_name: "rust".to_string(),
+            profile_hints: Vec::new(),
+            primary_file: None,
+            suggested_test_command: None,
+            available_tools: vec!["todo_write".to_string()],
+            observations: Vec::new(),
+            todos,
+        }
+    }
+
+    #[test]
+    fn build_user_prompt_omits_todos_block_when_empty() {
+        let prompt = super::build_user_prompt(&empty_request_with_todos(Vec::new()));
+        assert!(!prompt.contains("Todos:"), "expected no Todos: section: {prompt}");
+    }
+
+    #[test]
+    fn build_user_prompt_renders_todos_in_status_content_format() {
+        use crate::core::todos::{Todo, TodoStatus};
+        let todos = vec![
+            Todo { content: "Pen".to_string(), active_form: "Penning".to_string(), status: TodoStatus::Pending },
+            Todo { content: "Pro".to_string(), active_form: "Proing".to_string(), status: TodoStatus::InProgress },
+            Todo { content: "Don".to_string(), active_form: "Doning".to_string(), status: TodoStatus::Completed },
+        ];
+        let prompt = super::build_user_prompt(&empty_request_with_todos(todos));
+        assert!(prompt.contains("Todos:\n- [pending] Pen\n- [in_progress] Pro\n- [completed] Don\n"), "prompt: {prompt}");
+        // active_form must NOT leak into the user prompt:
+        assert!(!prompt.contains("Penning"));
+        assert!(!prompt.contains("Proing"));
+        assert!(!prompt.contains("Doning"));
+    }
+
+    #[test]
+    fn deepseek_body_contains_tool_choice_auto() {
+        // NEW-2: pin tool_choice="auto" against future PR drift.
+        // Inspect the source file directly to confirm the literal is present.
+        // We expect at least two matches (format string + this assertion); if
+        // the format string is removed we will see exactly one match, which
+        // still trips a follow-up safety check below.
+        let source = include_str!("deepseek.rs");
+        let openai_lit = r#""\"tool_choice\":\"auto\","#;
+        let anthropic_lit = r#""\"tool_choice\":{{\"type\":\"auto\"}},"#;
+        let openai_count = source.matches(openai_lit).count();
+        let anthropic_count = source.matches(anthropic_lit).count();
+        assert!(
+            openai_count >= 2,
+            "OpenAI body must include tool_choice auto (count={openai_count})"
+        );
+        assert!(
+            anthropic_count >= 2,
+            "Anthropic body must include tool_choice auto (count={anthropic_count})"
+        );
     }
 
     #[test]

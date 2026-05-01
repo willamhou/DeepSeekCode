@@ -182,6 +182,7 @@ fn sanitize_for_prompt(value: &str) -> String {
     out
 }
 
+#[cfg(test)]
 pub fn default_registry() -> ToolRegistry {
     default_registry_with_todos(std::rc::Rc::new(std::cell::RefCell::new(
         crate::core::todos::TodoList::default(),
