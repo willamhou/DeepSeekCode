@@ -40,6 +40,9 @@ prompt. To keep token usage bounded:
 `/clear` wipes the transcript when you want to start fresh without
 restarting the binary.
 
+Streaming token output is enabled by default — see
+[`docs/streaming.md`](streaming.md) for protocol detail and color rules.
+
 ## Sessions
 
 `/save <name>` writes the full transcript + budget + skill + token
@@ -68,8 +71,6 @@ if the file is missing, corrupt, or has an unknown version.
 
 ## v1 limitations
 
-- No streaming token output; the planner runs to completion before
-  printing the final assistant message.
 - No up/down arrow history. Use `rlwrap dscode chat` for a quick
   workaround.
 - Ctrl+C does not interrupt an in-flight LLM call; let the curl call

@@ -89,7 +89,9 @@ fn derive_hint(message: &str) -> Option<String> {
     let lower = message.to_ascii_lowercase();
 
     if lower.contains("gh cli not found") {
-        return Some("install gh from https://cli.github.com/ then run `gh auth login`".to_string());
+        return Some(
+            "install gh from https://cli.github.com/ then run `gh auth login`".to_string(),
+        );
     }
     if lower.contains("gh not authenticated") {
         return Some("run `gh auth login` to authenticate".to_string());
@@ -120,8 +122,7 @@ fn derive_hint(message: &str) -> Option<String> {
     }
     if lower.contains("hunk") && lower.contains("did not match") {
         return Some(
-            "the file changed since the patch was built; re-read the target and retry"
-                .to_string(),
+            "the file changed since the patch was built; re-read the target and retry".to_string(),
         );
     }
     if lower.contains("escapes cwd") {
@@ -204,6 +205,10 @@ mod tests {
         };
         let boxed: Box<dyn Error> = Box::new(app);
         assert!(boxed.source().is_some());
-        assert!(boxed.source().unwrap().to_string().contains("original cause"));
+        assert!(boxed
+            .source()
+            .unwrap()
+            .to_string()
+            .contains("original cause"));
     }
 }
