@@ -316,11 +316,11 @@ fn parse_todos_field(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::config::types::AppConfig;
 
-    fn config_with_temp_session_dir() -> (AppConfig, TempDir) {
+    pub(crate) fn config_with_temp_session_dir() -> (AppConfig, TempDir) {
         let dir = TempDir::new();
         let mut cfg = AppConfig::default();
         cfg.workspace.session_dir = dir.path().to_string_lossy().into_owned();
@@ -486,12 +486,12 @@ mod tests {
         assert!(reloaded.todos.borrow().is_empty());
     }
 
-    pub struct TempDir {
+    pub(crate) struct TempDir {
         path: PathBuf,
     }
 
     impl TempDir {
-        pub fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let nanos = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -501,7 +501,7 @@ mod tests {
             Self { path }
         }
 
-        pub fn path(&self) -> &std::path::Path {
+        pub(crate) fn path(&self) -> &std::path::Path {
             &self.path
         }
     }

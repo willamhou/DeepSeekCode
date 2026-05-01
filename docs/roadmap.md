@@ -1,6 +1,6 @@
 # Roadmap 与状态
 
-最后更新：`2026-04-30`
+最后更新：`2026-05-01`
 
 ## 当前状态
 
@@ -345,6 +345,18 @@
   - 自动保存 / `/sessions` 列表
 
 状态：v2 完成（streaming SSE）
+
+### Phase 10a — TodoTool
+
+- `todo_write` 工具：Claude Code 风格 task list；LLM 主动维护，跨 REPL 轮持久
+- `Todos:` 块每轮注入 user prompt（`render_for_prompt`）
+- 强 nudge 注入 system prompt（3+ 步任务必用、`in_progress` 唯一性、active_form 用于 in_progress 渲染）
+- session schema v1 → v2，自动迁移；v1 加载到空 todos，下次 `/save` 升级为 v2
+- `/todos` slash 命令读检视当前列表
+- transcript elision：旧的 `todos` ObservationKind 同类只保留最新
+- 261 → 264 tests，0 新依赖
+
+状态：已完成（2026-05-01）
 
 ## 建议的下一个顺序
 
