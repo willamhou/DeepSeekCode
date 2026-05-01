@@ -595,6 +595,7 @@ const TOOL_SPECS: &[ToolSpec] = &[
 
 #[derive(Default, Debug)]
 struct OpenAiToolAssembly {
+    index: u64,
     #[allow(dead_code)]
     id: Option<String>,
     name: Option<String>,
@@ -663,7 +664,28 @@ fn parse_openai_stream_inner<R: BufRead>(
             if let Some(tool_calls) = delta.get("tool_calls").and_then(json_as_array) {
                 for call in tool_calls {
                     let Some(call_obj) = json_as_object(call) else { continue };
-                    let assembly = tool_assembly.get_or_insert_with(OpenAiToolAssembly::default);
+                    // OpenAI streams tool calls indexed by `index`. We support exactly one
+                    // tool call per turn; any other distinct index is an error.
+                    let observed_index = call_obj
+                        .get("index")
+                        .and_then(json_as_u64)
+                        .unwrap_or(0);
+                    match tool_assembly.as_mut() {
+                        Some(existing) if existing.index != observed_index => {
+                            return Err(tool_failure(format!(
+                                "openai stream emitted multiple parallel tool calls (indices {} and {}); only one is supported per turn",
+                                existing.index, observed_index
+                            )));
+                        }
+                        Some(_) => {}
+                        None => {
+                            tool_assembly = Some(OpenAiToolAssembly {
+                                index: observed_index,
+                                ..OpenAiToolAssembly::default()
+                            });
+                        }
+                    }
+                    let assembly = tool_assembly.as_mut().expect("assembly seeded above");
                     if assembly.id.is_none() {
                         if let Some(id) = call_obj.get("id").and_then(json_as_string) {
                             assembly.id = Some(id.to_string());
@@ -711,6 +733,7 @@ fn parse_openai_stream_inner<R: BufRead>(
 
 #[derive(Default, Debug)]
 struct AnthropicToolAssembly {
+    index: u64,
     #[allow(dead_code)]
     id: Option<String>,
     name: Option<String>,
@@ -764,19 +787,33 @@ fn parse_anthropic_stream_inner<R: BufRead>(
             "content_block_start" => {
                 if let Some(block) = root.get("content_block").and_then(json_as_object) {
                     if block.get("type").and_then(json_as_string) == Some("tool_use") {
-                        let id = block
-                            .get("id")
-                            .and_then(json_as_string)
-                            .map(str::to_string);
-                        let name = block
-                            .get("name")
-                            .and_then(json_as_string)
-                            .map(str::to_string);
-                        tool_assembly = Some(AnthropicToolAssembly {
-                            id,
-                            name,
-                            partial_json: String::new(),
-                        });
+                        let block_index = root
+                            .get("index")
+                            .and_then(json_as_u64)
+                            .unwrap_or(0);
+                        if let Some(existing) = tool_assembly.as_ref() {
+                            if existing.index != block_index {
+                                return Err(tool_failure(format!(
+                                    "anthropic stream emitted multiple parallel tool_use blocks (indices {} and {}); only one is supported per turn",
+                                    existing.index, block_index
+                                )));
+                            }
+                        } else {
+                            let id = block
+                                .get("id")
+                                .and_then(json_as_string)
+                                .map(str::to_string);
+                            let name = block
+                                .get("name")
+                                .and_then(json_as_string)
+                                .map(str::to_string);
+                            tool_assembly = Some(AnthropicToolAssembly {
+                                index: block_index,
+                                id,
+                                name,
+                                partial_json: String::new(),
+                            });
+                        }
                     }
                 }
             }
@@ -794,8 +831,14 @@ fn parse_anthropic_stream_inner<R: BufRead>(
                         }
                         "input_json_delta" => {
                             if let Some(partial) = delta.get("partial_json").and_then(json_as_string) {
+                                let delta_index = root
+                                    .get("index")
+                                    .and_then(json_as_u64)
+                                    .unwrap_or(0);
                                 if let Some(assembly) = tool_assembly.as_mut() {
-                                    assembly.partial_json.push_str(partial);
+                                    if assembly.index == delta_index {
+                                        assembly.partial_json.push_str(partial);
+                                    }
                                 }
                             }
                         }
@@ -1800,6 +1843,91 @@ mod tests {
             1,
             "on_assistant_done must fire exactly once even when post-loop parsing errors"
         );
+    }
+
+    #[test]
+    fn parse_openai_stream_errors_on_parallel_tool_calls() {
+        // Two tool calls at distinct indices in the same stream — must error loudly.
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a.rs\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"b\",\"type\":\"function\",\"function\":{\"name\":\"git_diff\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut cur = Cursor::new(body.as_bytes().to_vec());
+        let mut events = NoopStreamEvents;
+        let result = super::parse_openai_stream(&mut cur, &mut events);
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("multiple parallel tool calls"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_openai_stream_handles_explicit_index_zero() {
+        // index field present but always 0 — should still parse correctly.
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a.rs\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut cur = Cursor::new(body.as_bytes().to_vec());
+        let mut events = NoopStreamEvents;
+        let (resp, _usage) = super::parse_openai_stream(&mut cur, &mut events).unwrap();
+        match resp.action {
+            super::ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "read_file");
+                assert_eq!(input.get("path"), Some("a.rs"));
+            }
+            super::ModelAction::Finish => panic!("expected tool call"),
+        }
+    }
+
+    #[test]
+    fn parse_anthropic_stream_errors_on_parallel_tool_use_blocks() {
+        let body = concat!(
+            "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tu_0\",\"name\":\"read_file\",\"input\":{}}}\n\n",
+            "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n",
+            "event: content_block_stop\ndata: {\"index\":0}\n\n",
+            "event: content_block_start\ndata: {\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tu_1\",\"name\":\"git_diff\",\"input\":{}}}\n\n",
+            "event: message_stop\ndata: {}\n\n",
+        );
+        let mut cur = Cursor::new(body.as_bytes().to_vec());
+        let mut events = NoopStreamEvents;
+        let result = super::parse_anthropic_stream(&mut cur, &mut events);
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("multiple parallel tool_use blocks"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn parse_anthropic_stream_ignores_input_json_delta_for_unrelated_index() {
+        // tool_use is at index 0; an input_json_delta at index 1 (mismatched)
+        // should be ignored, not corrupt the assembled JSON.
+        let body = concat!(
+            "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tu\",\"name\":\"read_file\",\"input\":{}}}\n\n",
+            "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"a.rs\\\"}\"}}\n\n",
+            "event: content_block_delta\ndata: {\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"GARBAGE\"}}\n\n",
+            "event: content_block_stop\ndata: {\"index\":0}\n\n",
+            "event: message_stop\ndata: {}\n\n",
+        );
+        let mut cur = Cursor::new(body.as_bytes().to_vec());
+        let mut events = NoopStreamEvents;
+        let (resp, _usage) = super::parse_anthropic_stream(&mut cur, &mut events).unwrap();
+        match resp.action {
+            super::ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "read_file");
+                assert_eq!(input.get("path"), Some("a.rs"));
+            }
+            super::ModelAction::Finish => panic!("expected tool call"),
+        }
     }
 
     #[test]
