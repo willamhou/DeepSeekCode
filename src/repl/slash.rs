@@ -26,6 +26,7 @@ pub fn try_handle_slash(repl: &mut Repl, line: &str) -> AppResult<SlashOutcome> 
             repl.transcript.clear();
             repl.tokens_prompt = 0;
             repl.tokens_completion = 0;
+            repl.todos.borrow_mut().items.clear();
             println!(
                 "cleared transcript (kept budget={}, skill={})",
                 repl.budget,
@@ -377,5 +378,20 @@ mod tests {
             try_handle_slash(&mut r, "/diff").unwrap(),
             SlashOutcome::Continue,
         ));
+    }
+
+    #[test]
+    fn slash_clear_resets_todos_along_with_transcript_and_tokens() {
+        use crate::core::todos::{Todo, TodoStatus};
+        let mut r = Repl::new(AppConfig::default(), None);
+        r.transcript.push_user("hi");
+        r.tokens_prompt = 100;
+        r.todos.borrow_mut().replace(vec![
+            Todo { content: "X".to_string(), active_form: "Xing".to_string(), status: TodoStatus::Pending },
+        ]);
+        let _ = r.handle_line("/clear").unwrap();
+        assert!(r.transcript.turns.is_empty());
+        assert_eq!(r.tokens_prompt, 0);
+        assert!(r.todos.borrow().is_empty());
     }
 }
