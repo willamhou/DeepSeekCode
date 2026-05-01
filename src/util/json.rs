@@ -115,34 +115,130 @@ pub fn parse_string(bytes: &[u8], index: &mut usize) -> AppResult<String> {
     }
     *index += 1;
 
-    let mut output = String::new();
-    let mut escaped = false;
+    let start = *index;
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut has_escape = false;
 
     while *index < bytes.len() {
         let byte = bytes[*index];
-        *index += 1;
-
-        if escaped {
-            match byte {
-                b'"' => output.push('"'),
-                b'\\' => output.push('\\'),
-                b'n' => output.push('\n'),
-                b'r' => output.push('\r'),
-                b't' => output.push('\t'),
-                _ => output.push(byte as char),
-            }
-            escaped = false;
-            continue;
-        }
-
         match byte {
-            b'\\' => escaped = true,
-            b'"' => return Ok(output),
-            _ => output.push(byte as char),
+            b'"' => {
+                let result = if has_escape {
+                    String::from_utf8(buffer).map_err(|_| {
+                        app_error("invalid utf-8 in json string after escape decoding")
+                    })?
+                } else {
+                    std::str::from_utf8(&bytes[start..*index])
+                        .map_err(|_| app_error("invalid utf-8 in json string"))?
+                        .to_string()
+                };
+                *index += 1;
+                return Ok(result);
+            }
+            b'\\' => {
+                if !has_escape {
+                    buffer.extend_from_slice(&bytes[start..*index]);
+                    has_escape = true;
+                }
+                *index += 1;
+                if *index >= bytes.len() {
+                    return Err(app_error("unterminated json escape"));
+                }
+                match bytes[*index] {
+                    b'"' => buffer.push(b'"'),
+                    b'\\' => buffer.push(b'\\'),
+                    b'/' => buffer.push(b'/'),
+                    b'n' => buffer.push(b'\n'),
+                    b'r' => buffer.push(b'\r'),
+                    b't' => buffer.push(b'\t'),
+                    b'b' => buffer.push(0x08),
+                    b'f' => buffer.push(0x0C),
+                    b'u' => {
+                        *index += 1;
+                        let cp = read_hex4(bytes, index)?;
+                        if (0xD800..=0xDBFF).contains(&cp) {
+                            if bytes.get(*index) != Some(&b'\\')
+                                || bytes.get(*index + 1) != Some(&b'u')
+                            {
+                                return Err(app_error(
+                                    "json `\\u` high surrogate not followed by `\\u`",
+                                ));
+                            }
+                            *index += 2;
+                            let low = read_hex4(bytes, index)?;
+                            if !(0xDC00..=0xDFFF).contains(&low) {
+                                return Err(app_error("json `\\u` invalid low surrogate"));
+                            }
+                            let combined =
+                                0x10000 + (((cp - 0xD800) << 10) | (low - 0xDC00)) as u32;
+                            push_utf8(&mut buffer, combined);
+                        } else if (0xDC00..=0xDFFF).contains(&cp) {
+                            return Err(app_error("json `\\u` lone low surrogate"));
+                        } else {
+                            push_utf8(&mut buffer, cp as u32);
+                        }
+                        continue;
+                    }
+                    other => {
+                        return Err(app_error(format!(
+                            "json invalid escape `\\{}`",
+                            other as char
+                        )));
+                    }
+                }
+                *index += 1;
+            }
+            _ => {
+                if has_escape {
+                    buffer.push(byte);
+                }
+                *index += 1;
+            }
         }
     }
 
     Err(app_error("unterminated json string"))
+}
+
+fn read_hex4(bytes: &[u8], index: &mut usize) -> AppResult<u16> {
+    if *index + 4 > bytes.len() {
+        return Err(app_error("json `\\u` escape needs 4 hex digits"));
+    }
+    let mut value: u16 = 0;
+    for _ in 0..4 {
+        let digit = match bytes[*index] {
+            b'0'..=b'9' => bytes[*index] - b'0',
+            b'a'..=b'f' => bytes[*index] - b'a' + 10,
+            b'A'..=b'F' => bytes[*index] - b'A' + 10,
+            other => {
+                return Err(app_error(format!(
+                    "json `\\u` non-hex digit `{}`",
+                    other as char
+                )));
+            }
+        };
+        value = (value << 4) | u16::from(digit);
+        *index += 1;
+    }
+    Ok(value)
+}
+
+fn push_utf8(buffer: &mut Vec<u8>, codepoint: u32) {
+    if codepoint < 0x80 {
+        buffer.push(codepoint as u8);
+    } else if codepoint < 0x800 {
+        buffer.push(0xC0 | (codepoint >> 6) as u8);
+        buffer.push(0x80 | (codepoint & 0x3F) as u8);
+    } else if codepoint < 0x10000 {
+        buffer.push(0xE0 | (codepoint >> 12) as u8);
+        buffer.push(0x80 | ((codepoint >> 6) & 0x3F) as u8);
+        buffer.push(0x80 | (codepoint & 0x3F) as u8);
+    } else {
+        buffer.push(0xF0 | (codepoint >> 18) as u8);
+        buffer.push(0x80 | ((codepoint >> 12) & 0x3F) as u8);
+        buffer.push(0x80 | ((codepoint >> 6) & 0x3F) as u8);
+        buffer.push(0x80 | (codepoint & 0x3F) as u8);
+    }
 }
 
 pub fn parse_bool(bytes: &[u8], index: &mut usize) -> AppResult<JsonValue> {
@@ -220,6 +316,11 @@ pub fn json_escape(value: &str) -> String {
             '\n' => output.push_str("\\n"),
             '\r' => output.push_str("\\r"),
             '\t' => output.push_str("\\t"),
+            '\u{0008}' => output.push_str("\\b"),
+            '\u{000C}' => output.push_str("\\f"),
+            ch if (ch as u32) < 0x20 => {
+                output.push_str(&format!("\\u{:04x}", ch as u32));
+            }
             _ => output.push(ch),
         }
     }
@@ -304,5 +405,82 @@ mod tests {
         write_kv_string(&mut out, "b", "2", true);
         out.push('}');
         assert_eq!(out, r#"{"a":"1","b":"2"}"#);
+    }
+
+    #[test]
+    fn parse_string_decodes_unicode_escape_sequence() {
+        let value = parse_json_value(r#""\u4e2d""#).unwrap();
+        match value {
+            JsonValue::String(s) => assert_eq!(s, "中"),
+            _ => panic!("expected string"),
+        }
+    }
+
+    #[test]
+    fn parse_string_decodes_surrogate_pair_to_emoji() {
+        // \uD83D\uDE00 = U+1F600 (😀)
+        let value = parse_json_value(r#""\uD83D\uDE00""#).unwrap();
+        match value {
+            JsonValue::String(s) => assert_eq!(s, "😀"),
+            _ => panic!("expected string"),
+        }
+    }
+
+    #[test]
+    fn parse_string_decodes_b_and_f_escapes() {
+        let value = parse_json_value(r#""\b\f""#).unwrap();
+        match value {
+            JsonValue::String(s) => assert_eq!(s, "\u{0008}\u{000C}"),
+            _ => panic!("expected string"),
+        }
+    }
+
+    #[test]
+    fn parse_string_decodes_solidus_escape() {
+        let value = parse_json_value(r#""\/path\/to""#).unwrap();
+        match value {
+            JsonValue::String(s) => assert_eq!(s, "/path/to"),
+            _ => panic!("expected string"),
+        }
+    }
+
+    #[test]
+    fn parse_string_passes_raw_utf8_bytes_through_unchanged() {
+        // Raw UTF-8 bytes (no escape) for "中文" should round-trip.
+        let value = parse_json_value(r#""中文""#).unwrap();
+        match value {
+            JsonValue::String(s) => assert_eq!(s, "中文"),
+            _ => panic!("expected string"),
+        }
+    }
+
+    #[test]
+    fn parse_string_rejects_unknown_escape() {
+        let result = parse_json_value(r#""\q""#);
+        assert!(result.is_err(), "unknown escape should error");
+    }
+
+    #[test]
+    fn parse_string_rejects_lone_high_surrogate() {
+        let result = parse_json_value(r#""\uD83D""#);
+        assert!(result.is_err(), "lone high surrogate should error");
+    }
+
+    #[test]
+    fn parse_string_rejects_lone_low_surrogate() {
+        let result = parse_json_value(r#""\uDE00""#);
+        assert!(result.is_err(), "lone low surrogate should error");
+    }
+
+    #[test]
+    fn json_escape_escapes_control_characters_below_0x20() {
+        let escaped = json_escape("a\x1bb\x07c");
+        assert_eq!(escaped, "a\\u001bb\\u0007c");
+    }
+
+    #[test]
+    fn json_escape_handles_b_and_f() {
+        let escaped = json_escape("\u{0008}\u{000C}");
+        assert_eq!(escaped, "\\b\\f");
     }
 }
