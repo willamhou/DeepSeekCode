@@ -75,6 +75,15 @@ pub fn is_safe_shell_command(command: &str) -> bool {
         "git diff",
         "ls",
         "pwd",
+        // Read-only research / fetch (Phase 10c precursor — no body, follow redirects).
+        "curl -sSL ",
+        "curl -sS ",
+        "curl -L ",
+        "curl -I ",
+        "wget -qO- ",
+        "gh search ",
+        "gh repo view ",
+        "gh api ",
     ];
 
     allowlist.iter().any(|prefix| command.starts_with(prefix))
