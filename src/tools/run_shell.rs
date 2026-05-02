@@ -75,6 +75,11 @@ pub fn is_safe_shell_command(command: &str) -> bool {
         "git diff",
         "ls",
         "pwd",
+        "mkdir -p ",
+        "cat ",
+        "echo ",
+        "head ",
+        "tail ",
         // Read-only research / fetch (Phase 10c precursor — no body, follow redirects).
         "curl -sSL ",
         "curl -sS ",
