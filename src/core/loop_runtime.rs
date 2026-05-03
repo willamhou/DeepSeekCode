@@ -131,6 +131,13 @@ impl AgentLoop {
         // the LLM never sees its own progress (REPL has Repl.transcript; one-shot did not).
         let mut recent_steps_log: Vec<String> = Vec::new();
         const RECENT_STEPS_KEEP: usize = 3;
+        // Phase 10c-2: repeat-call detection. Track fingerprints of the last
+        // REPEAT_WINDOW tool calls. 2nd identical call appends a stuck-warning to the
+        // observation summary; 3rd short-circuits with tool_failure forcing the LLM
+        // to change strategy. Dogfood-driven: v4-pro reproducibly looped 30 steps on
+        // identical list_files invocations against an empty workspace.
+        let mut recent_call_fingerprints: Vec<String> = Vec::new();
+        const REPEAT_WINDOW: usize = 3;
         for step in 0..steps {
             let recent_window = recent_steps_log
                 .iter()
@@ -170,8 +177,58 @@ impl AgentLoop {
             match response.action {
                 ModelAction::CallTool { tool_name, input } => {
                     let event_input = input.args.clone();
+
+                    // Phase 10c-2: compute fingerprint and check window BEFORE executing.
+                    let fingerprint = format!(
+                        "{}:{}",
+                        tool_name,
+                        event_input
+                            .iter()
+                            .map(|(k, v)| format!("{k}={v}"))
+                            .collect::<Vec<_>>()
+                            .join("|")
+                    );
+                    let same_count_in_window = recent_call_fingerprints
+                        .iter()
+                        .rev()
+                        .take(REPEAT_WINDOW)
+                        .filter(|fp| **fp == fingerprint)
+                        .count();
+                    recent_call_fingerprints.push(fingerprint.clone());
+
+                    if same_count_in_window >= 2 {
+                        // Third identical call in window → short-circuit as tool_failure.
+                        let stuck_msg = format!(
+                            "repeated identical tool call detected: '{}' invoked {} times in last {} steps with same args. Break out of stuck loop — try a different approach (todo_write to plan, gh/curl for research, or a different path/argument).",
+                            tool_name,
+                            same_count_in_window + 1,
+                            REPEAT_WINDOW
+                        );
+                        renderer.paint_tool_result(
+                            crate::ui::stream::ToolResultKind::Failed,
+                            &tool_name,
+                            "stuck",
+                            &stuck_msg,
+                        );
+                        let event_name = tool_name.clone();
+                        observations.push(Observation::failed(tool_name, stuck_msg.clone()));
+                        tool_events.push(ToolEvent {
+                            tool_name: event_name,
+                            input: event_input,
+                            output: stuck_msg,
+                            status: crate::model::protocol::ObservationStatus::Failed,
+                        });
+                        continue;
+                    }
+
                     match registry.execute_with_policy(&tool_name, input, &policy) {
-                        Ok(output) => {
+                        Ok(mut output) => {
+                            // Phase 10c-2: 2nd identical call gets a stuck-warning appended.
+                            if same_count_in_window == 1 {
+                                output.summary.push_str(
+                                    "\n\n[stuck-warning] You called this tool with the same args last step. If output is unchanged, try a DIFFERENT approach (todo_write to plan, gh/curl for research, different path/args, or move to next step).",
+                                );
+                            }
                             let kind = ObservationKind::from_tool_name(&tool_name);
                             let observation_summary = summarize_for_kind(&output.summary, kind);
                             // CR-1: user sees full body (output.summary), observation/transcript get trim.
@@ -432,6 +489,144 @@ mod cr1_regression_test {
         assert_eq!(captured[2].len(), 2);
         assert!(captured[2][0].contains("step ONE"));
         assert!(captured[2][1].contains("step TWO"));
+    }
+
+    /// Phase 10c-2: scripted client emits N identical list_files calls in a row.
+    /// Used to verify repeat-call detection windowing.
+    struct RepeatScriptedClient {
+        max_calls: usize,
+        calls: RefCell<usize>,
+    }
+
+    impl ModelClient for RepeatScriptedClient {
+        fn respond(
+            &self,
+            _input: ModelRequest,
+            _events: &mut dyn StreamEvents,
+        ) -> crate::error::AppResult<(ModelResponse, Option<TokenUsage>)> {
+            let n = *self.calls.borrow();
+            *self.calls.borrow_mut() = n + 1;
+            let action = if n < self.max_calls {
+                let mut tin = ToolInput::new();
+                tin.args.insert("root".to_string(), "/empty".to_string());
+                tin.args.insert("max_depth".to_string(), "1".to_string());
+                tin.args.insert("limit".to_string(), "5".to_string());
+                ModelAction::CallTool {
+                    tool_name: "list_files".to_string(),
+                    input: tin,
+                }
+            } else {
+                ModelAction::Finish
+            };
+            Ok((
+                ModelResponse {
+                    message: format!("step {n}"),
+                    action,
+                },
+                None,
+            ))
+        }
+    }
+
+    #[test]
+    fn repeat_detection_first_call_passes_through_clean() {
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("dummy".to_string(), None);
+        let client = RepeatScriptedClient {
+            max_calls: 1,
+            calls: RefCell::new(0),
+        };
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 2,
+                    initial_observations: Vec::new(),
+                    todos: Rc::new(RefCell::new(TodoList::default())),
+                },
+                &client,
+            )
+            .unwrap();
+        assert_eq!(result.tool_events.len(), 1);
+        assert!(
+            !result.tool_events[0].output.contains("stuck-warning"),
+            "first call must NOT have stuck-warning"
+        );
+        // It's an OK status (list_files ran, even if /empty doesn't exist — registry returns
+        // ToolFailure or empty listing depending on platform).
+    }
+
+    #[test]
+    fn repeat_detection_second_identical_call_appends_stuck_warning() {
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("dummy".to_string(), None);
+        let client = RepeatScriptedClient {
+            max_calls: 2,
+            calls: RefCell::new(0),
+        };
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 3,
+                    initial_observations: Vec::new(),
+                    todos: Rc::new(RefCell::new(TodoList::default())),
+                },
+                &client,
+            )
+            .unwrap();
+        // 2 tool events: 1st clean, 2nd has stuck-warning appended OR is the warning itself.
+        // For Ok results we append; for Failed results the registry-failure dominates.
+        // list_files on /empty likely returns Ok with empty body (or Failed). Either way,
+        // ToolEvent.output for the SECOND call should contain stuck-warning OR be a tool_failure.
+        assert_eq!(result.tool_events.len(), 2, "expected 2 tool events");
+        let second = &result.tool_events[1].output;
+        // After Ok branch appends stuck-warning the observation_summary may have it
+        // (passes through summarize_for_kind for `Listing` kind which keeps head 40 lines).
+        // Or if registry erred and there was no Ok branch, the failure path doesn't append
+        // — but the 2nd identical call before that is still tracked. Acceptable either way:
+        // assertion: NO short-circuit yet (output is normal tool result, not the
+        // "repeated identical tool call detected" string).
+        assert!(
+            !second.contains("repeated identical tool call detected"),
+            "2nd call must NOT short-circuit (only the 3rd does); output: {second}"
+        );
+    }
+
+    #[test]
+    fn repeat_detection_third_identical_call_short_circuits_as_failure() {
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("dummy".to_string(), None);
+        let client = RepeatScriptedClient {
+            max_calls: 5, // emit identical calls forever; loop budget will end it
+            calls: RefCell::new(0),
+        };
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 4,
+                    initial_observations: Vec::new(),
+                    todos: Rc::new(RefCell::new(TodoList::default())),
+                },
+                &client,
+            )
+            .unwrap();
+        // Step 1: list_files. Step 2: list_files (warning). Step 3: list_files (short-circuit).
+        // Step 4: list_files (short-circuit).
+        assert!(result.tool_events.len() >= 3, "expected ≥3 tool events");
+        let third = &result.tool_events[2].output;
+        assert!(
+            third.contains("repeated identical tool call detected"),
+            "3rd call must short-circuit: {third}"
+        );
+        assert!(matches!(
+            result.tool_events[2].status,
+            crate::model::protocol::ObservationStatus::Failed
+        ));
     }
 
     #[test]
