@@ -348,10 +348,18 @@ fn build_system_prompt(skill_name: Option<&SkillSpec>) -> String {
     build_system_prompt_with_flags(skill_name, false)
 }
 
+/// Phase 10c-3: tool-call concurrency constraint. DeepSeek v4 (both flash + pro)
+/// happily emits parallel tool calls when the task mentions multiple subtopics
+/// ("research these 4 topics"). dscode's parser rejects them (C3 fail-loud) so
+/// the agent gets a fatal error instead of useful work. State this constraint
+/// explicitly so the model issues sequential calls.
+const ONE_TOOL_PER_TURN_NUDGE: &str = " ALWAYS emit exactly ONE tool call per turn. NEVER emit parallel tool calls — the runtime rejects them with a hard error. Process multiple subtopics SEQUENTIALLY across turns.";
+
 fn build_system_prompt_with_flags(skill_name: Option<&SkillSpec>, research_bootstrap: bool) -> String {
     let mut prompt = String::from(
         "You are the offline planning layer for DeepseekCode. Prefer repository inspection before edits.",
     );
+    prompt.push_str(ONE_TOOL_PER_TURN_NUDGE);
     if let Some(skill) = skill_name {
         prompt.push_str(&format!(" Active skill: {}.", skill.name));
         if !skill.description.is_empty() {
