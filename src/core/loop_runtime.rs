@@ -1048,6 +1048,13 @@ fn should_use_explicit_planning(
         "hardening",
         "optimize",
         " better",
+        " more like ",
+        "close the gap",
+        "gap closure",
+        "production-ready",
+        "production ready",
+        "product-ready",
+        "product ready",
         " implement",
         " refactor",
         " debug",
@@ -1449,6 +1456,21 @@ mod tests {
         ));
         assert!(super::should_use_explicit_planning(
             "make the CLI onboarding better",
+            None,
+            &tools,
+        ));
+        assert!(super::should_use_explicit_planning(
+            "make DeepseekCode more like Claude Code",
+            None,
+            &tools,
+        ));
+        assert!(super::should_use_explicit_planning(
+            "close the product gap for PR review",
+            None,
+            &tools,
+        ));
+        assert!(super::should_use_explicit_planning(
+            "make the CLI production-ready",
             None,
             &tools,
         ));

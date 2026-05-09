@@ -57,6 +57,15 @@ budget = 1
 max_tool_calls = 1
 max_failed_tools = 0
 
+name = "plan-product-gap-closure"
+task = "make DeepseekCode more like Claude Code"
+category = "planning"
+assertion_bundle = "planning_todo_only"
+notes = "Product gap closure requests should trigger a first-turn todo plan before inspect/edit actions"
+budget = 1
+max_tool_calls = 1
+max_failed_tools = 0
+
 name = "isolated-write-validate"
 task = "replace `a - b` with `a + b` in src/lib.rs and validate with cargo test"
 category = "write_validate"

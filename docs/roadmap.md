@@ -1709,6 +1709,22 @@
   - live gate：`pass (no new dogfood records since previous snapshot, runs=33)`
 - 当前边界仍明确：PR/CI fixture baseline 已更厚，但外部真实 PR/CI live 样本和在线模型稳定性还不是小差距。
 
+**Phase 11+ product gap planning guard (`main`, 2026-05-09) — 已完成**：
+- 对照当前 gap review，open-ended 产品化请求还有一类常见说法此前没有明确回归样本：`make X more like Y`、`close the gap`、`production-ready` / `product ready`。
+- explicit planning heuristic 现在会把这些短模糊请求纳入 first-turn todo plan，而不是直接进入仓库搜索或随手编辑。
+- 新增 benchmark：
+  - `plan-product-gap-closure`
+  - task：`make DeepseekCode more like Claude Code`
+  - 断言：`planning_todo_only`
+- 最新验证：
+  - 全量测试：`540 passed, 0 failed`
+  - 默认 benchmark：`48/48`
+  - total tool calls：`163`
+  - failed tool calls：`0`
+  - trend gate：`skipped (need at least 3 prior comparable runs, found 0)`，因为 case 数从 `47` 到 `48`，当前没有同 case 数历史
+  - live gate：`pass (no new dogfood records since previous snapshot, runs=33)`
+- 当前边界仍明确：这把 open-ended gap 从“没有覆盖产品化模糊请求”推进到“有首轮规划保护”，但仍是 heuristic，不等于复杂开放任务已稳定收敛。
+
 **Phase 11+ IDE bootstrap (`main`, 2026-05-09) — 已完成基础版**：
 - 二次差距审计显示，Claude Code / Codex 的 IDE/app/cloud surface 仍是大差距；本轮先补一个很小但可版本化的 VS Code 入口
 - 新增 [`editors/vscode`](/home/willamhou/codes/DeepseekCode/editors/vscode/README.md)：

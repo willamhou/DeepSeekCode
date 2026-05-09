@@ -16,11 +16,11 @@
 - fixture-backed benchmark
 - dogfood ledger / promotion / trend gate / category slices
 
-当前基线（2026-05-09 Phase 11+ Go PR CI reproduce fixture 后复测）：
+当前基线（2026-05-09 Phase 11+ product gap planning guard 后复测）：
 
-- benchmark：`47/47`
+- benchmark：`48/48`
 - 全量测试：`540 passed, 0 failed`
-- benchmark trend gate：`skipped (need at least 3 prior comparable runs, found 0)`，原因是默认 baseline 从 `46` 条扩到 `47` 条，当前没有同 case 数历史
+- benchmark trend gate：`skipped (need at least 3 prior comparable runs, found 0)`，原因是默认 baseline 从 `47` 条扩到 `48` 条，当前没有同 case 数历史
 - dogfood live gate：`pass (no new dogfood records since previous snapshot, runs=33)`
 - 当前已收掉的红点：
   - `fixture-pr-reproduce-fix-rust-cli-failing-mini` 已稳定为 `run_shell -> read_file -> apply_patch -> git_diff -> run_shell`
@@ -105,6 +105,10 @@
   - explicit planning heuristic 会把短句 `improve` / `enhance` / `stabilize` / `hardening` / `optimize` / `better` 类模糊改进请求纳入 first-turn todo plan
   - 新增 `plan-ambiguous-improvement` benchmark，覆盖 `improve benchmark reliability` 这类没有路径和明确编辑指令的 open-ended 请求
   - 默认 baseline 从 `45` 条扩到 `46` 条，planning category 对短模糊任务也有回归样本
+- Phase 11+ product gap planning guard：
+  - explicit planning heuristic 继续覆盖 `more like` / `close the gap` / `gap closure` / `production-ready` / `product ready` 类产品化模糊请求
+  - 新增 `plan-product-gap-closure` benchmark，覆盖 `make DeepseekCode more like Claude Code`
+  - 默认 baseline 从 `47` 条扩到 `48` 条，planning category 对 gap closure 型请求也有回归样本
 - Phase 11+ subagent edited-file handoff：
   - `dispatch_subagent` summary 现在会从 child 的 `apply_patch` 输入/输出和 `git_diff` 输出提取 touched files
   - child 修改文件后会生成 `meta.child_files` 与 `meta.child_next_action=read_file:<path>`，让 parent loop 有明确 readback 入口
@@ -168,13 +172,13 @@
 4. 收 `11f`：release / upgrade story 从“能安装”补到“能发布、能升级、能回滚”
 
 当前结果：Phase 11 主体与后续 baseline hardening / custom slash commands / workspace instructions /
-local hooks / config bootstrap / live coverage gate / benchmark asset reproducibility / IDE bootstrap / VS Code quick actions / MCP config surface / MCP stdio tool discovery / MCP manual tool call / MCP agent bridge / MCP call approval/allowlist policy / MCP HTTP JSON-RPC transport / MCP legacy SSE transport / opt-in MCP dynamic tool exposure / Python PR CI fixture thickening / Go PR CI reproduce fixture / ambiguous improvement planning guard / subagent edited-file handoff 已收口，最新 benchmark 为 `47/47`，全量测试为 `540 passed, 0 failed`。本轮 trend gate 因 case 数从 `46` 到 `47` 进入 comparability warmup，live gate 继续通过。
+local hooks / config bootstrap / live coverage gate / benchmark asset reproducibility / IDE bootstrap / VS Code quick actions / MCP config surface / MCP stdio tool discovery / MCP manual tool call / MCP agent bridge / MCP call approval/allowlist policy / MCP HTTP JSON-RPC transport / MCP legacy SSE transport / opt-in MCP dynamic tool exposure / Python PR CI fixture thickening / Go PR CI reproduce fixture / ambiguous improvement planning guard / product gap planning guard / subagent edited-file handoff 已收口，最新 benchmark 为 `48/48`，全量测试为 `540 passed, 0 failed`。本轮 trend gate 因 case 数从 `47` 到 `48` 进入 comparability warmup，live gate 继续通过。
 
 这说明 `DeepseekCode` 已经不是“演示级原型”，但仍明显低于 Claude Code / Codex 的
 产品完成度。差距不再是“有没有 planner / tool loop”，而是：
 
 1. 真实/外部 PR / CI / review live 样本不够厚
-2. open-ended / ambiguous task 的默认稳定性不够
+2. open-ended / ambiguous task 的默认稳定性已有 first-turn planning guard，但仍依赖 heuristic
 3. subagent orchestration 仍是单层、保守的 merge-back
 4. IDE / 编辑器配套已有 VS Code command palette / status bar / quick action / context menu 的轻量入口，MCP/plugin 生态已有配置发现、stdio/HTTP/SSE `tools/list`、manual `tools/call`、generic agent bridge、bridge 级审批/allowlist 和 opt-in 动态 tool 注入初版，但完整 IDE agent 体验、完整 schema 注入、更完整 permission UX、plugin 生态和云端/外部任务面仍缺失
 5. live online-model 稳定性与外部 PR/CI 样本厚度还不足以宣称产品级
@@ -187,7 +191,7 @@ local hooks / config bootstrap / live coverage gate / benchmark asset reproducib
 | REPL / 交互体验 | transcript、slash、session 已有 | 更顺滑的 history、恢复、帮助、默认提示 | 中 |
 | 单仓库本地 coding flow | benchmark 覆盖面已较强 | 默认成功率更高，少漂移、少无效 hops | 中 |
 | 本地扩展 / 策略入口 | custom commands、workspace instructions、local hooks、MCP config + stdio/HTTP/SSE tools/list/call + generic agent bridge + bridge 级 MCP 审批/allowlist + opt-in 动态 MCP tool 注入已有 | 更完整的 MCP/plugin ecosystem 与团队级扩展面 | 中 |
-| open-ended 任务 | 已有 recovery / replan / ambiguous improvement first-turn plan guard，但仍依赖 heuristic | 对模糊任务也能稳定收敛 | 中到大 |
+| open-ended 任务 | 已有 recovery / replan / ambiguous improvement / product gap first-turn plan guard，但仍依赖 heuristic | 对模糊任务也能稳定收敛 | 中 |
 | PR / CI 工作流 | `pr review/fix/patch` 已有 + `16` 条 fixture baseline，Rust / JavaScript / Python / Go 均已有 PR 向修复样本 | 更厚的真实/外部 PR/CI 样本与稳定端到端闭环 | 中 |
 | subagent | 已能 dispatch / merge-back，并能把 child patch/diff touched files 回传给 parent readback | 更成熟的拆分、归并、去重、收敛 | 中到大 |
 | live 回归体系 | benchmark + dogfood 已闭环，且有关键 slice 覆盖下限 | 更厚的外部/在线 live baseline，且可阻断回归 | 小到中 |
