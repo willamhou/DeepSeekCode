@@ -24,10 +24,7 @@ pub fn confirm(prompt: &str) -> bool {
 }
 
 pub fn parse_confirmation(input: &str) -> bool {
-    matches!(
-        input.trim().to_ascii_lowercase().as_str(),
-        "y" | "yes"
-    )
+    matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 #[cfg(test)]

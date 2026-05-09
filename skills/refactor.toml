@@ -1,6 +1,27 @@
 name = "refactor"
 description = "Minimal-diff rename / extract / move with preserved test coverage"
 allowed_tools = ["list_files", "read_file", "search_text", "apply_patch", "run_shell", "git_diff", "todo_write"]
+triggers = ["refactor", "rename", "extract", "move code", "cleanup structure"]
+
+[[initial_todos]]
+content = "Inspect the current structure"
+active_form = "Inspecting the current structure"
+status = "in_progress"
+
+[[initial_todos]]
+content = "Find all affected references"
+active_form = "Finding all affected references"
+status = "pending"
+
+[[initial_todos]]
+content = "Apply minimal-diff refactor patches"
+active_form = "Applying minimal-diff refactor patches"
+status = "pending"
+
+[[initial_todos]]
+content = "Run tests and review the diff"
+active_form = "Running tests and reviewing the diff"
+status = "pending"
 
 system_append = """
 Refactor mode: change structure without changing behavior.

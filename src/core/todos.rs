@@ -43,6 +43,32 @@ impl TodoList {
         self.items = items;
     }
 
+    pub fn complete_in_progress_matching_subagent_task(&mut self, delegated_task: &str) -> bool {
+        let delegated_marker =
+            extract_delegated_todo_step(delegated_task).map(normalize_todo_match_key);
+        let delegated_fallback = normalize_todo_match_key(delegated_task);
+        let Some(index) = self.items.iter().position(|item| {
+            matches!(item.status, TodoStatus::InProgress)
+                && todo_matches_delegated_task(
+                    &item.content,
+                    delegated_marker.as_deref(),
+                    &delegated_fallback,
+                )
+        }) else {
+            return false;
+        };
+
+        self.items[index].status = TodoStatus::Completed;
+        if let Some(next) = self
+            .items
+            .iter_mut()
+            .find(|item| matches!(item.status, TodoStatus::Pending))
+        {
+            next.status = TodoStatus::InProgress;
+        }
+        true
+    }
+
     /// "- [pending] Run tests\n- [in_progress] Add feature\n…". Empty list → "".
     /// Currently `build_user_prompt` inlines this format directly; kept on
     /// `TodoList` per spec API surface for future reuse.
@@ -98,6 +124,55 @@ impl TodoList {
     }
 }
 
+fn todo_matches_delegated_task(
+    todo_content: &str,
+    delegated_marker: Option<&str>,
+    delegated_fallback: &str,
+) -> bool {
+    let todo_key = normalize_todo_match_key(todo_content);
+    if let Some(marker) = delegated_marker {
+        return marker == todo_key;
+    }
+    delegated_fallback == todo_key
+}
+
+fn extract_delegated_todo_step(task: &str) -> Option<&str> {
+    let marker = "delegated todo step:";
+    let lower = task.to_lowercase();
+    let start = lower.find(marker)?;
+    let rest = task.get(start + marker.len()..)?.trim_start();
+    let rest_lower = rest.to_lowercase();
+    let end = rest_lower.find(". parent task:").unwrap_or(rest.len());
+    let step = rest.get(..end)?.trim();
+    if step.is_empty() {
+        None
+    } else {
+        Some(step)
+    }
+}
+
+fn normalize_todo_match_key(text: &str) -> String {
+    let mut normalized = String::new();
+    let mut last_was_space = false;
+    for ch in text.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_lowercase()
+        } else {
+            ' '
+        };
+        if mapped == ' ' {
+            if !last_was_space && !normalized.is_empty() {
+                normalized.push(' ');
+            }
+            last_was_space = true;
+        } else {
+            normalized.push(mapped);
+            last_was_space = false;
+        }
+    }
+    normalized.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,8 +180,14 @@ mod tests {
     #[test]
     fn from_label_accepts_three_legal_values() {
         assert_eq!(TodoStatus::from_label("pending"), Some(TodoStatus::Pending));
-        assert_eq!(TodoStatus::from_label("in_progress"), Some(TodoStatus::InProgress));
-        assert_eq!(TodoStatus::from_label("completed"), Some(TodoStatus::Completed));
+        assert_eq!(
+            TodoStatus::from_label("in_progress"),
+            Some(TodoStatus::InProgress)
+        );
+        assert_eq!(
+            TodoStatus::from_label("completed"),
+            Some(TodoStatus::Completed)
+        );
     }
 
     #[test]
@@ -118,13 +199,21 @@ mod tests {
 
     #[test]
     fn label_round_trips_with_from_label() {
-        for &v in &[TodoStatus::Pending, TodoStatus::InProgress, TodoStatus::Completed] {
+        for &v in &[
+            TodoStatus::Pending,
+            TodoStatus::InProgress,
+            TodoStatus::Completed,
+        ] {
             assert_eq!(TodoStatus::from_label(v.label()), Some(v));
         }
     }
 
     fn make_todo(c: &str, a: &str, s: TodoStatus) -> Todo {
-        Todo { content: c.to_string(), active_form: a.to_string(), status: s }
+        Todo {
+            content: c.to_string(),
+            active_form: a.to_string(),
+            status: s,
+        }
     }
 
     #[test]
@@ -162,10 +251,19 @@ mod tests {
             make_todo("Read", "Reading", TodoStatus::Completed),
         ]);
         let s = list.render_for_display();
-        assert!(s.contains("Running tests"), "in_progress should use active_form: {s}");
-        assert!(!s.contains("Refactoring"), "pending should NOT use active_form: {s}");
+        assert!(
+            s.contains("Running tests"),
+            "in_progress should use active_form: {s}"
+        );
+        assert!(
+            !s.contains("Refactoring"),
+            "pending should NOT use active_form: {s}"
+        );
         assert!(s.contains("Refactor"));
-        assert!(!s.contains("Reading"), "completed should NOT use active_form: {s}");
+        assert!(
+            !s.contains("Reading"),
+            "completed should NOT use active_form: {s}"
+        );
         assert!(s.contains("Read"));
     }
 
@@ -214,5 +312,133 @@ mod tests {
         assert!(!list.is_empty());
         list.replace(vec![]);
         assert!(list.is_empty());
+    }
+
+    #[test]
+    fn complete_in_progress_matching_subagent_task_advances_next_pending_item() {
+        let mut list = TodoList::default();
+        list.replace(vec![
+            make_todo(
+                "Inspect the repository layout",
+                "Inspecting the repository layout",
+                TodoStatus::InProgress,
+            ),
+            make_todo(
+                "Read the most relevant files",
+                "Reading the most relevant files",
+                TodoStatus::Pending,
+            ),
+            make_todo(
+                "Implement the requested changes",
+                "Implementing the requested changes",
+                TodoStatus::Pending,
+            ),
+        ]);
+
+        let changed = list.complete_in_progress_matching_subagent_task(
+            "Delegated todo step: Inspect the repository layout. Parent task: debug the parser",
+        );
+
+        assert!(changed);
+        assert_eq!(list.items[0].status, TodoStatus::Completed);
+        assert_eq!(list.items[1].status, TodoStatus::InProgress);
+        assert_eq!(list.items[2].status, TodoStatus::Pending);
+    }
+
+    #[test]
+    fn complete_in_progress_matching_subagent_task_is_noop_when_task_does_not_match() {
+        let mut list = TodoList::default();
+        list.replace(vec![
+            make_todo(
+                "Inspect the repository layout",
+                "Inspecting the repository layout",
+                TodoStatus::InProgress,
+            ),
+            make_todo(
+                "Read the most relevant files",
+                "Reading the most relevant files",
+                TodoStatus::Pending,
+            ),
+        ]);
+
+        let changed =
+            list.complete_in_progress_matching_subagent_task("Unrelated subtask for another flow");
+
+        assert!(!changed);
+        assert_eq!(list.items[0].status, TodoStatus::InProgress);
+        assert_eq!(list.items[1].status, TodoStatus::Pending);
+    }
+
+    #[test]
+    fn complete_in_progress_matching_subagent_task_uses_explicit_marker_when_present() {
+        let mut list = TodoList::default();
+        list.replace(vec![
+            make_todo(
+                "Inspect the repository layout",
+                "Inspecting the repository layout",
+                TodoStatus::InProgress,
+            ),
+            make_todo(
+                "Read the most relevant files",
+                "Reading the most relevant files",
+                TodoStatus::Pending,
+            ),
+        ]);
+
+        let changed = list.complete_in_progress_matching_subagent_task(
+            "Delegated todo step: Inspect the repository layout. Parent task: debug the parser. Summarize concrete findings.",
+        );
+
+        assert!(changed);
+        assert_eq!(list.items[0].status, TodoStatus::Completed);
+        assert_eq!(list.items[1].status, TodoStatus::InProgress);
+    }
+
+    #[test]
+    fn complete_in_progress_matching_subagent_task_does_not_match_similar_but_different_step() {
+        let mut list = TodoList::default();
+        list.replace(vec![
+            make_todo(
+                "Inspect the repository layout",
+                "Inspecting the repository layout",
+                TodoStatus::InProgress,
+            ),
+            make_todo(
+                "Read the most relevant files",
+                "Reading the most relevant files",
+                TodoStatus::Pending,
+            ),
+        ]);
+
+        let changed = list.complete_in_progress_matching_subagent_task(
+            "Delegated todo step: Inspect the most relevant files. Parent task: debug the parser.",
+        );
+
+        assert!(!changed);
+        assert_eq!(list.items[0].status, TodoStatus::InProgress);
+        assert_eq!(list.items[1].status, TodoStatus::Pending);
+    }
+
+    #[test]
+    fn complete_in_progress_matching_subagent_task_fallback_requires_exact_normalized_step() {
+        let mut list = TodoList::default();
+        list.replace(vec![
+            make_todo(
+                "Inspect repository layout",
+                "Inspecting repository layout",
+                TodoStatus::InProgress,
+            ),
+            make_todo(
+                "Implement the requested changes",
+                "Implementing the requested changes",
+                TodoStatus::Pending,
+            ),
+        ]);
+
+        let changed = list.complete_in_progress_matching_subagent_task("Inspect repository layout");
+
+        assert!(changed);
+        assert_eq!(list.items[0].status, TodoStatus::Completed);
+        assert_eq!(list.items[1].status, TodoStatus::InProgress);
     }
 }

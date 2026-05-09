@@ -221,8 +221,17 @@ mod tests {
 
     #[test]
     fn paint_tool_result_uses_check_or_cross() {
-        let ok = render(true, |r| r.paint_tool_result(ToolResultKind::Ok, "read_file", "file_excerpt", "1: foo"));
-        let bad = render(true, |r| r.paint_tool_result(ToolResultKind::Failed, "read_file", "file_excerpt", "denied"));
+        let ok = render(true, |r| {
+            r.paint_tool_result(ToolResultKind::Ok, "read_file", "file_excerpt", "1: foo")
+        });
+        let bad = render(true, |r| {
+            r.paint_tool_result(
+                ToolResultKind::Failed,
+                "read_file",
+                "file_excerpt",
+                "denied",
+            )
+        });
         assert!(ok.contains("✓"));
         assert!(ok.contains("read_file"));
         assert!(ok.contains("  1: foo"));
@@ -235,10 +244,20 @@ mod tests {
     #[test]
     fn paint_tool_result_denied_uses_yellow_circle_or_text() {
         let on = render(true, |r| {
-            r.paint_tool_result(ToolResultKind::Denied, "run_shell", "shell_output", "policy")
+            r.paint_tool_result(
+                ToolResultKind::Denied,
+                "run_shell",
+                "shell_output",
+                "policy",
+            )
         });
         let off = render(false, |r| {
-            r.paint_tool_result(ToolResultKind::Denied, "run_shell", "shell_output", "policy")
+            r.paint_tool_result(
+                ToolResultKind::Denied,
+                "run_shell",
+                "shell_output",
+                "policy",
+            )
         });
         assert!(on.contains("\x1b[33m⊘\x1b[0m"), "ANSI denied: {on:?}");
         assert!(on.contains("run_shell"));

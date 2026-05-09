@@ -1,5 +1,5 @@
-use crate::error::AppResult;
 use crate::error::app_error;
+use crate::error::AppResult;
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
 use std::collections::BTreeSet;
 use std::fs;
@@ -310,9 +310,9 @@ fn summarize_patch(patch: &str) -> AppResult<PatchSummary> {
 
         if let Some(rest) = line.strip_prefix("+++ ") {
             let new_path = parse_header_path(rest)?;
-            let old_path = pending_old
-                .take()
-                .ok_or_else(|| app_error("patch contains `+++ ` header without preceding `--- `"))?;
+            let old_path = pending_old.take().ok_or_else(|| {
+                app_error("patch contains `+++ ` header without preceding `--- `")
+            })?;
             targets.push(PatchTarget {
                 old: old_path,
                 new: new_path,
@@ -350,10 +350,7 @@ fn ensure_within_cwd(cwd: &Path, raw: &str) -> AppResult<()> {
         )));
     }
 
-    if raw
-        .split(['/', '\\'])
-        .any(|segment| segment == "..")
-    {
+    if raw.split(['/', '\\']).any(|segment| segment == "..") {
         return Err(app_error(format!(
             "patch target `{raw}` escapes cwd via parent reference"
         )));
@@ -372,12 +369,7 @@ fn ensure_within_cwd(cwd: &Path, raw: &str) -> AppResult<()> {
     Ok(())
 }
 
-fn format_success_summary(
-    cwd: &str,
-    summary: &PatchSummary,
-    stdout: &str,
-    stderr: &str,
-) -> String {
+fn format_success_summary(cwd: &str, summary: &PatchSummary, stdout: &str, stderr: &str) -> String {
     let mut output = String::new();
     output.push_str(&format!(
         "Applied unified patch in {cwd} (touched {} file{}).",
@@ -470,7 +462,8 @@ fn classify_patch_failure(stdout: &str, stderr: &str) -> Option<String> {
     }
     if combined.contains("only garbage was found") {
         return Some(
-            "no patch headers were recognized (ensure the body uses unified diff format)".to_string(),
+            "no patch headers were recognized (ensure the body uses unified diff format)"
+                .to_string(),
         );
     }
     None
@@ -660,7 +653,9 @@ mod tests {
 
         let patch = "garbage without headers\n";
         let error = apply_unified_patch(dir.to_str().unwrap(), patch).unwrap_err();
-        assert!(error.to_string().contains("did not declare any file headers"));
+        assert!(error
+            .to_string()
+            .contains("did not declare any file headers"));
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -728,7 +723,8 @@ mod tests {
 
     #[test]
     fn classify_failure_recognizes_already_applied() {
-        let category = classify_patch_failure("Reversed (or previously applied) patch detected!", "");
+        let category =
+            classify_patch_failure("Reversed (or previously applied) patch detected!", "");
         assert!(category.unwrap().contains("already applied"));
     }
 
@@ -753,12 +749,7 @@ mod tests {
         let file = dir.join("note.txt");
         fs::write(&file, "alpha\nbeta gamma\ndelta\n").unwrap();
 
-        let plan = build_single_line_diff(
-            file.to_str().unwrap(),
-            "gamma",
-            "GAMMA",
-        )
-        .unwrap();
+        let plan = build_single_line_diff(file.to_str().unwrap(), "gamma", "GAMMA").unwrap();
 
         assert_eq!(plan.cwd, dir.to_string_lossy());
         assert!(plan.patch.contains("--- note.txt"));
@@ -790,11 +781,7 @@ mod tests {
         let file = dir.join("note.txt");
         fs::write(&file, "alpha\nbeta\n").unwrap();
 
-        let patch = build_single_line_diff(
-            file.to_str().unwrap(),
-            "alpha\nbeta",
-            "x",
-        );
+        let patch = build_single_line_diff(file.to_str().unwrap(), "alpha\nbeta", "x");
         assert!(patch.is_none());
 
         let _ = fs::remove_dir_all(dir);
@@ -837,12 +824,7 @@ mod tests {
         let file = dir.join("note.txt");
         fs::write(&file, "alpha\nbeta gamma\ndelta\n").unwrap();
 
-        let plan = build_single_line_diff(
-            file.to_str().unwrap(),
-            "gamma",
-            "GAMMA",
-        )
-        .unwrap();
+        let plan = build_single_line_diff(file.to_str().unwrap(), "gamma", "GAMMA").unwrap();
 
         apply_unified_patch(&plan.cwd, &plan.patch).unwrap();
         assert_eq!(

@@ -10,7 +10,7 @@ const OTHER_LINES: usize = 40;
 
 pub fn summarize_for_kind(raw: &str, kind: ObservationKind) -> String {
     match kind {
-        ObservationKind::ShellOutput => tail_trim(raw, SHELL_TAIL_LINES),
+        ObservationKind::ShellOutput => trim_shell_output(raw, SHELL_TAIL_LINES),
         ObservationKind::FileExcerpt => head_trim(raw, FILE_EXCERPT_LINES),
         ObservationKind::Listing => head_trim(raw, LISTING_LINES),
         ObservationKind::SearchResults => head_trim(raw, SEARCH_RESULT_LINES),
@@ -60,7 +60,10 @@ fn supersede_stub(summary: &str, kind: ObservationKind) -> String {
         first_line.to_string()
     };
     if preview.is_empty() {
-        format!("(superseded; kind={}, was {total_lines} line(s))", kind.label())
+        format!(
+            "(superseded; kind={}, was {total_lines} line(s))",
+            kind.label()
+        )
     } else {
         format!(
             "(superseded; kind={}, was {total_lines} line(s), first: {preview:?})",
@@ -91,12 +94,11 @@ fn head_trim(raw: &str, max_lines: usize) -> String {
     if total <= max_lines {
         return raw.trim_end_matches('\n').to_string();
     }
-    let mut output = raw
-        .lines()
-        .take(max_lines)
-        .collect::<Vec<_>>()
-        .join("\n");
-    output.push_str(&format!("\n... truncated {} more lines ...", total - max_lines));
+    let mut output = raw.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+    output.push_str(&format!(
+        "\n... truncated {} more lines ...",
+        total - max_lines
+    ));
     output
 }
 
@@ -110,6 +112,29 @@ pub fn tail_trim(raw: &str, max_lines: usize) -> String {
     format!("... truncated {dropped} earlier lines ...\n{tail}")
 }
 
+fn trim_shell_output(raw: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = raw.lines().collect();
+    if lines.len() <= max_lines {
+        return raw.trim_end_matches('\n').to_string();
+    }
+
+    let metadata_len = lines
+        .iter()
+        .take_while(|line| line.starts_with("meta.") || line.starts_with("exit_code: "))
+        .count();
+    if metadata_len == 0 {
+        return tail_trim(raw, max_lines);
+    }
+    if metadata_len >= max_lines {
+        return lines[..max_lines].join("\n");
+    }
+
+    let remaining_budget = max_lines - metadata_len;
+    let rest = lines[metadata_len..].join("\n");
+    let trimmed_rest = tail_trim(&rest, remaining_budget.saturating_sub(1).max(1));
+    format!("{}\n{}", lines[..metadata_len].join("\n"), trimmed_rest)
+}
+
 fn trim_diff(raw: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = raw.lines().collect();
     if lines.len() <= max_lines {
@@ -120,7 +145,11 @@ fn trim_diff(raw: &str, max_lines: usize) -> String {
         .iter()
         .enumerate()
         .filter_map(|(index, line)| {
-            if line.starts_with("@@") || line.starts_with("diff --git") || line.starts_with("--- ") || line.starts_with("+++ ") {
+            if line.starts_with("@@")
+                || line.starts_with("diff --git")
+                || line.starts_with("--- ")
+                || line.starts_with("+++ ")
+            {
                 Some(index)
             } else {
                 None
@@ -198,6 +227,24 @@ mod tests {
         assert!(trimmed.starts_with("... truncated"));
         assert!(trimmed.contains("line200"));
         assert!(!trimmed.contains("line1\n"));
+    }
+
+    #[test]
+    fn shell_output_preserves_structured_metadata_when_trimming() {
+        let mut raw = vec![
+            "meta.command_kind=test".to_string(),
+            "meta.exit_code=101".to_string(),
+            "meta.result=failed".to_string(),
+            "meta.failure_kind=test_failure".to_string(),
+            "meta.failed_tests=parser::rejects_bad_input".to_string(),
+            "exit_code: 101".to_string(),
+        ];
+        raw.extend((1..=100).map(|n| format!("stderr line {n}")));
+        let trimmed = summarize_for_kind(&raw.join("\n"), ObservationKind::ShellOutput);
+        assert!(trimmed.contains("meta.command_kind=test"));
+        assert!(trimmed.contains("meta.failed_tests=parser::rejects_bad_input"));
+        assert!(trimmed.contains("stderr line 100"));
+        assert!(!trimmed.contains("stderr line 1\n"));
     }
 
     #[test]
@@ -339,7 +386,10 @@ mod tests {
 
     #[test]
     fn from_tool_name_maps_todo_write_to_todos() {
-        assert_eq!(ObservationKind::from_tool_name("todo_write"), ObservationKind::Todos);
+        assert_eq!(
+            ObservationKind::from_tool_name("todo_write"),
+            ObservationKind::Todos
+        );
     }
 
     #[test]
@@ -357,9 +407,15 @@ mod tests {
     #[test]
     fn compact_observations_supersedes_old_todos_observation() {
         let observations = vec![
-            Observation::ok("todo_write", "5 todos: 0 completed, 1 in_progress, 4 pending\n  details..."),
+            Observation::ok(
+                "todo_write",
+                "5 todos: 0 completed, 1 in_progress, 4 pending\n  details...",
+            ),
             Observation::ok("read_file", "some file"),
-            Observation::ok("todo_write", "5 todos: 1 completed, 1 in_progress, 3 pending\n  newer..."),
+            Observation::ok(
+                "todo_write",
+                "5 todos: 1 completed, 1 in_progress, 3 pending\n  newer...",
+            ),
         ];
         let compacted = compact_observations(&observations);
         assert!(

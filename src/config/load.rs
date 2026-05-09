@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use crate::error::AppResult;
-use crate::error::app_error;
 use super::types::AppConfig;
+use crate::error::app_error;
+use crate::error::AppResult;
 
 pub fn load_or_default() -> AppResult<AppConfig> {
     let mut config = AppConfig::default();

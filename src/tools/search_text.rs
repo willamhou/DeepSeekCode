@@ -1,5 +1,5 @@
-use crate::error::AppResult;
 use crate::error::app_error;
+use crate::error::AppResult;
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -56,7 +56,10 @@ fn search_dir(
             break;
         }
 
-        let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
         if should_skip(name) {
             continue;
         }

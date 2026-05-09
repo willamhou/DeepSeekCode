@@ -1,5 +1,5 @@
-use crate::error::AppResult;
 use crate::error::app_error;
+use crate::error::AppResult;
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
 use std::fs;
 use std::path::Path;
@@ -35,8 +35,6 @@ impl Tool for ReadFileTool {
             .collect::<Vec<_>>()
             .join("\n");
 
-        Ok(ToolOutput {
-            summary: excerpt,
-        })
+        Ok(ToolOutput { summary: excerpt })
     }
 }

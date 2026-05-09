@@ -1,6 +1,22 @@
 name = "debug"
 description = "Reproduce a bug, trace its root cause, then apply a minimal fix"
 allowed_tools = ["list_files", "read_file", "search_text", "apply_patch", "run_shell", "git_diff", "todo_write"]
+triggers = ["debug", "bug", "root cause", "why is", "fails", "broken", "failing"]
+
+[[initial_todos]]
+content = "Reproduce the bug"
+active_form = "Reproducing the bug"
+status = "in_progress"
+
+[[initial_todos]]
+content = "Trace the call path and isolate root cause"
+active_form = "Tracing the call path and isolating root cause"
+status = "pending"
+
+[[initial_todos]]
+content = "Apply the minimal fix and verify"
+active_form = "Applying the minimal fix and verifying"
+status = "pending"
 
 system_append = """
 Debugging discipline:

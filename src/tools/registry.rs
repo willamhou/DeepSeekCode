@@ -1,20 +1,27 @@
+use std::cell::RefCell;
 use std::env;
+use std::rc::Rc;
 
+use crate::config::types::AppConfig;
 use crate::config::types::ApprovalConfig;
+use crate::core::todos::TodoList;
+use crate::error::{app_error, policy_denied, tool_failure, AppResult};
+use crate::skills::schema::SkillSpec;
 use crate::tools::apply_patch::ApplyPatchTool;
+use crate::tools::dispatch_subagent::DispatchSubagentTool;
 use crate::tools::git_diff::GitDiffTool;
 use crate::tools::list_files::ListFilesTool;
 use crate::tools::read_file::ReadFileTool;
 use crate::tools::run_shell::{is_safe_shell_command, RunShellTool};
 use crate::tools::search_text::SearchTextTool;
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
-use crate::error::{app_error, policy_denied, tool_failure, AppResult};
-use crate::skills::schema::SkillSpec;
 use crate::ui::confirm::confirm;
 
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
 }
+
+pub const MAX_SUBAGENT_DEPTH: usize = 1;
 
 impl ToolRegistry {
     pub fn names_for_policy(&self, policy: &ExecutionPolicy) -> Vec<&'static str> {
@@ -44,7 +51,8 @@ impl ToolRegistry {
             return Err(policy_denied(format!("tool blocked by policy: {name}")));
         }
 
-        if name == "apply_patch" && policy.require_write_confirmation && !policy.auto_approve_writes {
+        if name == "apply_patch" && policy.require_write_confirmation && !policy.auto_approve_writes
+        {
             let target = describe_apply_patch_target(&input);
             let prompt = format!("Apply patch in {}?", sanitize_for_prompt(&target));
             if !confirm(&prompt) {
@@ -116,22 +124,26 @@ pub struct ExecutionPolicy {
 
 impl ExecutionPolicy {
     pub fn new(approval: &ApprovalConfig, skill: Option<&SkillSpec>) -> Self {
-        let (allowed_tools, require_write_confirmation, require_shell_confirmation, shell_allowlist) =
-            if let Some(skill) = skill {
-                (
-                    skill.allowed_tools.clone(),
-                    skill.policy.require_write_confirmation,
-                    skill.policy.require_shell_confirmation,
-                    skill.policy.shell_allowlist.clone(),
-                )
-            } else {
-                (
-                    Vec::new(),
-                    approval.require_write_confirmation,
-                    approval.require_shell_confirmation,
-                    Vec::new(),
-                )
-            };
+        let (
+            allowed_tools,
+            require_write_confirmation,
+            require_shell_confirmation,
+            shell_allowlist,
+        ) = if let Some(skill) = skill {
+            (
+                skill.allowed_tools.clone(),
+                skill.policy.require_write_confirmation,
+                skill.policy.require_shell_confirmation,
+                skill.policy.shell_allowlist.clone(),
+            )
+        } else {
+            (
+                Vec::new(),
+                approval.require_write_confirmation,
+                approval.require_shell_confirmation,
+                Vec::new(),
+            )
+        };
 
         Self {
             allowed_tools,
@@ -149,7 +161,10 @@ impl ExecutionPolicy {
 }
 
 fn env_flag(name: &str) -> bool {
-    matches!(env::var(name).ok().as_deref(), Some("1") | Some("true") | Some("TRUE"))
+    matches!(
+        env::var(name).ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    )
 }
 
 fn describe_apply_patch_target(input: &ToolInput) -> String {
@@ -184,25 +199,36 @@ fn sanitize_for_prompt(value: &str) -> String {
 
 #[cfg(test)]
 pub fn default_registry() -> ToolRegistry {
-    default_registry_with_todos(std::rc::Rc::new(std::cell::RefCell::new(
-        crate::core::todos::TodoList::default(),
-    )))
+    default_registry_with_context(
+        AppConfig::default(),
+        0,
+        Rc::new(RefCell::new(TodoList::default())),
+    )
 }
 
-pub fn default_registry_with_todos(
-    todos: std::rc::Rc<std::cell::RefCell<crate::core::todos::TodoList>>,
+pub fn default_registry_with_context(
+    config: AppConfig,
+    subagent_depth: usize,
+    todos: Rc<RefCell<TodoList>>,
 ) -> ToolRegistry {
-    ToolRegistry {
-        tools: vec![
-            Box::new(ListFilesTool),
-            Box::new(ReadFileTool),
-            Box::new(SearchTextTool),
-            Box::new(ApplyPatchTool),
-            Box::new(RunShellTool),
-            Box::new(GitDiffTool),
-            Box::new(crate::tools::todo::TodoWriteTool { list: todos }),
-        ],
+    let mut tools: Vec<Box<dyn Tool>> = vec![
+        Box::new(ListFilesTool),
+        Box::new(ReadFileTool),
+        Box::new(SearchTextTool),
+        Box::new(ApplyPatchTool),
+        Box::new(RunShellTool),
+        Box::new(GitDiffTool),
+        Box::new(crate::tools::todo::TodoWriteTool {
+            list: todos.clone(),
+        }),
+    ];
+    if subagent_depth < MAX_SUBAGENT_DEPTH {
+        tools.push(Box::new(DispatchSubagentTool {
+            config,
+            parent_depth: subagent_depth,
+        }));
     }
+    ToolRegistry { tools }
 }
 
 #[cfg(test)]
@@ -294,5 +320,27 @@ mod tests {
         let raw = "name\twith\ttabs";
         let sanitized = sanitize_for_prompt(raw);
         assert_eq!(sanitized, "name\twith\ttabs");
+    }
+
+    #[test]
+    fn default_registry_includes_dispatch_subagent_only_below_max_depth() {
+        let approval = ApprovalConfig::default();
+        let root = default_registry_with_context(
+            AppConfig::default(),
+            0,
+            Rc::new(RefCell::new(TodoList::default())),
+        );
+        assert!(root
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"dispatch_subagent"));
+
+        let nested = default_registry_with_context(
+            AppConfig::default(),
+            MAX_SUBAGENT_DEPTH,
+            Rc::new(RefCell::new(TodoList::default())),
+        );
+        assert!(!nested
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"dispatch_subagent"));
     }
 }

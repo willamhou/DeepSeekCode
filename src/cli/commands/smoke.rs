@@ -5,8 +5,8 @@ use std::time::Instant;
 use crate::cli::app::{SmokeArgs, SmokeFlavor};
 use crate::config::load::load_or_default;
 use crate::config::types::ModelConfig;
-use crate::error::AppResult;
 use crate::error::app_error;
+use crate::error::AppResult;
 
 const DEFAULT_PROMPT: &str = "Reply with the single word `pong` and nothing else.";
 const MAX_TOKENS: u32 = 16;
@@ -14,7 +14,9 @@ const MAX_TOKENS: u32 = 16;
 pub fn run(args: SmokeArgs) -> AppResult<()> {
     let config = load_or_default()?;
     let model = config.model;
-    let flavor = args.flavor.unwrap_or_else(|| detect_flavor(&model.base_url));
+    let flavor = args
+        .flavor
+        .unwrap_or_else(|| detect_flavor(&model.base_url));
     let prompt = args
         .prompt
         .clone()
@@ -32,7 +34,7 @@ pub fn run(args: SmokeArgs) -> AppResult<()> {
         Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
         _ => {
             return Err(app_error(format!(
-                "{} is not set; export it before running `dscode smoke`",
+                "{} is not set; export it before running `deepseek smoke`",
                 model.api_key_env
             )));
         }
@@ -177,7 +179,7 @@ fn call_remote(
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(app_error(
-                "curl is not installed; install curl to use `dscode smoke`",
+                "curl is not installed; install curl to use `deepseek smoke`",
             ));
         }
         Err(error) => return Err(app_error(format!("curl failed to start: {error}"))),
@@ -390,10 +392,7 @@ mod tests {
     #[test]
     fn extract_openai_reply_decodes_escape_sequences() {
         let body = r#"{"choices":[{"message":{"role":"assistant","content":"line1\nline2"}}]}"#;
-        assert_eq!(
-            extract_openai_reply(body).as_deref(),
-            Some("line1\nline2")
-        );
+        assert_eq!(extract_openai_reply(body).as_deref(), Some("line1\nline2"));
     }
 
     #[test]

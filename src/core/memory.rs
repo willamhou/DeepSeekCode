@@ -11,4 +11,3 @@ impl MemoryState {
         format!("active profile = {}", self.active_profile)
     }
 }
-

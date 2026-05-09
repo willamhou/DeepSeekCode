@@ -1,4 +1,4 @@
-use crate::cli::app::PrAction;
+use crate::cli::app::{BenchmarkArgs, PrAction};
 use crate::config::load::load_or_default;
 use crate::config::types::AppConfig;
 use crate::core::context::TaskContext;
@@ -14,11 +14,21 @@ pub fn run(action: PrAction) -> AppResult<()> {
     let config = load_or_default()?;
     warn_if_offline_planner(&config);
     match action {
-        PrAction::Review { reference, post, out } => {
-            run_review(config, &reference, post, out.as_deref())
-        }
-        PrAction::Fix { reference, job } => run_fix(config, &reference, job.as_deref()),
-        PrAction::Patch { reference, commit } => run_patch(config, &reference, commit),
+        PrAction::Review {
+            reference,
+            post,
+            out,
+        } => run_review(config, &reference, post, out.as_deref()),
+        PrAction::Fix {
+            reference,
+            job,
+            benchmark_gate,
+        } => run_fix(config, &reference, job.as_deref(), benchmark_gate),
+        PrAction::Patch {
+            reference,
+            commit,
+            benchmark_gate,
+        } => run_patch(config, &reference, commit, benchmark_gate),
     }
 }
 
@@ -47,7 +57,7 @@ fn run_review(config: AppConfig, reference: &str, post: bool, out: Option<&str>)
         Observation::ok("list_files", pr.changed_files.join("\n")),
     ];
 
-    let runtime = AgentLoop::new(config);
+    let runtime = AgentLoop::new(config.clone());
     let result = runtime.run_with(
         context,
         AgentLoopOptions {
@@ -99,8 +109,12 @@ fn deliver_review(pr: &PrContext, body: &str, post: bool, out: Option<&str>) -> 
     Ok(())
 }
 
-
-fn run_fix(config: AppConfig, reference: &str, job_filter: Option<&str>) -> AppResult<()> {
+fn run_fix(
+    config: AppConfig,
+    reference: &str,
+    job_filter: Option<&str>,
+    benchmark_gate: bool,
+) -> AppResult<()> {
     ensure_gh_auth()?;
     let pr_ref = parse_pr_ref(reference)?;
     let pr = fetch_pr(&pr_ref)?;
@@ -118,7 +132,7 @@ fn run_fix(config: AppConfig, reference: &str, job_filter: Option<&str>) -> AppR
     let context = TaskContext::new(task, None);
     let observations = vec![Observation::ok("run_shell", failure.log_tail.clone())];
 
-    let runtime = AgentLoop::new(config);
+    let runtime = AgentLoop::new(config.clone());
     runtime.run_with(
         context,
         AgentLoopOptions {
@@ -132,6 +146,9 @@ fn run_fix(config: AppConfig, reference: &str, job_filter: Option<&str>) -> AppR
         "fix attempt complete for job `{}` (run #{}); review `git diff HEAD` and rerun if needed",
         failure.job_name, failure.run_id
     );
+    if benchmark_gate {
+        run_post_task_benchmark_gate(&config, &format!("pr fix #{}", pr.number))?;
+    }
     Ok(())
 }
 
@@ -149,8 +166,12 @@ fn build_fix_task_text(pr: &PrContext, failure: &CiFailure) -> String {
     )
 }
 
-
-fn run_patch(config: AppConfig, reference: &str, commit: bool) -> AppResult<()> {
+fn run_patch(
+    config: AppConfig,
+    reference: &str,
+    commit: bool,
+    benchmark_gate: bool,
+) -> AppResult<()> {
     ensure_gh_auth()?;
     let pr_ref = parse_pr_ref(reference)?;
     let pr = fetch_pr(&pr_ref)?;
@@ -165,7 +186,7 @@ fn run_patch(config: AppConfig, reference: &str, commit: bool) -> AppResult<()> 
     let context = TaskContext::new(task, None);
     let observations = vec![Observation::ok("git_diff", pr.diff.clone())];
 
-    let runtime = AgentLoop::new(config);
+    let runtime = AgentLoop::new(config.clone());
     runtime.run_with(
         context,
         AgentLoopOptions {
@@ -177,11 +198,14 @@ fn run_patch(config: AppConfig, reference: &str, commit: bool) -> AppResult<()> 
 
     if commit {
         run_git(&["add", "-A"])?;
-        let message = format!("dscode: fix PR #{}", pr.number);
+        let message = format!("deepseek: fix PR #{}", pr.number);
         run_git(&["commit", "-m", &message])?;
         println!("committed staged changes (no push)");
     } else {
         println!("changes left in worktree; run `git diff` to inspect, then commit manually");
+    }
+    if benchmark_gate {
+        run_post_task_benchmark_gate(&config, &format!("pr patch #{}", pr.number))?;
     }
     Ok(())
 }
@@ -195,6 +219,11 @@ fn build_patch_task_text(pr: &PrContext) -> String {
 
 fn run_git(args: &[&str]) -> AppResult<()> {
     crate::util::process::run_capture_stdout("git", args).map(|_| ())
+}
+
+fn run_post_task_benchmark_gate(config: &AppConfig, source: &str) -> AppResult<()> {
+    println!("post-task benchmark gate ({source}): running default benchmark baseline");
+    crate::cli::commands::benchmark::run_with_config(config.clone(), BenchmarkArgs::default())
 }
 
 #[cfg(test)]

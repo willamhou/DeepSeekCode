@@ -1,6 +1,23 @@
 name = "research"
 description = "Research a topic on GitHub or via curl, write findings to a markdown file"
 allowed_tools = ["list_files", "read_file", "search_text", "apply_patch", "run_shell", "todo_write"]
+triggers = ["research", "investigate", "explore", "look up", "compare"]
+references = ["RESEARCH.md", "README.md"]
+
+[[initial_todos]]
+content = "Plan the research approach"
+active_form = "Planning the research approach"
+status = "in_progress"
+
+[[initial_todos]]
+content = "Run the first GitHub or curl search"
+active_form = "Running the first GitHub or curl search"
+status = "pending"
+
+[[initial_todos]]
+content = "Synthesize findings into RESEARCH.md"
+active_form = "Synthesizing findings into RESEARCH.md"
+status = "pending"
 
 system_append = """
 You are doing read-only research, not editing project source code.

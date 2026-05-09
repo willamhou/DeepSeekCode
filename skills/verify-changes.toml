@@ -1,6 +1,28 @@
 name = "verify-changes"
 description = "Pre-commit verification: lint + test + build before declaring done"
 allowed_tools = ["list_files", "read_file", "run_shell", "git_diff", "todo_write"]
+triggers = ["verify", "validate", "check before commit", "pre-commit", "sanity check"]
+references = ["Cargo.toml", "package.json", "pyproject.toml"]
+
+[[initial_todos]]
+content = "Run lint"
+active_form = "Running lint"
+status = "in_progress"
+
+[[initial_todos]]
+content = "Run tests"
+active_form = "Running tests"
+status = "pending"
+
+[[initial_todos]]
+content = "Run build"
+active_form = "Running build"
+status = "pending"
+
+[[initial_todos]]
+content = "Review the diff and summarize remaining risks"
+active_form = "Reviewing the diff and summarizing remaining risks"
+status = "pending"
 
 system_append = """
 Verification ritual before commit:

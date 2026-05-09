@@ -130,8 +130,7 @@ shell_allowlist = []
         let dir_b = unique_test_dir("merge_b");
         write_skill(&dir_a, "alpha", &minimal_skill("alpha"));
         write_skill(&dir_b, "beta", &minimal_skill("beta"));
-        let (reg, stats) =
-            SkillRegistry::load_dirs(&[dir_a.as_path(), dir_b.as_path()]).unwrap();
+        let (reg, stats) = SkillRegistry::load_dirs(&[dir_a.as_path(), dir_b.as_path()]).unwrap();
         assert_eq!(reg.all().len(), 2);
         assert_eq!(stats.total, 2);
         assert!(reg.find("alpha").is_some());
@@ -210,7 +209,10 @@ shell_allowlist = []
         // (this test pins behavior; an explicit "fatal on missing name" check
         // would be nice but the loader currently uses fallback name from filename).
         let result = SkillRegistry::load_dirs(&[dir.as_path()]);
-        assert!(result.is_ok(), "loader is permissive; this pins that contract");
+        assert!(
+            result.is_ok(),
+            "loader is permissive; this pins that contract"
+        );
         let (reg, _) = result.unwrap();
         // The skill should load with name "broken" (from file stem) and empty fields.
         assert_eq!(reg.all().len(), 1);
