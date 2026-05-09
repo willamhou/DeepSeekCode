@@ -119,6 +119,8 @@
 ## 文档
 
 - [安装指南](./docs/install.md)
+- [发布检查清单](./docs/release.md)
+- [变更记录](./CHANGELOG.md)
 - [架构设计](./docs/architecture.md)
 - [MVP 与路线图](./docs/mvp.md)
 - [状态与完整 Roadmap](./docs/roadmap.md)

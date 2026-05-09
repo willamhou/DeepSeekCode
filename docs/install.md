@@ -29,6 +29,8 @@ deepseek version
 deepseek doctor
 ```
 
+完整发布流程见 [发布检查清单](./release.md)。
+
 `deepseek benchmark` 会同时检查：
 
 - benchmark case expectations
@@ -36,6 +38,14 @@ deepseek doctor
 - dogfood live gate
 
 任一 gate 失败都应阻断 release。
+
+发布前还应至少回放一个普通写入验证任务和一个 retry 任务：
+
+```bash
+deepseek dogfood run --from-benchmark fixture-write-validate-rust-mini --notes "release replay"
+deepseek dogfood run --from-benchmark fixture-retry-write-validate-python-mini --notes "release retry replay"
+deepseek dogfood report --limit 5
+```
 
 ## Release Binary
 
