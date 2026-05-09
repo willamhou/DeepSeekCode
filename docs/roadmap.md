@@ -396,7 +396,7 @@
   - 离线 fallback planner 在 `planning_mode` 下也先生成 `todo_write` 计划，保持远端/离线路径一致
   - 300 tests 全绿，含 planning heuristic / prompt rendering / offline bootstrap 回归
 - **10b (`main`, 2026-05-05)** — Sub-agent dispatch（v1）：新增 `dispatch_subagent` tool，把独立子任务派发给 child loop，带独立 todo list / budget / transcript。
-  - `ToolRegistry` 按 depth 注入 `dispatch_subagent`，默认只允许一层 child，避免无限递归
+  - `ToolRegistry` 按 depth 注入 `dispatch_subagent`，当时默认只允许一层 child，避免无限递归（后续 Phase 11+ 已放宽为两层上限）
   - child loop 复用同一套 runtime / skill / policy 逻辑，但关闭 banner、stream 输出与 session 持久化
   - `dispatch_subagent` 支持 `task`、可选 `skill`、可选 `steps`，返回 child tool calls + final message 摘要
   - system prompt 新增 sub-agent delegation nudge，仅在工具可用时出现
@@ -1724,6 +1724,21 @@
   - trend gate：`skipped (need at least 3 prior comparable runs, found 0)`，因为 case 数从 `47` 到 `48`，当前没有同 case 数历史
   - live gate：`pass (no new dogfood records since previous snapshot, runs=33)`
 - 当前边界仍明确：这把 open-ended gap 从“没有覆盖产品化模糊请求”推进到“有首轮规划保护”，但仍是 heuristic，不等于复杂开放任务已稳定收敛。
+
+**Phase 11+ bounded nested subagents (`main`, 2026-05-09) — 已完成基础版**：
+- 对照 gap review，subagent 仍被明确记为“单层、保守”。本轮先把硬性单层限制放宽为有上限的两层：
+  - root agent 可 dispatch child
+  - 第一层 child 也可在自己任务内 dispatch 一个清晰可分的 nested child
+  - 第二层之后 registry 不再暴露 `dispatch_subagent`，避免无界递归
+- subagent prompt nudge 同步说明 nested dispatch 是 bounded，只应在 child 内部有明确独立子任务时使用。
+- 最新验证：
+  - 全量测试：`540 passed, 0 failed`
+  - 默认 benchmark：`48/48`
+  - total tool calls：`163`
+  - failed tool calls：`0`
+  - trend gate：`skipped (need at least 3 prior comparable runs, found 1)`，`48` 条 case 历史仍在 warmup
+  - live gate：`pass (no new dogfood records since previous snapshot, runs=33)`
+- 当前边界仍明确：这不是成熟多 agent 调度器；只是从硬单层推进到保守、可控的两层拆分。
 
 **Phase 11+ IDE bootstrap (`main`, 2026-05-09) — 已完成基础版**：
 - 二次差距审计显示，Claude Code / Codex 的 IDE/app/cloud surface 仍是大差距；本轮先补一个很小但可版本化的 VS Code 入口

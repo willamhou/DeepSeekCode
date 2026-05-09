@@ -25,7 +25,7 @@ pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
 }
 
-pub const MAX_SUBAGENT_DEPTH: usize = 1;
+pub const MAX_SUBAGENT_DEPTH: usize = 2;
 const MAX_DYNAMIC_MCP_TOOLS: usize = 24;
 
 impl ToolRegistry {
@@ -599,10 +599,19 @@ done
 
         let nested = default_registry_with_context(
             AppConfig::default(),
+            1,
+            Rc::new(RefCell::new(TodoList::default())),
+        );
+        assert!(nested
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"dispatch_subagent"));
+
+        let at_limit = default_registry_with_context(
+            AppConfig::default(),
             MAX_SUBAGENT_DEPTH,
             Rc::new(RefCell::new(TodoList::default())),
         );
-        assert!(!nested
+        assert!(!at_limit
             .names_for_policy(&ExecutionPolicy::new(&approval, None))
             .contains(&"dispatch_subagent"));
     }
