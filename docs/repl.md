@@ -32,6 +32,32 @@ Explicit aliases are also supported:
 | `/load <name>` | Restore a saved session (replaces current state) |
 | `/todos` | Show the current todo list (read-only inspection) |
 | `/cost` | Show prompt / completion / total token counters |
+| `/name [args]` | Run a custom markdown command from `.dscode/commands/name.md` or the configured user commands dir |
+
+### Custom Slash Commands
+
+Custom commands are prompt-backed markdown files for repeated workflows. Store project commands in
+`.dscode/commands/` and personal commands in `~/.config/dscode/commands/` by default. User commands
+override project commands with the same name.
+
+Examples:
+
+```text
+.dscode/commands/review.md
+.dscode/commands/pr/fix.md
+~/.config/dscode/commands/commit-message.md
+```
+
+Invoke them by filename:
+
+```text
+> /review src/repl/slash.rs
+> /pr/fix 42
+```
+
+Inside the markdown body, `$ARGUMENTS` expands to all arguments, `$0` / `$1` expand positional
+arguments, and `$ARGUMENTS[0]` / `$ARGUMENTS[1]` are the long indexed forms. If no argument
+placeholder appears, DeepseekCode appends `ARGUMENTS: ...` to the prompt automatically.
 
 ## Cross-turn context
 

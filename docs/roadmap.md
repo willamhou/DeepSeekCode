@@ -1616,6 +1616,18 @@
   - CLI 本地修改 / 验证 / recovery / PR fixture baseline 与 Claude Code / Codex 的核心闭环差距已收敛到“小到中”
   - 真实在线模型稳定性、IDE/编辑器配套、外部 PR/CI live 样本厚度仍不是“小差距”，后续应继续按 live dogfood 暴露的问题推进
 
+**Phase 11+ custom slash commands (`main`, 2026-05-09) — 已完成**：
+- 二次对照 Claude Code / Codex 后补齐一个高频 REPL UX 缺口：
+  - Claude Code 支持项目/用户级 prompt-backed slash commands / skills
+  - DeepseekCode 原先只有内置 slash 命令与 TOML skills，缺少“把常用提示保存成 `/name` 命令”的轻量入口
+- 新增 custom slash command：
+  - 项目命令：`.dscode/commands/<name>.md`
+  - 用户命令：`~/.config/dscode/commands/<name>.md`，可通过 `workspace.user_commands_dir` 配置
+  - 支持 namespace：`.dscode/commands/pr/fix.md` -> `/pr/fix`
+  - 支持参数替换：`$ARGUMENTS`、`$ARGUMENTS[N]`、`$0`、`$1`
+  - 无参数占位符时自动追加 `ARGUMENTS: ...`
+- 这一步把“常用 workflow prompt 复用”从写 TOML skill 降低到写 markdown 文件，缩小了与 Claude Code 交互体验的差距。
+
 ## 最近里程碑
 
 - `d9b3ae4` `Initialize project docs`

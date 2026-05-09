@@ -79,10 +79,17 @@ impl Repl {
         match crate::repl::slash::try_handle_slash(self, line)? {
             crate::repl::slash::SlashOutcome::Quit => return Ok(ControlFlow::Quit),
             crate::repl::slash::SlashOutcome::Continue => return Ok(ControlFlow::Continue),
+            crate::repl::slash::SlashOutcome::Submit(prompt) => {
+                return self.dispatch_prompt(prompt);
+            }
             crate::repl::slash::SlashOutcome::NotASlash => {}
         }
 
-        self.transcript.push_user(line);
+        self.dispatch_prompt(line.to_string())
+    }
+
+    fn dispatch_prompt(&mut self, prompt: String) -> AppResult<ControlFlow> {
+        self.transcript.push_user(&prompt);
         let prompt = self.transcript.render_for_prompt();
         let context = crate::core::context::TaskContext::new(prompt, self.skill.clone());
         let runtime = crate::core::loop_runtime::AgentLoop::new(self.config.clone());

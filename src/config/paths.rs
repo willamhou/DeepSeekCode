@@ -15,6 +15,14 @@ impl WorkspaceConfig {
         PathBuf::from(&self.session_dir)
     }
 
+    pub fn commands_dir(&self) -> PathBuf {
+        PathBuf::from(&self.config_dir).join("commands")
+    }
+
+    pub fn user_commands_dir(&self) -> PathBuf {
+        crate::skills::tilde::expand_tilde(&self.user_commands_dir)
+    }
+
     pub fn dogfood_dir(&self) -> PathBuf {
         PathBuf::from(&self.config_dir).join("dogfood")
     }

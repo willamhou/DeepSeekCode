@@ -52,6 +52,7 @@ pub struct WorkspaceConfig {
     pub config_dir: String,
     pub session_dir: String,
     pub user_skills_dir: String,
+    pub user_commands_dir: String,
 }
 
 impl Default for WorkspaceConfig {
@@ -60,6 +61,7 @@ impl Default for WorkspaceConfig {
             config_dir: ".dscode".to_string(),
             session_dir: ".dscode/sessions".to_string(),
             user_skills_dir: "~/.config/dscode/skills".to_string(),
+            user_commands_dir: "~/.config/dscode/commands".to_string(),
         }
     }
 }

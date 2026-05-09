@@ -63,6 +63,10 @@
   - 新增 `deepseek benchmark --accept-live-baseline`，只有显式接受后才会把已排查的 live dogfood snapshot 作为新基线
   - 最新普通 benchmark：`42/42`，trend gate pass，live gate pass（accepted baseline 后 runs=33，无新增 dogfood 记录）
   - re-analysis：本地 CLI agent loop / recovery / PR fixture 基线差距已收敛到“小到中”；真实在线模型稳定性、IDE 配套、外部 PR/CI live 样本厚度仍不是“小差距”
+- Phase 11+ custom slash commands：
+  - REPL 支持 `.dscode/commands/*.md` 与用户级 `~/.config/dscode/commands/*.md`
+  - 支持 `/name args`、namespace（如 `/pr/fix`）和 `$ARGUMENTS` / `$0` 参数替换
+  - 对齐 Claude Code prompt-backed custom commands 的核心使用方式，降低常用 workflow 复用成本
 
 本轮收口顺序：
 

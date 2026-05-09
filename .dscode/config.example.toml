@@ -56,6 +56,10 @@ workspace.config_dir = ".dscode"
 # `dscode resume` 会从此目录读取上次会话
 workspace.session_dir = ".dscode/sessions"
 
+# 用户级自定义 slash command 目录
+# 项目级命令放在 `.dscode/commands/*.md`
+workspace.user_commands_dir = "~/.config/dscode/commands"
+
 # -----------------------------------------------------------------------------
 # pr: GitHub PR integration (Phase 8a)
 # -----------------------------------------------------------------------------

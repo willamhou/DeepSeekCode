@@ -102,6 +102,9 @@ fn parse_config(content: &str, config: &mut AppConfig) -> AppResult<()> {
             "workspace.user_skills_dir" => {
                 config.workspace.user_skills_dir = unquote(value);
             }
+            "workspace.user_commands_dir" => {
+                config.workspace.user_commands_dir = unquote(value);
+            }
             _ => {}
         }
     }
@@ -138,6 +141,14 @@ mod tests {
         let toml = "workspace.user_skills_dir = \"/custom/skills\"\n";
         parse_config(toml, &mut config).unwrap();
         assert_eq!(config.workspace.user_skills_dir, "/custom/skills");
+    }
+
+    #[test]
+    fn parse_config_overrides_user_commands_dir_from_toml() {
+        let mut config = AppConfig::default();
+        let toml = "workspace.user_commands_dir = \"/custom/commands\"\n";
+        parse_config(toml, &mut config).unwrap();
+        assert_eq!(config.workspace.user_commands_dir, "/custom/commands");
     }
 
     #[test]
