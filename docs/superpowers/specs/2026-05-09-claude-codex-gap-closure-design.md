@@ -58,6 +58,11 @@
   - `fixture-retry-write-validate-python-mini`
   - `fixture-pr-retry-validate-python-mini`
 - Phase 11+ live dogfood：上述两条 Python retry case 已 replay 到 live ledger，均为 `success`
+- Phase 11+ live gate hardening：
+  - `deepseek benchmark` 不再在 gate 失败时自动推进 benchmark history baseline
+  - 新增 `deepseek benchmark --accept-live-baseline`，只有显式接受后才会把已排查的 live dogfood snapshot 作为新基线
+  - 最新普通 benchmark：`42/42`，trend gate pass，live gate pass（accepted baseline 后 runs=33，无新增 dogfood 记录）
+  - re-analysis：本地 CLI agent loop / recovery / PR fixture 基线差距已收敛到“小到中”；真实在线模型稳定性、IDE 配套、外部 PR/CI live 样本厚度仍不是“小差距”
 
 本轮收口顺序：
 

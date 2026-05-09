@@ -38,6 +38,8 @@ deepseek benchmark
 - dogfood live gate
 
 The live gate blocks release when new dogfood failures, stuck runs, or manual interventions appear after the previous benchmark snapshot.
+Failed benchmark gates do not advance the saved benchmark history baseline. After triaging known live failures, use
+`deepseek benchmark --accept-live-baseline` only to intentionally accept the current dogfood snapshot; do not use it for normal release checks.
 
 ## Dogfood Replay
 

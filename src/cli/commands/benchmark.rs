@@ -141,23 +141,38 @@ pub fn run_with_config(config: AppConfig, args: BenchmarkArgs) -> AppResult<()> 
     );
     let trend_gate = evaluate_trend_gate(&current_record, &previous_history);
     let live_gate = evaluate_live_gate(&current_record, &previous_history);
-    let mut combined_history = previous_history.clone();
-    combined_history.push(current_record.clone());
+    let live_gate_line = live_gate_summary_line(&live_gate, args.accept_live_baseline);
+    let mut report_history = previous_history.clone();
+    report_history.push(current_record.clone());
     let report = render_report(
         &manifest_path,
         &results,
-        &combined_history,
+        &report_history,
         dogfood_snapshot.as_ref(),
         &trend_gate,
-        &live_gate,
+        &live_gate_line,
     );
     fs::write(&out_path, report)?;
-    append_history_record(&history_path, &current_record)?;
     println!("report: {}", out_path.display());
-    println!("history: {}", history_path.display());
-    println!("trend gate: {}", trend_gate.summary_line());
-    println!("live gate: {}", live_gate.summary_line());
     let passed = results.iter().filter(|result| result.passed).count();
+    let should_append_history = should_append_history_record(
+        passed as u64,
+        results.len() as u64,
+        &trend_gate,
+        &live_gate,
+        args.accept_live_baseline,
+    );
+    if should_append_history {
+        append_history_record(&history_path, &current_record)?;
+        println!("history: {}", history_path.display());
+    } else {
+        println!(
+            "history: {} (not updated; benchmark gate did not pass)",
+            history_path.display()
+        );
+    }
+    println!("trend gate: {}", trend_gate.summary_line());
+    println!("live gate: {live_gate_line}");
     if passed < results.len() {
         return Err(app_error(format!(
             "benchmark expectations failed: {passed}/{} passed",
@@ -170,7 +185,7 @@ pub fn run_with_config(config: AppConfig, args: BenchmarkArgs) -> AppResult<()> 
             trend_gate.summary_line()
         )));
     }
-    if live_gate.failed() {
+    if live_gate.failed() && !args.accept_live_baseline {
         return Err(app_error(format!(
             "benchmark live gate failed: {}",
             live_gate.summary_line()
@@ -734,6 +749,25 @@ impl LiveGateEvaluation {
     }
 }
 
+fn live_gate_summary_line(live_gate: &LiveGateEvaluation, accept_live_baseline: bool) -> String {
+    let summary = live_gate.summary_line();
+    if live_gate.failed() && accept_live_baseline {
+        format!("{summary} (accepted by --accept-live-baseline)")
+    } else {
+        summary
+    }
+}
+
+fn should_append_history_record(
+    passed: u64,
+    cases: u64,
+    trend_gate: &TrendGateEvaluation,
+    live_gate: &LiveGateEvaluation,
+    accept_live_baseline: bool,
+) -> bool {
+    passed == cases && !trend_gate.failed() && (!live_gate.failed() || accept_live_baseline)
+}
+
 fn parse_manifest(content: &str) -> AppResult<Vec<BenchmarkCase>> {
     let mut cases = Vec::new();
     let mut current = PendingCase::default();
@@ -1070,7 +1104,7 @@ fn render_report(
     history: &[BenchmarkRunRecord],
     dogfood_snapshot: Option<&DogfoodSnapshot>,
     trend_gate: &TrendGateEvaluation,
-    live_gate: &LiveGateEvaluation,
+    live_gate_line: &str,
 ) -> String {
     let passed = results.iter().filter(|result| result.passed).count();
     let total_tool_calls = results
@@ -1115,7 +1149,7 @@ fn render_report(
         ));
     }
     out.push_str(&format!("- Trend gate: {}\n", trend_gate.summary_line()));
-    out.push_str(&format!("- Live gate: {}\n", live_gate.summary_line()));
+    out.push_str(&format!("- Live gate: {live_gate_line}\n"));
     out.push('\n');
     out.push_str("| Case | Workdir | Passed | Budget | Tool Calls | Failed Tools | Duration ms | Notes | Tool Trace | Failure Summary | Final Message |\n");
     out.push_str("| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- |\n");
@@ -2518,7 +2552,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
             &[],
             None,
             &trend_gate,
-            &live_gate,
+            &live_gate.summary_line(),
         );
         assert!(report.contains("# DeepseekCode Benchmark Report"));
         assert!(report.contains("- Total tool calls: 2"));
@@ -2870,7 +2904,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
                 .last()
                 .and_then(|record| record.dogfood_snapshot.as_ref()),
             &trend_gate,
-            &live_gate,
+            &live_gate.summary_line(),
         );
         assert!(report.contains("Previous benchmark: 0/1 passed"));
         assert!(report.contains("Δ passed +1"));
@@ -3403,6 +3437,63 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
         let gate = evaluate_live_gate(&current, &[previous]);
         assert_eq!(gate.status, TrendGateStatus::Passed);
         assert!(gate.summary_line().contains("no new dogfood records"));
+    }
+
+    #[test]
+    fn live_gate_summary_line_marks_explicit_acceptance() {
+        let live_gate = LiveGateEvaluation {
+            status: TrendGateStatus::Failed,
+            current_runs: Some(4),
+            previous_runs: Some(3),
+            reasons: vec!["failed dogfood records increased 0 -> 1".to_string()],
+        };
+
+        let line = live_gate_summary_line(&live_gate, true);
+
+        assert!(line.contains("FAILED against previous dogfood snapshot"));
+        assert!(line.contains("accepted by --accept-live-baseline"));
+    }
+
+    #[test]
+    fn history_record_requires_all_gates_or_explicit_live_acceptance() {
+        let trend_gate = TrendGateEvaluation {
+            status: TrendGateStatus::Passed,
+            comparable_runs: 3,
+            best_passed: Some(1),
+            median_tool_calls: Some(2),
+            tool_call_limit: Some(5),
+            median_failed_tool_calls: Some(0),
+            category_summaries: Vec::new(),
+            reasons: Vec::new(),
+        };
+        let failed_live_gate = LiveGateEvaluation {
+            status: TrendGateStatus::Failed,
+            current_runs: Some(4),
+            previous_runs: Some(3),
+            reasons: vec!["failed dogfood records increased 0 -> 1".to_string()],
+        };
+
+        assert!(!should_append_history_record(
+            42,
+            42,
+            &trend_gate,
+            &failed_live_gate,
+            false
+        ));
+        assert!(should_append_history_record(
+            42,
+            42,
+            &trend_gate,
+            &failed_live_gate,
+            true
+        ));
+        assert!(!should_append_history_record(
+            41,
+            42,
+            &trend_gate,
+            &failed_live_gate,
+            true
+        ));
     }
 
     #[test]

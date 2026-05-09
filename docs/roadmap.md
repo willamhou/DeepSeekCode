@@ -1599,6 +1599,23 @@
   - benchmark snapshot 与 dogfood report 现在共用同一套 category 纠偏；category 重分桶不会在没有新增 run 时误触发 live gate
 - 这一步把 roadmap 里“单独排查 Python retry baseline 稳定性”的风险点收掉，并把对应 live dogfood 样本补进 ledger。
 
+**Phase 11+ live gate hardening (`main`, 2026-05-09) — 已完成**：
+- 与 Claude Code / Codex 的二次差距复盘显示，本地 benchmark 已经稳定，但 live dogfood gate 还有一个产品级缺口：
+  - 新增 live dogfood failed / stuck 记录后，旧实现会先把失败 benchmark 的 dogfood snapshot 写入 history
+  - 下一次 benchmark 可能因此把未处理的 live 失败当成已接受基线
+- 新增显式 live baseline 接受语义：
+  - 普通 `deepseek benchmark` 只有在 case expectations / trend gate / live gate 全通过时才写入 benchmark history
+  - live gate 失败时不会自动推进 history baseline
+  - 排查后如果确实要接受当前 live snapshot，必须显式运行 `deepseek benchmark --accept-live-baseline`
+  - report / console 会标出 `(accepted by --accept-live-baseline)`，避免误以为 live gate 自然通过
+- 最新验证：
+  - 全量测试：`479 passed, 0 failed`
+  - `deepseek benchmark --accept-live-baseline`：`42/42`，trend gate pass，live gate failed but explicitly accepted
+  - 随后的普通 `deepseek benchmark`：`42/42`，trend gate pass，live gate pass（runs=33，无新增 dogfood 记录）
+- 当前差距判断：
+  - CLI 本地修改 / 验证 / recovery / PR fixture baseline 与 Claude Code / Codex 的核心闭环差距已收敛到“小到中”
+  - 真实在线模型稳定性、IDE/编辑器配套、外部 PR/CI live 样本厚度仍不是“小差距”，后续应继续按 live dogfood 暴露的问题推进
+
 ## 最近里程碑
 
 - `d9b3ae4` `Initialize project docs`

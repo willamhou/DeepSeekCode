@@ -39,6 +39,9 @@ deepseek doctor
 
 任一 gate 失败都应阻断 release。
 
+如果新增 dogfood 失败已经完成排查，并且需要把当前 live snapshot 作为新的已知基线，必须显式运行
+`deepseek benchmark --accept-live-baseline`；普通发布检查不要使用这个选项。
+
 发布前还应至少回放一个普通写入验证任务和一个 retry 任务：
 
 ```bash

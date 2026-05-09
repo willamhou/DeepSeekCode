@@ -290,6 +290,7 @@ pub struct ChatArgs {
 pub struct BenchmarkArgs {
     pub manifest: Option<String>,
     pub out: Option<String>,
+    pub accept_live_baseline: bool,
 }
 
 #[derive(Debug)]
@@ -379,6 +380,11 @@ fn parse_benchmark_args(args: Vec<String>) -> BenchmarkArgs {
                     index += 2;
                     continue;
                 }
+            }
+            "--accept-live-baseline" => {
+                benchmark.accept_live_baseline = true;
+                index += 1;
+                continue;
             }
             _ => {}
         }
@@ -1061,12 +1067,14 @@ mod tests {
             "bench.txt".to_string(),
             "--out".to_string(),
             "report.md".to_string(),
+            "--accept-live-baseline".to_string(),
         ];
         let cli = Cli::from_argv(argv).expect("parse should succeed");
         match cli.command {
             Some(Command::Benchmark(args)) => {
                 assert_eq!(args.manifest.as_deref(), Some("bench.txt"));
                 assert_eq!(args.out.as_deref(), Some("report.md"));
+                assert!(args.accept_live_baseline);
             }
             other => panic!("expected Command::Benchmark, got {:?}", other),
         }
