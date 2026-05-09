@@ -187,6 +187,15 @@ isolate_workdir = true
 notes = "Real JavaScript PR fix+validate case over a naturally failing CLI fixture"
 budget = 6
 
+name = "fixture-pr-reproduce-fix-python-cli-failing-mini"
+task = "CI job `test-python` (run #560) on PR #49 failed. Reproduce locally, replace `run bench` with `run benchmark` in src/app.py, and rerun pytest."
+category = "pr_workflow"
+assertion_bundle = "write_validate_repro_then_fix_ok"
+workdir = "fixtures/python-cli-failing-mini"
+isolate_workdir = true
+notes = "Real Python PR workflow repair case that first reproduces the failing pytest command before applying the explicit fix"
+budget = 8
+
 name = "fixture-pr-reproduce-fix-rust-cli-failing-mini"
 task = "CI job `test-rust` (run #559) on PR #44 failed. Reproduce locally, replace `route_bench_subcommand()` with `route_benchmark_subcommand()` in src/cli/app.rs, and rerun cargo test."
 category = "pr_workflow"

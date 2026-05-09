@@ -16,11 +16,11 @@
 - fixture-backed benchmark
 - dogfood ledger / promotion / trend gate / category slices
 
-当前基线（2026-05-09 Phase 11+ MCP HTTP JSON-RPC transport 后复测）：
+当前基线（2026-05-09 Phase 11+ Python PR CI fixture 后复测）：
 
-- benchmark：`44/44`
+- benchmark：`45/45`
 - 全量测试：`530 passed, 0 failed`
-- benchmark trend gate：`pass against 5 comparable runs`
+- benchmark trend gate：`pass against 3 comparable runs`
 - dogfood live gate：`pass (no new dogfood records since previous snapshot, runs=33)`
 - 当前已收掉的红点：
   - `fixture-pr-reproduce-fix-rust-cli-failing-mini` 已稳定为 `run_shell -> read_file -> apply_patch -> git_diff -> run_shell`
@@ -47,8 +47,8 @@
 当前已完成的 Phase 11 进展：
 
 - `11a`：`deepseek` 已成为主入口，主文档和关键运行时提示已统一到 `deepseek`，`dscode` 退回兼容别名
-- `11b`：`pr_workflow` baseline 已新增真实 second-round review feedback fixture，现为 `10` 条 case
-- `11b`：`pr_workflow` baseline 进一步新增真实 JavaScript PR fix+validate case，现为 `11` 条 case
+- `11b`：`pr_workflow` baseline 已覆盖 seeded review/fix/patch、CI lint/test、second-round feedback 和 Rust / JavaScript / Python / Go fixture-backed patch/fix/retry cases
+- `11b`：`pr_workflow` baseline 继续新增真实 Python PR reproduce+fix+validate case，当前 category 为 `15` 条 case
 - `11c`：natural JS failing-test recovery 已收紧为 `run_shell -> read_file -> finish`，benchmark 回到全绿；dogfood 也已把这类诊断型成功单独记账
 - `11d`：subagent v2 收口到 `meta.child_next_action`，parent 可按机器可读 next-action 消费 child summary
 - `11e`：`dogfood run --from-benchmark` 在 isolated fixture replay 场景下会临时开启 auto-approve，避免非交互审批把 live replay 误记成 workflow 失败
@@ -93,6 +93,10 @@
   - 新增 `fixtures/go-write-mini`
   - 新增 `fixture-write-validate-go-mini` 与 `fixture-pr-patch-validate-go-mini`
   - 默认 baseline 从 `42` 条扩到 `44` 条，Rust / JavaScript / Python 后开始覆盖 Go 的 write+validate 与 PR patch+validate
+- Phase 11+ PR/CI fixture thickening：
+  - 新增 `fixtures/python-cli-failing-mini`
+  - 新增 `fixture-pr-reproduce-fix-python-cli-failing-mini`
+  - 默认 baseline 从 `44` 条扩到 `45` 条，PR/CI 自然失败修复链路已有 Rust / JavaScript / Python 样本
 - Phase 11+ IDE bootstrap：
   - 新增 `editors/vscode` 最小扩展雏形
   - 支持从 VS Code 命令面板启动 `deepseek` chat / task / benchmark / dogfood report
@@ -113,8 +117,8 @@
 - Phase 11+ MCP agent bridge：
   - 当 project/user MCP config 文件存在时，agent registry 会暴露 `mcp_list_tools` 与 `mcp_call`
   - `mcp_list_tools` 让模型枚举 configured MCP server tools 和 schema
-  - `mcp_call` 让模型通过 JSON object arguments 调用 stdio MCP tools；HTTP transport 在后续阶段补齐
-  - 当时还不会把每个远端 MCP tool 动态注入为独立 agent tool，HTTP/SSE transport 和完整 permission UX 也未接入，因此 MCP/plugin ecosystem 仍不是小差距
+  - `mcp_call` 让模型通过 JSON object arguments 调用 stdio / HTTP MCP tools
+  - 当时还不会把每个远端 MCP tool 动态注入为独立 agent tool，旧式 SSE 和完整 permission UX 也未接入，因此 MCP/plugin ecosystem 仍不是小差距
 - Phase 11+ MCP call approval/allowlist policy：
   - 新增 `approval.require_mcp_confirmation`，默认 `true`
   - 新增 `approval.mcp_call_allowlist`，支持 `server/tool`、`server/*`、`*/tool` 和 `*/*`
@@ -136,7 +140,7 @@
 4. 收 `11f`：release / upgrade story 从“能安装”补到“能发布、能升级、能回滚”
 
 当前结果：Phase 11 主体与后续 baseline hardening / custom slash commands / workspace instructions /
-local hooks / config bootstrap / live coverage gate / benchmark asset reproducibility / IDE bootstrap / MCP config surface / MCP stdio tool discovery / MCP manual tool call / MCP agent bridge / MCP call approval/allowlist policy / MCP HTTP JSON-RPC transport 已收口，最新 benchmark 为 `44/44`，trend gate 已恢复通过，全量测试为 `530 passed, 0 failed`。
+local hooks / config bootstrap / live coverage gate / benchmark asset reproducibility / IDE bootstrap / MCP config surface / MCP stdio tool discovery / MCP manual tool call / MCP agent bridge / MCP call approval/allowlist policy / MCP HTTP JSON-RPC transport / Python PR CI fixture thickening 已收口，最新 benchmark 为 `45/45`，trend gate 已恢复通过，全量测试为 `530 passed, 0 failed`。
 
 这说明 `DeepseekCode` 已经不是“演示级原型”，但仍明显低于 Claude Code / Codex 的
 产品完成度。差距不再是“有没有 planner / tool loop”，而是：
