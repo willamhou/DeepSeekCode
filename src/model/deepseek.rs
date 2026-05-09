@@ -1893,6 +1893,18 @@ const TOOL_SPECS: &[ToolSpec] = &[
         properties_json: r#"{"task":{"type":"string","description":"Concrete self-contained subtask for the child agent."},"skill":{"type":"string","description":"Optional skill name for the child agent."},"steps":{"type":"string","description":"Optional step budget for the child agent, as a positive integer up to 12."}}"#,
         required_json: r#"["task"]"#,
     },
+    ToolSpec {
+        name: "mcp_list_tools",
+        description: "List tools exposed by configured MCP servers. Use before mcp_call when you need the remote tool schema.",
+        properties_json: r#"{"server":{"type":"string","description":"Optional MCP server name. Omit to list enabled stdio servers."}}"#,
+        required_json: r#"[]"#,
+    },
+    ToolSpec {
+        name: "mcp_call",
+        description: "Call a configured stdio MCP server tool with JSON object arguments.",
+        properties_json: r#"{"server":{"type":"string","description":"MCP server name from the project or user MCP config."},"tool":{"type":"string","description":"Remote MCP tool name to call."},"arguments":{"type":"string","description":"JSON object string containing tool arguments, for example {\"path\":\"README.md\"}."}}"#,
+        required_json: r#"["server","tool"]"#,
+    },
 ];
 
 #[derive(Default, Debug)]
@@ -2683,6 +2695,21 @@ mod tests {
         assert!(tools.contains("\"name\":\"dispatch_subagent\""));
         assert!(tools.contains("\"task\""));
         assert!(tools.contains("\"steps\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_mcp_bridge_tools() {
+        let openai = build_openai_tools(&["mcp_list_tools".to_string(), "mcp_call".to_string()]);
+        assert!(openai.contains("\"name\":\"mcp_list_tools\""));
+        assert!(openai.contains("\"name\":\"mcp_call\""));
+        assert!(openai.contains("\"server\""));
+        assert!(openai.contains("\"arguments\""));
+
+        let anthropic =
+            build_anthropic_tools(&["mcp_list_tools".to_string(), "mcp_call".to_string()]);
+        assert!(anthropic.contains("\"name\":\"mcp_list_tools\""));
+        assert!(anthropic.contains("\"name\":\"mcp_call\""));
+        assert!(anthropic.contains("\"input_schema\""));
     }
 
     fn empty_request_with_todos(todos: Vec<crate::core::todos::Todo>) -> ModelRequest {

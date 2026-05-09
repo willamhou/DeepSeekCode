@@ -81,8 +81,9 @@ hooks.timeout_ms = 5000
 # mcp: MCP server discovery (config validation/listing + stdio tools/list/call)
 # -----------------------------------------------------------------------------
 
-# 当前版本会读取并校验 MCP server 配置，并可手动对 stdio server 执行 tools/list / tools/call。
-# 还不会把 MCP tools 注入 agent tool registry。
+# 当前版本会读取并校验 MCP server 配置，可手动对 stdio server 执行 tools/list / tools/call。
+# 当 project/user MCP config 文件存在时，agent registry 会暴露通用 mcp_list_tools / mcp_call bridge。
+# 还不会把每个远端 MCP tool 动态注入为独立 agent tool。
 # Project/user scope 的同名 server 以 project 为准。
 mcp.enabled = true
 mcp.project_file = ".dscode/mcp.json"

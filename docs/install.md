@@ -173,7 +173,9 @@ deepseek mcp call <server-name> <tool-name> '{"arg":"value"}'
 `deepseek mcp tools` 会按 MCP lifecycle 启动 stdio server，执行 `initialize` / `notifications/initialized` / `tools/list`，并展示返回的 tool name、description 和 input schema。
 `deepseek mcp call` 会显式执行 `tools/call`，参数必须是 JSON object；返回会显示 text content、structuredContent 和 tool-level error flag。
 
-这一版还不会把 MCP tools 注入 agent tool registry；`mcp call` 是人工指定 server/tool/arguments 的调试入口，便于后续接入模型可调用工具。
+当 project/user MCP config 文件存在时，agent 运行时会暴露两个通用 bridge tools：`mcp_list_tools` 和 `mcp_call`。这使模型可以先枚举 MCP server tools，再用 JSON object arguments 调用 stdio MCP tools。
+
+这一版还不会把每个远端 MCP tool 动态注入为独立 agent tool；HTTP/SSE transport 和更细的 MCP 审批策略仍是后续工作。
 
 如果要做一次最小 live 请求验证：
 

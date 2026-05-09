@@ -1726,6 +1726,14 @@
 - 已用临时 stdio fake server 做 smoke，能调用 `echo` tool 并展示返回内容
 - 当前边界仍明确：这还是人工指定 server/tool/arguments 的调试入口；MCP tools 还没有进入 agent tool registry，也没有对应审批/策略模型
 
+**Phase 11+ MCP agent bridge (`main`, 2026-05-09) — 已完成基础版**：
+- 延续 manual `tools/call`，本轮把 MCP 从 CLI 调试入口推进到 agent 可见的 generic bridge
+- 当 project/user MCP config 文件存在时，默认 registry 会暴露：
+  - `mcp_list_tools`：枚举 configured MCP server tools 和 input schema
+  - `mcp_call`：按 server/tool/JSON arguments 调用 stdio MCP tools
+- OpenAI / Anthropic tool schema 都已加入这两个 bridge tools；没有 MCP config 文件时不会暴露，避免无 MCP 项目的默认 prompt 膨胀
+- 当前边界仍明确：远端 MCP tools 还不是动态独立 agent tools；HTTP/SSE transport、细粒度 MCP approval/policy 和更完整的 plugin ecosystem 仍未接入
+
 ## 最近里程碑
 
 - `d9b3ae4` `Initialize project docs`

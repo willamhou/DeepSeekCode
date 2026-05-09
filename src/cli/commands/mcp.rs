@@ -107,21 +107,31 @@ fn doctor(config: &AppConfig) -> AppResult<()> {
 }
 
 fn list_remote_tools(config: &AppConfig, requested_server: Option<&str>) -> AppResult<()> {
+    print!("{}", list_remote_tools_summary(config, requested_server)?);
+    Ok(())
+}
+
+pub(crate) fn list_remote_tools_summary(
+    config: &AppConfig,
+    requested_server: Option<&str>,
+) -> AppResult<String> {
     if !config.mcp.enabled {
-        println!("MCP is disabled by config: mcp.enabled = false");
-        return Ok(());
+        return Ok("MCP is disabled by config: mcp.enabled = false\n".to_string());
     }
 
     let inventory = load_inventory(config)?;
-    print_sources(&inventory);
+    let mut output = String::new();
+    push_sources(&mut output, &inventory);
     let targets = select_tool_targets(&inventory, requested_server)?;
 
     if targets.is_empty() {
-        println!("No enabled MCP servers configured. Run `deepseek mcp list` to inspect config.");
-        return Ok(());
+        output.push_str(
+            "No enabled MCP servers configured. Run `deepseek mcp list` to inspect config.\n",
+        );
+        return Ok(output);
     }
 
-    println!("MCP remote tools:");
+    output.push_str("MCP remote tools:\n");
     for server in targets {
         if server.transport != "stdio" {
             let message = format!(
@@ -131,25 +141,37 @@ fn list_remote_tools(config: &AppConfig, requested_server: Option<&str>) -> AppR
             if requested_server.is_some() {
                 return Err(app_error(message));
             }
-            println!(
+            output.push_str(&format!(
                 "- {} [{}]: skipped ({message})",
                 server.name, server.transport
-            );
+            ));
+            output.push('\n');
             continue;
         }
 
         let tools = list_stdio_tools(server)?;
-        println!("- {} [stdio]: {} tool(s)", server.name, tools.len());
+        output.push_str(&format!(
+            "- {} [stdio]: {} tool(s)\n",
+            server.name,
+            tools.len()
+        ));
         for tool in tools {
             let description = tool.description.as_deref().unwrap_or("-");
-            println!("  - {}: {}", tool.name, compact_inline(description, 140));
+            output.push_str(&format!(
+                "  - {}: {}\n",
+                tool.name,
+                compact_inline(description, 140)
+            ));
             if let Some(input_schema) = tool.input_schema {
-                println!("    schema: {}", compact_inline(&input_schema, 220));
+                output.push_str(&format!(
+                    "    schema: {}\n",
+                    compact_inline(&input_schema, 220)
+                ));
             }
         }
     }
 
-    Ok(())
+    Ok(output)
 }
 
 fn call_remote_tool(
@@ -158,14 +180,27 @@ fn call_remote_tool(
     tool_name: &str,
     arguments_json: Option<&str>,
 ) -> AppResult<()> {
+    print!(
+        "{}",
+        call_remote_tool_summary(config, server_name, tool_name, arguments_json)?
+    );
+    Ok(())
+}
+
+pub(crate) fn call_remote_tool_summary(
+    config: &AppConfig,
+    server_name: &str,
+    tool_name: &str,
+    arguments_json: Option<&str>,
+) -> AppResult<String> {
     if !config.mcp.enabled {
-        println!("MCP is disabled by config: mcp.enabled = false");
-        return Ok(());
+        return Ok("MCP is disabled by config: mcp.enabled = false\n".to_string());
     }
 
     let arguments = parse_call_arguments(arguments_json)?;
     let inventory = load_inventory(config)?;
-    print_sources(&inventory);
+    let mut output = String::new();
+    push_sources(&mut output, &inventory);
     let targets = select_tool_targets(&inventory, Some(server_name))?;
     let server = targets[0];
     if server.transport != "stdio" {
@@ -176,29 +211,31 @@ fn call_remote_tool(
     }
 
     let result = call_stdio_tool(server, tool_name, &arguments)?;
-    println!("MCP tool call:");
-    println!(
+    output.push_str("MCP tool call:\n");
+    output.push_str(&format!(
         "- {}/{} [stdio]: {}",
         server.name,
         tool_name,
         if result.is_error { "tool-error" } else { "ok" }
-    );
+    ));
+    output.push('\n');
     if result.content.is_empty() {
-        println!("  content: -");
+        output.push_str("  content: -\n");
     } else {
-        println!("  content:");
+        output.push_str("  content:\n");
         for item in result.content {
-            println!("  - {}", compact_inline(&item, 260));
+            output.push_str(&format!("  - {}\n", compact_inline(&item, 260)));
         }
     }
     if let Some(structured_content) = result.structured_content {
-        println!(
+        output.push_str(&format!(
             "  structuredContent: {}",
             compact_inline(&structured_content, 260)
-        );
+        ));
+        output.push('\n');
     }
 
-    Ok(())
+    Ok(output)
 }
 
 fn parse_call_arguments(arguments_json: Option<&str>) -> AppResult<BTreeMap<String, JsonValue>> {
@@ -617,12 +654,18 @@ fn compact_inline(value: &str, limit: usize) -> String {
 }
 
 fn print_sources(inventory: &McpInventory) {
-    println!("MCP config sources:");
+    let mut output = String::new();
+    push_sources(&mut output, inventory);
+    print!("{output}");
+}
+
+fn push_sources(output: &mut String, inventory: &McpInventory) {
+    output.push_str("MCP config sources:\n");
     for source in &inventory.sources {
-        println!("- {}: {}", source.scope, source.path.display());
+        output.push_str(&format!("- {}: {}\n", source.scope, source.path.display()));
     }
     if inventory.sources.is_empty() {
-        println!("- none found");
+        output.push_str("- none found\n");
     }
 }
 

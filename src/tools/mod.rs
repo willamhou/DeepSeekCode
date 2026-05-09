@@ -2,6 +2,7 @@ pub mod apply_patch;
 pub mod dispatch_subagent;
 pub mod git_diff;
 pub mod list_files;
+pub mod mcp;
 pub mod read_file;
 pub mod registry;
 pub mod run_shell;

@@ -11,6 +11,7 @@ use crate::tools::apply_patch::ApplyPatchTool;
 use crate::tools::dispatch_subagent::DispatchSubagentTool;
 use crate::tools::git_diff::GitDiffTool;
 use crate::tools::list_files::ListFilesTool;
+use crate::tools::mcp::{McpCallTool, McpListToolsTool};
 use crate::tools::read_file::ReadFileTool;
 use crate::tools::run_shell::{is_safe_shell_command, RunShellTool};
 use crate::tools::search_text::SearchTextTool;
@@ -211,6 +212,8 @@ pub fn default_registry_with_context(
     subagent_depth: usize,
     todos: Rc<RefCell<TodoList>>,
 ) -> ToolRegistry {
+    let expose_mcp_tools = config.mcp.enabled
+        && (config.mcp.project_file_path().exists() || config.mcp.user_file_path().exists());
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(ListFilesTool),
         Box::new(ReadFileTool),
@@ -222,6 +225,14 @@ pub fn default_registry_with_context(
             list: todos.clone(),
         }),
     ];
+    if expose_mcp_tools {
+        tools.push(Box::new(McpListToolsTool {
+            config: config.clone(),
+        }));
+        tools.push(Box::new(McpCallTool {
+            config: config.clone(),
+        }));
+    }
     if subagent_depth < MAX_SUBAGENT_DEPTH {
         tools.push(Box::new(DispatchSubagentTool {
             config,
@@ -246,6 +257,17 @@ mod tests {
             auto_approve_writes: false,
             auto_approve_shell: false,
         }
+    }
+
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "deepseek-registry-{name}-{}-{suffix}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -342,5 +364,45 @@ mod tests {
         assert!(!nested
             .names_for_policy(&ExecutionPolicy::new(&approval, None))
             .contains(&"dispatch_subagent"));
+    }
+
+    #[test]
+    fn default_registry_exposes_mcp_bridge_tools_when_config_exists() {
+        let root = temp_root("mcp");
+        std::fs::create_dir_all(&root).unwrap();
+        let mcp_file = root.join("mcp.json");
+        std::fs::write(
+            &mcp_file,
+            r#"{"mcpServers":{"fake":{"disabled":true,"transport":"stdio"}}}"#,
+        )
+        .unwrap();
+
+        let mut config = AppConfig::default();
+        config.mcp.project_file = mcp_file.display().to_string();
+        config.mcp.user_file = root.join("missing-user.json").display().to_string();
+        let registry =
+            default_registry_with_context(config, 0, Rc::new(RefCell::new(TodoList::default())));
+        let approval = ApprovalConfig::default();
+        let names = registry.names_for_policy(&ExecutionPolicy::new(&approval, None));
+
+        assert!(names.contains(&"mcp_list_tools"));
+        assert!(names.contains(&"mcp_call"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn default_registry_hides_mcp_bridge_tools_without_config_files() {
+        let root = temp_root("mcp-missing");
+        let mut config = AppConfig::default();
+        config.mcp.project_file = root.join("missing-project.json").display().to_string();
+        config.mcp.user_file = root.join("missing-user.json").display().to_string();
+        let registry =
+            default_registry_with_context(config, 0, Rc::new(RefCell::new(TodoList::default())));
+        let approval = ApprovalConfig::default();
+        let names = registry.names_for_policy(&ExecutionPolicy::new(&approval, None));
+
+        assert!(!names.contains(&"mcp_list_tools"));
+        assert!(!names.contains(&"mcp_call"));
     }
 }
