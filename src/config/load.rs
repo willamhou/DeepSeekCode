@@ -97,6 +97,18 @@ fn parse_config(content: &str, config: &mut AppConfig) -> AppResult<()> {
             "approval.require_shell_confirmation" => {
                 config.approval.require_shell_confirmation = parse_bool(value)?
             }
+            "hooks.enabled" => {
+                config.hooks.enabled = parse_bool(value)?;
+            }
+            "hooks.project_dir" => {
+                config.hooks.project_dir = unquote(value);
+            }
+            "hooks.user_dir" => {
+                config.hooks.user_dir = unquote(value);
+            }
+            "hooks.timeout_ms" => {
+                config.hooks.timeout_ms = parse_u64(value)?;
+            }
             "workspace.config_dir" => config.workspace.config_dir = unquote(value),
             "workspace.session_dir" => config.workspace.session_dir = unquote(value),
             "workspace.user_skills_dir" => {
@@ -121,6 +133,13 @@ fn parse_bool(value: &str) -> AppResult<bool> {
         "false" => Ok(false),
         _ => Err(app_error(format!("invalid boolean value: {value}"))),
     }
+}
+
+fn parse_u64(value: &str) -> AppResult<u64> {
+    value
+        .trim_matches('"')
+        .parse::<u64>()
+        .map_err(|_| app_error(format!("invalid integer value: {value}")))
 }
 
 fn unquote(value: &str) -> String {
@@ -160,6 +179,23 @@ mod tests {
         let toml = "workspace.user_instructions_file = \"/custom/AGENTS.md\"\n";
         parse_config(toml, &mut config).unwrap();
         assert_eq!(config.workspace.user_instructions_file, "/custom/AGENTS.md");
+    }
+
+    #[test]
+    fn parse_config_overrides_hooks_from_toml() {
+        let mut config = AppConfig::default();
+        let toml = r#"
+hooks.enabled = true
+hooks.project_dir = ".dscode/custom-hooks"
+hooks.user_dir = "/custom/user-hooks"
+hooks.timeout_ms = 1234
+"#;
+        parse_config(toml, &mut config).unwrap();
+
+        assert!(config.hooks.enabled);
+        assert_eq!(config.hooks.project_dir, ".dscode/custom-hooks");
+        assert_eq!(config.hooks.user_dir, "/custom/user-hooks");
+        assert_eq!(config.hooks.timeout_ms, 1234);
     }
 
     #[test]

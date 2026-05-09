@@ -1640,6 +1640,15 @@
   - 每个文件最多注入 32 KiB，并在系统 prompt 中标出来源路径
 - 这一步把项目规则、构建约定、review/checklist 等长期上下文从“口头重复”移动到可版本化文件，进一步缩小与 Codex/Claude 的基础协作体验差距。
 
+**Phase 11+ local hooks (`main`, 2026-05-09) — 已完成**：
+- 对照 Claude Code / Codex 的 hooks 扩展面，补齐一个保守的本地 hook 机制：
+  - 默认关闭，必须显式配置 `hooks.enabled = true`
+  - 支持 project/user hook dirs：`.dscode/hooks` 与 `~/.config/dscode/hooks`
+  - 支持事件：`user_prompt_submit`、`pre_tool_use`、`post_tool_use`
+  - hook 以可执行脚本形式存在，stdin 接收 JSON payload，环境变量 `DSCODE_HOOK_EVENT` 标注事件
+  - `user_prompt_submit` / `pre_tool_use` 非零退出会阻断 prompt/tool；`post_tool_use` 非零退出作为 advisory observation 返回
+- 这一步不试图复制完整 MCP/plugin 生态，但给团队策略、审计、上下文注入和危险 tool gate 留出了稳定扩展点。
+
 ## 最近里程碑
 
 - `d9b3ae4` `Initialize project docs`

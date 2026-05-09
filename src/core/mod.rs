@@ -1,4 +1,5 @@
 pub mod context;
+pub mod hooks;
 pub mod instructions;
 pub mod loop_runtime;
 pub mod memory;

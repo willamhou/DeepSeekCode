@@ -83,6 +83,31 @@ instructions naturally win when they conflict. Each loaded file is capped at 32 
 Set `workspace.user_instructions_file = ""` in `.dscode/config.toml` to disable user-level
 instructions, or point it at another personal instruction file.
 
+## Hooks
+
+Hooks are local executable scripts for lightweight policy and context injection. They are disabled
+by default; enable them explicitly in `.dscode/config.toml`:
+
+```text
+hooks.enabled = true
+hooks.project_dir = ".dscode/hooks"
+hooks.user_dir = "~/.config/dscode/hooks"
+hooks.timeout_ms = 5000
+```
+
+Supported event directories:
+
+```text
+.dscode/hooks/user_prompt_submit/*
+.dscode/hooks/pre_tool_use/*
+.dscode/hooks/post_tool_use/*
+```
+
+Scripts must be executable. DeepseekCode runs user hooks first, then project hooks, in lexical path
+order. Each script receives a JSON payload on stdin and `DSCODE_HOOK_EVENT` in the environment.
+`user_prompt_submit` and `pre_tool_use` scripts block the turn or tool call when they exit nonzero.
+`post_tool_use` failures are added back as advisory hook observations instead of failing the tool.
+
 ## Cross-turn context
 
 Every user message is appended to the transcript; the LLM receives the

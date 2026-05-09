@@ -103,6 +103,7 @@ impl AgentLoop {
         let cwd = std::env::current_dir()?;
         let workspace_instructions =
             crate::core::instructions::load_workspace_instructions(&cwd, &self.config.workspace)?;
+        let hooks = crate::core::hooks::HookRunner::new(&self.config.hooks);
         let registry = crate::tools::registry::default_registry_with_context(
             self.config.clone(),
             subagent_depth,
@@ -198,6 +199,12 @@ impl AgentLoop {
         }
 
         let mut observations = initial_observations;
+        if let Some(hook_context) = hooks.user_prompt_submit(&context.task)? {
+            observations.push(Observation::ok(
+                "hook",
+                format!("user_prompt_submit: {hook_context}"),
+            ));
+        }
         let mut last_message = String::new();
         let mut tool_events: Vec<ToolEvent> = Vec::new();
         let mut total_usage = crate::model::protocol::TokenUsage::default();
@@ -330,6 +337,39 @@ impl AgentLoop {
                         observations.push(Observation::ok("stuck-warning", warning));
                     }
 
+                    match hooks.pre_tool_use(&context.task, &tool_name, &input) {
+                        Ok(Some(hook_context)) => {
+                            observations.push(Observation::ok(
+                                "hook",
+                                format!("pre_tool_use: {hook_context}"),
+                            ));
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            let raw = error.to_string();
+                            if let Some(renderer) = renderer.as_mut() {
+                                renderer.paint_tool_result(
+                                    crate::ui::stream::ToolResultKind::Denied,
+                                    &tool_name,
+                                    "hook",
+                                    &raw,
+                                );
+                            }
+                            let event_name = tool_name.clone();
+                            observations.push(Observation::failed(
+                                tool_name,
+                                format!("pre_tool_use hook blocked tool: {raw}"),
+                            ));
+                            tool_events.push(ToolEvent {
+                                tool_name: event_name,
+                                input: event_input,
+                                output: raw,
+                                status: crate::model::protocol::ObservationStatus::Failed,
+                            });
+                            continue;
+                        }
+                    }
+
                     match registry.execute_with_policy(&tool_name, input, &policy) {
                         Ok(mut output) => {
                             if tool_name == "dispatch_subagent" {
@@ -378,6 +418,12 @@ impl AgentLoop {
                                 output: output.summary,
                                 status: crate::model::protocol::ObservationStatus::Ok,
                             });
+                            push_post_tool_hook_observation(
+                                &hooks,
+                                &context.task,
+                                &tool_events,
+                                &mut observations,
+                            );
                         }
                         Err(error) => {
                             let kind = ObservationKind::from_tool_name(&tool_name);
@@ -420,6 +466,12 @@ impl AgentLoop {
                                 output: raw,
                                 status: crate::model::protocol::ObservationStatus::Failed,
                             });
+                            push_post_tool_hook_observation(
+                                &hooks,
+                                &context.task,
+                                &tool_events,
+                                &mut observations,
+                            );
                         }
                     }
                 }
@@ -447,6 +499,38 @@ impl AgentLoop {
             tool_events,
             usage: total_usage,
         })
+    }
+}
+
+fn push_post_tool_hook_observation(
+    hooks: &crate::core::hooks::HookRunner,
+    task: &str,
+    tool_events: &[ToolEvent],
+    observations: &mut Vec<Observation>,
+) {
+    let Some(event) = tool_events.last() else {
+        return;
+    };
+    match hooks.post_tool_use(
+        task,
+        &event.tool_name,
+        &event.input,
+        event.status,
+        &event.output,
+    ) {
+        Ok(Some(hook_context)) => {
+            observations.push(Observation::ok(
+                "hook",
+                format!("post_tool_use: {hook_context}"),
+            ));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            observations.push(Observation::failed(
+                "hook",
+                format!("post_tool_use hook failed: {error}"),
+            ));
+        }
     }
 }
 
@@ -2054,6 +2138,89 @@ shell_allowlist = []
                 None,
             ))
         }
+    }
+
+    struct HookBlockingClient {
+        calls: RefCell<usize>,
+    }
+
+    impl ModelClient for HookBlockingClient {
+        fn respond(
+            &self,
+            _input: ModelRequest,
+            _events: &mut dyn StreamEvents,
+        ) -> crate::error::AppResult<(ModelResponse, Option<TokenUsage>)> {
+            let n = *self.calls.borrow();
+            *self.calls.borrow_mut() = n + 1;
+            let action = if n == 0 {
+                ModelAction::CallTool {
+                    tool_name: "list_files".to_string(),
+                    input: ToolInput::new()
+                        .with_arg("root", ".")
+                        .with_arg("max_depth", "1"),
+                }
+            } else {
+                ModelAction::Finish
+            };
+            Ok((
+                ModelResponse {
+                    message: format!("hook step {n}"),
+                    action,
+                },
+                None,
+            ))
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_with_client_blocks_tool_when_pre_tool_hook_denies() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_tmp("pre_tool_hook");
+        let hook_dir = root.join("hooks/pre_tool_use");
+        fs::create_dir_all(&hook_dir).unwrap();
+        let hook_path = hook_dir.join("10-block");
+        fs::write(
+            &hook_path,
+            "#!/bin/sh\nprintf 'blocked by pre hook' >&2\nexit 7\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&hook_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook_path, permissions).unwrap();
+
+        let mut cfg = crate::config::types::AppConfig::default();
+        cfg.hooks.enabled = true;
+        cfg.hooks.project_dir = root.join("hooks").display().to_string();
+        let agent = AgentLoop::new(cfg);
+        let client = HookBlockingClient {
+            calls: RefCell::new(0),
+        };
+
+        let result = agent
+            .run_with_client(
+                TaskContext::new("inspect with hook".to_string(), None),
+                AgentLoopOptions {
+                    steps: 2,
+                    emit_progress: false,
+                    persist_session: false,
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(result.tool_events.len(), 1);
+        let event = &result.tool_events[0];
+        assert_eq!(event.tool_name, "list_files");
+        assert_eq!(
+            event.status,
+            crate::model::protocol::ObservationStatus::Failed
+        );
+        assert!(event.output.contains("blocked by pre hook"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -136,6 +136,11 @@ DEEPSEEK_MODEL=deepseek-coder
 `AGENTS*.md` 时把它们作为 fallback。个人默认指令文件是 `~/.config/dscode/AGENTS.md`，可通过
 `workspace.user_instructions_file` 改路径或设为空字符串禁用。
 
+可选 hooks 需要显式启用，默认关闭，避免 clone 下来的仓库自动执行脚本。启用后可在
+`.dscode/hooks/user_prompt_submit/`、`.dscode/hooks/pre_tool_use/`、`.dscode/hooks/post_tool_use/`
+放置可执行脚本；脚本通过 stdin 接收 JSON payload。`user_prompt_submit` / `pre_tool_use` 非零退出会阻断，
+`post_tool_use` 非零退出只会作为 advisory observation 返回给 agent。
+
 如果要做一次最小 live 请求验证：
 
 ```bash

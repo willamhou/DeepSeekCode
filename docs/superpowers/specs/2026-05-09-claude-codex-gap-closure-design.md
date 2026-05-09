@@ -72,6 +72,12 @@
   - 项目级从 git root 到当前目录逐层读取 `AGENTS.override.md` / `AGENTS.md` / `CLAUDE.md` / `.claude/CLAUDE.md`
   - 每个文件最多注入 32 KiB，并在 system prompt 中标注来源路径
   - 对齐 Codex `AGENTS.md` 与 Claude Code `CLAUDE.md` 的基础项目记忆/团队规则入口
+- Phase 11+ local hooks：
+  - 默认关闭，通过 `hooks.enabled = true` 显式启用
+  - 支持 project/user hook dirs 与 `user_prompt_submit` / `pre_tool_use` / `post_tool_use`
+  - hook scripts 通过 stdin JSON payload 获取上下文
+  - prompt submit / pre-tool hook 可阻断，post-tool hook 只作为 advisory observation
+  - 对齐 Claude Code / Codex hook 扩展面的最小本地策略与审计能力
 
 本轮收口顺序：
 

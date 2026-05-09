@@ -65,6 +65,19 @@ workspace.user_commands_dir = "~/.config/dscode/commands"
 workspace.user_instructions_file = "~/.config/dscode/AGENTS.md"
 
 # -----------------------------------------------------------------------------
+# hooks: optional local extension points
+# -----------------------------------------------------------------------------
+
+# Disabled by default so cloned repositories cannot execute hook scripts implicitly.
+hooks.enabled = false
+
+# Hook scripts live under <dir>/<event>/* and must be executable.
+# Supported events: user_prompt_submit, pre_tool_use, post_tool_use.
+hooks.project_dir = ".dscode/hooks"
+hooks.user_dir = "~/.config/dscode/hooks"
+hooks.timeout_ms = 5000
+
+# -----------------------------------------------------------------------------
 # pr: GitHub PR integration (Phase 8a)
 # -----------------------------------------------------------------------------
 

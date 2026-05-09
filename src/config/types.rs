@@ -3,6 +3,7 @@ pub struct AppConfig {
     pub model: ModelConfig,
     pub approval: ApprovalConfig,
     pub workspace: WorkspaceConfig,
+    pub hooks: HooksConfig,
 }
 
 impl Default for AppConfig {
@@ -11,6 +12,7 @@ impl Default for AppConfig {
             model: ModelConfig::default(),
             approval: ApprovalConfig::default(),
             workspace: WorkspaceConfig::default(),
+            hooks: HooksConfig::default(),
         }
     }
 }
@@ -43,6 +45,25 @@ impl Default for ApprovalConfig {
         Self {
             require_write_confirmation: true,
             require_shell_confirmation: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HooksConfig {
+    pub enabled: bool,
+    pub project_dir: String,
+    pub user_dir: String,
+    pub timeout_ms: u64,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            project_dir: ".dscode/hooks".to_string(),
+            user_dir: "~/.config/dscode/hooks".to_string(),
+            timeout_ms: 5_000,
         }
     }
 }
