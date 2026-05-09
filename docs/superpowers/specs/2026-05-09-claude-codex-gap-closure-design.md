@@ -20,7 +20,7 @@
 
 - benchmark：`48/48`
 - 全量测试：`540 passed, 0 failed`
-- benchmark trend gate：`skipped (need at least 3 prior comparable runs, found 2)`，当前 `48` 条 case 的同数历史还在 warmup
+- benchmark trend gate：`pass against 3 comparable runs`
 - dogfood live gate：`pass (no new dogfood records since previous snapshot, runs=33)`
 - 当前已收掉的红点：
   - `fixture-pr-reproduce-fix-rust-cli-failing-mini` 已稳定为 `run_shell -> read_file -> apply_patch -> git_diff -> run_shell`
@@ -180,7 +180,7 @@
 4. 收 `11f`：release / upgrade story 从“能安装”补到“能发布、能升级、能回滚”
 
 当前结果：Phase 11 主体与后续 baseline hardening / custom slash commands / workspace instructions /
-local hooks / config bootstrap / live coverage gate / benchmark asset reproducibility / IDE bootstrap / VS Code quick actions / VS Code Explorer view / MCP config surface / MCP stdio tool discovery / MCP manual tool call / MCP agent bridge / MCP call approval/allowlist policy / MCP HTTP JSON-RPC transport / MCP legacy SSE transport / opt-in MCP dynamic tool exposure / Python PR CI fixture thickening / Go PR CI reproduce fixture / ambiguous improvement planning guard / product gap planning guard / subagent edited-file handoff / bounded nested subagents 已收口，最新 benchmark 为 `48/48`，全量测试为 `540 passed, 0 failed`。当前 `48` 条 case 的 trend gate 仍在 warmup，live gate 继续通过。
+local hooks / config bootstrap / live coverage gate / benchmark asset reproducibility / IDE bootstrap / VS Code quick actions / VS Code Explorer view / MCP config surface / MCP stdio tool discovery / MCP manual tool call / MCP agent bridge / MCP call approval/allowlist policy / MCP HTTP JSON-RPC transport / MCP legacy SSE transport / opt-in MCP dynamic tool exposure / Python PR CI fixture thickening / Go PR CI reproduce fixture / ambiguous improvement planning guard / product gap planning guard / subagent edited-file handoff / bounded nested subagents 已收口，最新 benchmark 为 `48/48`，全量测试为 `540 passed, 0 failed`，trend gate 已恢复为 `pass against 3 comparable runs`，live gate 继续通过。
 
 这说明 `DeepseekCode` 已经不是“演示级原型”，但仍明显低于 Claude Code / Codex 的
 产品完成度。差距不再是“有没有 planner / tool loop”，而是：

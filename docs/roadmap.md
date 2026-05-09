@@ -1736,7 +1736,7 @@
   - 默认 benchmark：`48/48`
   - total tool calls：`163`
   - failed tool calls：`0`
-  - trend gate：`skipped (need at least 3 prior comparable runs, found 1)`，`48` 条 case 历史仍在 warmup
+  - trend gate：后续已恢复为 `pass against 3 comparable runs`
   - live gate：`pass (no new dogfood records since previous snapshot, runs=33)`
 - 当前边界仍明确：这不是成熟多 agent 调度器；只是从硬单层推进到保守、可控的两层拆分。
 
@@ -1769,7 +1769,7 @@
   - `jq -c . editors/vscode/package.json`
   - 全量测试：`540 passed, 0 failed`
   - 默认 benchmark：`48/48`
-  - trend gate：`skipped (need at least 3 prior comparable runs, found 2)`，`48` 条 case 历史仍在 warmup
+  - trend gate：`pass against 3 comparable runs`
   - live gate：`pass (no new dogfood records since previous snapshot, runs=33)`
 - 当前边界仍明确：这提升 IDE 可发现性，但仍不是完整 agent sidebar / inline diff / diagnostics / chat panel。
 
