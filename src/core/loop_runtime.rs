@@ -1042,6 +1042,12 @@ fn should_use_explicit_planning(
         " end-to-end",
         " investigate",
         " research",
+        "improve",
+        "enhance",
+        "stabilize",
+        "hardening",
+        "optimize",
+        " better",
         " implement",
         " refactor",
         " debug",
@@ -1430,6 +1436,21 @@ mod tests {
             "short task",
             Some(&skill),
             &tools
+        ));
+    }
+
+    #[test]
+    fn explicit_planning_heuristic_triggers_for_ambiguous_improvement_tasks() {
+        let tools = vec!["todo_write".to_string()];
+        assert!(super::should_use_explicit_planning(
+            "improve benchmark reliability",
+            None,
+            &tools,
+        ));
+        assert!(super::should_use_explicit_planning(
+            "make the CLI onboarding better",
+            None,
+            &tools,
         ));
     }
 

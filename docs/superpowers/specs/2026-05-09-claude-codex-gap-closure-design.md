@@ -16,10 +16,10 @@
 - fixture-backed benchmark
 - dogfood ledger / promotion / trend gate / category slices
 
-当前基线（2026-05-09 Phase 11+ Python PR CI fixture 后复测）：
+当前基线（2026-05-09 Phase 11+ ambiguous improvement planning guard 后复测）：
 
-- benchmark：`45/45`
-- 全量测试：`530 passed, 0 failed`
+- benchmark：`46/46`
+- 全量测试：`531 passed, 0 failed`
 - benchmark trend gate：`pass against 3 comparable runs`
 - dogfood live gate：`pass (no new dogfood records since previous snapshot, runs=33)`
 - 当前已收掉的红点：
@@ -97,6 +97,10 @@
   - 新增 `fixtures/python-cli-failing-mini`
   - 新增 `fixture-pr-reproduce-fix-python-cli-failing-mini`
   - 默认 baseline 从 `44` 条扩到 `45` 条，PR/CI 自然失败修复链路已有 Rust / JavaScript / Python 样本
+- Phase 11+ ambiguous improvement planning guard：
+  - explicit planning heuristic 会把短句 `improve` / `enhance` / `stabilize` / `hardening` / `optimize` / `better` 类模糊改进请求纳入 first-turn todo plan
+  - 新增 `plan-ambiguous-improvement` benchmark，覆盖 `improve benchmark reliability` 这类没有路径和明确编辑指令的 open-ended 请求
+  - 默认 baseline 从 `45` 条扩到 `46` 条，planning category 对短模糊任务也有回归样本
 - Phase 11+ IDE bootstrap：
   - 新增 `editors/vscode` 最小扩展雏形
   - 支持从 VS Code 命令面板启动 `deepseek` chat / task / benchmark / dogfood report
@@ -140,7 +144,7 @@
 4. 收 `11f`：release / upgrade story 从“能安装”补到“能发布、能升级、能回滚”
 
 当前结果：Phase 11 主体与后续 baseline hardening / custom slash commands / workspace instructions /
-local hooks / config bootstrap / live coverage gate / benchmark asset reproducibility / IDE bootstrap / MCP config surface / MCP stdio tool discovery / MCP manual tool call / MCP agent bridge / MCP call approval/allowlist policy / MCP HTTP JSON-RPC transport / Python PR CI fixture thickening 已收口，最新 benchmark 为 `45/45`，trend gate 已恢复通过，全量测试为 `530 passed, 0 failed`。
+local hooks / config bootstrap / live coverage gate / benchmark asset reproducibility / IDE bootstrap / MCP config surface / MCP stdio tool discovery / MCP manual tool call / MCP agent bridge / MCP call approval/allowlist policy / MCP HTTP JSON-RPC transport / Python PR CI fixture thickening / ambiguous improvement planning guard 已收口，最新 benchmark 为 `46/46`，trend gate 已恢复通过，全量测试为 `531 passed, 0 failed`。
 
 这说明 `DeepseekCode` 已经不是“演示级原型”，但仍明显低于 Claude Code / Codex 的
 产品完成度。差距不再是“有没有 planner / tool loop”，而是：
@@ -159,8 +163,8 @@ local hooks / config bootstrap / live coverage gate / benchmark asset reproducib
 | REPL / 交互体验 | transcript、slash、session 已有 | 更顺滑的 history、恢复、帮助、默认提示 | 中 |
 | 单仓库本地 coding flow | benchmark 覆盖面已较强 | 默认成功率更高，少漂移、少无效 hops | 中 |
 | 本地扩展 / 策略入口 | custom commands、workspace instructions、local hooks、MCP config + stdio/HTTP tools/list/call + generic agent bridge + bridge 级 MCP 审批/allowlist 已有 | 更完整的 MCP/plugin ecosystem 与团队级扩展面 | 中到大 |
-| open-ended 任务 | 已有 recovery / replan，但依赖 heuristic | 对模糊任务也能稳定收敛 | 大 |
-| PR / CI 工作流 | `pr review/fix/patch` 已有 + baseline | 更厚的真实 PR/CI 样本与稳定端到端闭环 | 大 |
+| open-ended 任务 | 已有 recovery / replan / ambiguous improvement first-turn plan guard，但仍依赖 heuristic | 对模糊任务也能稳定收敛 | 中到大 |
+| PR / CI 工作流 | `pr review/fix/patch` 已有 + `15` 条 fixture baseline | 更厚的真实/外部 PR/CI 样本与稳定端到端闭环 | 中到大 |
 | subagent | 已能 dispatch / merge-back | 更成熟的拆分、归并、去重、收敛 | 大 |
 | live 回归体系 | benchmark + dogfood 已闭环，且有关键 slice 覆盖下限 | 更厚的外部/在线 live baseline，且可阻断回归 | 小到中 |
 | 安装 / 分发 | install guide、version、completion、config init 已有 | 普通用户开箱即装即用 | 小到中 |

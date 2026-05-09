@@ -409,3 +409,12 @@ notes = "Should trigger explicit planning and todo_write without mutating files"
 budget = 6
 max_tool_calls = 2
 max_failed_tools = 0
+
+name = "plan-ambiguous-improvement"
+task = "improve benchmark reliability"
+category = "planning"
+assertion_bundle = "planning_todo_only"
+notes = "Ambiguous improvement requests should trigger a first-turn todo plan before inspect/edit actions"
+budget = 1
+max_tool_calls = 1
+max_failed_tools = 0
