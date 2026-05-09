@@ -2,7 +2,15 @@ const path = require("path");
 const vscode = require("vscode");
 
 function activate(context) {
+  const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  status.text = "$(sparkle) DeepseekCode";
+  status.tooltip = "DeepseekCode actions";
+  status.command = "deepseek.quickAction";
+  status.show();
+
   context.subscriptions.push(
+    status,
+    vscode.commands.registerCommand("deepseek.quickAction", quickAction),
     vscode.commands.registerCommand("deepseek.openChat", openChat),
     vscode.commands.registerCommand("deepseek.runTask", runTask),
     vscode.commands.registerCommand("deepseek.explainSelection", explainSelection),
@@ -48,6 +56,51 @@ function runInTerminal(command) {
   });
   terminal.show(true);
   terminal.sendText(command);
+}
+
+async function quickAction() {
+  const hasSelection = Boolean(
+    vscode.window.activeTextEditor && !vscode.window.activeTextEditor.selection.isEmpty,
+  );
+  const picked = await vscode.window.showQuickPick(
+    [
+      {
+        label: "$(comment-discussion) Open Chat",
+        description: "Start an interactive DeepseekCode session",
+        command: "deepseek.openChat",
+      },
+      {
+        label: "$(terminal) Run Task",
+        description: "Prompt for a task in the current workspace",
+        command: "deepseek.runTask",
+      },
+      {
+        label: "$(symbol-method) Explain Selection",
+        description: hasSelection
+          ? "Send selected code as context"
+          : "Uses the active file path as context",
+        command: "deepseek.explainSelection",
+      },
+      {
+        label: "$(beaker) Run Benchmark",
+        description: "Run the local benchmark suite",
+        command: "deepseek.runBenchmark",
+      },
+      {
+        label: "$(graph) Show Dogfood Report",
+        description: "Show recent dogfood runs",
+        command: "deepseek.showDogfoodReport",
+      },
+    ],
+    {
+      title: "DeepseekCode",
+      placeHolder: workspaceCwd() || "No workspace folder open",
+      ignoreFocusOut: true,
+    },
+  );
+  if (picked) {
+    await vscode.commands.executeCommand(picked.command);
+  }
 }
 
 async function openChat() {
@@ -138,4 +191,5 @@ function shellQuote(value) {
 module.exports = {
   activate,
   deactivate,
+  shellQuote,
 };

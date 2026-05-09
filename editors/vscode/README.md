@@ -1,9 +1,12 @@
 # DeepseekCode VS Code Extension
 
-Minimal VS Code entrypoint for the `deepseek` CLI.
+VS Code entrypoint for the `deepseek` CLI.
+
+The extension adds a `DeepseekCode` status bar action, editor title action, command palette commands, and editor context menu entries for common workflows.
 
 ## Commands
 
+- `DeepseekCode: Quick Action` opens a quick-pick menu for common workflows
 - `DeepseekCode: Open Chat` launches `deepseek`
 - `DeepseekCode: Run Task` prompts for a task and runs `deepseek run`
 - `DeepseekCode: Explain Selection` sends the active file and selected text as task context

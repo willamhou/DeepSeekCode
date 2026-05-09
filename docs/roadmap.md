@@ -1704,6 +1704,14 @@
 - extension 只负责把当前 workspace、当前文件路径和可选 selection 组织成 `deepseek` CLI 命令并在 VS Code terminal 中运行
 - 这一步没有引入 npm dependency，也不声明已具备完整 IDE agent 体验；它只是把 IDE gap 从“几乎没有”推进到“有可试用入口”
 
+**Phase 11+ VS Code quick actions (`main`, 2026-05-09) — 已完成基础版**：
+- 延续最小 VS Code extension，本轮把入口从“隐藏在命令面板里”推进到更可发现：
+  - 新增状态栏 `DeepseekCode` action
+  - 新增 `DeepseekCode: Quick Action` quick-pick，集中启动 chat / task / selection explain / benchmark / dogfood report
+  - 新增 editor title 和 editor context menu 入口，选中文本时可直接 explain selection
+  - extension manifest 为命令补齐 product icons，并保持无外部 npm dependency
+- 当前边界仍明确：这仍是 terminal-backed launcher，不是完整 IDE agent sidebar / inline diff / diagnostics / chat panel；IDE/app/cloud surface 仍不是小差距
+
 **Phase 11+ MCP config surface (`main`, 2026-05-09) — 已完成基础版**：
 - 二次差距审计里 MCP/plugin ecosystem 仍是大差距；本轮先补最小可验证配置面，而不是一次性实现完整 MCP transport
 - 新增 `deepseek mcp`：
