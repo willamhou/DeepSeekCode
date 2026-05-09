@@ -83,6 +83,7 @@ impl DeepSeekClient {
                 "\"stream\":true,",
                 "\"stream_options\":{{\"include_usage\":true}},",
                 "\"tool_choice\":\"auto\",",
+                "\"parallel_tool_calls\":false,",
                 "\"tools\":{},",
                 "\"messages\":[",
                 "{{\"role\":\"system\",\"content\":\"{}\"}},",
@@ -725,6 +726,9 @@ fn build_user_prompt(input: &ModelRequest) -> String {
         "Available tools: {}\n",
         input.available_tools.join(", ")
     ));
+    if let Some(next_action) = next_required_action_for_prompt(input) {
+        prompt.push_str(&format!("Next required action: {next_action}\n"));
+    }
     if !input.todos.is_empty() {
         prompt.push_str("Todos:\n");
         prompt.push_str(&render_todos_for_prompt(&input.todos));
@@ -775,6 +779,33 @@ fn build_user_prompt(input: &ModelRequest) -> String {
         }
     }
     prompt
+}
+
+fn next_required_action_for_prompt(input: &ModelRequest) -> Option<String> {
+    let command = input.suggested_test_command.as_deref()?;
+    if !input.available_tools.iter().any(|tool| tool == "run_shell") {
+        return None;
+    }
+
+    let last_patch_index = input.observations.iter().rposition(|observation| {
+        observation.tool_name == "apply_patch" && !observation.is_failure()
+    })?;
+    let shell_after_patch = input.observations[last_patch_index + 1..]
+        .iter()
+        .find(|observation| observation.tool_name == "run_shell");
+
+    match shell_after_patch {
+        Some(observation)
+            if observation.summary.contains("meta.command_kind=test")
+                && observation.summary.contains("meta.result=ok") =>
+        {
+            Some("validation already passed; finish with a concise summary and do not call more tools".to_string())
+        }
+        Some(_) => None,
+        None => Some(format!(
+            "call run_shell with command `{command}` now; do not call read_file or git_diff before validation"
+        )),
+    }
 }
 
 fn render_todos_for_prompt(todos: &[crate::core::todos::Todo]) -> String {
@@ -1924,15 +1955,13 @@ fn parse_openai_stream_inner<R: BufRead>(
                         let Some(call_obj) = json_as_object(call) else {
                             continue;
                         };
-                        // OpenAI streams tool calls indexed by `index`. We support exactly one
-                        // tool call per turn; any other distinct index is an error.
+                        // OpenAI streams tool calls indexed by `index`. The loop executes one
+                        // tool call per turn; if a gateway ignores `parallel_tool_calls:false`,
+                        // keep the first call and let the next turn continue from its result.
                         let observed_index = call_obj.get("index").and_then(json_as_u64);
                         match (tool_assembly.as_mut(), observed_index) {
                             (Some(existing), Some(idx)) if existing.index != idx => {
-                                return Err(tool_failure(format!(
-                                    "openai stream emitted multiple parallel tool calls (indices {} and {}); only one is supported per turn",
-                                    existing.index, idx
-                                )));
+                                continue;
                             }
                             (Some(_), _) => {}
                             (None, _) => {
@@ -2660,6 +2689,46 @@ mod tests {
     }
 
     #[test]
+    fn build_user_prompt_requires_validation_after_successful_patch() {
+        let mut req = empty_request_with_todos(Vec::new());
+        req.suggested_test_command = Some("cargo test".to_string());
+        req.available_tools = vec!["run_shell".to_string(), "read_file".to_string()];
+        req.observations = vec![
+            Observation::ok(
+                "apply_patch",
+                "Updated src/lib.rs using single replacement mode.",
+            ),
+            Observation::ok("read_file", "1 pub fn add(a: i32, b: i32) -> i32 {"),
+        ];
+        let prompt = super::build_user_prompt(&req);
+        assert!(
+            prompt.contains("Next required action: call run_shell with command `cargo test` now")
+        );
+        assert!(prompt.contains("do not call read_file or git_diff before validation"));
+    }
+
+    #[test]
+    fn build_user_prompt_requires_finish_after_successful_validation() {
+        let mut req = empty_request_with_todos(Vec::new());
+        req.suggested_test_command = Some("cargo test".to_string());
+        req.available_tools = vec!["run_shell".to_string(), "read_file".to_string()];
+        req.observations = vec![
+            Observation::ok(
+                "apply_patch",
+                "Updated src/lib.rs using single replacement mode.",
+            ),
+            Observation::ok(
+                "run_shell",
+                "meta.command_kind=test\nmeta.exit_code=0\nmeta.result=ok\nexit_code: 0",
+            ),
+        ];
+        let prompt = super::build_user_prompt(&req);
+        assert!(prompt.contains(
+            "Next required action: validation already passed; finish with a concise summary"
+        ));
+    }
+
+    #[test]
     fn build_user_prompt_renders_recent_steps_block_when_present() {
         let mut req = empty_request_with_todos(Vec::new());
         req.recent_steps = vec![
@@ -2754,12 +2823,18 @@ mod tests {
         // still trips a follow-up safety check below.
         let source = include_str!("deepseek.rs");
         let openai_lit = r#""\"tool_choice\":\"auto\","#;
+        let openai_parallel_lit = r#""\"parallel_tool_calls\":false,"#;
         let anthropic_lit = r#""\"tool_choice\":{{\"type\":\"auto\"}},"#;
         let openai_count = source.matches(openai_lit).count();
+        let openai_parallel_count = source.matches(openai_parallel_lit).count();
         let anthropic_count = source.matches(anthropic_lit).count();
         assert!(
             openai_count >= 2,
             "OpenAI body must include tool_choice auto (count={openai_count})"
+        );
+        assert!(
+            openai_parallel_count >= 2,
+            "OpenAI body must disable parallel tool calls (count={openai_parallel_count})"
         );
         assert!(
             anthropic_count >= 2,
@@ -4972,8 +5047,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_openai_stream_errors_on_parallel_tool_calls() {
-        // Two tool calls at distinct indices in the same stream — must error loudly.
+    fn parse_openai_stream_keeps_first_parallel_tool_call() {
+        // Some OpenAI-compatible gateways may ignore `parallel_tool_calls:false`.
+        // Execute the first call and ignore later same-turn calls so the loop can
+        // continue serially on the next model turn.
         let body = concat!(
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a.rs\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"b\",\"type\":\"function\",\"function\":{\"name\":\"git_diff\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
@@ -4982,13 +5059,14 @@ mod tests {
         );
         let mut cur = Cursor::new(body.as_bytes().to_vec());
         let mut events = NoopStreamEvents;
-        let result = super::parse_openai_stream(&mut cur, &mut events);
-        let err = result.unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("multiple parallel tool calls"),
-            "unexpected error: {msg}"
-        );
+        let (resp, _usage) = super::parse_openai_stream(&mut cur, &mut events).unwrap();
+        match resp.action {
+            super::ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "read_file");
+                assert_eq!(input.get("path"), Some("a.rs"));
+            }
+            _ => panic!("expected first tool call to be used"),
+        }
     }
 
     #[test]
