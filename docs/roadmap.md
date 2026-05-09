@@ -1738,7 +1738,7 @@
   - `mcp_list_tools`：枚举 configured MCP server tools 和 input schema
   - `mcp_call`：按 server/tool/JSON arguments 调用 stdio MCP tools
 - OpenAI / Anthropic tool schema 都已加入这两个 bridge tools；没有 MCP config 文件时不会暴露，避免无 MCP 项目的默认 prompt 膨胀
-- 当前边界仍明确：远端 MCP tools 还不是动态独立 agent tools；HTTP/SSE transport、更完整的 MCP permission UX 和 plugin ecosystem 仍未接入
+- 当时边界明确：远端 MCP tools 还不是动态独立 agent tools；HTTP transport、完整 MCP permission UX 和 plugin ecosystem 仍未接入
 
 **Phase 11+ MCP call approval/allowlist policy (`main`, 2026-05-09) — 已完成基础版**：
 - 延续 MCP agent bridge，本轮把远端 tool 调用接回现有 approval/policy 入口：
@@ -1748,7 +1748,16 @@
   - agent 通过 `mcp_call` 调用远端 MCP tool 前会确认 `server/tool`
 - `mcp_list_tools` 仍保持只读发现能力，不要求确认
 - 用户直接执行的 `deepseek mcp call <server> <tool> [json-args]` 不走该 prompt，因为它已经是显式 CLI 命令意图
-- 当前边界仍明确：这只是 MCP bridge 级别的安全闸；还没有把每个远端 MCP tool 动态注入为独立 agent tool，也没有 HTTP/SSE runtime 或更完整的 permission UX
+- 当时边界明确：这只是 MCP bridge 级别的安全闸；还没有把每个远端 MCP tool 动态注入为独立 agent tool，也没有 HTTP/SSE runtime 或更完整的 permission UX
+
+**Phase 11+ MCP HTTP JSON-RPC transport (`main`, 2026-05-09) — 已完成基础版**：
+- 延续 MCP bridge 与 policy，本轮把已能被配置识别的 `http` / `streamable-http` server 推进到可实际调用：
+  - `deepseek mcp tools [server]` 可对 HTTP MCP endpoint 执行 `initialize` / `notifications/initialized` / `tools/list`
+  - `deepseek mcp call <server> <tool> [json-args]` 可通过 HTTP JSON-RPC POST 执行 `tools/call`
+  - 会续传服务端返回的 `Mcp-Session-Id`
+  - HTTP response 如果是 `text/event-stream` 形态，会读取 `data:` 中的 JSON-RPC response
+- agent bridge 的 `mcp_list_tools` / `mcp_call` 复用同一 summary 函数，因此 HTTP MCP server 也进入 agent 可用路径，并继续受 confirmation / allowlist 保护
+- 当前边界仍明确：旧式 `sse` transport 还没有实现；远端 MCP tools 还不是动态独立 agent tools，permission UX 也仍是 bridge 级别
 
 ## 最近里程碑
 

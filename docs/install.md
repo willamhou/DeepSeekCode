@@ -145,7 +145,7 @@ DEEPSEEK_MODEL=deepseek-coder
 放置可执行脚本；脚本通过 stdin 接收 JSON payload。`user_prompt_submit` / `pre_tool_use` 非零退出会阻断，
 `post_tool_use` 非零退出只会作为 advisory observation 返回给 agent。
 
-MCP server 配置可放在项目级 `.dscode/mcp.json` 或用户级 `~/.config/dscode/mcp.json`。当前版本支持配置发现、校验，以及 stdio server 的手动 tool discovery / invocation：
+MCP server 配置可放在项目级 `.dscode/mcp.json` 或用户级 `~/.config/dscode/mcp.json`。当前版本支持配置发现、校验，以及 stdio / HTTP server 的手动 tool discovery / invocation：
 
 ```bash
 deepseek mcp init
@@ -170,14 +170,14 @@ deepseek mcp call <server-name> <tool-name> '{"arg":"value"}'
 }
 ```
 
-`deepseek mcp tools` 会按 MCP lifecycle 启动 stdio server，执行 `initialize` / `notifications/initialized` / `tools/list`，并展示返回的 tool name、description 和 input schema。
-`deepseek mcp call` 会显式执行 `tools/call`，参数必须是 JSON object；返回会显示 text content、structuredContent 和 tool-level error flag。
+`deepseek mcp tools` 会按 MCP lifecycle 对 stdio server 或 HTTP MCP endpoint 执行 `initialize` / `notifications/initialized` / `tools/list`，并展示返回的 tool name、description 和 input schema。
+`deepseek mcp call` 会显式执行 `tools/call`，参数必须是 JSON object；返回会显示 text content、structuredContent 和 tool-level error flag。HTTP transport 通过 JSON-RPC POST 调用，并会续传服务端返回的 `Mcp-Session-Id`。
 
-当 project/user MCP config 文件存在时，agent 运行时会暴露两个通用 bridge tools：`mcp_list_tools` 和 `mcp_call`。这使模型可以先枚举 MCP server tools，再用 JSON object arguments 调用 stdio MCP tools。
+当 project/user MCP config 文件存在时，agent 运行时会暴露两个通用 bridge tools：`mcp_list_tools` 和 `mcp_call`。这使模型可以先枚举 MCP server tools，再用 JSON object arguments 调用 stdio / HTTP MCP tools。
 
 agent 侧的 `mcp_call` 默认受 `approval.require_mcp_confirmation = true` 保护；非交互运行可用 `DSCODE_AUTO_APPROVE_MCP=1` 放行。还可以用 `approval.mcp_call_allowlist = ["server/tool", "server/*", "*/tool"]` 限制 agent 能调用的远端 MCP tool；空数组表示不限制。`mcp_list_tools` 只是只读发现，不要求确认；用户显式执行的 `deepseek mcp call ...` 也不会再次弹出 agent 审批。
 
-这一版还不会把每个远端 MCP tool 动态注入为独立 agent tool；HTTP/SSE transport 和更完整的 MCP permission UX 仍是后续工作。
+这一版还不会把每个远端 MCP tool 动态注入为独立 agent tool；旧式 SSE 双通道 transport 和更完整的 MCP permission UX 仍是后续工作。
 
 如果要做一次最小 live 请求验证：
 

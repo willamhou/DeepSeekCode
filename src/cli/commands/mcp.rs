@@ -133,9 +133,9 @@ pub(crate) fn list_remote_tools_summary(
 
     output.push_str("MCP remote tools:\n");
     for server in targets {
-        if server.transport != "stdio" {
+        if !matches!(server.transport.as_str(), "stdio" | "http") {
             let message = format!(
-                "mcp tools currently supports stdio servers only; `{}` uses {}",
+                "mcp tools currently supports stdio/http servers only; `{}` uses {}",
                 server.name, server.transport
             );
             if requested_server.is_some() {
@@ -149,10 +149,15 @@ pub(crate) fn list_remote_tools_summary(
             continue;
         }
 
-        let tools = list_stdio_tools(server)?;
+        let tools = match server.transport.as_str() {
+            "stdio" => list_stdio_tools(server)?,
+            "http" => list_http_tools(server)?,
+            _ => unreachable!("transport checked above"),
+        };
         output.push_str(&format!(
-            "- {} [stdio]: {} tool(s)\n",
+            "- {} [{}]: {} tool(s)\n",
             server.name,
+            server.transport,
             tools.len()
         ));
         for tool in tools {
@@ -203,19 +208,24 @@ pub(crate) fn call_remote_tool_summary(
     push_sources(&mut output, &inventory);
     let targets = select_tool_targets(&inventory, Some(server_name))?;
     let server = targets[0];
-    if server.transport != "stdio" {
+    if !matches!(server.transport.as_str(), "stdio" | "http") {
         return Err(app_error(format!(
-            "mcp call currently supports stdio servers only; `{}` uses {}",
+            "mcp call currently supports stdio/http servers only; `{}` uses {}",
             server.name, server.transport
         )));
     }
 
-    let result = call_stdio_tool(server, tool_name, &arguments)?;
+    let result = match server.transport.as_str() {
+        "stdio" => call_stdio_tool(server, tool_name, &arguments)?,
+        "http" => call_http_tool(server, tool_name, &arguments)?,
+        _ => unreachable!("transport checked above"),
+    };
     output.push_str("MCP tool call:\n");
     output.push_str(&format!(
-        "- {}/{} [stdio]: {}",
+        "- {}/{} [{}]: {}",
         server.name,
         tool_name,
+        server.transport,
         if result.is_error { "tool-error" } else { "ok" }
     ));
     output.push('\n');
@@ -336,6 +346,167 @@ fn call_stdio_tool(
     let _ = child.kill();
     let _ = child.wait();
     result
+}
+
+fn list_http_tools(server: &McpServer) -> AppResult<Vec<McpRemoteTool>> {
+    let mut session_id = None::<String>;
+    let initialize = post_http_json_rpc(server, &build_initialize_request(1), None)?;
+    if let Some(value) = initialize.session_id {
+        session_id = Some(value);
+    }
+    parse_http_json_rpc_response(&initialize.body, 1).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` initialize failed: {error}",
+            server.name
+        ))
+    })?;
+    let _ = post_http_json_rpc(
+        server,
+        build_initialized_notification(),
+        session_id.as_deref(),
+    )?;
+
+    let mut request_id = 2u64;
+    let mut cursor: Option<String> = None;
+    let mut tools = Vec::new();
+    loop {
+        let response = post_http_json_rpc(
+            server,
+            &build_tools_list_request(request_id, cursor.as_deref()),
+            session_id.as_deref(),
+        )?;
+        if let Some(value) = response.session_id {
+            session_id = Some(value);
+        }
+        let root = parse_http_json_rpc_response(&response.body, request_id).map_err(|error| {
+            app_error(format!(
+                "MCP server `{}` tools/list failed: {error}",
+                server.name
+            ))
+        })?;
+        let (mut page_tools, next_cursor) = parse_tools_list_result(&root)?;
+        tools.append(&mut page_tools);
+        let Some(next_cursor) = next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+        request_id += 1;
+    }
+
+    Ok(tools)
+}
+
+fn call_http_tool(
+    server: &McpServer,
+    tool_name: &str,
+    arguments: &BTreeMap<String, JsonValue>,
+) -> AppResult<McpToolCallResult> {
+    let mut session_id = None::<String>;
+    let initialize = post_http_json_rpc(server, &build_initialize_request(1), None)?;
+    if let Some(value) = initialize.session_id {
+        session_id = Some(value);
+    }
+    parse_http_json_rpc_response(&initialize.body, 1).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` initialize failed: {error}",
+            server.name
+        ))
+    })?;
+    let _ = post_http_json_rpc(
+        server,
+        build_initialized_notification(),
+        session_id.as_deref(),
+    )?;
+    let response = post_http_json_rpc(
+        server,
+        &build_tools_call_request(2, tool_name, arguments),
+        session_id.as_deref(),
+    )?;
+    let root = parse_http_json_rpc_response(&response.body, 2).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` tools/call failed: {error}",
+            server.name
+        ))
+    })?;
+    parse_tool_call_result(&root)
+}
+
+#[derive(Debug)]
+struct HttpJsonRpcResponse {
+    body: String,
+    session_id: Option<String>,
+}
+
+fn post_http_json_rpc(
+    server: &McpServer,
+    body: &str,
+    session_id: Option<&str>,
+) -> AppResult<HttpJsonRpcResponse> {
+    let url = server
+        .url
+        .as_deref()
+        .ok_or_else(|| app_error(format!("http MCP server `{}` has no url", server.name)))?;
+    let mut args = vec![
+        "-sS".to_string(),
+        "--include".to_string(),
+        "--max-time".to_string(),
+        MCP_RESPONSE_TIMEOUT.as_secs().to_string(),
+        "-X".to_string(),
+        "POST".to_string(),
+        "-H".to_string(),
+        "Content-Type: application/json".to_string(),
+        "-H".to_string(),
+        "Accept: application/json, text/event-stream".to_string(),
+        "-H".to_string(),
+        format!("MCP-Protocol-Version: {MCP_PROTOCOL_VERSION}"),
+    ];
+    if let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) {
+        args.push("-H".to_string());
+        args.push(format!("Mcp-Session-Id: {session_id}"));
+    }
+    for (key, value) in &server.headers {
+        args.push("-H".to_string());
+        args.push(format!("{key}: {value}"));
+    }
+    args.extend([
+        "--data-binary".to_string(),
+        body.to_string(),
+        "-w".to_string(),
+        "\n__DSCODE_HTTP_STATUS:%{http_code}".to_string(),
+        url.to_string(),
+    ]);
+
+    let output = Command::new("curl").args(&args).output().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            app_error("curl not found in PATH; install curl to use HTTP MCP servers")
+        } else {
+            app_error(format!(
+                "failed to invoke curl for HTTP MCP server `{}`: {error}",
+                server.name
+            ))
+        }
+    })?;
+    if !output.status.success() {
+        return Err(app_error(format!(
+            "curl failed for HTTP MCP server `{}`: {}",
+            server.name,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let (raw_response, status) = split_http_status(&stdout)?;
+    if !(200..=299).contains(&status) {
+        return Err(app_error(format!(
+            "HTTP MCP server `{}` returned status {status}: {}",
+            server.name,
+            compact_inline(raw_response.trim(), 220)
+        )));
+    }
+    let (headers, response_body) = split_http_headers_body(raw_response);
+    Ok(HttpJsonRpcResponse {
+        body: response_body.to_string(),
+        session_id: extract_http_header(headers, "mcp-session-id"),
+    })
 }
 
 fn run_stdio_call_session(
@@ -502,6 +673,103 @@ fn read_json_rpc_response(
         }
         return Ok(root);
     }
+}
+
+fn parse_http_json_rpc_response(
+    body: &str,
+    expected_id: u64,
+) -> AppResult<BTreeMap<String, JsonValue>> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err(app_error(format!(
+            "HTTP response body missing JSON-RPC response id {expected_id}"
+        )));
+    }
+
+    if let Ok(root) = parse_root_object(body) {
+        return validate_json_rpc_response(root, expected_id);
+    }
+
+    for line in body.lines() {
+        let line = line.trim();
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let root = parse_root_object(data).map_err(|error| {
+            app_error(format!(
+                "HTTP MCP server returned invalid SSE JSON-RPC data `{}`: {error}",
+                compact_inline(data, 160)
+            ))
+        })?;
+        if response_id_matches(&root, expected_id) {
+            return validate_json_rpc_response(root, expected_id);
+        }
+    }
+
+    Err(app_error(format!(
+        "HTTP response did not contain JSON-RPC response id {expected_id}"
+    )))
+}
+
+fn validate_json_rpc_response(
+    root: BTreeMap<String, JsonValue>,
+    expected_id: u64,
+) -> AppResult<BTreeMap<String, JsonValue>> {
+    if !response_id_matches(&root, expected_id) {
+        return Err(app_error(format!(
+            "JSON-RPC response id did not match expected id {expected_id}"
+        )));
+    }
+    if let Some(error) = root.get("error") {
+        return Err(app_error(format!(
+            "JSON-RPC error for id {expected_id}: {}",
+            describe_json_rpc_error(error)
+        )));
+    }
+    if !root.contains_key("result") {
+        return Err(app_error(format!(
+            "JSON-RPC response id {expected_id} missing `result`"
+        )));
+    }
+    Ok(root)
+}
+
+fn split_http_status(stdout: &str) -> AppResult<(&str, u16)> {
+    let Some((raw_response, status)) = stdout.rsplit_once("\n__DSCODE_HTTP_STATUS:") else {
+        return Err(app_error("HTTP MCP response missing curl status footer"));
+    };
+    let status = status
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| app_error(format!("invalid HTTP MCP status: {status}")))?;
+    Ok((raw_response, status))
+}
+
+fn split_http_headers_body(raw_response: &str) -> (&str, &str) {
+    if let Some(index) = raw_response.rfind("\r\n\r\n") {
+        return (&raw_response[..index], &raw_response[index + 4..]);
+    }
+    if let Some(index) = raw_response.rfind("\n\n") {
+        return (&raw_response[..index], &raw_response[index + 2..]);
+    }
+    ("", raw_response)
+}
+
+fn extract_http_header(headers: &str, name: &str) -> Option<String> {
+    headers.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        if key.trim().eq_ignore_ascii_case(name) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+        None
+    })
 }
 
 fn response_id_matches(root: &BTreeMap<String, JsonValue>, expected_id: u64) -> bool {
@@ -946,6 +1214,9 @@ struct McpToolCallResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::JoinHandle;
 
     fn temp_root(name: &str) -> PathBuf {
         let suffix = std::time::SystemTime::now()
@@ -956,6 +1227,112 @@ mod tests {
             "deepseek-mcp-{name}-{}-{suffix}",
             std::process::id()
         ))
+    }
+
+    fn config_with_mcp_server(root: &Path, server_json: &str) -> AppConfig {
+        std::fs::create_dir_all(root).unwrap();
+        let mcp_file = root.join("mcp.json");
+        std::fs::write(
+            &mcp_file,
+            format!(r#"{{"mcpServers":{{"remote":{server_json}}}}}"#),
+        )
+        .unwrap();
+        let mut config = AppConfig::default();
+        config.mcp.project_file = mcp_file.display().to_string();
+        config.mcp.user_file = root.join("missing-user.json").display().to_string();
+        config
+    }
+
+    fn start_fake_http_mcp(
+        final_method: &'static str,
+        final_response: &'static str,
+    ) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            for step in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_http_request(&mut stream);
+                let lower = request.to_ascii_lowercase();
+                if step > 0 {
+                    assert!(lower.contains("mcp-session-id: session-1"));
+                }
+                match step {
+                    0 => {
+                        assert!(request.contains(r#""method":"initialize""#));
+                        write_http_response(
+                            &mut stream,
+                            200,
+                            &[("Mcp-Session-Id", "session-1")],
+                            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"}}}"#,
+                        );
+                    }
+                    1 => {
+                        assert!(request.contains(r#""method":"notifications/initialized""#));
+                        write_http_response(&mut stream, 202, &[], "");
+                    }
+                    _ => {
+                        assert!(request.contains(&format!(r#""method":"{final_method}""#)));
+                        write_http_response(&mut stream, 200, &[], final_response);
+                    }
+                }
+            }
+        });
+        (url, handle)
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 512];
+        loop {
+            let read = stream.read(&mut chunk).unwrap();
+            assert!(read > 0, "connection closed before request completed");
+            buffer.extend_from_slice(&chunk[..read]);
+            if let Some(header_end) = find_header_end(&buffer) {
+                let headers = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.trim()
+                            .eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if buffer.len() >= header_end + 4 + content_length {
+                    return String::from_utf8_lossy(&buffer).into_owned();
+                }
+            }
+        }
+    }
+
+    fn find_header_end(buffer: &[u8]) -> Option<usize> {
+        buffer.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    fn write_http_response(
+        stream: &mut TcpStream,
+        status: u16,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) {
+        let reason = match status {
+            200 => "OK",
+            202 => "Accepted",
+            _ => "Error",
+        };
+        let mut response = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        );
+        for (key, value) in headers {
+            response.push_str(&format!("{key}: {value}\r\n"));
+        }
+        response.push_str("\r\n");
+        response.push_str(body);
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.flush().unwrap();
     }
 
     #[test]
@@ -1116,6 +1493,55 @@ mod tests {
             result.structured_content.as_deref(),
             Some(r#"{"code":"ENOENT"}"#)
         );
+    }
+
+    #[test]
+    fn list_remote_tools_summary_supports_http_transport() {
+        let (url, handle) = start_fake_http_mcp(
+            "tools/list",
+            r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo input","inputSchema":{"type":"object"}}]}}"#,
+        );
+        let root = temp_root("http-tools");
+        let config =
+            config_with_mcp_server(&root, &format!(r#"{{"transport":"http","url":"{url}"}}"#));
+
+        let summary = list_remote_tools_summary(&config, Some("remote")).unwrap();
+        assert!(summary.contains("- remote [http]: 1 tool(s)"));
+        assert!(summary.contains("echo"));
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn call_remote_tool_summary_supports_http_transport() {
+        let (url, handle) = start_fake_http_mcp(
+            "tools/call",
+            r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"echo: hello"}],"structuredContent":{"ok":true},"isError":false}}"#,
+        );
+        let root = temp_root("http-call");
+        let config =
+            config_with_mcp_server(&root, &format!(r#"{{"transport":"http","url":"{url}"}}"#));
+
+        let summary =
+            call_remote_tool_summary(&config, "remote", "echo", Some(r#"{"text":"hello"}"#))
+                .unwrap();
+        assert!(summary.contains("- remote/echo [http]: ok"));
+        assert!(summary.contains("echo: hello"));
+        assert!(summary.contains(r#"structuredContent: {"ok":true}"#));
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn parse_http_json_rpc_response_reads_sse_data_lines() {
+        let body = r#"event: message
+data: {"jsonrpc":"2.0","id":2,"result":{"tools":[]}}
+
+"#;
+        let root = parse_http_json_rpc_response(body, 2).unwrap();
+        assert!(root.contains_key("result"));
     }
 
     #[test]
