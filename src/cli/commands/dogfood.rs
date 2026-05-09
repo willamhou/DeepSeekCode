@@ -521,13 +521,20 @@ impl DogfoodRecord {
         let recovered_validation_success = args.outcome.is_none()
             && (is_recovered_validation_success(&result.tool_events)
                 || is_successful_write_validation_result(&result.tool_events));
+        let empty_no_tool_response = args.outcome.is_none()
+            && result.tool_events.is_empty()
+            && is_empty_model_response(&result.final_message);
         let outcome = args.outcome.unwrap_or_else(|| {
-            derive_default_outcome(
-                failed_tool_calls,
-                repeated_call_failures,
-                diagnostic_expected_failure,
-                recovered_validation_success,
-            )
+            if empty_no_tool_response {
+                DogfoodOutcome::Failed
+            } else {
+                derive_default_outcome(
+                    failed_tool_calls,
+                    repeated_call_failures,
+                    diagnostic_expected_failure,
+                    recovered_validation_success,
+                )
+            }
         });
         let benchmark_category = infer_benchmark_category(
             &args.task,
@@ -811,6 +818,10 @@ fn derive_default_outcome(
     } else {
         DogfoodOutcome::Success
     }
+}
+
+fn is_empty_model_response(message: &str) -> bool {
+    message.trim() == "DeepSeek returned no content."
 }
 
 fn is_expected_failure_diagnosis_result(
@@ -2326,6 +2337,42 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("dispatch_subagent:failed"));
+    }
+
+    #[test]
+    fn from_result_treats_empty_no_tool_response_as_failed() {
+        let result = RunResult {
+            final_message: "DeepSeek returned no content.".to_string(),
+            tool_events: Vec::new(),
+            usage: TokenUsage::default(),
+        };
+        let args = DogfoodRunArgs {
+            task: "replace `a - b` with `a + b` in src/lib.rs and validate with cargo test"
+                .to_string(),
+            from_benchmark: None,
+            benchmark_manifest: None,
+            skill: None,
+            budget: Some(4),
+            workdir: None,
+            isolate_workdir: false,
+            outcome: None,
+            manual_intervention: false,
+            benchmark_gate: false,
+            notes: None,
+        };
+        let record = DogfoodRecord::from_result(
+            1,
+            10,
+            "deepseek-v4-flash".to_string(),
+            ".".to_string(),
+            4,
+            &args,
+            false,
+            &result,
+        );
+        assert_eq!(record.tool_calls, 0);
+        assert_eq!(record.failed_tool_calls, 0);
+        assert!(matches!(record.outcome, DogfoodOutcome::Failed));
     }
 
     #[test]

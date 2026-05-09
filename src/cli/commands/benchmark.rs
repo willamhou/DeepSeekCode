@@ -1997,6 +1997,16 @@ fn load_dogfood_snapshot(path: &Path) -> AppResult<Option<DogfoodSnapshot>> {
         let repeated_call_failures =
             read_optional_u64(&root, "repeated_call_failures").unwrap_or(0);
         let used_subagent = read_optional_bool(&root, "used_subagent").unwrap_or(false);
+        let tool_calls = read_optional_u64(&root, "tool_calls").unwrap_or(0);
+        let final_message = read_optional_string(&root, "final_message").unwrap_or("");
+        let outcome = if outcome == "success"
+            && tool_calls == 0
+            && final_message.trim() == "DeepSeek returned no content."
+        {
+            "failed"
+        } else {
+            outcome
+        };
         let benchmark_seed_observations =
             read_optional_string(&root, "benchmark_seed_observations");
         let category = resolved_benchmark_category(
@@ -2009,7 +2019,6 @@ fn load_dogfood_snapshot(path: &Path) -> AppResult<Option<DogfoodSnapshot>> {
             benchmark_seed_observations,
         )
         .into_owned();
-        let tool_calls = read_optional_u64(&root, "tool_calls").unwrap_or(0);
         snapshot.runs += 1;
         match outcome {
             "success" => snapshot.success += 1,
@@ -3646,6 +3655,31 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
         assert_eq!(snapshot.category_stats.len(), 2);
         assert_eq!(snapshot.category_stats[0].category, "read_only");
         assert_eq!(snapshot.category_stats[1].category, "recovery");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_dogfood_snapshot_reclassifies_empty_success_as_failed() {
+        let root = std::env::temp_dir().join(format!(
+            "deepseek-bench-empty-dogfood-{}-{}",
+            std::process::id(),
+            next_temp_suffix()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let ledger = root.join("ledger.jsonl");
+        fs::write(
+            &ledger,
+            "{\"task\":\"replace `a - b` with `a + b`\",\"tool_trace\":\"none\",\"outcome\":\"success\",\"manual_intervention\":false,\"benchmark_category\":\"write_validate\",\"failed_tool_calls\":0,\"repeated_call_failures\":0,\"used_subagent\":false,\"tool_calls\":0,\"final_message\":\"DeepSeek returned no content.\"}\n",
+        )
+        .unwrap();
+        let snapshot = load_dogfood_snapshot(&ledger).unwrap().unwrap();
+        assert_eq!(snapshot.runs, 1);
+        assert_eq!(snapshot.success, 0);
+        assert_eq!(snapshot.failed, 1);
+        assert_eq!(snapshot.category_stats.len(), 1);
+        assert_eq!(snapshot.category_stats[0].category, "write_validate");
+        assert_eq!(snapshot.category_stats[0].success, 0);
+        assert_eq!(snapshot.category_stats[0].failed, 1);
         let _ = fs::remove_dir_all(root);
     }
 
