@@ -24,10 +24,7 @@ pub fn parse_pr_ref(input: &str) -> AppResult<PrRef> {
         if kind != "pull" || owner.is_empty() || repo.is_empty() {
             return Err(app_error(format!("malformed GitHub PR URL: {input}")));
         }
-        let number_token = number
-            .split(['?', '#'])
-            .next()
-            .unwrap_or("");
+        let number_token = number.split(['?', '#']).next().unwrap_or("");
         let number: u64 = number_token
             .parse()
             .map_err(|_| app_error(format!("PR URL has non-numeric ID: {input}")))?;
@@ -52,9 +49,11 @@ pub fn parse_pr_ref(input: &str) -> AppResult<PrRef> {
         });
     }
 
-    let number: u64 = trimmed
-        .parse()
-        .map_err(|_| app_error(format!("PR reference is not a number, owner/repo#N, or URL: {input}")))?;
+    let number: u64 = trimmed.parse().map_err(|_| {
+        app_error(format!(
+            "PR reference is not a number, owner/repo#N, or URL: {input}"
+        ))
+    })?;
     Ok(PrRef::Number(number))
 }
 
@@ -194,10 +193,7 @@ fn extract_run_id_from_link(link: &str) -> Option<u64> {
     rest[..end].parse().ok()
 }
 
-pub fn parse_failed_job_from_run(
-    body: &str,
-    job_name: &str,
-) -> AppResult<(u64, Option<String>)> {
+pub fn parse_failed_job_from_run(body: &str, job_name: &str) -> AppResult<(u64, Option<String>)> {
     let root = parse_root_object(body)?;
     let jobs = root
         .get("jobs")
@@ -216,25 +212,22 @@ pub fn parse_failed_job_from_run(
             .get("databaseId")
             .and_then(json_as_u64)
             .ok_or_else(|| app_error(format!("run view: job `{job_name}` missing databaseId")))?;
-        let failed_step = map
-            .get("steps")
-            .and_then(json_as_array)
-            .and_then(|steps| {
-                steps.iter().find_map(|step| {
-                    let map = json_as_object(step)?;
-                    let conclusion = map.get("conclusion").and_then(json_as_string)?;
-                    if conclusion.eq_ignore_ascii_case("failure") {
-                        Some(
-                            map.get("name")
-                                .and_then(json_as_string)
-                                .unwrap_or("")
-                                .to_string(),
-                        )
-                    } else {
-                        None
-                    }
-                })
-            });
+        let failed_step = map.get("steps").and_then(json_as_array).and_then(|steps| {
+            steps.iter().find_map(|step| {
+                let map = json_as_object(step)?;
+                let conclusion = map.get("conclusion").and_then(json_as_string)?;
+                if conclusion.eq_ignore_ascii_case("failure") {
+                    Some(
+                        map.get("name")
+                            .and_then(json_as_string)
+                            .unwrap_or("")
+                            .to_string(),
+                    )
+                } else {
+                    None
+                }
+            })
+        });
         return Ok((database_id, failed_step));
     }
 
@@ -351,12 +344,10 @@ pub fn post_pr_comment(repo: &str, number: u64, body: &str) -> AppResult<()> {
 
     let target = format!("{repo}#{number}");
     let path_str = path.to_string_lossy().into_owned();
-    let result = run_gh(&["pr", "comment", &target, "--body-file", &path_str])
-        .map(|_| ());
+    let result = run_gh(&["pr", "comment", &target, "--body-file", &path_str]).map(|_| ());
     let _ = std::fs::remove_file(&path);
     result
 }
-
 
 pub fn current_branch() -> Option<String> {
     let captured = run_capture("git", &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
@@ -417,8 +408,7 @@ mod tests {
 
     #[test]
     fn parses_github_pull_request_url() {
-        let parsed =
-            parse_pr_ref("https://github.com/willamhou/DeepseekCode/pull/7").unwrap();
+        let parsed = parse_pr_ref("https://github.com/willamhou/DeepseekCode/pull/7").unwrap();
         assert_eq!(
             parsed,
             PrRef::Qualified {
@@ -445,8 +435,8 @@ mod tests {
 
     #[test]
     fn parses_url_with_query_string() {
-        let parsed = parse_pr_ref("https://github.com/willamhou/DeepseekCode/pull/5?diff=split")
-            .unwrap();
+        let parsed =
+            parse_pr_ref("https://github.com/willamhou/DeepseekCode/pull/5?diff=split").unwrap();
         assert_eq!(
             parsed,
             PrRef::Qualified {
@@ -458,8 +448,8 @@ mod tests {
 
     #[test]
     fn parses_url_with_fragment() {
-        let parsed = parse_pr_ref("https://github.com/willamhou/DeepseekCode/pull/5#discussion")
-            .unwrap();
+        let parsed =
+            parse_pr_ref("https://github.com/willamhou/DeepseekCode/pull/5#discussion").unwrap();
         assert_eq!(
             parsed,
             PrRef::Qualified {
@@ -471,8 +461,8 @@ mod tests {
 
     #[test]
     fn parses_url_with_files_suffix() {
-        let parsed = parse_pr_ref("https://github.com/willamhou/DeepseekCode/pull/5/files")
-            .unwrap();
+        let parsed =
+            parse_pr_ref("https://github.com/willamhou/DeepseekCode/pull/5/files").unwrap();
         assert_eq!(
             parsed,
             PrRef::Qualified {
@@ -571,7 +561,6 @@ mod tests {
         let body = r#"{"jobs": []}"#;
         assert!(parse_failed_job_from_run(body, "test").is_err());
     }
-
 
     #[test]
     fn extracts_run_id_from_actions_link() {

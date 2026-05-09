@@ -4,7 +4,9 @@ use std::rc::Rc;
 use crate::core::todos::{Todo, TodoList, TodoStatus};
 use crate::error::{tool_failure, AppResult};
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
-use crate::util::json::{json_as_array, json_as_object, json_as_string, parse_json_value, JsonValue};
+use crate::util::json::{
+    json_as_array, json_as_object, json_as_string, parse_json_value, JsonValue,
+};
 
 const MAX_ITEMS: usize = 100;
 
@@ -68,19 +70,20 @@ impl Tool for TodoWriteTool {
                 })?
                 .to_string();
 
-            let status_str = obj
-                .get("status")
-                .and_then(json_as_string)
-                .ok_or_else(|| {
-                    tool_failure(format!("todo at index {index} missing field `status`"))
-                })?;
+            let status_str = obj.get("status").and_then(json_as_string).ok_or_else(|| {
+                tool_failure(format!("todo at index {index} missing field `status`"))
+            })?;
             let status = TodoStatus::from_label(status_str).ok_or_else(|| {
                 tool_failure(format!(
                     "todo at index {index}: status must be pending|in_progress|completed (got `{status_str}`)"
                 ))
             })?;
 
-            new_items.push(Todo { content, active_form, status });
+            new_items.push(Todo {
+                content,
+                active_form,
+                status,
+            });
         }
 
         let mut list = self.list.borrow_mut();
@@ -113,7 +116,9 @@ mod tests {
         let list = fresh_list();
         let tool = TodoWriteTool { list: list.clone() };
         let mut input = ToolInput::new();
-        input.args.insert("items".to_string(), items_json.to_string());
+        input
+            .args
+            .insert("items".to_string(), items_json.to_string());
         let output = tool.execute(input)?;
         Ok((output, list))
     }
@@ -158,7 +163,9 @@ mod tests {
     fn execute_fails_when_status_invalid() {
         let body = r#"[{"content":"A","activeForm":"Aing","status":"unknown"}]"#;
         let err = execute(body).unwrap_err();
-        assert!(err.to_string().contains("must be pending|in_progress|completed"));
+        assert!(err
+            .to_string()
+            .contains("must be pending|in_progress|completed"));
     }
 
     #[test]

@@ -54,7 +54,9 @@ pub fn spawn_streaming(bin: &str, args: &[&str]) -> AppResult<StreamingProcess> 
         .spawn()
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
-                app_error(format!("{bin} not found in PATH; install it before retrying"))
+                app_error(format!(
+                    "{bin} not found in PATH; install it before retrying"
+                ))
             } else {
                 app_error(format!("could not invoke {bin}: {error}"))
             }
@@ -125,6 +127,9 @@ mod tests {
     fn run_capture_returns_not_found_error_for_missing_binary() {
         let result = run_capture("definitely-not-a-real-binary-xyz", &[]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found in PATH"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not found in PATH"));
     }
 }

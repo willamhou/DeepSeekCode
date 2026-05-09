@@ -1,6 +1,27 @@
 name = "write-tests"
 description = "Test-Driven Development: failing test first, then implementation"
 allowed_tools = ["list_files", "read_file", "search_text", "apply_patch", "run_shell", "git_diff", "todo_write"]
+triggers = ["write tests", "add tests", "tdd", "test-driven", "coverage"]
+
+[[initial_todos]]
+content = "Plan the first failing test"
+active_form = "Planning the first failing test"
+status = "in_progress"
+
+[[initial_todos]]
+content = "Write one failing test"
+active_form = "Writing one failing test"
+status = "pending"
+
+[[initial_todos]]
+content = "Implement the minimal fix"
+active_form = "Implementing the minimal fix"
+status = "pending"
+
+[[initial_todos]]
+content = "Run tests and repeat the red-green cycle"
+active_form = "Running tests and repeating the red-green cycle"
+status = "pending"
 
 system_append = """
 TDD strict order:

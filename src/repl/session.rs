@@ -31,10 +31,7 @@ pub fn load(name: &str, config: &AppConfig) -> AppResult<Repl> {
     validate_session_name(name).map_err(app_error)?;
     let path = sessions_dir(config).join(format!("{name}.json"));
     if !path.exists() {
-        return Err(app_error(format!(
-            "session not found: {}",
-            path.display()
-        )));
+        return Err(app_error(format!("session not found: {}", path.display())));
     }
     let content = std::fs::read_to_string(&path)?;
     parse_session(config, &content)
@@ -138,7 +135,7 @@ pub fn parse_session(config: &AppConfig, content: &str) -> AppResult<Repl> {
         2 => parse_todos_field(&root)?,
         other => {
             return Err(app_error(format!(
-                "unsupported session version: {other} (this dscode supports v1 and v2)"
+                "unsupported session version: {other} (this deepseek CLI supports v1 and v2)"
             )));
         }
     };
@@ -148,9 +145,7 @@ pub fn parse_session(config: &AppConfig, content: &str) -> AppResult<Repl> {
         .and_then(json_as_u64)
         .ok_or_else(|| app_error("session missing `budget`"))? as usize;
     if budget == 0 || budget > 200 {
-        return Err(app_error(format!(
-            "session budget out of range: {budget}"
-        )));
+        return Err(app_error(format!("session budget out of range: {budget}")));
     }
 
     let skill = match root.get("skill") {
@@ -191,7 +186,9 @@ pub fn parse_session(config: &AppConfig, content: &str) -> AppResult<Repl> {
     repl.transcript = transcript;
     repl.tokens_prompt = tokens_prompt;
     repl.tokens_completion = tokens_completion;
-    *repl.todos.borrow_mut() = crate::core::todos::TodoList { items: todos_from_file };
+    *repl.todos.borrow_mut() = crate::core::todos::TodoList {
+        items: todos_from_file,
+    };
     Ok(repl)
 }
 
@@ -244,9 +241,8 @@ fn parse_turn(value: &JsonValue) -> AppResult<crate::repl::transcript::Turn> {
                 .ok_or_else(|| app_error("tool turn missing `input` object"))?;
             let mut input = BTreeMap::new();
             for (k, v) in input_obj {
-                let s = json_as_string(v).ok_or_else(|| {
-                    app_error(format!("tool input `{k}` must be a string"))
-                })?;
+                let s = json_as_string(v)
+                    .ok_or_else(|| app_error(format!("tool input `{k}` must be a string")))?;
                 input.insert(k.clone(), s.to_string());
             }
             let output = map
@@ -261,11 +257,7 @@ fn parse_turn(value: &JsonValue) -> AppResult<crate::repl::transcript::Turn> {
             let status = match status_str {
                 "ok" => ObservationStatus::Ok,
                 "failed" => ObservationStatus::Failed,
-                other => {
-                    return Err(app_error(format!(
-                        "tool turn has unknown status `{other}`"
-                    )))
-                }
+                other => return Err(app_error(format!("tool turn has unknown status `{other}`"))),
             };
             Ok(crate::repl::transcript::Turn {
                 role: TurnRole::Tool,
@@ -312,7 +304,11 @@ fn parse_todos_field(
                 "session todos[{i}]: status must be pending|in_progress|completed (got `{status_str}`)"
             ))
         })?;
-        out.push(crate::core::todos::Todo { content, active_form, status });
+        out.push(crate::core::todos::Todo {
+            content,
+            active_form,
+            status,
+        });
     }
     Ok(out)
 }
@@ -432,7 +428,10 @@ pub(crate) mod tests {
         let cfg = AppConfig::default();
         let body = r#"{"version":1,"name":"x","saved_at":"-","skill":null,"budget":20,"transcript":[],"tokens":{"prompt":0,"completion":0}}"#;
         let repl = parse_session(&cfg, body).unwrap();
-        assert!(repl.todos.borrow().is_empty(), "v1 must migrate to empty todos in memory");
+        assert!(
+            repl.todos.borrow().is_empty(),
+            "v1 must migrate to empty todos in memory"
+        );
     }
 
     #[test]
@@ -442,8 +441,16 @@ pub(crate) mod tests {
         let mut original = fixture_repl();
         original.config = cfg.clone();
         original.todos.borrow_mut().replace(vec![
-            Todo { content: "A".to_string(), active_form: "Aing".to_string(), status: TodoStatus::Pending },
-            Todo { content: "B".to_string(), active_form: "Bing".to_string(), status: TodoStatus::InProgress },
+            Todo {
+                content: "A".to_string(),
+                active_form: "Aing".to_string(),
+                status: TodoStatus::Pending,
+            },
+            Todo {
+                content: "B".to_string(),
+                active_form: "Bing".to_string(),
+                status: TodoStatus::InProgress,
+            },
         ]);
         save("v2-todos", &original).unwrap();
         let loaded = load("v2-todos", &cfg).unwrap();
@@ -458,7 +465,9 @@ pub(crate) mod tests {
         let cfg = AppConfig::default();
         let body = r#"{"version":2,"name":"x","saved_at":"-","skill":null,"budget":20,"transcript":[],"tokens":{"prompt":0,"completion":0}}"#;
         let err = parse_session(&cfg, body).unwrap_err();
-        assert!(err.to_string().contains("v2 missing required field `todos`"));
+        assert!(err
+            .to_string()
+            .contains("v2 missing required field `todos`"));
     }
 
     #[test]
@@ -481,8 +490,14 @@ pub(crate) mod tests {
 
         save("upgrade", &repl).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("\"version\":2"), "saved file must be v2: {raw}");
-        assert!(raw.contains("\"todos\":[]"), "saved file must include empty todos array: {raw}");
+        assert!(
+            raw.contains("\"version\":2"),
+            "saved file must be v2: {raw}"
+        );
+        assert!(
+            raw.contains("\"todos\":[]"),
+            "saved file must include empty todos array: {raw}"
+        );
 
         let reloaded = load("upgrade", &cfg).unwrap();
         assert!(reloaded.todos.borrow().is_empty());

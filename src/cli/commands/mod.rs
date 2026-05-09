@@ -1,9 +1,12 @@
+pub mod benchmark;
 pub mod chat;
+pub mod completion;
 pub mod config;
 pub mod diff;
 pub mod doctor;
+pub mod dogfood;
 pub mod pr;
 pub mod resume;
 pub mod run;
 pub mod smoke;
-
+pub mod version;

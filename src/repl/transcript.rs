@@ -109,12 +109,7 @@ impl Transcript {
                     if assistants_kept_full.contains(&i) {
                         out.push_str(&format!("[assistant {assistant_n}]: {}\n\n", turn.content));
                     } else {
-                        let head = turn
-                            .content
-                            .lines()
-                            .next()
-                            .unwrap_or("")
-                            .trim();
+                        let head = turn.content.lines().next().unwrap_or("").trim();
                         out.push_str(&format!(
                             "[assistant {assistant_n}]: {head} (truncated assistant turn {assistant_n})\n\n",
                         ));
@@ -148,10 +143,8 @@ impl Transcript {
                         turn.tool_input
                             .as_ref()
                             .map(|map| {
-                                let parts: Vec<String> = map
-                                    .iter()
-                                    .map(|(k, v)| format!("{k}={v}"))
-                                    .collect();
+                                let parts: Vec<String> =
+                                    map.iter().map(|(k, v)| format!("{k}={v}")).collect();
                                 parts.join(", ")
                             })
                             .unwrap_or_default()
@@ -199,7 +192,11 @@ mod tests {
         assert_eq!(last.tool_name.as_deref(), Some("read_file"));
         assert_eq!(last.tool_output.as_deref(), Some("contents"));
         assert_eq!(
-            last.tool_input.as_ref().unwrap().get("path").map(String::as_str),
+            last.tool_input
+                .as_ref()
+                .unwrap()
+                .get("path")
+                .map(String::as_str),
             Some("x.rs"),
         );
     }
@@ -277,7 +274,10 @@ mod tests {
         );
         let render = transcript.render_for_prompt();
         assert!(render.contains("items=<2 todos>"));
-        assert!(!render.contains(r#""content":"A""#), "raw JSON must be elided: {render}");
+        assert!(
+            !render.contains(r#""content":"A""#),
+            "raw JSON must be elided: {render}"
+        );
     }
 
     #[test]

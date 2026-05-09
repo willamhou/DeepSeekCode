@@ -18,7 +18,8 @@ pub fn detect_profile(root: &str) -> AppResult<LanguageProfile> {
     if root.join("go.mod").exists() {
         return Ok(go_profile());
     }
-    if root.join("pom.xml").exists() || root.join("build.gradle").exists()
+    if root.join("pom.xml").exists()
+        || root.join("build.gradle").exists()
         || root.join("build.gradle.kts").exists()
     {
         return Ok(java_profile(root));
@@ -53,7 +54,11 @@ fn rust_profile(root: &Path) -> LanguageProfile {
 fn node_profile(root: &Path) -> LanguageProfile {
     let manager = detect_node_package_manager(root);
     let has_typescript = root.join("tsconfig.json").exists();
-    let name = if has_typescript { "typescript" } else { "javascript" };
+    let name = if has_typescript {
+        "typescript"
+    } else {
+        "javascript"
+    };
 
     let test = format!("{} test", manager.test_runner());
 
@@ -65,7 +70,10 @@ fn node_profile(root: &Path) -> LanguageProfile {
     file_priority.push("test/".to_string());
 
     let hints = vec![
-        format!("Detected package manager: {}; use it consistently.", manager.label()),
+        format!(
+            "Detected package manager: {}; use it consistently.",
+            manager.label()
+        ),
         "Keep changes narrow and respect the package manager already in use.".to_string(),
     ];
 
@@ -119,7 +127,11 @@ fn go_profile() -> LanguageProfile {
 
 fn java_profile(root: &Path) -> LanguageProfile {
     let uses_maven = root.join("pom.xml").exists();
-    let test = if uses_maven { "mvn test" } else { "gradle test" };
+    let test = if uses_maven {
+        "mvn test"
+    } else {
+        "gradle test"
+    };
     let manager = if uses_maven { "Maven" } else { "Gradle" };
 
     LanguageProfile {

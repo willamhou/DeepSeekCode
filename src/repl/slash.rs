@@ -92,10 +92,7 @@ fn print_help() {
 
 fn handle_budget(repl: &mut Repl, args: &[&str]) {
     if args.is_empty() {
-        println!(
-            "budget: {} (default {DEFAULT_BUDGET})",
-            repl.budget
-        );
+        println!("budget: {} (default {DEFAULT_BUDGET})", repl.budget);
         return;
     }
     if args.len() > 1 {
@@ -398,9 +395,11 @@ mod tests {
         let mut r = Repl::new(AppConfig::default(), None);
         r.transcript.push_user("hi");
         r.tokens_prompt = 100;
-        r.todos.borrow_mut().replace(vec![
-            Todo { content: "X".to_string(), active_form: "Xing".to_string(), status: TodoStatus::Pending },
-        ]);
+        r.todos.borrow_mut().replace(vec![Todo {
+            content: "X".to_string(),
+            active_form: "Xing".to_string(),
+            status: TodoStatus::Pending,
+        }]);
         let _ = r.handle_line("/clear").unwrap();
         assert!(r.transcript.turns.is_empty());
         assert_eq!(r.tokens_prompt, 0);
@@ -420,13 +419,25 @@ mod tests {
         use crate::core::todos::{Todo, TodoStatus};
         let mut r = Repl::new(AppConfig::default(), None);
         r.todos.borrow_mut().replace(vec![
-            Todo { content: "X".to_string(), active_form: "Xing".to_string(), status: TodoStatus::InProgress },
-            Todo { content: "Y".to_string(), active_form: "Ying".to_string(), status: TodoStatus::Pending },
+            Todo {
+                content: "X".to_string(),
+                active_form: "Xing".to_string(),
+                status: TodoStatus::InProgress,
+            },
+            Todo {
+                content: "Y".to_string(),
+                active_form: "Ying".to_string(),
+                status: TodoStatus::Pending,
+            },
         ]);
         let before_len = r.todos.borrow().items.len();
         let outcome = try_handle_slash(&mut r, "/todos").unwrap();
         assert!(matches!(outcome, SlashOutcome::Continue));
-        assert_eq!(r.todos.borrow().items.len(), before_len, "/todos must be read-only");
+        assert_eq!(
+            r.todos.borrow().items.len(),
+            before_len,
+            "/todos must be read-only"
+        );
     }
 
     #[test]
@@ -434,9 +445,11 @@ mod tests {
         use crate::core::todos::{Todo, TodoStatus};
         let (cfg, _tmp) = crate::repl::session::tests::config_with_temp_session_dir();
         let original = Repl::new(cfg.clone(), None);
-        original.todos.borrow_mut().replace(vec![
-            Todo { content: "T".to_string(), active_form: "Ting".to_string(), status: TodoStatus::Completed },
-        ]);
+        original.todos.borrow_mut().replace(vec![Todo {
+            content: "T".to_string(),
+            active_form: "Ting".to_string(),
+            status: TodoStatus::Completed,
+        }]);
         crate::repl::session::save("rt", &original).unwrap();
         let loaded = crate::repl::session::load("rt", &cfg).unwrap();
         let inner = loaded.todos.borrow();

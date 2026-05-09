@@ -256,7 +256,10 @@ pub fn parse_bool(bytes: &[u8], index: &mut usize) -> AppResult<JsonValue> {
 pub fn parse_number(bytes: &[u8], index: &mut usize) -> AppResult<JsonValue> {
     let start = *index;
     while *index < bytes.len()
-        && matches!(bytes[*index], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+        && matches!(
+            bytes[*index],
+            b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9'
+        )
     {
         *index += 1;
     }

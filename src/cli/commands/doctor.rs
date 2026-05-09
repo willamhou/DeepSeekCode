@@ -108,7 +108,8 @@ fn print_api_key_section(config: &AppConfig) {
 fn print_network_section(config: &AppConfig) {
     println!();
     println!("[network]");
-    let host = host_from_url(&config.model.base_url).unwrap_or_else(|| config.model.base_url.clone());
+    let host =
+        host_from_url(&config.model.base_url).unwrap_or_else(|| config.model.base_url.clone());
     match probe_host(&config.model.base_url) {
         ProbeOutcome::Reachable { status } => {
             println!("  curl HEAD {host}: ok (status {status})");
@@ -156,7 +157,7 @@ fn print_github_section() {
             }
         }
         Ok(_) | Err(_) => {
-            println!("  gh CLI: not installed (install from https://cli.github.com/ for `dscode pr` commands)");
+            println!("  gh CLI: not installed (install from https://cli.github.com/ for `deepseek pr` commands)");
         }
     }
 }
@@ -173,7 +174,7 @@ fn print_hints_section(config: &AppConfig) {
         config.model.base_url.trim_end_matches('/')
     );
     println!(
-        "  Run `dscode smoke` (or `dscode smoke --flavor anthropic`) to send a single live request."
+        "  Run `deepseek smoke` (or `deepseek smoke --flavor anthropic`) to send a single live request."
     );
 }
 
@@ -212,7 +213,7 @@ impl ApiFlavor {
     fn label(self) -> &'static str {
         match self {
             Self::OpenAi => "OpenAI-compatible (tools / function-calling)",
-            Self::Anthropic => "Anthropic-compatible (json plan fallback today)",
+            Self::Anthropic => "Anthropic-compatible (tools / tool_use content blocks)",
         }
     }
 
@@ -291,7 +292,10 @@ fn host_probe_url(base_url: &str) -> String {
 }
 
 fn host_from_url(base_url: &str) -> Option<String> {
-    let without_scheme = base_url.split_once("://").map(|(_, rest)| rest).unwrap_or(base_url);
+    let without_scheme = base_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(base_url);
     let host = without_scheme.split('/').next()?;
     if host.is_empty() {
         None
@@ -358,7 +362,10 @@ mod tests {
             host_from_url("https://api.deepseek.com/v1"),
             Some("api.deepseek.com".to_string())
         );
-        assert_eq!(host_from_url("api.deepseek.com"), Some("api.deepseek.com".to_string()));
+        assert_eq!(
+            host_from_url("api.deepseek.com"),
+            Some("api.deepseek.com".to_string())
+        );
     }
 
     #[test]

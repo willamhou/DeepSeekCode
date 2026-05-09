@@ -38,8 +38,11 @@ impl Repl {
     pub fn run(&mut self) -> AppResult<()> {
         use std::io::{self, IsTerminal};
         if !io::stdin().is_terminal() {
+            let bin = invoked_binary_name();
             return Err(crate::error::policy_denied(
-                "dscode chat requires a TTY; use `dscode run \"task\"` for one-shot tasks",
+                format!(
+                    "{bin} interactive mode requires a TTY; use `{bin} run \"task\"` for one-shot tasks"
+                ),
             ));
         }
         let stdin = io::stdin();
@@ -81,8 +84,7 @@ impl Repl {
 
         self.transcript.push_user(line);
         let prompt = self.transcript.render_for_prompt();
-        let context =
-            crate::core::context::TaskContext::new(prompt, self.skill.clone());
+        let context = crate::core::context::TaskContext::new(prompt, self.skill.clone());
         let runtime = crate::core::loop_runtime::AgentLoop::new(self.config.clone());
         let result = runtime.run_with(
             context,
@@ -90,24 +92,33 @@ impl Repl {
                 steps: self.budget,
                 initial_observations: Vec::new(),
                 todos: self.todos.clone(),
+                ..crate::core::loop_runtime::AgentLoopOptions::default()
             },
         )?;
 
         self.tokens_prompt += result.usage.prompt;
         self.tokens_completion += result.usage.completion;
         for event in result.tool_events {
-            self.transcript.push_tool(
-                event.tool_name,
-                event.input,
-                event.output,
-                event.status,
-            );
+            self.transcript
+                .push_tool(event.tool_name, event.input, event.output, event.status);
         }
         if !result.final_message.is_empty() {
             self.transcript.push_assistant(result.final_message);
         }
         Ok(ControlFlow::Continue)
     }
+}
+
+fn invoked_binary_name() -> String {
+    std::env::args()
+        .next()
+        .and_then(|path| {
+            std::path::Path::new(&path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "deepseek".to_string())
 }
 
 #[cfg(test)]
@@ -172,5 +183,11 @@ mod tests {
         r.run_with_reader(&mut input, &mut output).unwrap();
         let prompt = String::from_utf8(output).unwrap();
         assert!(prompt.contains("> "));
+    }
+
+    #[test]
+    fn invoked_binary_name_falls_back_to_deepseek_when_missing() {
+        let name = invoked_binary_name();
+        assert!(!name.trim().is_empty());
     }
 }

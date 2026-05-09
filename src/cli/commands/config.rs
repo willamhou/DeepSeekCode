@@ -19,7 +19,10 @@ pub fn run(args: ConfigArgs) -> AppResult<()> {
         println!("workspace.config_dir = {}", config.workspace.config_dir);
         println!("workspace.session_dir = {}", config.workspace.session_dir);
     } else {
-        println!("Config file path: {}", config.workspace.config_path().display());
+        println!(
+            "Config file path: {}",
+            config.workspace.config_path().display()
+        );
     }
     Ok(())
 }

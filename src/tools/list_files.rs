@@ -22,7 +22,14 @@ impl Tool for ListFilesTool {
             .unwrap_or(40);
 
         let mut files = Vec::new();
-        visit(Path::new(root), Path::new(root), 0, max_depth, limit, &mut files)?;
+        visit(
+            Path::new(root),
+            Path::new(root),
+            0,
+            max_depth,
+            limit,
+            &mut files,
+        )?;
 
         Ok(ToolOutput {
             summary: if files.is_empty() {
@@ -57,7 +64,10 @@ fn visit(
             break;
         }
 
-        let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
         if should_skip(name) {
             continue;
         }

@@ -1,0 +1,205 @@
+use crate::cli::app::CompletionShell;
+use crate::error::{app_error, AppResult};
+
+pub fn run(shell: CompletionShell) -> AppResult<()> {
+    let script = match shell {
+        CompletionShell::Bash => bash_completion(),
+        CompletionShell::Zsh => zsh_completion(),
+        CompletionShell::Fish => fish_completion(),
+    };
+    if script.trim().is_empty() {
+        return Err(app_error(
+            "completion script generation returned empty output",
+        ));
+    }
+    print!("{script}");
+    Ok(())
+}
+
+fn command_words() -> &'static [&'static str] {
+    &[
+        "benchmark",
+        "chat",
+        "completion",
+        "config",
+        "diff",
+        "doctor",
+        "dogfood",
+        "interactive",
+        "pr",
+        "repl",
+        "resume",
+        "run",
+        "smoke",
+        "version",
+    ]
+}
+
+fn dogfood_words() -> &'static [&'static str] {
+    &[
+        "run",
+        "replay-benchmark",
+        "report",
+        "export-benchmark",
+        "promote-benchmark",
+    ]
+}
+
+fn pr_words() -> &'static [&'static str] {
+    &["review", "fix", "patch"]
+}
+
+fn shell_words() -> &'static [&'static str] {
+    &["bash", "zsh", "fish"]
+}
+
+fn bash_completion() -> String {
+    let commands = command_words().join(" ");
+    let dogfood = dogfood_words().join(" ");
+    let pr = pr_words().join(" ");
+    let shells = shell_words().join(" ");
+    format!(
+        r#"_deepseek()
+{{
+    local cur prev words cword
+    _init_completion || return
+
+    if [[ $cword -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "{commands}" -- "$cur") )
+        return
+    fi
+
+    case "${{words[1]}}" in
+        dogfood)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "{dogfood}" -- "$cur") )
+            fi
+            ;;
+        pr)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "{pr}" -- "$cur") )
+            fi
+            ;;
+        completion)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "{shells}" -- "$cur") )
+            fi
+            ;;
+    esac
+}}
+
+complete -F _deepseek deepseek
+"#
+    )
+}
+
+fn zsh_completion() -> String {
+    let commands = command_words();
+    let dogfood = dogfood_words();
+    let pr = pr_words();
+    let shells = shell_words();
+    format!(
+        r#"#compdef deepseek
+
+_deepseek() {{
+  local -a commands
+  commands=(
+{commands}
+  )
+
+  if (( CURRENT == 2 )); then
+    _describe 'command' commands
+    return
+  fi
+
+  case "$words[2]" in
+    dogfood)
+      _values 'dogfood action' {dogfood}
+      ;;
+    pr)
+      _values 'pr action' {pr}
+      ;;
+    completion)
+      _values 'shell' {shells}
+      ;;
+  esac
+}}
+
+_deepseek "$@"
+"#,
+        commands = commands
+            .iter()
+            .map(|value| format!("    '{value}'"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        dogfood = dogfood
+            .iter()
+            .map(|value| format!("'{value}'"))
+            .collect::<Vec<_>>()
+            .join(" "),
+        pr = pr
+            .iter()
+            .map(|value| format!("'{value}'"))
+            .collect::<Vec<_>>()
+            .join(" "),
+        shells = shells
+            .iter()
+            .map(|value| format!("'{value}'"))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn fish_completion() -> String {
+    let mut lines = Vec::new();
+    for command in command_words() {
+        lines.push(format!(
+            "complete -c deepseek -n '__fish_use_subcommand' -a '{command}'"
+        ));
+    }
+    for action in dogfood_words() {
+        lines.push(format!(
+            "complete -c deepseek -n '__fish_seen_subcommand_from dogfood' -a '{action}'"
+        ));
+    }
+    for action in pr_words() {
+        lines.push(format!(
+            "complete -c deepseek -n '__fish_seen_subcommand_from pr' -a '{action}'"
+        ));
+    }
+    for shell in shell_words() {
+        lines.push(format!(
+            "complete -c deepseek -n '__fish_seen_subcommand_from completion' -a '{shell}'"
+        ));
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bash_completion, fish_completion, zsh_completion};
+
+    #[test]
+    fn bash_completion_mentions_deepseek_commands() {
+        let script = bash_completion();
+        assert!(script.contains("complete -F _deepseek deepseek"));
+        assert!(script.contains("benchmark"));
+        assert!(script.contains("completion"));
+    }
+
+    #[test]
+    fn zsh_completion_mentions_subcommands() {
+        let script = zsh_completion();
+        assert!(script.contains("#compdef deepseek"));
+        assert!(script.contains("dogfood"));
+        assert!(script.contains("completion"));
+    }
+
+    #[test]
+    fn fish_completion_mentions_shell_variants() {
+        let script = fish_completion();
+        assert!(script.contains("complete -c deepseek"));
+        assert!(script.contains("bash"));
+        assert!(script.contains("fish"));
+    }
+}

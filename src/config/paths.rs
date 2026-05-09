@@ -3,6 +3,10 @@ use std::path::PathBuf;
 use super::types::WorkspaceConfig;
 
 impl WorkspaceConfig {
+    pub fn benchmark_manifest_path(&self) -> PathBuf {
+        PathBuf::from(".dscode").join("benchmarks.txt")
+    }
+
     pub fn config_path(&self) -> PathBuf {
         PathBuf::from(&self.config_dir).join("config.toml")
     }
@@ -10,5 +14,28 @@ impl WorkspaceConfig {
     pub fn session_dir(&self) -> PathBuf {
         PathBuf::from(&self.session_dir)
     }
-}
 
+    pub fn dogfood_dir(&self) -> PathBuf {
+        PathBuf::from(&self.config_dir).join("dogfood")
+    }
+
+    pub fn dogfood_ledger_path(&self) -> PathBuf {
+        self.dogfood_dir().join("ledger.jsonl")
+    }
+
+    pub fn dogfood_report_path(&self) -> PathBuf {
+        self.dogfood_dir().join("latest.md")
+    }
+
+    pub fn dogfood_benchmark_seed_path(&self) -> PathBuf {
+        self.dogfood_dir().join("benchmark-seeds.txt")
+    }
+
+    pub fn benchmark_dir(&self) -> PathBuf {
+        PathBuf::from(".dscode").join("benchmarks")
+    }
+
+    pub fn benchmark_history_path(&self) -> PathBuf {
+        self.benchmark_dir().join("history.jsonl")
+    }
+}
