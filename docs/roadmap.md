@@ -1804,6 +1804,21 @@
   - live gate：`pass (no new dogfood records since previous snapshot, runs=33)`
 - 当前边界仍明确：这已经是可试用的 IDE 侧栏任务入口，但仍不是完整 inline diff / diagnostics / native chat / patch review 体验。
 
+**Phase 11+ VS Code diagnostics/diff actions (`main`, 2026-05-09) — 已完成基础版**：
+- 继续缩小 IDE 侧缺口，本轮补两个轻量但贴近日常修复/审阅的入口：
+  - 新增 `DeepseekCode: Explain Diagnostics`，读取当前文件的 VS Code diagnostics，汇总成 `deepseek run` task context
+  - 新增 `DeepseekCode: Show Active Diff`，用 VS Code diff editor 比较 `HEAD` 与当前 editor 内容，支持未保存 editor 内容
+  - Explorer actions、agent panel、quick action 和 editor context menu 均暴露这两个入口
+  - 仍保持 terminal-backed launcher 和无外部 npm dependency
+- 最新验证：
+  - `node --check editors/vscode/extension.js`
+  - `jq -c . editors/vscode/package.json`
+  - `git diff --check`
+  - 默认 benchmark：`48/48`
+  - trend gate：`pass against 5 comparable runs`
+  - live gate：`pass (no new dogfood records since previous snapshot, runs=33)`
+- 当前边界仍明确：diagnostics 和 diff 已有手动入口，但还没有自动诊断修复、inline patch review 或 native chat loop。
+
 **Phase 11+ MCP config surface (`main`, 2026-05-09) — 已完成基础版**：
 - 二次差距审计里 MCP/plugin ecosystem 仍是大差距；本轮先补最小可验证配置面，而不是一次性实现完整 MCP transport
 - 新增 `deepseek mcp`：

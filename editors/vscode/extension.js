@@ -1,5 +1,9 @@
 const path = require("path");
+const childProcess = require("child_process");
+const util = require("util");
 const vscode = require("vscode");
+
+const execFile = util.promisify(childProcess.execFile);
 
 function activate(context) {
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -17,6 +21,8 @@ function activate(context) {
     vscode.commands.registerCommand("deepseek.openChat", openChat),
     vscode.commands.registerCommand("deepseek.runTask", runTask),
     vscode.commands.registerCommand("deepseek.explainSelection", explainSelection),
+    vscode.commands.registerCommand("deepseek.explainDiagnostics", explainDiagnostics),
+    vscode.commands.registerCommand("deepseek.showActiveDiff", showActiveDiff),
     vscode.commands.registerCommand("deepseek.runBenchmark", runBenchmark),
     vscode.commands.registerCommand("deepseek.showDogfoodReport", showDogfoodReport),
   );
@@ -40,6 +46,12 @@ class DeepseekPanelProvider {
           break;
         case "explainSelection":
           await explainSelection();
+          break;
+        case "explainDiagnostics":
+          await explainDiagnostics();
+          break;
+        case "showActiveDiff":
+          await showActiveDiff();
           break;
         case "runBenchmark":
           await runBenchmark();
@@ -71,6 +83,18 @@ class DeepseekActionsProvider {
         "Send active file and selection as context",
         "deepseek.explainSelection",
         "symbol-method",
+      ),
+      actionItem(
+        "Explain Diagnostics",
+        "Send active file diagnostics as task context",
+        "deepseek.explainDiagnostics",
+        "warning",
+      ),
+      actionItem(
+        "Show Active Diff",
+        "Open a review diff for the active file",
+        "deepseek.showActiveDiff",
+        "diff",
       ),
       actionItem(
         "Run Benchmark",
@@ -166,6 +190,8 @@ function panelHtml(panelNonce) {
     <div class="grid">
       <button id="chat">Chat</button>
       <button id="explain">Explain</button>
+      <button id="diagnostics">Diagnostics</button>
+      <button id="diff">Diff</button>
       <button id="benchmark">Benchmark</button>
       <button id="dogfood">Dogfood</button>
     </div>
@@ -181,6 +207,12 @@ function panelHtml(panelNonce) {
     });
     document.getElementById("explain").addEventListener("click", () => {
       vscode.postMessage({ type: "explainSelection" });
+    });
+    document.getElementById("diagnostics").addEventListener("click", () => {
+      vscode.postMessage({ type: "explainDiagnostics" });
+    });
+    document.getElementById("diff").addEventListener("click", () => {
+      vscode.postMessage({ type: "showActiveDiff" });
     });
     document.getElementById("benchmark").addEventListener("click", () => {
       vscode.postMessage({ type: "runBenchmark" });
@@ -259,6 +291,16 @@ async function quickAction() {
         command: "deepseek.explainSelection",
       },
       {
+        label: "$(warning) Explain Diagnostics",
+        description: "Send active file problems as context",
+        command: "deepseek.explainDiagnostics",
+      },
+      {
+        label: "$(diff) Show Active Diff",
+        description: "Open a review diff for the active file",
+        command: "deepseek.showActiveDiff",
+      },
+      {
         label: "$(beaker) Run Benchmark",
         description: "Run the local benchmark suite",
         command: "deepseek.runBenchmark",
@@ -320,6 +362,75 @@ async function explainSelection() {
   runInTerminal(`${deepseekCommand()} run ${shellQuote(prompt)}`);
 }
 
+async function explainDiagnostics() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    vscode.window.showInformationMessage("Open a file before running this command.");
+    return;
+  }
+
+  const diagnostics = vscode.languages.getDiagnostics(editor.document.uri);
+  if (diagnostics.length === 0) {
+    vscode.window.showInformationMessage("No VS Code diagnostics found for the active file.");
+    return;
+  }
+
+  const filePath = relativeDocumentPath(editor.document) || editor.document.uri.fsPath;
+  const renderedDiagnostics = diagnostics.slice(0, 20).map(formatDiagnostic).join("\n");
+  const truncated = diagnostics.length > 20 ? `\n- truncated after 20 of ${diagnostics.length} diagnostics` : "";
+  const task = [
+    "Explain these VS Code diagnostics and suggest a minimal fix.",
+    "",
+    `File: ${filePath}`,
+    "Diagnostics:",
+    `${renderedDiagnostics}${truncated}`,
+  ].join("\n");
+
+  runInTerminal(`${deepseekCommand()} run ${shellQuote(task)}`);
+}
+
+async function showActiveDiff() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.uri.scheme !== "file") {
+    vscode.window.showInformationMessage("Open a file-backed editor before showing a diff.");
+    return;
+  }
+
+  let gitRoot;
+  try {
+    gitRoot = await gitRootForDocument(editor.document);
+  } catch (error) {
+    vscode.window.showInformationMessage("No Git repository found for the active file.");
+    return;
+  }
+
+  const relativePath = toGitPath(path.relative(gitRoot, editor.document.uri.fsPath));
+  let baseContent;
+  try {
+    const result = await execFile("git", ["show", `HEAD:${relativePath}`], {
+      cwd: gitRoot,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    baseContent = result.stdout;
+  } catch (error) {
+    vscode.window.showInformationMessage("No HEAD version found for the active file.");
+    return;
+  }
+
+  const language = editor.document.languageId;
+  const baseDocument = await vscode.workspace.openTextDocument({ content: baseContent, language });
+  const currentDocument = await vscode.workspace.openTextDocument({
+    content: editor.document.getText(),
+    language,
+  });
+  await vscode.commands.executeCommand(
+    "vscode.diff",
+    baseDocument.uri,
+    currentDocument.uri,
+    `DeepseekCode Diff: HEAD vs Editor - ${relativePath}`,
+  );
+}
+
 async function runBenchmark() {
   runInTerminal(`${deepseekCommand()} benchmark`);
 }
@@ -372,6 +483,44 @@ function selectedText(editor) {
     return raw;
   }
   return `${raw.slice(0, limit)}\n[truncated after ${limit} characters]`;
+}
+
+async function gitRootForDocument(document) {
+  const folder = vscode.workspace.getWorkspaceFolder(document.uri);
+  const cwd = folder ? folder.uri.fsPath : path.dirname(document.uri.fsPath);
+  const result = await execFile("git", ["rev-parse", "--show-toplevel"], {
+    cwd,
+    maxBuffer: 1024 * 1024,
+  });
+  return result.stdout.trim();
+}
+
+function toGitPath(value) {
+  return value.split(path.sep).join("/");
+}
+
+function formatDiagnostic(diagnostic) {
+  const severity = ["error", "warning", "info", "hint"][diagnostic.severity] || "diagnostic";
+  const start = diagnostic.range.start;
+  return [
+    `- ${severity}${formatDiagnosticCode(diagnostic.code)}`,
+    `L${start.line + 1}:C${start.character + 1}:`,
+    oneLine(diagnostic.message),
+  ].join(" ");
+}
+
+function formatDiagnosticCode(code) {
+  if (code === undefined || code === null) {
+    return "";
+  }
+  if (typeof code === "object" && "value" in code) {
+    return ` [${code.value}]`;
+  }
+  return ` [${code}]`;
+}
+
+function oneLine(value) {
+  return String(value).replace(/\s+/g, " ").trim();
 }
 
 function shellQuote(value) {

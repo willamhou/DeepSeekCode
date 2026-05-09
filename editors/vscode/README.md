@@ -11,6 +11,8 @@ The extension adds a `DeepseekCode` Explorer view, a lightweight agent panel, st
 - `DeepseekCode: Open Chat` launches `deepseek`
 - `DeepseekCode: Run Task` prompts for a task and runs `deepseek run`
 - `DeepseekCode: Explain Selection` sends the active file and selected text as task context
+- `DeepseekCode: Explain Diagnostics` sends active file diagnostics as task context
+- `DeepseekCode: Show Active Diff` opens a VS Code diff between `HEAD` and the active editor content
 - `DeepseekCode: Run Benchmark` runs `deepseek benchmark`
 - `DeepseekCode: Show Dogfood Report` runs `deepseek dogfood report --limit 10`
 
@@ -20,7 +22,7 @@ The `DeepseekCode` view in the Explorer sidebar exposes the same core actions as
 
 ## Agent Panel
 
-The `DeepseekCode Agent` sidebar panel accepts a task prompt and runs it with the active editor file and selected text as context. The panel also exposes chat, explain, benchmark, and dogfood actions.
+The `DeepseekCode Agent` sidebar panel accepts a task prompt and runs it with the active editor file and selected text as context. The panel also exposes chat, explain, diagnostics, diff, benchmark, and dogfood actions.
 
 ## Settings
 

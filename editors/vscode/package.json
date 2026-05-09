@@ -18,6 +18,8 @@
     "onCommand:deepseek.openChat",
     "onCommand:deepseek.runTask",
     "onCommand:deepseek.explainSelection",
+    "onCommand:deepseek.explainDiagnostics",
+    "onCommand:deepseek.showActiveDiff",
     "onCommand:deepseek.runBenchmark",
     "onCommand:deepseek.showDogfoodReport",
     "onView:deepseek.actions",
@@ -52,6 +54,16 @@
         "icon": "$(symbol-method)"
       },
       {
+        "command": "deepseek.explainDiagnostics",
+        "title": "DeepseekCode: Explain Diagnostics",
+        "icon": "$(warning)"
+      },
+      {
+        "command": "deepseek.showActiveDiff",
+        "title": "DeepseekCode: Show Active Diff",
+        "icon": "$(diff)"
+      },
+      {
         "command": "deepseek.runBenchmark",
         "title": "DeepseekCode: Run Benchmark",
         "icon": "$(beaker)"
@@ -72,6 +84,14 @@
         {
           "command": "deepseek.runTask",
           "group": "navigation@91"
+        },
+        {
+          "command": "deepseek.explainDiagnostics",
+          "group": "navigation@92"
+        },
+        {
+          "command": "deepseek.showActiveDiff",
+          "group": "navigation@93"
         }
       ],
       "editor/title": [
