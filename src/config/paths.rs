@@ -56,3 +56,13 @@ impl WorkspaceConfig {
         self.benchmark_dir().join("history.jsonl")
     }
 }
+
+impl super::types::McpConfig {
+    pub fn project_file_path(&self) -> PathBuf {
+        PathBuf::from(&self.project_file)
+    }
+
+    pub fn user_file_path(&self) -> PathBuf {
+        crate::skills::tilde::expand_tilde(&self.user_file)
+    }
+}

@@ -1684,7 +1684,7 @@
   - 默认 benchmark：`44/44`
   - total tool calls：`151`
   - failed tool calls：`0`
-  - trend gate：`pass against 3 comparable runs`
+  - trend gate：`pass against 5 comparable runs`
   - live gate：`pass (no new dogfood records since previous snapshot, runs=33)`
 
 **Phase 11+ IDE bootstrap (`main`, 2026-05-09) — 已完成基础版**：
@@ -1697,6 +1697,16 @@
   - `DeepseekCode: Show Dogfood Report`
 - extension 只负责把当前 workspace、当前文件路径和可选 selection 组织成 `deepseek` CLI 命令并在 VS Code terminal 中运行
 - 这一步没有引入 npm dependency，也不声明已具备完整 IDE agent 体验；它只是把 IDE gap 从“几乎没有”推进到“有可试用入口”
+
+**Phase 11+ MCP config surface (`main`, 2026-05-09) — 已完成基础版**：
+- 二次差距审计里 MCP/plugin ecosystem 仍是大差距；本轮先补最小可验证配置面，而不是一次性实现完整 MCP transport
+- 新增 `deepseek mcp`：
+  - `deepseek mcp init` 创建 `.dscode/mcp.json`
+  - `deepseek mcp list` 展示 project/user MCP server 定义
+  - `deepseek mcp doctor` 校验 server schema，并对同名 server 使用 project 覆盖 user 的语义
+- 配置格式采用常见 `mcpServers` JSON object，支持 `stdio` / `http` / `streamable-http` / `sse` 的基础字段校验
+- `deepseek config init` 同步创建 disabled 示例 MCP config；`.dscode/config.example.toml` 与安装文档已补充 `mcp.enabled` / `mcp.project_file` / `mcp.user_file`
+- 当前边界明确：这一轮只做发现与校验，还不会把 MCP tools 注入 agent tool registry
 
 ## 最近里程碑
 

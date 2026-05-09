@@ -53,6 +53,9 @@ fn print_config(config: &AppConfig) {
     println!("hooks.project_dir = {}", config.hooks.project_dir);
     println!("hooks.user_dir = {}", config.hooks.user_dir);
     println!("hooks.timeout_ms = {}", config.hooks.timeout_ms);
+    println!("mcp.enabled = {}", config.mcp.enabled);
+    println!("mcp.project_file = {}", config.mcp.project_file);
+    println!("mcp.user_file = {}", config.mcp.user_file);
 }
 
 pub(crate) fn init_config_at(root: &std::path::Path, force: bool) -> AppResult<std::path::PathBuf> {
@@ -74,6 +77,13 @@ pub(crate) fn init_config_at(root: &std::path::Path, force: bool) -> AppResult<s
 
     for event in ["user_prompt_submit", "pre_tool_use", "post_tool_use"] {
         std::fs::create_dir_all(root.join(&config.hooks.project_dir).join(event))?;
+    }
+    let mcp_path = root.join(config.mcp.project_file_path());
+    if !mcp_path.exists() {
+        if let Some(parent) = mcp_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&mcp_path, render_default_mcp_config())?;
     }
 
     Ok(config_path)
@@ -100,6 +110,12 @@ hooks.enabled = {hooks_enabled}
 hooks.project_dir = "{hooks_project_dir}"
 hooks.user_dir = "{hooks_user_dir}"
 hooks.timeout_ms = {hooks_timeout_ms}
+
+# MCP server discovery is config-only in this release. Use `deepseek mcp list|doctor`
+# to inspect project/user MCP server definitions.
+mcp.enabled = {mcp_enabled}
+mcp.project_file = "{mcp_project_file}"
+mcp.user_file = "{mcp_user_file}"
 "#,
         base_url = config.model.base_url,
         model = config.model.model,
@@ -115,7 +131,24 @@ hooks.timeout_ms = {hooks_timeout_ms}
         hooks_project_dir = config.hooks.project_dir,
         hooks_user_dir = config.hooks.user_dir,
         hooks_timeout_ms = config.hooks.timeout_ms,
+        mcp_enabled = config.mcp.enabled,
+        mcp_project_file = config.mcp.project_file,
+        mcp_user_file = config.mcp.user_file,
     )
+}
+
+fn render_default_mcp_config() -> &'static str {
+    r#"{
+  "mcpServers": {
+    "example-filesystem": {
+      "disabled": true,
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    }
+  }
+}
+"#
 }
 
 #[cfg(test)]
@@ -145,6 +178,9 @@ mod tests {
         assert!(root.join(".dscode/sessions").is_dir());
         assert!(root.join(".dscode/commands").is_dir());
         assert!(root.join(".dscode/hooks/pre_tool_use").is_dir());
+        assert!(root.join(".dscode/mcp.json").is_file());
+        let mcp = std::fs::read_to_string(root.join(".dscode/mcp.json")).unwrap();
+        assert!(mcp.contains("mcpServers"));
 
         let _ = std::fs::remove_dir_all(root);
     }

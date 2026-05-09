@@ -109,6 +109,15 @@ fn parse_config(content: &str, config: &mut AppConfig) -> AppResult<()> {
             "hooks.timeout_ms" => {
                 config.hooks.timeout_ms = parse_u64(value)?;
             }
+            "mcp.enabled" => {
+                config.mcp.enabled = parse_bool(value)?;
+            }
+            "mcp.project_file" => {
+                config.mcp.project_file = unquote(value);
+            }
+            "mcp.user_file" => {
+                config.mcp.user_file = unquote(value);
+            }
             "workspace.config_dir" => config.workspace.config_dir = unquote(value),
             "workspace.session_dir" => config.workspace.session_dir = unquote(value),
             "workspace.user_skills_dir" => {
@@ -196,6 +205,21 @@ hooks.timeout_ms = 1234
         assert_eq!(config.hooks.project_dir, ".dscode/custom-hooks");
         assert_eq!(config.hooks.user_dir, "/custom/user-hooks");
         assert_eq!(config.hooks.timeout_ms, 1234);
+    }
+
+    #[test]
+    fn parse_config_overrides_mcp_from_toml() {
+        let mut config = AppConfig::default();
+        let toml = r#"
+mcp.enabled = false
+mcp.project_file = ".dscode/custom-mcp.json"
+mcp.user_file = "/custom/user-mcp.json"
+"#;
+        parse_config(toml, &mut config).unwrap();
+
+        assert!(!config.mcp.enabled);
+        assert_eq!(config.mcp.project_file, ".dscode/custom-mcp.json");
+        assert_eq!(config.mcp.user_file, "/custom/user-mcp.json");
     }
 
     #[test]

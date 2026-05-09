@@ -5,6 +5,7 @@ pub mod config;
 pub mod diff;
 pub mod doctor;
 pub mod dogfood;
+pub mod mcp;
 pub mod pr;
 pub mod resume;
 pub mod run;

@@ -26,6 +26,7 @@ fn command_words() -> &'static [&'static str] {
         "doctor",
         "dogfood",
         "interactive",
+        "mcp",
         "pr",
         "repl",
         "resume",
@@ -49,6 +50,10 @@ fn pr_words() -> &'static [&'static str] {
     &["review", "fix", "patch"]
 }
 
+fn mcp_words() -> &'static [&'static str] {
+    &["list", "doctor", "init"]
+}
+
 fn shell_words() -> &'static [&'static str] {
     &["bash", "zsh", "fish"]
 }
@@ -57,6 +62,7 @@ fn bash_completion() -> String {
     let commands = command_words().join(" ");
     let dogfood = dogfood_words().join(" ");
     let pr = pr_words().join(" ");
+    let mcp = mcp_words().join(" ");
     let shells = shell_words().join(" ");
     format!(
         r#"_deepseek()
@@ -80,6 +86,11 @@ fn bash_completion() -> String {
                 COMPREPLY=( $(compgen -W "{pr}" -- "$cur") )
             fi
             ;;
+        mcp)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "{mcp}" -- "$cur") )
+            fi
+            ;;
         completion)
             if [[ $cword -eq 2 ]]; then
                 COMPREPLY=( $(compgen -W "{shells}" -- "$cur") )
@@ -97,6 +108,7 @@ fn zsh_completion() -> String {
     let commands = command_words();
     let dogfood = dogfood_words();
     let pr = pr_words();
+    let mcp = mcp_words();
     let shells = shell_words();
     format!(
         r#"#compdef deepseek
@@ -119,6 +131,9 @@ _deepseek() {{
     pr)
       _values 'pr action' {pr}
       ;;
+    mcp)
+      _values 'mcp action' {mcp}
+      ;;
     completion)
       _values 'shell' {shells}
       ;;
@@ -138,6 +153,11 @@ _deepseek "$@"
             .collect::<Vec<_>>()
             .join(" "),
         pr = pr
+            .iter()
+            .map(|value| format!("'{value}'"))
+            .collect::<Vec<_>>()
+            .join(" "),
+        mcp = mcp
             .iter()
             .map(|value| format!("'{value}'"))
             .collect::<Vec<_>>()
@@ -167,6 +187,11 @@ fn fish_completion() -> String {
             "complete -c deepseek -n '__fish_seen_subcommand_from pr' -a '{action}'"
         ));
     }
+    for action in mcp_words() {
+        lines.push(format!(
+            "complete -c deepseek -n '__fish_seen_subcommand_from mcp' -a '{action}'"
+        ));
+    }
     for shell in shell_words() {
         lines.push(format!(
             "complete -c deepseek -n '__fish_seen_subcommand_from completion' -a '{shell}'"
@@ -185,6 +210,7 @@ mod tests {
         assert!(script.contains("complete -F _deepseek deepseek"));
         assert!(script.contains("benchmark"));
         assert!(script.contains("completion"));
+        assert!(script.contains("mcp"));
     }
 
     #[test]

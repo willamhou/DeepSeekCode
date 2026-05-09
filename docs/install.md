@@ -123,6 +123,7 @@ deepseek doctor
 
 `deepseek config init` 会创建项目级 `.dscode/config.toml`、session 目录、custom command 目录和 hooks 事件目录。
 如果确实要覆盖已有配置，可以显式运行 `deepseek config init --force`。
+它也会创建 `.dscode/mcp.json`，用于记录项目级 MCP server 定义。
 
 `deepseek` 会自动读取当前工作目录下的 `.env`，并在变量尚未存在于进程环境时注入。常用 DeepSeek/OpenAI-compatible 配置：
 
@@ -144,6 +145,31 @@ DEEPSEEK_MODEL=deepseek-coder
 放置可执行脚本；脚本通过 stdin 接收 JSON payload。`user_prompt_submit` / `pre_tool_use` 非零退出会阻断，
 `post_tool_use` 非零退出只会作为 advisory observation 返回给 agent。
 
+MCP server 配置可放在项目级 `.dscode/mcp.json` 或用户级 `~/.config/dscode/mcp.json`。当前版本先支持配置发现和校验：
+
+```bash
+deepseek mcp init
+deepseek mcp list
+deepseek mcp doctor
+```
+
+配置格式兼容常见 `mcpServers` 对象，例如：
+
+```json
+{
+  "mcpServers": {
+    "example-filesystem": {
+      "disabled": true,
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    }
+  }
+}
+```
+
+这一版还不会把 MCP tools 注入 agent tool registry；它先把项目/用户级 MCP 配置面固定下来，便于后续接入真实 transport。
+
 如果要做一次最小 live 请求验证：
 
 ```bash
@@ -156,6 +182,7 @@ deepseek smoke
 - `deepseek "task"` 或 `deepseek run "task"`：执行单次任务
 - `deepseek benchmark`：跑本地 benchmark 基线
 - `deepseek dogfood ...`：记录或回放真实任务
+- `deepseek mcp list|doctor`：查看或校验 MCP server 配置
 - `deepseek completion bash|zsh|fish`：生成 shell completion 脚本
 
 ## Shell Completion

@@ -16,6 +16,7 @@ pub fn run(cli: app::Cli) -> AppResult<()> {
         app::Command::Doctor(args) => commands::doctor::run(args),
         app::Command::Smoke(args) => commands::smoke::run(args),
         app::Command::Pr(action) => commands::pr::run(action),
+        app::Command::Mcp(action) => commands::mcp::run(action),
         app::Command::Version => commands::version::run(),
     }
 }

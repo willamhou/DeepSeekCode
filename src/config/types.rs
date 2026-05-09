@@ -4,6 +4,7 @@ pub struct AppConfig {
     pub approval: ApprovalConfig,
     pub workspace: WorkspaceConfig,
     pub hooks: HooksConfig,
+    pub mcp: McpConfig,
 }
 
 impl Default for AppConfig {
@@ -13,6 +14,7 @@ impl Default for AppConfig {
             approval: ApprovalConfig::default(),
             workspace: WorkspaceConfig::default(),
             hooks: HooksConfig::default(),
+            mcp: McpConfig::default(),
         }
     }
 }
@@ -64,6 +66,23 @@ impl Default for HooksConfig {
             project_dir: ".dscode/hooks".to_string(),
             user_dir: "~/.config/dscode/hooks".to_string(),
             timeout_ms: 5_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct McpConfig {
+    pub enabled: bool,
+    pub project_file: String,
+    pub user_file: String,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            project_file: ".dscode/mcp.json".to_string(),
+            user_file: "~/.config/dscode/mcp.json".to_string(),
         }
     }
 }

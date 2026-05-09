@@ -48,6 +48,13 @@ pub enum DogfoodAction {
     PromoteBenchmark(DogfoodPromoteArgs),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpAction {
+    List,
+    Doctor,
+    Init { force: bool },
+}
+
 #[derive(Debug)]
 pub struct DogfoodRunArgs {
     pub task: String,
@@ -222,6 +229,7 @@ impl Cli {
             "doctor" => Command::Doctor(DoctorArgs {}),
             "smoke" => Command::Smoke(parse_smoke_args(args)),
             "pr" => Command::Pr(parse_pr_subcommand(args)?),
+            "mcp" => Command::Mcp(parse_mcp_subcommand(args)?),
             _ => {
                 let mut combined = vec![first];
                 combined.extend(args);
@@ -251,6 +259,7 @@ pub enum Command {
     Doctor(DoctorArgs),
     Smoke(SmokeArgs),
     Pr(PrAction),
+    Mcp(McpAction),
     Version,
 }
 
@@ -359,6 +368,41 @@ fn parse_smoke_args(args: Vec<String>) -> SmokeArgs {
     }
 
     smoke
+}
+
+fn parse_mcp_subcommand(args: Vec<String>) -> Result<McpAction, String> {
+    if args.is_empty() {
+        return Ok(McpAction::List);
+    }
+
+    let action = &args[0];
+    match action.as_str() {
+        "list" => {
+            if args.len() > 1 {
+                return Err("mcp list accepts no arguments".to_string());
+            }
+            Ok(McpAction::List)
+        }
+        "doctor" => {
+            if args.len() > 1 {
+                return Err("mcp doctor accepts no arguments".to_string());
+            }
+            Ok(McpAction::Doctor)
+        }
+        "init" => {
+            let mut force = false;
+            for flag in args.iter().skip(1) {
+                match flag.as_str() {
+                    "--force" => force = true,
+                    other => return Err(format!("unknown flag for `mcp init`: {other}")),
+                }
+            }
+            Ok(McpAction::Init { force })
+        }
+        other => Err(format!(
+            "unknown mcp sub-action `{other}`; expected list|doctor|init"
+        )),
+    }
 }
 
 fn parse_config_args(args: Vec<String>) -> Result<ConfigArgs, String> {
@@ -811,6 +855,29 @@ mod tests {
                 post: true,
                 out: None,
             } if reference == "42"
+        ));
+    }
+
+    #[test]
+    fn parses_mcp_subcommands() {
+        let list = Cli::from_argv(vec!["mcp".to_string()]).unwrap();
+        assert!(matches!(list.command, Some(Command::Mcp(McpAction::List))));
+
+        let doctor = Cli::from_argv(vec!["mcp".to_string(), "doctor".to_string()]).unwrap();
+        assert!(matches!(
+            doctor.command,
+            Some(Command::Mcp(McpAction::Doctor))
+        ));
+
+        let init = Cli::from_argv(vec![
+            "mcp".to_string(),
+            "init".to_string(),
+            "--force".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            init.command,
+            Some(Command::Mcp(McpAction::Init { force: true }))
         ));
     }
 

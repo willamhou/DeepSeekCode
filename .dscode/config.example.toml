@@ -78,6 +78,16 @@ hooks.user_dir = "~/.config/dscode/hooks"
 hooks.timeout_ms = 5000
 
 # -----------------------------------------------------------------------------
+# mcp: MCP server discovery (config validation/listing)
+# -----------------------------------------------------------------------------
+
+# 当前版本会读取并校验 MCP server 配置，但还不会把 MCP tools 注入 agent tool registry。
+# Project/user scope 的同名 server 以 project 为准。
+mcp.enabled = true
+mcp.project_file = ".dscode/mcp.json"
+mcp.user_file = "~/.config/dscode/mcp.json"
+
+# -----------------------------------------------------------------------------
 # pr: GitHub PR integration (Phase 8a)
 # -----------------------------------------------------------------------------
 
