@@ -102,7 +102,7 @@ done
         std::fs::write(
             &mcp_file,
             format!(
-                r#"{{"mcpServers":{{"fake":{{"transport":"stdio","command":"{}"}}}}}}"#,
+                r#"{{"mcpServers":{{"fake":{{"transport":"stdio","command":"/bin/sh","args":["{}"]}}}}}}"#,
                 server.display()
             ),
         )
