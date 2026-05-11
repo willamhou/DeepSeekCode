@@ -7,28 +7,43 @@ use std::time::{Duration, Instant};
 use crate::config::types::HooksConfig;
 use crate::error::{app_error, policy_denied, AppResult};
 use crate::tools::types::ToolInput;
-use crate::util::json::{json_value_to_string, JsonValue};
+use crate::util::json::{json_as_string, json_value_to_string, parse_root_object, JsonValue};
 
 const HOOK_OUTPUT_LIMIT: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookEvent {
+    SessionStart,
+    SessionStop,
     UserPromptSubmit,
     PreToolUse,
+    PermissionRequest,
     PostToolUse,
+    SubagentStart,
+    SubagentStop,
+    PreCompact,
 }
 
 impl HookEvent {
     fn dir_name(self) -> &'static str {
         match self {
+            Self::SessionStart => "session_start",
+            Self::SessionStop => "session_stop",
             Self::UserPromptSubmit => "user_prompt_submit",
             Self::PreToolUse => "pre_tool_use",
+            Self::PermissionRequest => "permission_request",
             Self::PostToolUse => "post_tool_use",
+            Self::SubagentStart => "subagent_start",
+            Self::SubagentStop => "subagent_stop",
+            Self::PreCompact => "pre_compact",
         }
     }
 
     fn blocks_on_failure(self) -> bool {
-        matches!(self, Self::UserPromptSubmit | Self::PreToolUse)
+        matches!(
+            self,
+            Self::UserPromptSubmit | Self::PreToolUse | Self::PermissionRequest
+        )
     }
 }
 
@@ -60,6 +75,42 @@ impl HookRunner {
                 tool_input: None,
                 tool_status: None,
                 tool_output: None,
+                metadata: BTreeMap::new(),
+            }),
+        )
+    }
+
+    pub fn session_start(&self, task: &str, reason: &str) -> AppResult<Option<String>> {
+        self.run(
+            HookEvent::SessionStart,
+            hook_payload(HookPayload {
+                event: HookEvent::SessionStart,
+                task,
+                tool_name: None,
+                tool_input: None,
+                tool_status: None,
+                tool_output: None,
+                metadata: BTreeMap::from([("reason".to_string(), reason.to_string())]),
+            }),
+        )
+    }
+
+    pub fn session_stop(
+        &self,
+        task: &str,
+        reason: &str,
+        final_message: &str,
+    ) -> AppResult<Option<String>> {
+        self.run(
+            HookEvent::SessionStop,
+            hook_payload(HookPayload {
+                event: HookEvent::SessionStop,
+                task,
+                tool_name: None,
+                tool_input: None,
+                tool_status: None,
+                tool_output: Some(final_message),
+                metadata: BTreeMap::from([("reason".to_string(), reason.to_string())]),
             }),
         )
     }
@@ -79,6 +130,35 @@ impl HookRunner {
                 tool_input: Some(input),
                 tool_status: None,
                 tool_output: None,
+                metadata: BTreeMap::new(),
+            }),
+        )
+    }
+
+    pub fn permission_request(
+        &self,
+        task: &str,
+        tool_name: &str,
+        input: &ToolInput,
+        permission_kind: &str,
+        permission_target: &str,
+    ) -> AppResult<Option<String>> {
+        self.run(
+            HookEvent::PermissionRequest,
+            hook_payload(HookPayload {
+                event: HookEvent::PermissionRequest,
+                task,
+                tool_name: Some(tool_name),
+                tool_input: Some(input),
+                tool_status: None,
+                tool_output: None,
+                metadata: BTreeMap::from([
+                    ("permission_kind".to_string(), permission_kind.to_string()),
+                    (
+                        "permission_target".to_string(),
+                        permission_target.to_string(),
+                    ),
+                ]),
             }),
         )
     }
@@ -105,6 +185,73 @@ impl HookRunner {
                     crate::model::protocol::ObservationStatus::Failed => "failed",
                 }),
                 tool_output: Some(output),
+                metadata: BTreeMap::new(),
+            }),
+        )
+    }
+
+    pub fn subagent_start(
+        &self,
+        task: &str,
+        subagent_task: &str,
+        agent_name: Option<&str>,
+    ) -> AppResult<Option<String>> {
+        let mut metadata =
+            BTreeMap::from([("subagent_task".to_string(), subagent_task.to_string())]);
+        if let Some(agent_name) = agent_name {
+            metadata.insert("agent".to_string(), agent_name.to_string());
+        }
+        self.run(
+            HookEvent::SubagentStart,
+            hook_payload(HookPayload {
+                event: HookEvent::SubagentStart,
+                task,
+                tool_name: Some("dispatch_subagent"),
+                tool_input: None,
+                tool_status: None,
+                tool_output: None,
+                metadata,
+            }),
+        )
+    }
+
+    pub fn subagent_stop(
+        &self,
+        task: &str,
+        subagent_task: &str,
+        agent_name: Option<&str>,
+        output: &str,
+    ) -> AppResult<Option<String>> {
+        let mut metadata =
+            BTreeMap::from([("subagent_task".to_string(), subagent_task.to_string())]);
+        if let Some(agent_name) = agent_name {
+            metadata.insert("agent".to_string(), agent_name.to_string());
+        }
+        self.run(
+            HookEvent::SubagentStop,
+            hook_payload(HookPayload {
+                event: HookEvent::SubagentStop,
+                task,
+                tool_name: Some("dispatch_subagent"),
+                tool_input: None,
+                tool_status: None,
+                tool_output: Some(output),
+                metadata,
+            }),
+        )
+    }
+
+    pub fn pre_compact(&self, task: &str, reason: &str) -> AppResult<Option<String>> {
+        self.run(
+            HookEvent::PreCompact,
+            hook_payload(HookPayload {
+                event: HookEvent::PreCompact,
+                task,
+                tool_name: None,
+                tool_input: None,
+                tool_status: None,
+                tool_output: None,
+                metadata: BTreeMap::from([("reason".to_string(), reason.to_string())]),
             }),
         )
     }
@@ -131,11 +278,25 @@ impl HookRunner {
                 continue;
             }
             if !result.stdout.trim().is_empty() {
-                context.push(format!(
-                    "{}: {}",
-                    script.display(),
-                    truncate_output(result.stdout.trim())
-                ));
+                match hook_stdout_decision(event, result.stdout.trim())? {
+                    HookStdoutDecision::Allow(Some(add_context)) => context.push(format!(
+                        "{}: {}",
+                        script.display(),
+                        truncate_output(&add_context)
+                    )),
+                    HookStdoutDecision::Allow(None) => {}
+                    HookStdoutDecision::Deny(reason) => {
+                        let message = format!(
+                            "hook `{}` denied: {}",
+                            script.display(),
+                            truncate_output(&reason)
+                        );
+                        if event.blocks_on_failure() {
+                            return Err(policy_denied(message));
+                        }
+                        context.push(message);
+                    }
+                }
             }
         }
 
@@ -171,6 +332,7 @@ struct HookPayload<'a> {
     tool_input: Option<&'a ToolInput>,
     tool_status: Option<&'a str>,
     tool_output: Option<&'a str>,
+    metadata: BTreeMap<String, String>,
 }
 
 fn hook_payload(payload: HookPayload<'_>) -> String {
@@ -211,7 +373,61 @@ fn hook_payload(payload: HookPayload<'_>) -> String {
             .map(|value| JsonValue::String(truncate_output(value)))
             .unwrap_or(JsonValue::Null),
     );
+    root.insert(
+        "metadata".to_string(),
+        JsonValue::Object(
+            payload
+                .metadata
+                .into_iter()
+                .map(|(key, value)| (key, JsonValue::String(value)))
+                .collect(),
+        ),
+    );
     json_value_to_string(&JsonValue::Object(root))
+}
+
+enum HookStdoutDecision {
+    Allow(Option<String>),
+    Deny(String),
+}
+
+fn hook_stdout_decision(event: HookEvent, stdout: &str) -> AppResult<HookStdoutDecision> {
+    let trimmed = stdout.trim();
+    if !trimmed.starts_with('{') {
+        return Ok(HookStdoutDecision::Allow(Some(trimmed.to_string())));
+    }
+    let root = parse_root_object(trimmed)?;
+    let decision = root.get("decision").and_then(json_as_string);
+    let add_context = root
+        .get("add_context")
+        .or_else(|| root.get("additional_context"))
+        .and_then(json_as_string)
+        .map(str::to_string);
+    let system_message = root
+        .get("system_message")
+        .or_else(|| root.get("systemMessage"))
+        .and_then(json_as_string)
+        .map(str::to_string);
+    let context = add_context.or(system_message);
+
+    match decision {
+        Some("deny") | Some("block") => {
+            let reason = root
+                .get("reason")
+                .or_else(|| root.get("message"))
+                .and_then(json_as_string)
+                .unwrap_or_else(|| {
+                    if event.blocks_on_failure() {
+                        "blocked by hook"
+                    } else {
+                        "advisory hook block"
+                    }
+                });
+            Ok(HookStdoutDecision::Deny(reason.to_string()))
+        }
+        Some("allow") | None => Ok(HookStdoutDecision::Allow(context)),
+        Some(other) => Err(app_error(format!("unsupported hook decision `{other}`"))),
+    }
 }
 
 fn tool_input_json(input: &ToolInput) -> JsonValue {
@@ -470,11 +686,61 @@ mod tests {
             tool_input: Some(&input),
             tool_status: None,
             tool_output: None,
+            metadata: BTreeMap::new(),
         });
 
         assert!(payload.contains("\"event\":\"pre_tool_use\""));
         assert!(payload.contains("\"tool_name\":\"read_file\""));
         assert!(payload.contains("\"path\":\"src/main.rs\""));
+        assert!(payload.contains("\"metadata\":{}"));
+    }
+
+    #[test]
+    fn hook_payload_includes_metadata() {
+        let payload = hook_payload(HookPayload {
+            event: HookEvent::PermissionRequest,
+            task: "inspect",
+            tool_name: Some("run_shell"),
+            tool_input: Some(&ToolInput::new().with_arg("command", "cargo test")),
+            tool_status: None,
+            tool_output: None,
+            metadata: BTreeMap::from([
+                ("permission_kind".to_string(), "shell".to_string()),
+                ("permission_target".to_string(), "cargo test".to_string()),
+            ]),
+        });
+
+        assert!(payload.contains("\"event\":\"permission_request\""));
+        assert!(payload.contains("\"permission_kind\":\"shell\""));
+        assert!(payload.contains("\"permission_target\":\"cargo test\""));
+    }
+
+    #[test]
+    fn hook_stdout_decision_supports_json_allow_context() {
+        let decision = hook_stdout_decision(
+            HookEvent::SessionStart,
+            r#"{"decision":"allow","add_context":"load me"}"#,
+        )
+        .unwrap();
+
+        match decision {
+            HookStdoutDecision::Allow(Some(context)) => assert_eq!(context, "load me"),
+            _ => panic!("expected allow with context"),
+        }
+    }
+
+    #[test]
+    fn hook_stdout_decision_supports_json_deny() {
+        let decision = hook_stdout_decision(
+            HookEvent::PreToolUse,
+            r#"{"decision":"deny","reason":"no"}"#,
+        )
+        .unwrap();
+
+        match decision {
+            HookStdoutDecision::Deny(reason) => assert_eq!(reason, "no"),
+            _ => panic!("expected deny"),
+        }
     }
 
     #[test]
@@ -562,5 +828,25 @@ mod tests {
             .unwrap();
 
         assert!(output.contains("post failed note"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pre_compact_collects_hook_stdout() {
+        let root = temp_root("pre-compact");
+        let hook = root.join("hooks/pre_compact/10-note");
+        write_hook(&hook, "printf 'compact note'");
+        let runner = HookRunner::new(&HooksConfig {
+            enabled: true,
+            project_dir: root.join("hooks").display().to_string(),
+            ..HooksConfig::default()
+        });
+
+        let output = runner
+            .pre_compact("task", "manual_repl_compact")
+            .unwrap()
+            .unwrap();
+
+        assert!(output.contains("compact note"));
     }
 }

@@ -1,0 +1,13 @@
+[Unit]
+Description=DeepseekCode diagnostics watch worker
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__WORKDIR__
+ExecStart=/usr/bin/env __DEEPSEEK_BIN__ diagnostics --watch --changed --interval-ms __INTERVAL_MS__
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

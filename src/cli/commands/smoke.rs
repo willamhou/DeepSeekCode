@@ -25,7 +25,12 @@ pub fn run(args: SmokeArgs) -> AppResult<()> {
     println!("DeepseekCode smoke");
     println!("  flavor: {}", flavor_label(flavor));
     println!("  base_url: {}", model.base_url);
-    println!("  model: {}", model.model);
+    let resolved_model = smoke_model_name(&model);
+    if resolved_model == model.model {
+        println!("  model: {}", model.model);
+    } else {
+        println!("  model: {} -> {}", model.model, resolved_model);
+    }
     let endpoint = endpoint_for(flavor, &model.base_url);
     println!("  endpoint: {endpoint}");
     println!("  prompt: {prompt}");
@@ -103,6 +108,7 @@ fn endpoint_for(flavor: SmokeFlavor, base_url: &str) -> String {
 }
 
 fn build_request_body(flavor: SmokeFlavor, model: &ModelConfig, prompt: &str) -> String {
+    let model_name = smoke_model_name(model);
     match flavor {
         SmokeFlavor::OpenAi => format!(
             concat!(
@@ -115,7 +121,7 @@ fn build_request_body(flavor: SmokeFlavor, model: &ModelConfig, prompt: &str) ->
                 "]",
                 "}}"
             ),
-            model = json_escape(&model.model),
+            model = json_escape(&model_name),
             max_tokens = MAX_TOKENS,
             prompt = json_escape(prompt),
         ),
@@ -129,10 +135,17 @@ fn build_request_body(flavor: SmokeFlavor, model: &ModelConfig, prompt: &str) ->
                 "]",
                 "}}"
             ),
-            model = json_escape(&model.model),
+            model = json_escape(&model_name),
             max_tokens = MAX_TOKENS,
             prompt = json_escape(prompt),
         ),
+    }
+}
+
+fn smoke_model_name(model: &ModelConfig) -> String {
+    match model.model.trim().to_ascii_lowercase().as_str() {
+        "auto" | "auto-deepseek" | "deepseek-auto" => "deepseek-v4-flash".to_string(),
+        _ => model.model.clone(),
     }
 }
 
@@ -358,6 +371,7 @@ mod tests {
             base_url: "https://api.deepseek.com".to_string(),
             model: "deepseek-chat".to_string(),
             api_key_env: "DEEPSEEK_API_KEY".to_string(),
+            reasoning_effort: "off".to_string(),
         };
         let openai = build_request_body(SmokeFlavor::OpenAi, &model, "ping");
         assert!(openai.contains("\"model\":\"deepseek-chat\""));
@@ -368,6 +382,21 @@ mod tests {
         assert!(anthropic.contains("\"model\":\"deepseek-chat\""));
         assert!(anthropic.contains("\"type\":\"text\""));
         assert!(anthropic.contains("\"text\":\"ping\""));
+    }
+
+    #[test]
+    fn build_request_body_resolves_auto_model_for_smoke_probe() {
+        let model = ModelConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            model: "auto".to_string(),
+            api_key_env: "DEEPSEEK_API_KEY".to_string(),
+            reasoning_effort: "off".to_string(),
+        };
+
+        let openai = build_request_body(SmokeFlavor::OpenAi, &model, "ping");
+
+        assert!(openai.contains("\"model\":\"deepseek-v4-flash\""));
+        assert!(!openai.contains("\"model\":\"auto\""));
     }
 
     #[test]

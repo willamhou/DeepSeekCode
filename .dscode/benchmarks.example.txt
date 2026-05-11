@@ -18,6 +18,17 @@ workdir = "fixtures/rust-cli-mini"
 notes = "Safe read-only baseline case in a fixture workdir"
 budget = 6
 
+name = "git-log-recent-history"
+task = "show recent git commits"
+category = "read_only"
+expect_tool = "git_log"
+expect_tool_sequence = ["git_log"]
+expect_last_tool_output_contains = "meta.result=ok"
+max_tool_calls = 1
+max_failed_tools = 0
+notes = "Safe read-only Git history case for repository-level inspection"
+budget = 2
+
 name = "seeded-recovery"
 task = "find where dispatch_subagent is implemented and inspect the code"
 category = "recovery"
@@ -62,6 +73,16 @@ task = "make DeepseekCode more like Claude Code"
 category = "planning"
 assertion_bundle = "planning_todo_only"
 notes = "Product gap closure requests should trigger a first-turn todo plan before inspect/edit actions"
+budget = 1
+max_tool_calls = 1
+max_failed_tools = 0
+
+name = "plan-product-readiness"
+task = "productionize DeepseekCode for daily coding work"
+category = "planning"
+assertion_bundle = "planning_todo_only"
+expect_tool_output_contains = "todo_write:Assessing current capability gaps against the target product behavior"
+notes = "Product readiness requests should trigger a product-gap audit plan before inspect/edit actions"
 budget = 1
 max_tool_calls = 1
 max_failed_tools = 0

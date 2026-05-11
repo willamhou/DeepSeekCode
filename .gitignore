@@ -1,4 +1,5 @@
 /target/
+/npm/platforms/*/bin/
 /.dscode/*
 !/.dscode/config.example.toml
 !/.dscode/benchmarks.example.txt

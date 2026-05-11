@@ -1,10 +1,10 @@
 # Roadmap 与状态
 
-最后更新：`2026-05-07`
+最后更新：`2026-05-11`
 
 ## 当前状态
 
-`DeepseekCode` 已经从纯设计文档阶段进入到“可运行的本地 agent 原型”阶段。
+`DeepseekCode` 已经从“可运行的本地 agent 原型”推进到可回归验证的 CLI code-agent 工作树。
 
 当前代码具备这些基础能力：
 
@@ -17,7 +17,7 @@
   - `apply_patch`
   - `run_shell`
   - `git_diff`
-- 可运行离线 planner loop
+- 可运行离线 planner loop、REPL、scriptable `exec --json` 和 benchmark/dogfood 门禁
 - DeepSeek 远端传输层已接入：
   - `OpenAI-compatible` 路径支持正式 `tools` / function-calling
   - `Anthropic-compatible` 路径支持正式 `tool_use` content block，输入支持字符串与数值
@@ -27,8 +27,10 @@
   - 写入/命令审批：交互式 TTY prompt（非 TTY 默认拒绝），env 可放行
   - 错误分类 `PolicyDenied` / `ToolFailure` / `Other`
 - 本机可验证性已具备：
-  - `doctor` 输出 workspace / model / api key / network / hints 五段
+  - `doctor` 输出 workspace / model / api key / network / hints / capabilities 等诊断
   - `smoke` 可对 OpenAI 与 Anthropic 兼容路径单独发起最小远端请求
+  - 默认离线 benchmark 当前 `70/70`，live gate 通过；trend gate 因新增 Git history cases 进入新 comparable baseline warmup
+  - dogfood ledger 当前 `39` runs；新增 Phase 12A replay 均为 success，但距离 100+ live gate 仍不足
 
 ## 已完成
 
@@ -48,6 +50,8 @@
   - `dscode`
   - `deepseek "task"`
   - `deepseek run "task"`
+  - `deepseek exec "task"` / `deepseek exec --json`
+  - `deepseek agents`
   - `deepseek benchmark --manifest <file> --out <report>`
   - `deepseek dogfood run "task"`
   - `deepseek dogfood report --out <report>`
@@ -56,6 +60,10 @@
   - `deepseek config`
   - `deepseek doctor`
   - `deepseek smoke`（支持 `--flavor openai|anthropic` 与 `--prompt`）
+  - `deepseek mcp`
+  - `deepseek completion`
+  - `deepseek update`
+  - `deepseek version`
 - 支持 `--skill`
 - 支持简单 `.dscode/config.toml` 配置读取：
   - `model.base_url`
@@ -144,22 +152,23 @@
 
 这些是已经明确存在、但还未完成的部分：
 
-- 当前执行环境无法直接验证外网访问
-  - 真实 DeepSeek 在线调用代码已接好，但未在当前会话里做 live API 验证
-- `apply_patch` 多文件 + 路径范围 + 失败诊断已落地
-- planner 编辑路径默认走 patch 模式，不可构造时回退到文本替换
-- 工具失败已转为观察项，agent loop 不再因错误退出
-- patch 应用后自动 git_diff 复核（仅在成功时触发）
-- patch 模式失败可单次回退到文本替换重试
-- 失败重试策略仍较窄（仅 apply_patch 单次 patch→text 回退）
-  - 其他工具失败后只是被记录为观察项并继续走启发式
+- 当前执行环境无法直接验证外网访问：本轮尝试 live dogfood 时 `api.deepseek.com` DNS 解析失败，guard 正确跳过 ledger 写入
+- Phase 12 完整产品面仍未收口：
+  - VS Code 仍是 terminal-backed 入口，不是完整 native agent workbench
+  - GitHub automation 仍是本地 `gh` workflow，不是 Action / `@deepseek` hosted trigger
+  - 还没有 background worktree runner / app-cloud task surface
+  - dogfood 只有 `39` runs，距离 100+ live CLI runs 和关键 slice `>=90%` 成功率门槛仍不足
+- CLI-only 实现面已接近高个位数差距，但完成声明仍被真实在线 dogfood 厚度阻塞
 
 ## 已验证
 
 这些能力已经在当前本地环境里验证过：
 
-- `cargo check --offline`
-- `cargo test --offline`（198 项单测全部通过）
+- `cargo test --offline`（611 项单测全部通过）
+- `DEEPSEEK_API_KEY_ENV=DEEPSEEK_API_KEY_OFFLINE cargo run --offline -- benchmark`：默认 manifest `70/70`
+- benchmark trend gate：`skipped (need at least 3 prior comparable runs, found 0)`，因为 case 数从 `67` 扩到 `70`
+- benchmark live gate：`pass (runs=39)`
+- `.dscode/dogfood/latest.md`：`39` runs；最新 6 条 Phase 12A replay 均为 success
 - `cargo run --offline -- doctor` 输出五段诊断（workspace / model / api key / network / hints）
 - `cargo run --offline -- smoke` 与 `cargo run --offline -- smoke --flavor anthropic` 在缺少 key 时给出预检失败
 - `cargo run --offline -- "inspect repository"`
@@ -1593,7 +1602,7 @@
   - 默认 benchmark：`42/42`
   - total tool calls：`145`
   - failed tool calls：`0`
-  - trend gate：`pass against 3 comparable runs`
+  - trend gate：`pass against 4 comparable runs`
   - live gate：`pass (no new dogfood records since previous snapshot, runs=22)`
 - 已把两条 Python retry baseline replay 成 live dogfood：
   - `fixture-retry-write-validate-python-mini` 记为 `write_validate / success`
@@ -1890,6 +1899,158 @@
   - 动态 tool 仍按真实 `server/tool` 走 `approval.require_mcp_confirmation` 与 `approval.mcp_call_allowlist`
   - 单次最多注入 `24` 个动态 MCP tools；发现失败的 server 会被跳过，避免单个坏 server 阻断整个 agent registry
 - 当前边界仍明确：动态 tool schema 还是通用 `arguments` wrapper，尚未把远端 input schema 逐个注入模型 schema；permission UX 仍偏 bridge 级别，完整 plugin ecosystem 和云端/外部任务面仍未接入
+
+**Phase 12 gap audit v2 (`working tree`, 2026-05-10) — Phase 12A baseline 已完成**：
+- 新增 gap audit/spec：
+  - `docs/superpowers/specs/2026-05-10-claude-codex-gap-audit-v2.md`
+  - 对照 Claude Code / Codex 官方资料重新评估完整产品面差距
+  - Phase 12A 后当前相对完整产品面估计约 `34%` gap；只有继续按 Phase 12B-12E 补齐后才可压到 `8% - 10%`
+- 新增执行计划：
+  - `docs/superpowers/plans/2026-05-10-claude-codex-gap-closure-v2.md`
+  - Phase 12A：quality baseline
+  - Phase 12B：native VS Code workbench
+  - Phase 12C：GitHub automation
+  - Phase 12D：MCP/hooks/subagent hardening
+  - Phase 12E：background worktree runner and distribution
+- 同步新增 `plan-product-readiness` benchmark，覆盖 `productionize DeepseekCode for daily coding work` 这类产品化/daily-use 请求
+- Phase 12A 已追加 6 条 dogfood replay：
+  - product gap planning
+  - product readiness planning
+  - failed-validation retry
+  - Rust / JavaScript / Python PR retry validation
+  - 这些 replay 在当前 sandbox 中使用 offline fallback；真实 live API 访问因 DNS failure 未写入 ledger
+- 最新验证：
+  - 全量测试：`611 passed, 0 failed`
+  - 默认离线 benchmark：`67/67`
+  - total tool calls：`200`
+  - failed tool calls：`0`
+  - trend gate：`pass against 3 comparable runs`
+  - live gate：`pass (runs=39)`
+  - dogfood report：`39` runs，新增 Phase 12A replay 未引入 failed/stuck/manual
+- 当前边界仍明确：Phase 12A 质量基线已收口，但还没有实际收掉 IDE workbench、GitHub automation、background worktree/app/cloud、true live dogfood 厚度这些主差距。
+
+**Phase 12 CLI-only gap audit (`working tree`, 2026-05-10) — 首轮实现已完成**：
+- 按最新口径，只对比 Claude Code CLI / Codex CLI，不计入 IDE、Codex app/cloud、GitHub Action 或其他 hosted automation
+- 新增 CLI-only audit/spec：
+  - `docs/superpowers/specs/2026-05-10-cli-only-gap-audit.md`
+  - 实施前 CLI-only residual gap 估计为 `22% - 28%`
+  - CLI-12 首轮实现后 residual gap 估计为 `12% - 16%`
+  - live JSONL、20 个 subagent benchmark cases、parallel subagent/thread management、MCP prompt slash commands、native image payloads、REPL `/compact` 与 release/install verifier 补齐后 residual gap 估计为 `6% - 9%`
+  - 主要差距收敛为 6 类：scriptable CLI UX、subagent orchestration、hooks events、MCP schema UX、model/context、install/update
+- 新增 CLI-only closure plan：
+  - `docs/superpowers/plans/2026-05-10-cli-only-gap-closure.md`
+  - Phase CLI-12A：scriptable CLI contract
+  - Phase CLI-12B：subagent CLI maturity
+  - Phase CLI-12C：hooks event parity
+  - Phase CLI-12D：MCP schema and permission UX
+  - Phase CLI-12E：model context and distribution
+- 已落地首轮 CLI gap closure：
+  - `deepseek exec`：stdin、JSONL、resume follow-up、skill/budget、image file refs
+  - `deepseek agents`：project/user agent files 的 list/show/validate
+  - hooks：session、prompt、tool、permission、subagent、pre-compact event 面与结构化 allow/deny/add_context
+  - MCP：动态 schema cache/injection、fallback wrapper、argument-aware permission prompt、`prompts/list` / `prompts/get` 和 REPL MCP prompt slash commands
+  - model/context：`doctor` capability reporting、`exec --image` 路径验证和 OpenAI/Anthropic native image payloads
+  - install/update：`deepseek update --check/--print-command`
+- 追加补齐：
+  - `deepseek exec --json` 现在 live 输出 `assistant_delta`、`tool_call`、`permission_request`、`tool_result`，完成后输出 `assistant_final`
+  - 默认 benchmark manifest 扩到 67 cases，其中 `subagent` category 为 20 cases；subagent-only verifier 已跑通 `20/20`
+  - `deepseek mcp prompts [server]`、`deepseek mcp prompt <server> <prompt> [json]`、REPL `/mcp/<server>/<prompt>` 和 Claude 风格 `/mcp__server__prompt` 已接入 MCP prompt flow
+  - `deepseek exec --image` 对 OpenAI-compatible vision 模型发送 `image_url` data URL，对 Anthropic-compatible Claude 模型发送 base64 `image` content block；DeepSeek text-only profile 保留文件引用
+  - REPL `/compact` 会先触发 `pre_compact` hook，再把旧 transcript turns 压成一个 summary turn 并保留最近 8 个 turns
+  - `deepseek update package` 生成本地 release package；`install-package` 安装并备份当前 binary；`rollback` 恢复备份；`verify-install` 在隔离目录跑 version/config/doctor/exec JSONL/benchmark sample
+  - `dispatch_subagents` 支持最多 4 个 child tasks 并发执行，返回 consolidated per-thread metadata，并写入 `.dscode/agent-threads/*.md`
+  - `deepseek agents threads/show-thread/switch/current/clear-current` 提供 thread artifact inspection 和 active thread switching
+  - 全量测试：`611 passed, 0 failed`
+  - 默认 benchmark：`67/67`，trend gate `pass against 4 comparable runs`，live gate `pass (runs=39)`
+- 当前边界仍明确：CLI-only 实现面已降到“高个位数”差距，但还不能标记完成。剩余硬差距是 100+ true live dogfood 证据。
+
+**DeepSeek-TUI parity track (`working tree`, 2026-05-10) — Phase A 启动**：
+- 新增源码级追平计划：
+  - `docs/superpowers/plans/2026-05-10-deepseek-tui-parity.md`
+  - 对照本地拉取的 `Hmbown/DeepSeek-TUI` HEAD `506343f`
+  - 明确 8 个产品面 deliverables：true TUI、durable runtime、tool surface、DeepSeek-native UX、LSP diagnostics、subagent/RLM、MCP/runtime API、packaging
+- 第一块低风险基础能力已落地：
+  - `deepseek doctor --json`
+  - JSON 输出 version、workspace、model、capabilities、api key presence、skills、MCP、network probe 状态和本地 binary availability
+  - JSON 模式不会做 live network probe，方便本地 supervisor、future workbench、release automation 稳定消费
+  - JSON 模式不输出真实 API key 或 key 尾号，只报告 `present/source` 与 `masked: redacted`
+- 发布文档已把 `deepseek doctor --json` 加入 source / artifact release checks
+- 验证：
+  - `cargo fmt --check`
+  - `cargo test --offline doctor`：`12 passed`
+  - `deepseek doctor --json`：本地实际执行成功
+- 第二块工具面补齐已落地：
+  - 新增只读 agent tools：`git_log`、`git_show`、`git_blame`
+  - 三个工具均支持显式 `cwd`，输出 `meta.git_command` / `meta.result`，并限制默认输出长度
+  - OpenAI/Anthropic tool schema 已暴露这三种工具
+  - offline planner 会把直接的 recent commits / git show / git blame 请求路由到专用工具，而不是退回 shell
+  - 默认 benchmark manifest 已新增三条 Git history read-only cases
+- 最新验证：
+  - `/home/willamhou/.cargo/bin/cargo fmt --check`
+  - `/home/willamhou/.cargo/bin/cargo test --offline`：`624 passed`
+  - `DEEPSEEK_API_KEY_ENV=DEEPSEEK_API_KEY_OFFLINE /home/willamhou/.cargo/bin/cargo run --offline -- benchmark`：`70/70`
+  - live gate：`pass (runs=39)`
+  - trend gate：`skipped`，因为 70-case comparable history 还不足 3 条
+- 当前边界仍明确：这只是 runtime/workbench integration contract 的第一步；还没有 agent-connected full TUI、SQLite durable runtime、live SSE task runtime 或 release artifact matrix。
+- Phase A integration contract 补齐：
+  - `deepseek serve --http` skeleton 已提供 `/health` 与 `/runtime`
+  - `docs/runtime.md` 记录 HTTP runtime schema、REPL session JSON v2、legacy exec snapshot、subagent thread artifacts、durable runtime draft 和 public readiness checklist
+  - 安装与发布文档已链接 runtime skeleton，并要求 release notes 包含 health/runtime 输出
+- 最新本地验证：
+- `/home/willamhou/.cargo/bin/cargo test`：`666 passed`
+- Phase B durable runtime 第一片已落地：
+  - 新增 `src/core/runtime.rs`，以 `.dscode/runtime/sessions`、`threads`、`turns`、`items`、`tasks`、`automations`、`events`、`usage` 保存 file-backed durable records
+  - `serve --http` 新增 `/v1/automations`、`/v1/automations/{id}`、`/v1/automations/{id}/trigger`、`/v1/sessions`、`/v1/sessions/{id}`、`/v1/sessions/{id}/automations`、`/v1/sessions/{id}/threads`、`/v1/sessions/{id}/tasks`、`/v1/tasks`、`/v1/tasks/{id}`、`/v1/tasks/{id}/claim`、`/v1/tasks/{id}/cancel`、`/v1/tasks/{id}/pause`、`/v1/tasks/{id}/resume`、`/v1/threads`、`/v1/threads/{id}`、`/v1/threads/{id}/automations`、`/v1/threads/{id}/items`、`/v1/threads/{id}/items/{item_id}`、`/v1/threads/{id}/turns`、`/v1/threads/{id}/turns/{turn_id}/items`、`/v1/threads/{id}/tasks`、`/v1/threads/{id}/events`、`/v1/threads/{id}/events/stream`、`/v1/threads/{id}/usage`、`/v1/threads/{id}/usage/summary`、`/v1/usage` 和 `/v1/usage/summary`
+  - `deepseek exec` 成功运行后会追加 durable session、linked user/assistant turns、matching message items、completed task record 和 token/cache/cost usage record
+  - `deepseek agents run-task <task-id>` 会 claim pending thread-linked runtime task，在 thread workspace 执行 agent loop，把 user/assistant turns、tool_result items、usage 和 completed/failed task status 写回同一 durable thread，并为 git worktree 创建 pre-run rollback snapshot
+  - `deepseek agents daemon [--interval-ms 1000] [--budget N]` 会轮询 `.dscode/runtime`，触发 `next_run_at` 到期的 active automation，支持 `every:60s` / `every:5m` / `@every 1h` recurring schedule，并复用 `run-task` 路径执行一个 thread-linked pending task per tick；`run-task`/daemon 的 permissioned write/shell/MCP 调用会写 durable `permission_request` 并等待同 thread 的 `permission_response`
+  - `/runtime` capability 现在对 `sessions` / `threads` / `turns` / `items` / `events` / `events_write` / `cancellation_events` / `events_sse` / `events_sse_wait` / `events_sse_follow` / `diagnostics` / `diagnostics_changed` / `diagnostics_broker` / `tasks` / `task_claim` / `task_cancel` / `task_pause` / `task_resume` / `task_updates` / `automations` / `automation_trigger` / `usage` / `usage_summary` 报 `true`；`events/stream?wait_ms=N` 支持 bounded SSE live wait，`events/stream?follow=1` 支持单连接连续输出多个 runtime event frame；非 `--once` HTTP listener 会并发处理连接，等待/订阅中的 SSE 不会阻塞其它 runtime write；`POST /v1/diagnostics` 提供 runtime-hosted diagnostics broker，同一 HTTP runtime 进程内对同 workspace 复用 warmed stdio LSP session；`deepseek tui --runtime-url http://HOST:PORT` 可从 HTTP runtime 构建快照、把前台 action 写回 HTTP，并对已知 thread 订阅 `follow=1` 事件流，HTTP TUI 的 `diagnostics [--changed|paths...]` 会走 runtime broker；usage summary 聚合 cache hit/miss、recognized DeepSeek V4 USD micro-cost estimate 和 1M-context policy；active automation 可手动 trigger 成 pending task，pending/running task 可被外部 runner、HTTP client 或本地 daemon claim/cancel，pending task 还可 pause/resume 做队列级控制；`deepseek agents service` 可生成 systemd/launchd runtime+daemon+diagnostics supervisor 文件；`deepseek update homebrew-formula` 可从 release matrix `.sha256` 文件渲染 Homebrew formula，减少手工发布步骤；Release Matrix 在 `v*` tag 上会创建/更新 GitHub Release、上传平台 archive 与 checksum assets、发布 GHCR Docker image，并在配置 `CARGO_REGISTRY_TOKEN` / `NPM_TOKEN` / `HOMEBREW_TAP_*` 后分别执行 crates.io/npm/Homebrew tap 发布
+  - 全量测试更新为 `/home/willamhou/.cargo/bin/cargo test -- --test-threads=1`：`765 passed`
+- Phase D TUI 第一片已落地：
+  - `Cargo.toml` 新增 `ratatui` / `crossterm`
+  - 新增 `src/tui.rs` 和 `src/cli/commands/tui.rs`
+  - `deepseek tui` 启动全屏 workbench shell；`deepseek tui --demo --once` 输出可测试快照
+  - 已有 Plan / Agent / YOLO mode tabs、sidebar、transcript/composer frame、task panel、command palette、session picker、approval modal
+  - session picker 读取 `.dscode/runtime/sessions` 的 durable session metadata，并在启动时预加载 linked threads 与 item timelines
+  - session picker 和 thread navigator 可以切换当前可见 durable transcript snapshot；composer focus/input 会把用户消息追加成 active thread 的 durable user turn 和 message item，并在 interactive TUI 中启动后台 agent response；command palette 已支持 UI/runtime 命令：`mode plan|agent|yolo`、`sessions`、`threads`、`thread next|prev|<id>`、`task <summary>`、`task pause [id]`、`task resume [id]`、`diagnostics [--changed|paths...]`、`restore snapshot|list|show`、`revert turn <id|last> [--apply]`、`approval`、`cancel`、`compact [tail]`
+  - interactive TUI 会轮询刷新 file-backed runtime sessions / threads / item timelines，并启动本地 runtime watcher，把外部 durable runtime 写入转换成 foreground draw loop 的 full snapshot live event；同时读取直接写入或通过 `POST /v1/threads/{id}/events` 写入的 durable `permission_request` events 打开真实 tool/kind/target approval modal；approval accept/deny 会写入 durable `permission_response` event，已响应请求刷新后不会再弹出；TUI-started agent run 的 write/shell/MCP permission gate 会等待并消费这些 response events；`--once` 仍保持 deterministic snapshot
+  - 后台 TUI agent run 会先创建 running assistant message item，将 assistant deltas 通过 durable item updates 写入该 item，同时通过前台 live event channel 在每次 draw 前直接 upsert 可见 item；随后再把 final assistant message、tool_result items、usage 和 completed/failed task records 写回 active durable thread
+  - 后台 TUI agent run 现在会创建 running runtime task；TUI 会加载 active thread 的 recent runtime task records 并在 task panel 中显示 kind/status/summary；command palette 的 `task <summary>` 可在当前 thread 下创建 pending agent task；同时会加载 active-thread automations，command palette 的 `automation trigger [id] [prompt]` 可触发 automation 生成 pending runtime task；`c` / `cancel` 会为当前 running assistant turn 写入 durable `cancel_requested` event，AgentLoop 在 model/tool step 与 approval wait checkpoints 消费该事件，并把 turn/item/task 标记为 `cancelled`
+  - task panel 会从 durable usage records 显示 active thread 的 token total、cache hit rate、cache chart、estimated cost、input/output cost split、cost chart 和 1M-context strategy；当策略进入 compaction 区间时会提示 `:compact [tail]`
+  - 当前边界仍明确：外部 runtime writer 已能通过本地 watcher 更快反映到当前 TUI，但还不是跨进程 push/SSE subscription；还缺更细的 progress controls 或通用 external command execution；`run_shell` 已通过 cancel-aware process-group kill 支持 in-flight 中止，remote model stream stdout 也通过 cancel-aware pipe reader 避免阻塞在下一帧/transport timeout
+- Packaging 第一片已落地：
+  - 新增 `Dockerfile` / `.dockerignore`，支持从源码构建本地 Docker image；Release Matrix tag run 现在会发布 GHCR image
+  - 新增 `npm/package.json`、`npm/bin/deepseek.js`、`npm/README.md`、`npm/platforms/*/package.json` 和 npm staging/test scripts；root npm wrapper 会优先解析当前平台 optional binary package，也可转发到 packaged target-triple binary 或 `DEEPSEEK_BINARY`
+  - `Cargo.toml` 已补 `description`、`readme`、`license-file`、repository/homepage、keywords、categories；新增 `LICENSE`
+  - 新增 `.github/workflows/release.yml`，覆盖 Linux x64、macOS x64、macOS arm64、Windows x64 release build/test/package matrix，并验证 Cargo metadata、`cargo package`、Cargo/npm/Homebrew version sync、npm wrapper、root/platform npm dry-pack、Homebrew formula syntax 和 Docker artifact smoke；每个 release archive 会上传旁路 `.sha256`，并为 archive/checksum 创建 GitHub signed artifact attestation；每个平台 build 还会把 binary stage 成对应 npm platform package 并 smoke-run staged package binary，随后打出 platform tarball，tag run 在配置 `NPM_TOKEN` 后会先发布平台包再发布 root wrapper 包；配置 `HOMEBREW_TAP_REPOSITORY` / `HOMEBREW_TAP_TOKEN` 后会在 GitHub Release assets 发布后渲染并推送 tap formula
+  - 新增 `packaging/homebrew/deepseek.rb` Homebrew formula 模板，覆盖 macOS arm64/x64 和 Linux x64 release assets
+  - 新增 `packaging/systemd/` 与 `packaging/launchd/` runtime/daemon/diagnostics service placeholders；`deepseek update package` 会带上 `SERVICES.md` 和 `services/` 模板，`deepseek agents service` 可按目标 workspace 渲染实际 supervisor 文件
+  - `docs/install.md` 与 `docs/release.md` 已记录 Docker/npm wrapper/Homebrew/release matrix 验证命令
+  - `cargo package --allow-dirty` 已可本地完成 package verify；`Cargo.toml.orig` 是 Cargo 生成的 package manifest 副本，不是仓库残留文件
+  - 仍缺 actual npm/Cargo/Homebrew 外部发布凭据、真实 tag 发布验证，以及实际已发布的 registry/tap 记录
+- Phase F rollback 第一片已落地：
+  - 新增 `src/language/diagnostics.rs`，提供 diagnostics runner；有具体文件且语言服务器可用时优先走 stdio LSP `textDocument/publishDiagnostics`，失败/超时再回退到 compiler/type-check fallback
+  - `deepseek diagnostics [--changed] [paths...]` 和 `deepseek diagnostics --watch [--interval-ms N] ...` 已接入 CLI；watch 模式在同一进程内复用 warmed stdio LSP session 并对后续 tick 发送 `didChange`；`deepseek agents service` 会生成 `diagnostics --watch --changed` 的 systemd/launchd 常驻 worker；agent registry 暴露只读 `diagnostics` tool，OpenAI/Anthropic tool schema 已包含该工具
+  - 新增 `diagnostics.post_edit = true` 配置开关；开启后成功 `apply_patch` 会把 post-edit diagnostics 附加到 tool result；agent-loop `apply_patch` 会在同一个 tool 实例内复用 warmed stdio LSP session
+  - 新增 `src/core/rollback.rs`，把 tracked combined/staged/unstaged diffs 和 untracked regular files 快照保存到 `.dscode/rollback/snapshots/<id>/`
+  - `deepseek restore snapshot [label]`、`restore list`、`restore show <id> [--patch]`、`restore revert-turn <id> [--apply]` 已接入 CLI
+  - REPL 新增 `/restore snapshot [label]`、`/restore list`、`/restore show <id|last>` 和 `/revert_turn <id|last> [--apply]`；每轮 prompt 会尝试创建 pre-turn rollback snapshot，并把 `last` 指向最近一轮
+  - restore 默认 dry-run，`--apply` 会先反转当前 tracked diff，再应用 snapshot patch；要求当前 git `HEAD` 等于 snapshot 捕获的 commit
+  - restore `--apply` 后会恢复 staged-index / unstaged-worktree split、captured untracked regular files、列出恢复后的 changed files，并用 fallback diagnostics 对这些文件跑 post-restore diagnostics
+  - `deepseek exec` 在 git worktree 内会创建 pre-run rollback snapshot，并在成功后绑定到 durable assistant turn id；TUI-started agent run 也会创建 pre-run snapshot，并在 assistant turn 创建后立即绑定；REPL live turns 通过 `/revert_turn last` 暴露最近 pre-turn snapshot；本地 file-backed TUI command palette 暴露 `diagnostics [--changed|paths...]`、`restore snapshot [label]`、`restore list [limit]`、`restore show <id|last>` 和 `revert turn <id|last> [--apply]`，其中 TUI `last` 解析为 active thread 的 latest durable turn id；`restore show` / `restore revert-turn` 可用 snapshot id、bound turn id 或 REPL/TUI `last`
+  - 当前边界仍明确：diagnostics watch、service-rendered diagnostics worker、agent-loop post-edit diagnostics 和 HTTP runtime diagnostics broker 都能在各自进程内复用 warmed stdio LSP session，HTTP clients 可通过 `/v1/diagnostics` 共享 runtime broker；但还没有 standalone diagnostics daemon protocol；rollback 的 untracked 覆盖普通文件，不覆盖 symlink/目录；legacy snapshots 没有 split patch 时不能恢复 staged-index fidelity；HTTP-runtime TUI 不会隐式回滚远端 host，rollback command palette 仅支持本地 file-backed TUI
+- DeepSeek-native UX 第一片已落地：
+  - `model.model = "auto"` / `DEEPSEEK_MODEL=auto` 会把简单任务路由到 `deepseek-v4-flash`，把规划、审查、架构、安全、迁移和恢复类复杂任务路由到 `deepseek-v4-pro`；usage 会记录实际 resolved model
+  - `model.reasoning_effort = "off|high|max|auto"` / `DEEPSEEK_REASONING_EFFORT` 会映射到官方 DeepSeek V4 thinking mode 与 reasoning effort 参数；默认 `off`，直到 provider-native reasoning transcript replay 和更完整的 thinking/tool-call 兼容性验证完成
+  - OpenAI-compatible stream 会把 `delta.reasoning_content` 作为独立 reasoning delta 输出；Anthropic-compatible stream 会处理 `thinking_delta` / `reasoning_delta`
+  - Agent loop 会捕获每步 reasoning delta，把最近几步 reasoning 摘要和 assistant message 一起回放进后续请求；TUI runtime stream 会把 reasoning delta 保存为 linked durable `reasoning` item
+  - usage records 和 summary 已聚合 prompt cache hit/miss、recognized DeepSeek V4 USD micro-cost estimate、unpriced record count 和 1M-context strategy
+- 当前边界仍明确：已有 non-destructive runtime thread compaction endpoint、
+  TUI active-thread compaction command、`thread_compacted` audit event 和
+  daemon-side 800k-token proactive compaction scheduler，并有 agent-loop
+  近期 reasoning replay / TUI durable reasoning item；
+  但还没有 provider-native full reasoning transcript replay 或 model-generated
+  automatic compaction policy
 
 ## 最近里程碑
 

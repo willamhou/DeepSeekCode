@@ -5,12 +5,14 @@ use std::io::Write;
 ///
 /// Per assistant turn, callers invoke methods in this order:
 ///
-/// 1. `on_text_delta` — zero or more times, only with non-empty chunks
-/// 2. `on_assistant_done` — exactly once, with the full concatenated text
-/// 3. `on_tool_call` — zero or one time, after `on_assistant_done`
+/// 1. `on_reasoning_delta` — zero or more times for thinking-mode chunks
+/// 2. `on_text_delta` — zero or more times, only with non-empty chunks
+/// 3. `on_assistant_done` — exactly once, with the full concatenated text
+/// 4. `on_tool_call` — zero or one time, after `on_assistant_done`
 ///
 /// Implementations may rely on this ordering.
 pub trait StreamEvents {
+    fn on_reasoning_delta(&mut self, _chunk: &str) {}
     fn on_text_delta(&mut self, chunk: &str);
     fn on_assistant_done(&mut self, full_text: &str);
     fn on_tool_call(&mut self, name: &str, input: &BTreeMap<String, String>);
@@ -85,6 +87,18 @@ impl<W: Write> TtyRenderer<W> {
 }
 
 impl<W: Write> StreamEvents for TtyRenderer<W> {
+    fn on_reasoning_delta(&mut self, chunk: &str) {
+        if chunk.is_empty() {
+            return;
+        }
+        if self.use_ansi {
+            let _ = write!(self.out, "\x1b[2m{chunk}\x1b[0m");
+        } else {
+            let _ = write!(self.out, "{chunk}");
+        }
+        let _ = self.out.flush();
+    }
+
     fn on_text_delta(&mut self, chunk: &str) {
         if chunk.is_empty() {
             return;

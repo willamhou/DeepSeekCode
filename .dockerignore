@@ -1,0 +1,6 @@
+target
+.git
+.dscode
+.env
+*.log
+npm/node_modules

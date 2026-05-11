@@ -14,6 +14,9 @@ pub fn try_handle_slash(repl: &mut Repl, line: &str) -> AppResult<SlashOutcome> 
     if !line.starts_with('/') {
         return Ok(SlashOutcome::NotASlash);
     }
+    if let Some(prompt) = load_mcp_prompt_slash_command(repl, line)? {
+        return Ok(SlashOutcome::Submit(prompt));
+    }
     let mut tokens = line.split_whitespace();
     let command = tokens.next().unwrap_or("");
     let args: Vec<&str> = tokens.collect();
@@ -36,6 +39,10 @@ pub fn try_handle_slash(repl: &mut Repl, line: &str) -> AppResult<SlashOutcome> 
             );
             Ok(SlashOutcome::Continue)
         }
+        "/compact" => {
+            handle_compact(repl)?;
+            Ok(SlashOutcome::Continue)
+        }
         "/budget" => {
             handle_budget(repl, &args);
             Ok(SlashOutcome::Continue)
@@ -46,6 +53,14 @@ pub fn try_handle_slash(repl: &mut Repl, line: &str) -> AppResult<SlashOutcome> 
         }
         "/diff" => {
             handle_diff();
+            Ok(SlashOutcome::Continue)
+        }
+        "/restore" => {
+            handle_restore(repl, &args);
+            Ok(SlashOutcome::Continue)
+        }
+        "/revert_turn" => {
+            handle_revert_turn(repl, &args);
             Ok(SlashOutcome::Continue)
         }
         "/cost" => {
@@ -86,13 +101,19 @@ fn print_help() {
     println!("  /quit, /q, /exit              exit the REPL");
     println!("  /help, /h, /?                 show this help");
     println!("  /clear                        wipe transcript + token counters");
+    println!("  /compact                      summarize older transcript turns");
     println!("  /budget [N]                   show or set per-turn step budget (1..200)");
     println!("  /skill [name|-]               show, switch, or clear the active skill");
     println!("  /diff                         show pending git diff");
+    println!("  /restore snapshot [label]     capture a rollback snapshot");
+    println!("  /restore list|show <id|last>  inspect rollback snapshots");
+    println!("  /revert_turn <id|last> [--apply] dry-run or apply rollback snapshot");
     println!("  /save <name>                  save the session to .dscode/sessions/<name>.json");
     println!("  /load <name>                  restore a saved session");
     println!("  /todos                        show the current todo list (read-only)");
     println!("  /cost                         show prompt/completion token totals");
+    println!("  /mcp/<server>/<prompt> [json] load an MCP prompt as the next user turn");
+    println!("  /mcp__server__prompt [json]   Claude-style MCP prompt alias");
     println!("custom commands:");
     println!("  /name [args]                  run .dscode/commands/name.md or a user command");
 }
@@ -115,6 +136,44 @@ fn handle_budget(repl: &mut Repl, args: &[&str]) {
         Ok(_) => println!("budget out of range; expected 1..=200"),
         Err(_) => println!("budget must be a positive integer; got `{}`", args[0]),
     }
+}
+
+fn handle_compact(repl: &mut Repl) -> AppResult<()> {
+    if repl.transcript.turns.is_empty() {
+        println!("no transcript to compact");
+        return Ok(());
+    }
+
+    let task = latest_user_prompt(repl).to_string();
+    let hooks = crate::core::hooks::HookRunner::new(&repl.config.hooks);
+    if let Some(hook_context) = hooks.pre_compact(&task, "manual_repl_compact")? {
+        println!("pre_compact hook context:\n{hook_context}");
+    }
+
+    let stats = repl.transcript.compact();
+    if stats.summarized_turns == 0 {
+        println!(
+            "transcript already compact enough ({} turns)",
+            stats.before_turns
+        );
+    } else {
+        println!(
+            "compacted transcript: {} -> {} turns (summarized {}, kept {})",
+            stats.before_turns, stats.after_turns, stats.summarized_turns, stats.kept_tail_turns
+        );
+    }
+    Ok(())
+}
+
+fn latest_user_prompt(repl: &Repl) -> &str {
+    repl.transcript
+        .turns
+        .iter()
+        .rev()
+        .find_map(|turn| {
+            (turn.role == crate::repl::transcript::TurnRole::User).then_some(turn.content.as_str())
+        })
+        .unwrap_or("manual_repl_compact")
 }
 
 fn handle_skill(repl: &mut Repl, args: &[&str]) {
@@ -171,6 +230,165 @@ fn handle_diff() {
         }
         Err(error) => println!("could not run git diff: {error}"),
     }
+}
+
+fn handle_restore(repl: &Repl, args: &[&str]) {
+    let store = rollback_store(repl);
+    match args {
+        ["snapshot"] => match std::env::current_dir() {
+            Ok(cwd) => match store.create_snapshot(&cwd, "manual REPL snapshot".to_string()) {
+                Ok(snapshot) => println!(
+                    "snapshot {} created (patch_bytes={}, untracked_files={}, tracked_only={})",
+                    snapshot.id,
+                    snapshot.patch_bytes,
+                    snapshot.untracked_files.len(),
+                    snapshot.tracked_only
+                ),
+                Err(error) => println!("snapshot failed: {error}"),
+            },
+            Err(error) => println!("snapshot failed: {error}"),
+        },
+        ["snapshot", label @ ..] => {
+            let label = label.join(" ");
+            match std::env::current_dir() {
+                Ok(cwd) => match store.create_snapshot(&cwd, label) {
+                    Ok(snapshot) => println!(
+                        "snapshot {} created (patch_bytes={}, untracked_files={}, tracked_only={})",
+                        snapshot.id,
+                        snapshot.patch_bytes,
+                        snapshot.untracked_files.len(),
+                        snapshot.tracked_only
+                    ),
+                    Err(error) => println!("snapshot failed: {error}"),
+                },
+                Err(error) => println!("snapshot failed: {error}"),
+            }
+        }
+        ["list"] => match store.list_snapshots(20) {
+            Ok(snapshots) if snapshots.is_empty() => println!("no rollback snapshots"),
+            Ok(snapshots) => {
+                for snapshot in snapshots {
+                    println!(
+                        "{}  {}  patch={}  untracked={}  turn={}  {}",
+                        snapshot.id,
+                        snapshot.created_at,
+                        snapshot.patch_bytes,
+                        snapshot.untracked_files.len(),
+                        snapshot.runtime_turn_id.as_deref().unwrap_or("-"),
+                        snapshot.label
+                    );
+                }
+            }
+            Err(error) => println!("restore list failed: {error}"),
+        },
+        ["show", id] => match resolve_snapshot_arg(repl, id) {
+            Ok(id) => match store.load_snapshot_or_turn(&id) {
+                Ok(snapshot) => {
+                    println!("snapshot: {}", snapshot.id);
+                    println!("  label: {}", snapshot.label);
+                    println!("  git_head: {}", snapshot.git_head);
+                    println!(
+                        "  runtime_thread_id: {}",
+                        snapshot.runtime_thread_id.as_deref().unwrap_or("-")
+                    );
+                    println!(
+                        "  runtime_turn_id: {}",
+                        snapshot.runtime_turn_id.as_deref().unwrap_or("-")
+                    );
+                    println!("  patch_bytes: {}", snapshot.patch_bytes);
+                    println!("  staged_patch_bytes: {}", snapshot.staged_patch_bytes);
+                    println!("  unstaged_patch_bytes: {}", snapshot.unstaged_patch_bytes);
+                    println!("  untracked_files: {}", snapshot.untracked_files.len());
+                    println!("  untracked_bytes: {}", snapshot.untracked_bytes);
+                    println!("  tracked_only: {}", snapshot.tracked_only);
+                    if !snapshot.untracked_files.is_empty() {
+                        println!("  untracked paths:");
+                        for file in &snapshot.untracked_files {
+                            println!("    - {file}");
+                        }
+                    }
+                }
+                Err(error) => println!("restore show failed: {error}"),
+            },
+            Err(message) => println!("{message}"),
+        },
+        ["revert-turn", id] | ["revert_turn", id] => handle_revert_turn(repl, &[id]),
+        ["revert-turn", id, "--apply"] | ["revert_turn", id, "--apply"] => {
+            handle_revert_turn(repl, &[id, "--apply"])
+        }
+        _ => println!(
+            "usage: /restore snapshot [label] | list | show <id> | revert-turn <id> [--apply]"
+        ),
+    }
+}
+
+fn handle_revert_turn(repl: &Repl, args: &[&str]) {
+    let (id, apply) = match args {
+        [id] => (*id, false),
+        [id, "--apply"] => (*id, true),
+        _ => {
+            println!("usage: /revert_turn <snapshot-id|last> [--apply]");
+            return;
+        }
+    };
+    let id = match resolve_snapshot_arg(repl, id) {
+        Ok(id) => id,
+        Err(message) => {
+            println!("{message}");
+            return;
+        }
+    };
+    match rollback_store(repl).restore_snapshot(&id, apply) {
+        Ok(plan) if plan.applied => {
+            println!(
+                "restored tracked changes from {} (current_patch_bytes={}, snapshot_patch_bytes={})",
+                plan.snapshot_id, plan.current_patch_bytes, plan.patch_bytes
+            );
+            print_revert_changed_files(&plan.changed_files);
+            print_revert_diagnostics(Path::new(&plan.git_root), &plan.changed_files);
+        }
+        Ok(plan) => println!(
+            "dry-run restore for {} (current_patch_bytes={}, snapshot_patch_bytes={}); pass --apply to restore tracked changes",
+            plan.snapshot_id, plan.current_patch_bytes, plan.patch_bytes
+        ),
+        Err(error) => println!("revert_turn failed: {error}"),
+    }
+}
+
+fn resolve_snapshot_arg(repl: &Repl, id: &str) -> Result<String, String> {
+    if id == "last" {
+        repl.last_rollback_snapshot_id
+            .clone()
+            .ok_or_else(|| "no last rollback snapshot recorded for this REPL session".to_string())
+    } else {
+        Ok(id.to_string())
+    }
+}
+
+fn print_revert_changed_files(files: &[String]) {
+    if files.is_empty() {
+        println!("changed_files: none");
+        return;
+    }
+    println!("changed_files:");
+    for file in files {
+        println!("  - {file}");
+    }
+}
+
+fn print_revert_diagnostics(workspace: &Path, files: &[String]) {
+    if files.is_empty() {
+        return;
+    }
+    let report = crate::language::diagnostics::run_diagnostics(workspace, files);
+    println!("post-restore diagnostics:");
+    println!("{}", report.render_text());
+}
+
+fn rollback_store(repl: &Repl) -> crate::core::rollback::RollbackStore {
+    crate::core::rollback::RollbackStore::new(
+        PathBuf::from(&repl.config.workspace.config_dir).join("rollback"),
+    )
 }
 
 fn handle_cost(repl: &Repl) {
@@ -248,6 +466,68 @@ fn load_custom_slash_command(
         path,
         &expanded,
     )))
+}
+
+fn load_mcp_prompt_slash_command(repl: &Repl, line: &str) -> AppResult<Option<String>> {
+    let Some(parsed) = parse_mcp_prompt_slash(line) else {
+        return Ok(None);
+    };
+    let prompt = crate::cli::commands::mcp::get_remote_prompt_text(
+        &repl.config,
+        parsed.server,
+        parsed.prompt,
+        parsed.arguments_json,
+    )?;
+    Ok(Some(prompt))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct McpPromptSlash<'a> {
+    server: &'a str,
+    prompt: &'a str,
+    arguments_json: Option<&'a str>,
+}
+
+fn parse_mcp_prompt_slash(line: &str) -> Option<McpPromptSlash<'_>> {
+    let trimmed = line.trim_start();
+    let command_end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    let command = &trimmed[..command_end];
+    let arguments_json = trimmed[command_end..].trim();
+    let arguments_json = (!arguments_json.is_empty()).then_some(arguments_json);
+
+    if let Some(rest) = command.strip_prefix("/mcp/") {
+        let (server, prompt) = rest.split_once('/')?;
+        if valid_mcp_prompt_segment(server) && valid_mcp_prompt_segment(prompt) {
+            return Some(McpPromptSlash {
+                server,
+                prompt,
+                arguments_json,
+            });
+        }
+        return None;
+    }
+
+    if let Some(rest) = command.strip_prefix("/mcp__") {
+        let (server, prompt) = rest.split_once("__")?;
+        if valid_mcp_prompt_segment(server) && valid_mcp_prompt_segment(prompt) {
+            return Some(McpPromptSlash {
+                server,
+                prompt,
+                arguments_json,
+            });
+        }
+    }
+
+    None
+}
+
+fn valid_mcp_prompt_segment(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('.')
+        && !value.contains("..")
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
 fn custom_command_relative_path(command: &str) -> Option<PathBuf> {
@@ -519,6 +799,36 @@ mod tests {
     }
 
     #[test]
+    fn compact_empty_transcript_continues() {
+        let mut r = fresh_repl();
+        assert!(matches!(
+            try_handle_slash(&mut r, "/compact").unwrap(),
+            SlashOutcome::Continue,
+        ));
+        assert!(r.transcript.turns.is_empty());
+    }
+
+    #[test]
+    fn compact_slash_compacts_transcript() {
+        let mut r = fresh_repl();
+        for index in 0..12 {
+            r.transcript.push_user(format!("turn {index}"));
+        }
+
+        assert!(matches!(
+            try_handle_slash(&mut r, "/compact").unwrap(),
+            SlashOutcome::Continue,
+        ));
+
+        assert_eq!(r.transcript.turns.len(), 9);
+        assert!(r.transcript.turns[0]
+            .content
+            .contains("Compacted conversation summary"));
+        assert_eq!(r.transcript.turns[1].content, "turn 4");
+        assert_eq!(r.transcript.turns.last().unwrap().content, "turn 11");
+    }
+
+    #[test]
     fn budget_with_valid_number_updates_budget() {
         let mut r = fresh_repl();
         try_handle_slash(&mut r, "/budget 30").unwrap();
@@ -550,12 +860,60 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_arg_last_resolves_recent_repl_snapshot() {
+        let mut r = fresh_repl();
+        r.last_rollback_snapshot_id = Some("snapshot-123".to_string());
+
+        assert_eq!(
+            resolve_snapshot_arg(&r, "last").unwrap(),
+            "snapshot-123".to_string()
+        );
+        assert_eq!(
+            resolve_snapshot_arg(&r, "snapshot-abc").unwrap(),
+            "snapshot-abc".to_string()
+        );
+    }
+
+    #[test]
+    fn snapshot_arg_last_requires_recorded_snapshot() {
+        let r = fresh_repl();
+        let error = resolve_snapshot_arg(&r, "last").unwrap_err();
+        assert!(error.contains("no last rollback snapshot"));
+    }
+
+    #[test]
     fn unknown_slash_is_handled_gracefully() {
         let mut r = fresh_repl();
         assert!(matches!(
             try_handle_slash(&mut r, "/bogus").unwrap(),
             SlashOutcome::Continue,
         ));
+    }
+
+    #[test]
+    fn parses_mcp_prompt_slash_path_style() {
+        let parsed = parse_mcp_prompt_slash(r#"/mcp/github/review_pr {"number":42}"#)
+            .expect("mcp prompt slash");
+
+        assert_eq!(parsed.server, "github");
+        assert_eq!(parsed.prompt, "review_pr");
+        assert_eq!(parsed.arguments_json, Some(r#"{"number":42}"#));
+    }
+
+    #[test]
+    fn parses_mcp_prompt_slash_claude_style() {
+        let parsed = parse_mcp_prompt_slash("/mcp__github__review_pr").expect("mcp prompt slash");
+
+        assert_eq!(parsed.server, "github");
+        assert_eq!(parsed.prompt, "review_pr");
+        assert_eq!(parsed.arguments_json, None);
+    }
+
+    #[test]
+    fn rejects_mcp_prompt_slash_with_unsafe_segments() {
+        assert!(parse_mcp_prompt_slash("/mcp/../review_pr").is_none());
+        assert!(parse_mcp_prompt_slash("/mcp/github/../review_pr").is_none());
+        assert!(parse_mcp_prompt_slash("/mcp__github__review/pr").is_none());
     }
 
     #[test]

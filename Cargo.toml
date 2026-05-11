@@ -3,6 +3,13 @@ name = "deepseek_code"
 version = "0.1.0"
 edition = "2021"
 default-run = "deepseek"
+description = "DeepSeek-first terminal code agent"
+readme = "README.md"
+license-file = "LICENSE"
+repository = "https://github.com/willamhou/DeepseekCode"
+homepage = "https://github.com/willamhou/DeepseekCode"
+keywords = ["deepseek", "agent", "cli", "tui"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "dscode"
@@ -13,3 +20,5 @@ name = "deepseek"
 path = "src/bin/deepseek.rs"
 
 [dependencies]
+crossterm = "0.28.1"
+ratatui = "0.29.0"

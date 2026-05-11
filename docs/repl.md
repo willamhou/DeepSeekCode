@@ -13,7 +13,7 @@ Explicit aliases are also supported:
 
 ## Prerequisites
 
-- A real terminal (TTY). Piped stdin is rejected; use `deepseek run "task"`
+- A real terminal (TTY). Piped stdin is rejected; use `deepseek exec -`
   for one-shot tasks in scripts.
 - Optional: `DEEPSEEK_API_KEY` exported for live LLM-driven planning.
   Without it, the offline planner produces shallow output.
@@ -25,14 +25,26 @@ Explicit aliases are also supported:
 | `/quit`, `/q`, `/exit` | Exit the REPL (exit code 0) |
 | `/help`, `/h`, `/?` | Show this help |
 | `/clear` | Wipe transcript and token counters; keep budget and skill |
+| `/compact` | Summarize older transcript turns and keep the recent tail verbatim |
 | `/budget [N]` | Show current budget; or set new value (1..200) |
 | `/skill [name\|-]` | Show / switch / clear the active skill |
 | `/diff` | Show pending git diff |
+| `/restore snapshot [label]` | Capture a rollback snapshot for tracked changes and untracked regular files |
+| `/restore list` | List recent rollback snapshots |
+| `/restore show <id\|last>` | Inspect rollback snapshot metadata by snapshot id, bound runtime turn id, or the latest REPL turn snapshot |
+| `/revert_turn <id\|last> [--apply]` | Dry-run or apply a rollback snapshot by snapshot id, bound runtime turn id, or `last`; dry-run is the default |
 | `/save <name>` | Save the session to `.dscode/sessions/<name>.json` |
 | `/load <name>` | Restore a saved session (replaces current state) |
 | `/todos` | Show the current todo list (read-only inspection) |
 | `/cost` | Show prompt / completion / total token counters |
+| `/mcp/<server>/<prompt> [json]` | Load an MCP prompt and submit it as the next user turn |
+| `/mcp__server__prompt [json]` | Claude-style alias for an MCP prompt slash command |
 | `/name [args]` | Run a custom markdown command from `.dscode/commands/name.md` or the configured user commands dir |
+
+For each submitted prompt, the REPL tries to create a pre-turn rollback
+snapshot when the current directory is a git worktree. Use `/revert_turn last`
+to inspect the restore plan for the latest REPL turn, and
+`/revert_turn last --apply` to restore it.
 
 ### Custom Slash Commands
 
@@ -58,6 +70,19 @@ Invoke them by filename:
 Inside the markdown body, `$ARGUMENTS` expands to all arguments, `$0` / `$1` expand positional
 arguments, and `$ARGUMENTS[0]` / `$ARGUMENTS[1]` are the long indexed forms. If no argument
 placeholder appears, DeepseekCode appends `ARGUMENTS: ...` to the prompt automatically.
+
+### MCP Prompt Slash Commands
+
+Connected MCP servers can expose prompt templates through `prompts/list` and `prompts/get`.
+DeepseekCode can load those prompts directly from the REPL:
+
+```text
+> /mcp/github/review_pr {"number":42}
+> /mcp__github__review_pr {"number":42}
+```
+
+The prompt result is wrapped with source metadata and submitted as the next user turn. JSON
+arguments are optional, but when present they must be a JSON object.
 
 ## Workspace Instructions
 
@@ -98,15 +123,22 @@ hooks.timeout_ms = 5000
 Supported event directories:
 
 ```text
+.dscode/hooks/session_start/*
+.dscode/hooks/session_stop/*
 .dscode/hooks/user_prompt_submit/*
 .dscode/hooks/pre_tool_use/*
+.dscode/hooks/permission_request/*
 .dscode/hooks/post_tool_use/*
+.dscode/hooks/subagent_start/*
+.dscode/hooks/subagent_stop/*
+.dscode/hooks/pre_compact/*
 ```
 
 Scripts must be executable. DeepseekCode runs user hooks first, then project hooks, in lexical path
 order. Each script receives a JSON payload on stdin and `DSCODE_HOOK_EVENT` in the environment.
-`user_prompt_submit` and `pre_tool_use` scripts block the turn or tool call when they exit nonzero.
-`post_tool_use` failures are added back as advisory hook observations instead of failing the tool.
+`user_prompt_submit`, `pre_tool_use`, and `permission_request` scripts block the turn or tool call
+when they exit nonzero or return `{"decision":"deny","reason":"..."}`. Other hook failures are
+added back as advisory hook observations.
 
 ## Cross-turn context
 
@@ -119,6 +151,11 @@ prompt. To keep token usage bounded:
 - Tool outputs run through the same per-kind summarisation as the
   one-shot loop (shell tail, file head, diff hunk-headers).
 
+`/compact` mutates the transcript: older turns are replaced by one
+assistant summary turn, while the latest 8 turns are kept verbatim. If
+hooks are enabled, DeepseekCode runs `pre_compact` before rewriting the
+transcript; hook output is printed as advisory context.
+
 `/clear` wipes the transcript when you want to start fresh without
 restarting the binary.
 
@@ -128,16 +165,16 @@ Streaming token output is enabled by default — see
 ## Sessions
 
 `/save <name>` writes the full transcript + budget + skill + token
-counters to `.dscode/sessions/<name>.json` atomically (temp file +
-rename). `/load <name>` parses the JSON, validates schema version 1,
+counters + todos to `.dscode/sessions/<name>.json` atomically (temp file +
+rename). `/load <name>` parses the JSON, accepts schema version 1 or 2,
 and replaces the current REPL state — or fails without modifying state
 if the file is missing, corrupt, or has an unknown version.
 
-### Schema v1
+### Schema v2
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "name": "fix-pr-42",
   "saved_at": "epoch+1745960000",
   "skill": "pr-review",
@@ -147,11 +184,21 @@ if the file is missing, corrupt, or has an unknown version.
     {"role": "assistant", "content": "..."},
     {"role": "tool", "name": "read_file", "input": {"path": "x.rs"}, "output": "...", "status": "ok"}
   ],
-  "tokens": {"prompt": 12345, "completion": 6789}
+  "tokens": {"prompt": 12345, "completion": 6789},
+  "todos": [
+    {"content": "Run tests", "activeForm": "Running tests", "status": "pending"}
+  ]
 }
 ```
 
-## v1 limitations
+Schema v1 is still accepted for older saved sessions; it has the same shape
+without `todos`. Loading v1 gives an empty todo list in memory, and the next
+`/save` writes v2.
+
+The runtime integration contract is tracked separately in
+[`docs/runtime.md`](runtime.md).
+
+## Current limitations
 
 - No up/down arrow history. Use `rlwrap deepseek` for a quick
   workaround.

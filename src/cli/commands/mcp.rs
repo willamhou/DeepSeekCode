@@ -24,11 +24,17 @@ pub fn run(action: McpAction) -> AppResult<()> {
         McpAction::List => list_servers(&config),
         McpAction::Doctor => doctor(&config),
         McpAction::Tools { server } => list_remote_tools(&config, server.as_deref()),
+        McpAction::Prompts { server } => list_remote_prompts(&config, server.as_deref()),
         McpAction::Call {
             server,
             tool,
             arguments_json,
         } => call_remote_tool(&config, &server, &tool, arguments_json.as_deref()),
+        McpAction::Prompt {
+            server,
+            prompt,
+            arguments_json,
+        } => get_remote_prompt(&config, &server, &prompt, arguments_json.as_deref()),
         McpAction::Init { force } => {
             let path = init_mcp_config_at(&std::env::current_dir()?, &config, force)?;
             println!("initialized MCP config: {}", path.display());
@@ -176,10 +182,99 @@ pub(crate) fn list_remote_tools_summary(
     Ok(output)
 }
 
+fn list_remote_prompts(config: &AppConfig, requested_server: Option<&str>) -> AppResult<()> {
+    print!("{}", list_remote_prompts_summary(config, requested_server)?);
+    Ok(())
+}
+
+pub(crate) fn list_remote_prompts_summary(
+    config: &AppConfig,
+    requested_server: Option<&str>,
+) -> AppResult<String> {
+    if !config.mcp.enabled {
+        return Ok("MCP is disabled by config: mcp.enabled = false\n".to_string());
+    }
+
+    let inventory = load_inventory(config)?;
+    let mut output = String::new();
+    push_sources(&mut output, &inventory);
+    let targets = select_tool_targets(&inventory, requested_server)?;
+
+    if targets.is_empty() {
+        output.push_str(
+            "No enabled MCP servers configured. Run `deepseek mcp list` to inspect config.\n",
+        );
+        return Ok(output);
+    }
+
+    output.push_str("MCP remote prompts:\n");
+    for server in targets {
+        if !matches!(server.transport.as_str(), "stdio" | "http" | "sse") {
+            let message = format!(
+                "mcp prompts currently supports stdio/http/sse servers only; `{}` uses {}",
+                server.name, server.transport
+            );
+            if requested_server.is_some() {
+                return Err(app_error(message));
+            }
+            output.push_str(&format!(
+                "- {} [{}]: skipped ({message})",
+                server.name, server.transport
+            ));
+            output.push('\n');
+            continue;
+        }
+
+        let prompts = list_prompts_for_server(server)?;
+        output.push_str(&format!(
+            "- {} [{}]: {} prompt(s)\n",
+            server.name,
+            server.transport,
+            prompts.len()
+        ));
+        for prompt in prompts {
+            let description = prompt.description.as_deref().unwrap_or("-");
+            output.push_str(&format!(
+                "  - {}: {}\n",
+                prompt.name,
+                compact_inline(description, 140)
+            ));
+            if !prompt.arguments.is_empty() {
+                let arguments = prompt
+                    .arguments
+                    .iter()
+                    .map(|argument| {
+                        let required = if argument.required {
+                            "required"
+                        } else {
+                            "optional"
+                        };
+                        let description = argument.description.as_deref().unwrap_or("-");
+                        format!(
+                            "{} ({required}): {}",
+                            argument.name,
+                            compact_inline(description, 80)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                output.push_str(&format!(
+                    "    arguments: {}\n",
+                    compact_inline(&arguments, 260)
+                ));
+            }
+        }
+    }
+
+    Ok(output)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct McpDiscoveredRemoteTool {
     pub server: String,
     pub tool: String,
+    pub description: Option<String>,
+    pub input_schema: Option<String>,
 }
 
 pub(crate) fn discover_remote_tools_for_agent(
@@ -205,6 +300,8 @@ pub(crate) fn discover_remote_tools_for_agent(
             discovered.push(McpDiscoveredRemoteTool {
                 server: server.name.clone(),
                 tool: tool.name,
+                description: tool.description,
+                input_schema: tool.input_schema,
             });
             if discovered.len() >= max_tools {
                 return discovered;
@@ -284,6 +381,97 @@ pub(crate) fn call_remote_tool_summary(
     Ok(output)
 }
 
+fn get_remote_prompt(
+    config: &AppConfig,
+    server_name: &str,
+    prompt_name: &str,
+    arguments_json: Option<&str>,
+) -> AppResult<()> {
+    print!(
+        "{}",
+        get_remote_prompt_summary(config, server_name, prompt_name, arguments_json)?
+    );
+    Ok(())
+}
+
+pub(crate) fn get_remote_prompt_summary(
+    config: &AppConfig,
+    server_name: &str,
+    prompt_name: &str,
+    arguments_json: Option<&str>,
+) -> AppResult<String> {
+    if !config.mcp.enabled {
+        return Ok("MCP is disabled by config: mcp.enabled = false\n".to_string());
+    }
+
+    let result = get_remote_prompt_result(config, server_name, prompt_name, arguments_json)?;
+    let mut output = String::new();
+    let inventory = load_inventory(config)?;
+    push_sources(&mut output, &inventory);
+    let targets = select_tool_targets(&inventory, Some(server_name))?;
+    let server = targets[0];
+
+    output.push_str("MCP prompt:\n");
+    output.push_str(&format!(
+        "- {}/{} [{}]: ok\n",
+        server.name, prompt_name, server.transport
+    ));
+    if let Some(description) = &result.description {
+        output.push_str(&format!(
+            "  description: {}\n",
+            compact_inline(description, 260)
+        ));
+    }
+    if result.messages.is_empty() {
+        output.push_str("  messages: -\n");
+    } else {
+        output.push_str("  messages:\n");
+        for message in result.messages {
+            output.push_str(&format!("  - {}\n", compact_inline(&message, 260)));
+        }
+    }
+
+    Ok(output)
+}
+
+pub(crate) fn get_remote_prompt_text(
+    config: &AppConfig,
+    server_name: &str,
+    prompt_name: &str,
+    arguments_json: Option<&str>,
+) -> AppResult<String> {
+    if !config.mcp.enabled {
+        return Err(app_error("MCP is disabled by config: mcp.enabled = false"));
+    }
+    let result = get_remote_prompt_result(config, server_name, prompt_name, arguments_json)?;
+    Ok(render_remote_prompt_text(server_name, prompt_name, &result))
+}
+
+fn get_remote_prompt_result(
+    config: &AppConfig,
+    server_name: &str,
+    prompt_name: &str,
+    arguments_json: Option<&str>,
+) -> AppResult<McpPromptGetResult> {
+    let arguments = parse_prompt_arguments(arguments_json)?;
+    let inventory = load_inventory(config)?;
+    let targets = select_tool_targets(&inventory, Some(server_name))?;
+    let server = targets[0];
+    if !matches!(server.transport.as_str(), "stdio" | "http" | "sse") {
+        return Err(app_error(format!(
+            "mcp prompt currently supports stdio/http/sse servers only; `{}` uses {}",
+            server.name, server.transport
+        )));
+    }
+
+    match server.transport.as_str() {
+        "stdio" => get_stdio_prompt(server, prompt_name, &arguments),
+        "http" => get_http_prompt(server, prompt_name, &arguments),
+        "sse" => get_sse_prompt(server, prompt_name, &arguments),
+        _ => unreachable!("transport checked above"),
+    }
+}
+
 fn parse_call_arguments(arguments_json: Option<&str>) -> AppResult<BTreeMap<String, JsonValue>> {
     let Some(arguments_json) = arguments_json else {
         return Ok(BTreeMap::new());
@@ -296,6 +484,23 @@ fn parse_call_arguments(arguments_json: Option<&str>) -> AppResult<BTreeMap<Stri
     let JsonValue::Object(arguments) = parsed else {
         return Err(app_error(
             "mcp call JSON arguments must be an object, for example '{\"path\":\"README.md\"}'",
+        ));
+    };
+    Ok(arguments)
+}
+
+fn parse_prompt_arguments(arguments_json: Option<&str>) -> AppResult<BTreeMap<String, JsonValue>> {
+    let Some(arguments_json) = arguments_json else {
+        return Ok(BTreeMap::new());
+    };
+    let parsed = parse_json_value(arguments_json.trim()).map_err(|error| {
+        app_error(format!(
+            "failed to parse mcp prompt JSON arguments object: {error}"
+        ))
+    })?;
+    let JsonValue::Object(arguments) = parsed else {
+        return Err(app_error(
+            "mcp prompt JSON arguments must be an object, for example '{\"owner\":\"openai\"}'",
         ));
     };
     Ok(arguments)
@@ -331,6 +536,18 @@ fn list_tools_for_server(server: &McpServer) -> AppResult<Vec<McpRemoteTool>> {
         "sse" => list_sse_tools(server),
         _ => Err(app_error(format!(
             "mcp tools currently supports stdio/http/sse servers only; `{}` uses {}",
+            server.name, server.transport
+        ))),
+    }
+}
+
+fn list_prompts_for_server(server: &McpServer) -> AppResult<Vec<McpRemotePrompt>> {
+    match server.transport.as_str() {
+        "stdio" => list_stdio_prompts(server),
+        "http" => list_http_prompts(server),
+        "sse" => list_sse_prompts(server),
+        _ => Err(app_error(format!(
+            "mcp prompts currently supports stdio/http/sse servers only; `{}` uses {}",
             server.name, server.transport
         ))),
     }
@@ -391,6 +608,66 @@ fn call_stdio_tool(
     })?;
 
     let result = run_stdio_call_session(server, &mut child, tool_name, arguments);
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+fn list_stdio_prompts(server: &McpServer) -> AppResult<Vec<McpRemotePrompt>> {
+    let command = server
+        .command
+        .as_deref()
+        .ok_or_else(|| app_error(format!("stdio MCP server `{}` has no command", server.name)))?;
+    let mut command_builder = Command::new(command);
+    command_builder
+        .args(&server.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for (key, value) in &server.env {
+        command_builder.env(key, value);
+    }
+
+    let mut child = command_builder.spawn().map_err(|error| {
+        app_error(format!(
+            "failed to start stdio MCP server `{}` with `{}`: {error}",
+            server.name, command
+        ))
+    })?;
+
+    let result = run_stdio_prompts_session(server, &mut child);
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+fn get_stdio_prompt(
+    server: &McpServer,
+    prompt_name: &str,
+    arguments: &BTreeMap<String, JsonValue>,
+) -> AppResult<McpPromptGetResult> {
+    let command = server
+        .command
+        .as_deref()
+        .ok_or_else(|| app_error(format!("stdio MCP server `{}` has no command", server.name)))?;
+    let mut command_builder = Command::new(command);
+    command_builder
+        .args(&server.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for (key, value) in &server.env {
+        command_builder.env(key, value);
+    }
+
+    let mut child = command_builder.spawn().map_err(|error| {
+        app_error(format!(
+            "failed to start stdio MCP server `{}` with `{}`: {error}",
+            server.name, command
+        ))
+    })?;
+
+    let result = run_stdio_prompt_get_session(server, &mut child, prompt_name, arguments);
     let _ = child.kill();
     let _ = child.wait();
     result
@@ -479,6 +756,89 @@ fn call_http_tool(
     parse_tool_call_result(&root)
 }
 
+fn list_http_prompts(server: &McpServer) -> AppResult<Vec<McpRemotePrompt>> {
+    let mut session_id = None::<String>;
+    let initialize = post_http_json_rpc(server, &build_initialize_request(1), None)?;
+    if let Some(value) = initialize.session_id {
+        session_id = Some(value);
+    }
+    parse_http_json_rpc_response(&initialize.body, 1).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` initialize failed: {error}",
+            server.name
+        ))
+    })?;
+    let _ = post_http_json_rpc(
+        server,
+        build_initialized_notification(),
+        session_id.as_deref(),
+    )?;
+
+    let mut request_id = 2u64;
+    let mut cursor: Option<String> = None;
+    let mut prompts = Vec::new();
+    loop {
+        let response = post_http_json_rpc(
+            server,
+            &build_prompts_list_request(request_id, cursor.as_deref()),
+            session_id.as_deref(),
+        )?;
+        if let Some(value) = response.session_id {
+            session_id = Some(value);
+        }
+        let root = parse_http_json_rpc_response(&response.body, request_id).map_err(|error| {
+            app_error(format!(
+                "MCP server `{}` prompts/list failed: {error}",
+                server.name
+            ))
+        })?;
+        let (mut page_prompts, next_cursor) = parse_prompts_list_result(&root)?;
+        prompts.append(&mut page_prompts);
+        let Some(next_cursor) = next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+        request_id += 1;
+    }
+
+    Ok(prompts)
+}
+
+fn get_http_prompt(
+    server: &McpServer,
+    prompt_name: &str,
+    arguments: &BTreeMap<String, JsonValue>,
+) -> AppResult<McpPromptGetResult> {
+    let mut session_id = None::<String>;
+    let initialize = post_http_json_rpc(server, &build_initialize_request(1), None)?;
+    if let Some(value) = initialize.session_id {
+        session_id = Some(value);
+    }
+    parse_http_json_rpc_response(&initialize.body, 1).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` initialize failed: {error}",
+            server.name
+        ))
+    })?;
+    let _ = post_http_json_rpc(
+        server,
+        build_initialized_notification(),
+        session_id.as_deref(),
+    )?;
+    let response = post_http_json_rpc(
+        server,
+        &build_prompts_get_request(2, prompt_name, arguments),
+        session_id.as_deref(),
+    )?;
+    let root = parse_http_json_rpc_response(&response.body, 2).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` prompts/get failed: {error}",
+            server.name
+        ))
+    })?;
+    parse_prompt_get_result(&root)
+}
+
 fn list_sse_tools(server: &McpServer) -> AppResult<Vec<McpRemoteTool>> {
     let mut session = open_sse_session(server)?;
     post_sse_json_rpc(server, &session.endpoint, &build_initialize_request(1))?;
@@ -555,6 +915,86 @@ fn call_sse_tool(
     )?;
     let root = validate_json_rpc_response(root, 2)?;
     let result = parse_tool_call_result(&root);
+    session.close();
+    result
+}
+
+fn list_sse_prompts(server: &McpServer) -> AppResult<Vec<McpRemotePrompt>> {
+    let mut session = open_sse_session(server)?;
+    post_sse_json_rpc(server, &session.endpoint, &build_initialize_request(1))?;
+    let response = read_sse_json_rpc_response(&session.receiver, 1, MCP_RESPONSE_TIMEOUT).map_err(
+        |error| {
+            app_error(format!(
+                "MCP server `{}` initialize failed: {error}",
+                server.name
+            ))
+        },
+    )?;
+    validate_json_rpc_response(response, 1)?;
+    post_sse_json_rpc(server, &session.endpoint, build_initialized_notification())?;
+
+    let mut request_id = 2u64;
+    let mut cursor: Option<String> = None;
+    let mut prompts = Vec::new();
+    loop {
+        post_sse_json_rpc(
+            server,
+            &session.endpoint,
+            &build_prompts_list_request(request_id, cursor.as_deref()),
+        )?;
+        let root = read_sse_json_rpc_response(&session.receiver, request_id, MCP_RESPONSE_TIMEOUT)
+            .map_err(|error| {
+                app_error(format!(
+                    "MCP server `{}` prompts/list failed: {error}",
+                    server.name
+                ))
+            })?;
+        let root = validate_json_rpc_response(root, request_id)?;
+        let (mut page_prompts, next_cursor) = parse_prompts_list_result(&root)?;
+        prompts.append(&mut page_prompts);
+        let Some(next_cursor) = next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+        request_id += 1;
+    }
+
+    session.close();
+    Ok(prompts)
+}
+
+fn get_sse_prompt(
+    server: &McpServer,
+    prompt_name: &str,
+    arguments: &BTreeMap<String, JsonValue>,
+) -> AppResult<McpPromptGetResult> {
+    let mut session = open_sse_session(server)?;
+    post_sse_json_rpc(server, &session.endpoint, &build_initialize_request(1))?;
+    let response = read_sse_json_rpc_response(&session.receiver, 1, MCP_RESPONSE_TIMEOUT).map_err(
+        |error| {
+            app_error(format!(
+                "MCP server `{}` initialize failed: {error}",
+                server.name
+            ))
+        },
+    )?;
+    validate_json_rpc_response(response, 1)?;
+    post_sse_json_rpc(server, &session.endpoint, build_initialized_notification())?;
+    post_sse_json_rpc(
+        server,
+        &session.endpoint,
+        &build_prompts_get_request(2, prompt_name, arguments),
+    )?;
+    let root = read_sse_json_rpc_response(&session.receiver, 2, MCP_RESPONSE_TIMEOUT).map_err(
+        |error| {
+            app_error(format!(
+                "MCP server `{}` prompts/get failed: {error}",
+                server.name
+            ))
+        },
+    )?;
+    let root = validate_json_rpc_response(root, 2)?;
+    let result = parse_prompt_get_result(&root);
     session.close();
     result
 }
@@ -918,6 +1358,43 @@ fn run_stdio_call_session(
     parse_tool_call_result(&response)
 }
 
+fn run_stdio_prompt_get_session(
+    server: &McpServer,
+    child: &mut std::process::Child,
+    prompt_name: &str,
+    arguments: &BTreeMap<String, JsonValue>,
+) -> AppResult<McpPromptGetResult> {
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| app_error("failed to open MCP server stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| app_error("failed to open MCP server stdout"))?;
+    let receiver = spawn_stdout_reader(stdout);
+
+    send_json_rpc(&mut stdin, &build_initialize_request(1))?;
+    read_json_rpc_response(&receiver, 1, MCP_RESPONSE_TIMEOUT).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` initialize failed: {error}",
+            server.name
+        ))
+    })?;
+    send_json_rpc(&mut stdin, build_initialized_notification())?;
+    send_json_rpc(
+        &mut stdin,
+        &build_prompts_get_request(2, prompt_name, arguments),
+    )?;
+    let response = read_json_rpc_response(&receiver, 2, MCP_RESPONSE_TIMEOUT).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` prompts/get failed: {error}",
+            server.name
+        ))
+    })?;
+    parse_prompt_get_result(&response)
+}
+
 fn run_stdio_tools_session(
     server: &McpServer,
     child: &mut std::process::Child,
@@ -966,6 +1443,56 @@ fn run_stdio_tools_session(
     }
 
     Ok(tools)
+}
+
+fn run_stdio_prompts_session(
+    server: &McpServer,
+    child: &mut std::process::Child,
+) -> AppResult<Vec<McpRemotePrompt>> {
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| app_error("failed to open MCP server stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| app_error("failed to open MCP server stdout"))?;
+    let receiver = spawn_stdout_reader(stdout);
+
+    send_json_rpc(&mut stdin, &build_initialize_request(1))?;
+    read_json_rpc_response(&receiver, 1, MCP_RESPONSE_TIMEOUT).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` initialize failed: {error}",
+            server.name
+        ))
+    })?;
+    send_json_rpc(&mut stdin, build_initialized_notification())?;
+
+    let mut request_id = 2u64;
+    let mut cursor: Option<String> = None;
+    let mut prompts = Vec::new();
+    loop {
+        send_json_rpc(
+            &mut stdin,
+            &build_prompts_list_request(request_id, cursor.as_deref()),
+        )?;
+        let response = read_json_rpc_response(&receiver, request_id, MCP_RESPONSE_TIMEOUT)
+            .map_err(|error| {
+                app_error(format!(
+                    "MCP server `{}` prompts/list failed: {error}",
+                    server.name
+                ))
+            })?;
+        let (mut page_prompts, next_cursor) = parse_prompts_list_result(&response)?;
+        prompts.append(&mut page_prompts);
+        let Some(next_cursor) = next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+        request_id += 1;
+    }
+
+    Ok(prompts)
 }
 
 fn spawn_stdout_reader(stdout: std::process::ChildStdout) -> Receiver<Result<String, String>> {
@@ -1197,6 +1724,30 @@ fn build_tools_call_request(
     )
 }
 
+fn build_prompts_list_request(id: u64, cursor: Option<&str>) -> String {
+    match cursor {
+        Some(cursor) => format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"prompts/list","params":{{"cursor":"{}"}}}}"#,
+            crate::util::json::json_escape(cursor)
+        ),
+        None => {
+            format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"prompts/list","params":{{}}}}"#)
+        }
+    }
+}
+
+fn build_prompts_get_request(
+    id: u64,
+    prompt_name: &str,
+    arguments: &BTreeMap<String, JsonValue>,
+) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"method":"prompts/get","params":{{"name":"{}","arguments":{}}}}}"#,
+        crate::util::json::json_escape(prompt_name),
+        json_value_to_string(&JsonValue::Object(arguments.clone())),
+    )
+}
+
 fn parse_tools_list_result(
     response: &BTreeMap<String, JsonValue>,
 ) -> AppResult<(Vec<McpRemoteTool>, Option<String>)> {
@@ -1230,6 +1781,73 @@ fn parse_tools_list_result(
             name: name.to_string(),
             description,
             input_schema,
+        });
+    }
+
+    Ok((parsed, next_cursor))
+}
+
+fn parse_prompts_list_result(
+    response: &BTreeMap<String, JsonValue>,
+) -> AppResult<(Vec<McpRemotePrompt>, Option<String>)> {
+    let result = response
+        .get("result")
+        .and_then(json_as_object)
+        .ok_or_else(|| app_error("prompts/list response `result` must be an object"))?;
+    let prompts = result
+        .get("prompts")
+        .and_then(json_as_array)
+        .ok_or_else(|| app_error("prompts/list response `result.prompts` must be an array"))?;
+    let next_cursor = result
+        .get("nextCursor")
+        .and_then(json_as_string)
+        .map(ToString::to_string);
+
+    let mut parsed = Vec::with_capacity(prompts.len());
+    for prompt in prompts {
+        let object = json_as_object(prompt)
+            .ok_or_else(|| app_error("prompts/list response prompt entries must be objects"))?;
+        let name = object
+            .get("name")
+            .and_then(json_as_string)
+            .ok_or_else(|| app_error("prompts/list response prompt entry missing string `name`"))?;
+        let description = object
+            .get("description")
+            .and_then(json_as_string)
+            .map(ToString::to_string);
+        let mut arguments = Vec::new();
+        if let Some(value) = object.get("arguments") {
+            let items = json_as_array(value).ok_or_else(|| {
+                app_error("prompts/list response prompt `arguments` must be an array")
+            })?;
+            for item in items {
+                let argument = json_as_object(item).ok_or_else(|| {
+                    app_error("prompts/list response prompt argument entries must be objects")
+                })?;
+                let argument_name =
+                    argument
+                        .get("name")
+                        .and_then(json_as_string)
+                        .ok_or_else(|| {
+                            app_error("prompts/list response prompt argument missing string `name`")
+                        })?;
+                arguments.push(McpPromptArgument {
+                    name: argument_name.to_string(),
+                    description: argument
+                        .get("description")
+                        .and_then(json_as_string)
+                        .map(ToString::to_string),
+                    required: argument
+                        .get("required")
+                        .and_then(json_as_bool)
+                        .unwrap_or(false),
+                });
+            }
+        }
+        parsed.push(McpRemotePrompt {
+            name: name.to_string(),
+            description,
+            arguments,
         });
     }
 
@@ -1278,6 +1896,79 @@ fn parse_tool_call_result(response: &BTreeMap<String, JsonValue>) -> AppResult<M
         content,
         structured_content,
     })
+}
+
+fn parse_prompt_get_result(
+    response: &BTreeMap<String, JsonValue>,
+) -> AppResult<McpPromptGetResult> {
+    let result = response
+        .get("result")
+        .and_then(json_as_object)
+        .ok_or_else(|| app_error("prompts/get response `result` must be an object"))?;
+    let description = result
+        .get("description")
+        .and_then(json_as_string)
+        .map(ToString::to_string);
+    let messages = result
+        .get("messages")
+        .and_then(json_as_array)
+        .ok_or_else(|| app_error("prompts/get response `result.messages` must be an array"))?;
+
+    let mut parsed = Vec::with_capacity(messages.len());
+    for message in messages {
+        let Some(object) = json_as_object(message) else {
+            parsed.push(json_value_to_string(message));
+            continue;
+        };
+        let role = object.get("role").and_then(json_as_string).unwrap_or("");
+        let content = object
+            .get("content")
+            .map(render_prompt_content)
+            .unwrap_or_else(|| json_value_to_string(message));
+        if role.is_empty() {
+            parsed.push(content);
+        } else {
+            parsed.push(format!("{role}: {content}"));
+        }
+    }
+
+    Ok(McpPromptGetResult {
+        description,
+        messages: parsed,
+    })
+}
+
+fn render_prompt_content(value: &JsonValue) -> String {
+    let Some(object) = json_as_object(value) else {
+        return json_value_to_string(value);
+    };
+    match object.get("type").and_then(json_as_string) {
+        Some("text") => object
+            .get("text")
+            .and_then(json_as_string)
+            .unwrap_or("")
+            .to_string(),
+        _ => json_value_to_string(value),
+    }
+}
+
+fn render_remote_prompt_text(
+    server_name: &str,
+    prompt_name: &str,
+    result: &McpPromptGetResult,
+) -> String {
+    let mut output = format!("MCP prompt /mcp/{server_name}/{prompt_name}\n");
+    output.push_str(&format!("Source: {server_name}/{prompt_name}\n"));
+    if let Some(description) = &result.description {
+        output.push_str(&format!("Description: {}\n", description.trim()));
+    }
+    output.push('\n');
+    if result.messages.is_empty() {
+        output.push_str("(empty prompt)");
+    } else {
+        output.push_str(&result.messages.join("\n\n"));
+    }
+    output
 }
 
 fn compact_inline(value: &str, limit: usize) -> String {
@@ -1577,10 +2268,30 @@ struct McpRemoteTool {
 }
 
 #[derive(Debug, Clone)]
+struct McpRemotePrompt {
+    name: String,
+    description: Option<String>,
+    arguments: Vec<McpPromptArgument>,
+}
+
+#[derive(Debug, Clone)]
+struct McpPromptArgument {
+    name: String,
+    description: Option<String>,
+    required: bool,
+}
+
+#[derive(Debug, Clone)]
 struct McpToolCallResult {
     is_error: bool,
     content: Vec<String>,
     structured_content: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct McpPromptGetResult {
+    description: Option<String>,
+    messages: Vec<String>,
 }
 
 #[cfg(test)]
@@ -1863,8 +2574,58 @@ mod tests {
     }
 
     #[test]
+    fn build_prompt_protocol_messages_include_prompt_name_and_arguments() {
+        let list = build_prompts_list_request(2, Some("next page"));
+        let root = parse_root_object(&list).unwrap();
+        assert_eq!(
+            root.get("method").and_then(json_as_string),
+            Some("prompts/list")
+        );
+        let params = root
+            .get("params")
+            .and_then(json_as_object)
+            .expect("prompts/list params");
+        assert_eq!(
+            params.get("cursor").and_then(json_as_string),
+            Some("next page")
+        );
+
+        let arguments = parse_prompt_arguments(Some(r#"{"number":42}"#)).unwrap();
+        let get = build_prompts_get_request(3, "review_pr", &arguments);
+        let root = parse_root_object(&get).unwrap();
+        assert_eq!(
+            root.get("method").and_then(json_as_string),
+            Some("prompts/get")
+        );
+        let params = root
+            .get("params")
+            .and_then(json_as_object)
+            .expect("prompts/get params");
+        assert_eq!(
+            params.get("name").and_then(json_as_string),
+            Some("review_pr")
+        );
+        let args = params
+            .get("arguments")
+            .and_then(json_as_object)
+            .expect("arguments");
+        assert!(matches!(
+            args.get("number"),
+            Some(JsonValue::Number(value)) if value == "42"
+        ));
+    }
+
+    #[test]
     fn parse_call_arguments_rejects_non_object_json() {
         let error = parse_call_arguments(Some("[1,2]")).unwrap_err().to_string();
+        assert!(error.contains("must be an object"));
+    }
+
+    #[test]
+    fn parse_prompt_arguments_rejects_non_object_json() {
+        let error = parse_prompt_arguments(Some("[1,2]"))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("must be an object"));
     }
 
@@ -1932,6 +2693,77 @@ mod tests {
     }
 
     #[test]
+    fn parse_prompts_list_result_reads_arguments_and_cursor() {
+        let root = parse_root_object(
+            r#"{
+              "jsonrpc": "2.0",
+              "id": 2,
+              "result": {
+                "nextCursor": "page-2",
+                "prompts": [
+                  {
+                    "name": "review_pr",
+                    "description": "Review a pull request",
+                    "arguments": [
+                      {"name": "number", "description": "PR number", "required": true}
+                    ]
+                  }
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let (prompts, next_cursor) = parse_prompts_list_result(&root).unwrap();
+        assert_eq!(next_cursor.as_deref(), Some("page-2"));
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].name, "review_pr");
+        assert_eq!(
+            prompts[0].description.as_deref(),
+            Some("Review a pull request")
+        );
+        assert_eq!(prompts[0].arguments[0].name, "number");
+        assert!(prompts[0].arguments[0].required);
+    }
+
+    #[test]
+    fn parse_prompt_get_result_reads_text_messages() {
+        let root = parse_root_object(
+            r#"{
+              "jsonrpc": "2.0",
+              "id": 2,
+              "result": {
+                "description": "Review prompt",
+                "messages": [
+                  {"role": "user", "content": {"type": "text", "text": "Review PR 42"}},
+                  {"role": "assistant", "content": {"type": "text", "text": "I will inspect it."}}
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let result = parse_prompt_get_result(&root).unwrap();
+        assert_eq!(result.description.as_deref(), Some("Review prompt"));
+        assert_eq!(result.messages[0], "user: Review PR 42");
+        assert_eq!(result.messages[1], "assistant: I will inspect it.");
+    }
+
+    #[test]
+    fn render_remote_prompt_text_includes_source_and_messages() {
+        let result = McpPromptGetResult {
+            description: Some("Review prompt".to_string()),
+            messages: vec!["user: Review PR 42".to_string()],
+        };
+
+        let rendered = render_remote_prompt_text("github", "review_pr", &result);
+
+        assert!(rendered.contains("MCP prompt /mcp/github/review_pr"));
+        assert!(rendered.contains("Source: github/review_pr"));
+        assert!(rendered.contains("user: Review PR 42"));
+    }
+
+    #[test]
     fn list_remote_tools_summary_supports_http_transport() {
         let (url, handle) = start_fake_http_mcp(
             "tools/list",
@@ -1944,6 +2776,46 @@ mod tests {
         let summary = list_remote_tools_summary(&config, Some("remote")).unwrap();
         assert!(summary.contains("- remote [http]: 1 tool(s)"));
         assert!(summary.contains("echo"));
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn list_remote_prompts_summary_supports_http_transport() {
+        let (url, handle) = start_fake_http_mcp(
+            "prompts/list",
+            r#"{"jsonrpc":"2.0","id":2,"result":{"prompts":[{"name":"review_pr","description":"Review a PR","arguments":[{"name":"number","required":true}]}]}}"#,
+        );
+        let root = temp_root("http-prompts");
+        let config =
+            config_with_mcp_server(&root, &format!(r#"{{"transport":"http","url":"{url}"}}"#));
+
+        let summary = list_remote_prompts_summary(&config, Some("remote")).unwrap();
+        assert!(summary.contains("- remote [http]: 1 prompt(s)"));
+        assert!(summary.contains("review_pr"));
+        assert!(summary.contains("number (required)"));
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn get_remote_prompt_summary_supports_http_transport() {
+        let (url, handle) = start_fake_http_mcp(
+            "prompts/get",
+            r#"{"jsonrpc":"2.0","id":2,"result":{"description":"Review prompt","messages":[{"role":"user","content":{"type":"text","text":"Review PR 42"}}]}}"#,
+        );
+        let root = temp_root("http-prompt-get");
+        let config =
+            config_with_mcp_server(&root, &format!(r#"{{"transport":"http","url":"{url}"}}"#));
+
+        let summary =
+            get_remote_prompt_summary(&config, "remote", "review_pr", Some(r#"{"number":42}"#))
+                .unwrap();
+        assert!(summary.contains("- remote/review_pr [http]: ok"));
+        assert!(summary.contains("Review prompt"));
+        assert!(summary.contains("user: Review PR 42"));
 
         handle.join().unwrap();
         let _ = std::fs::remove_dir_all(root);

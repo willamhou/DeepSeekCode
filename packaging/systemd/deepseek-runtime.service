@@ -1,0 +1,13 @@
+[Unit]
+Description=DeepseekCode HTTP runtime
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__WORKDIR__
+ExecStart=/usr/bin/env __DEEPSEEK_BIN__ serve --http --addr __HTTP_ADDR__
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

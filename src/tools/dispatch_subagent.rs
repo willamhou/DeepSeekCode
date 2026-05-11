@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::config::types::AppConfig;
@@ -10,6 +11,7 @@ use crate::tools::types::{Tool, ToolInput, ToolOutput};
 
 const DEFAULT_SUBAGENT_STEPS: usize = 4;
 const MAX_SUBAGENT_STEPS: usize = 12;
+const MAX_PARALLEL_SUBAGENTS: usize = 4;
 
 pub struct DispatchSubagentTool {
     pub config: AppConfig,
@@ -22,36 +24,250 @@ impl Tool for DispatchSubagentTool {
     }
 
     fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
-        let task = input
-            .get("task")
+        let request = subagent_request_from_input(&input, "dispatch_subagent")?;
+        let summary = run_subagent_request(&self.config, self.parent_depth, &request)?;
+
+        Ok(ToolOutput { summary })
+    }
+}
+
+pub struct DispatchSubagentsTool {
+    pub config: AppConfig,
+    pub parent_depth: usize,
+}
+
+impl Tool for DispatchSubagentsTool {
+    fn name(&self) -> &str {
+        "dispatch_subagents"
+    }
+
+    fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
+        let requests = parse_parallel_requests(input.get("tasks"))?;
+        let mut handles = Vec::with_capacity(requests.len());
+        for (index, request) in requests.into_iter().enumerate() {
+            let config = self.config.clone();
+            let parent_depth = self.parent_depth;
+            handles.push(std::thread::spawn(move || {
+                let thread_id = new_thread_id(index + 1);
+                let summary =
+                    run_subagent_request(&config, parent_depth, &request).unwrap_or_else(|error| {
+                        render_blocked_parallel_child(&request, &error.to_string())
+                    });
+                let artifact = persist_agent_thread(
+                    &config.workspace.config_dir,
+                    &thread_id,
+                    &request,
+                    &summary,
+                )
+                .ok();
+                ParallelChildSummary {
+                    thread_id,
+                    request,
+                    summary,
+                    artifact,
+                }
+            }));
+        }
+
+        let mut children = Vec::with_capacity(handles.len());
+        for handle in handles {
+            children.push(
+                handle
+                    .join()
+                    .map_err(|_| tool_failure("dispatch_subagents child thread panicked"))?,
+            );
+        }
+
+        Ok(ToolOutput {
+            summary: render_parallel_summary(&children),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SubagentRequest {
+    task: String,
+    skill: Option<String>,
+    agent_name: Option<String>,
+    steps: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ParallelChildSummary {
+    thread_id: String,
+    request: SubagentRequest,
+    summary: String,
+    artifact: Option<PathBuf>,
+}
+
+fn subagent_request_from_input(input: &ToolInput, tool_name: &str) -> AppResult<SubagentRequest> {
+    let task = input
+        .get("task")
+        .map(str::trim)
+        .filter(|task| !task.is_empty())
+        .ok_or_else(|| tool_failure(format!("{tool_name} requires a non-empty `task`")))?
+        .to_string();
+    let skill = input
+        .get("skill")
+        .map(str::trim)
+        .filter(|skill| !skill.is_empty())
+        .map(str::to_string);
+    let agent_name = input
+        .get("agent")
+        .map(str::trim)
+        .filter(|agent| !agent.is_empty())
+        .map(str::to_string);
+    let steps = parse_steps(input.get("steps"))?;
+    Ok(SubagentRequest {
+        task,
+        skill,
+        agent_name,
+        steps,
+    })
+}
+
+fn run_subagent_request(
+    config: &AppConfig,
+    parent_depth: usize,
+    request: &SubagentRequest,
+) -> AppResult<String> {
+    let agent = request
+        .agent_name
+        .as_deref()
+        .map(|name| crate::core::agents::find_agent(&config.workspace.config_dir, name))
+        .transpose()
+        .map_err(|error| {
+            tool_failure(format!(
+                "subagent agent `{}` could not be loaded: {}",
+                request.agent_name.as_deref().unwrap_or("unknown"),
+                error.message
+            ))
+        })?;
+    let child_task = match agent.as_ref() {
+        Some(agent) => render_agent_task(agent, &request.task),
+        None => request.task.clone(),
+    };
+    let hooks = crate::core::hooks::HookRunner::new(&config.hooks);
+    let hook_context = hooks
+        .subagent_start(&request.task, &child_task, request.agent_name.as_deref())
+        .map_err(|error| tool_failure(format!("subagent_start hook failed: {error}")))?;
+    let child_task = match hook_context {
+        Some(context) => format!("{child_task}\n\nSubagent start hook context:\n{context}"),
+        None => child_task,
+    };
+
+    let result = AgentLoop::new(config.clone())
+        .run_with(
+            TaskContext::new(child_task, request.skill.clone()),
+            AgentLoopOptions {
+                steps: request.steps,
+                initial_observations: Vec::new(),
+                todos: Rc::new(RefCell::new(TodoList::default())),
+                subagent_depth: parent_depth + 1,
+                emit_progress: false,
+                persist_session: false,
+                stream_events: None,
+                run_events: None,
+                approval_resolver: None,
+                cancel_check: None,
+            },
+        )
+        .map_err(|error| tool_failure(format!("subagent failed: {error}")))?;
+
+    let summary = render_summary(
+        &request.task,
+        request.skill.as_deref(),
+        agent.as_ref(),
+        request.steps,
+        &result,
+    );
+    let _ = hooks
+        .subagent_stop(
+            &request.task,
+            &request.task,
+            request.agent_name.as_deref(),
+            &summary,
+        )
+        .map_err(|error| tool_failure(format!("subagent_stop hook failed: {error}")))?;
+    Ok(summary)
+}
+
+fn parse_parallel_requests(raw: Option<&str>) -> AppResult<Vec<SubagentRequest>> {
+    let raw = raw
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .ok_or_else(|| tool_failure("dispatch_subagents requires `tasks` JSON array"))?;
+    let value = crate::util::json::parse_json_value(raw)
+        .map_err(|error| tool_failure(format!("dispatch_subagents tasks must be JSON: {error}")))?;
+    let array = match value {
+        crate::util::json::JsonValue::Array(array) => array,
+        _ => {
+            return Err(tool_failure(
+                "dispatch_subagents `tasks` must be a JSON array",
+            ))
+        }
+    };
+    if array.is_empty() {
+        return Err(tool_failure(
+            "dispatch_subagents requires at least one task",
+        ));
+    }
+    if array.len() > MAX_PARALLEL_SUBAGENTS {
+        return Err(tool_failure(format!(
+            "dispatch_subagents accepts at most {MAX_PARALLEL_SUBAGENTS} tasks"
+        )));
+    }
+
+    let mut requests = Vec::with_capacity(array.len());
+    for (index, item) in array.iter().enumerate() {
+        let object = match item {
+            crate::util::json::JsonValue::Object(object) => object,
+            _ => {
+                return Err(tool_failure(format!(
+                    "dispatch_subagents task {} must be an object",
+                    index + 1
+                )));
+            }
+        };
+        let task = json_string_field(object, "task")
             .map(str::trim)
             .filter(|task| !task.is_empty())
-            .ok_or_else(|| tool_failure("dispatch_subagent requires a non-empty `task`"))?
+            .ok_or_else(|| {
+                tool_failure(format!(
+                    "dispatch_subagents task {} requires non-empty `task`",
+                    index + 1
+                ))
+            })?
             .to_string();
-        let skill = input
-            .get("skill")
+        let skill = json_string_field(object, "skill")
             .map(str::trim)
             .filter(|skill| !skill.is_empty())
             .map(str::to_string);
-        let steps = parse_steps(input.get("steps"))?;
+        let agent_name = json_string_field(object, "agent")
+            .map(str::trim)
+            .filter(|agent| !agent.is_empty())
+            .map(str::to_string);
+        let steps = match json_string_field(object, "steps") {
+            Some(value) => parse_steps(Some(value))?,
+            None => DEFAULT_SUBAGENT_STEPS,
+        };
+        requests.push(SubagentRequest {
+            task,
+            skill,
+            agent_name,
+            steps,
+        });
+    }
+    Ok(requests)
+}
 
-        let result = AgentLoop::new(self.config.clone())
-            .run_with(
-                TaskContext::new(task.clone(), skill.clone()),
-                AgentLoopOptions {
-                    steps,
-                    initial_observations: Vec::new(),
-                    todos: Rc::new(RefCell::new(TodoList::default())),
-                    subagent_depth: self.parent_depth + 1,
-                    emit_progress: false,
-                    persist_session: false,
-                },
-            )
-            .map_err(|error| tool_failure(format!("subagent failed: {error}")))?;
-
-        Ok(ToolOutput {
-            summary: render_summary(&task, skill.as_deref(), steps, &result),
-        })
+fn json_string_field<'a>(
+    object: &'a std::collections::BTreeMap<String, crate::util::json::JsonValue>,
+    key: &str,
+) -> Option<&'a str> {
+    match object.get(key) {
+        Some(crate::util::json::JsonValue::String(value)) => Some(value),
+        _ => None,
     }
 }
 
@@ -74,7 +290,143 @@ fn parse_steps(raw: Option<&str>) -> AppResult<usize> {
     Ok(steps)
 }
 
-fn render_summary(task: &str, skill: Option<&str>, steps: usize, result: &RunResult) -> String {
+fn render_parallel_summary(children: &[ParallelChildSummary]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("meta.parallel_children={}\n", children.len()));
+    for (index, child) in children.iter().enumerate() {
+        let ordinal = index + 1;
+        out.push_str(&format!(
+            "meta.parallel_child_{ordinal}_thread={}\n",
+            child.thread_id
+        ));
+        out.push_str(&format!(
+            "meta.parallel_child_{ordinal}_task={}\n",
+            sanitize_meta_value(&child.request.task)
+        ));
+        if let Some(outcome) = meta_value(&child.summary, "meta.child_outcome") {
+            out.push_str(&format!(
+                "meta.parallel_child_{ordinal}_outcome={outcome}\n"
+            ));
+        }
+        if let Some(next_action) = meta_value(&child.summary, "meta.child_next_action") {
+            out.push_str(&format!(
+                "meta.parallel_child_{ordinal}_next_action={next_action}\n"
+            ));
+        }
+        if let Some(path) = child.artifact.as_ref() {
+            out.push_str(&format!(
+                "meta.parallel_child_{ordinal}_artifact={}\n",
+                sanitize_meta_value(&path.display().to_string())
+            ));
+        }
+    }
+
+    out.push_str(&format!(
+        "parallel subagents completed: {} child thread(s)\n",
+        children.len()
+    ));
+    for child in children {
+        out.push_str(&format!(
+            "\n[{}] task: {}\n{}\n",
+            child.thread_id, child.request.task, child.summary
+        ));
+    }
+    out
+}
+
+fn render_blocked_parallel_child(request: &SubagentRequest, error: &str) -> String {
+    format!(
+        "meta.child_task={}\nmeta.child_budget={}\nmeta.child_outcome=blocked\nmeta.child_next_action=replan_parent\nmeta.child_final_message={}\nsubagent failed task `{}`: {}",
+        sanitize_meta_value(&request.task),
+        request.steps,
+        sanitize_meta_value(error),
+        request.task,
+        error
+    )
+}
+
+fn meta_value(summary: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    summary.lines().find_map(|line| {
+        line.strip_prefix(&prefix)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn new_thread_id(index: usize) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("thread-{nanos}-{index}")
+}
+
+pub fn agent_threads_dir(config_dir: &str) -> PathBuf {
+    PathBuf::from(config_dir).join("agent-threads")
+}
+
+fn persist_agent_thread(
+    config_dir: &str,
+    thread_id: &str,
+    request: &SubagentRequest,
+    summary: &str,
+) -> std::io::Result<PathBuf> {
+    let dir = agent_threads_dir(config_dir);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{thread_id}.md"));
+    std::fs::write(&path, render_agent_thread_file(thread_id, request, summary))?;
+    Ok(path)
+}
+
+fn render_agent_thread_file(thread_id: &str, request: &SubagentRequest, summary: &str) -> String {
+    format!(
+        "# Agent Thread {thread_id}\n\nTask: {}\nAgent: {}\nSkill: {}\nSteps: {}\n\n## Summary\n\n{}\n",
+        request.task,
+        request.agent_name.as_deref().unwrap_or("-"),
+        request.skill.as_deref().unwrap_or("-"),
+        request.steps,
+        summary.trim()
+    )
+}
+
+pub fn active_agent_thread_path(config_dir: &str) -> PathBuf {
+    agent_threads_dir(config_dir).join("active")
+}
+
+pub fn validate_thread_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.starts_with('.')
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+}
+
+pub fn thread_file_path(config_dir: &str, id: &str) -> Option<PathBuf> {
+    validate_thread_id(id).then(|| agent_threads_dir(config_dir).join(format!("{id}.md")))
+}
+
+fn render_agent_task(agent: &crate::core::agents::AgentSpec, task: &str) -> String {
+    let tools = if agent.tools.is_empty() {
+        "all available child tools".to_string()
+    } else {
+        agent.tools.join(", ")
+    };
+    format!(
+        "Act as custom subagent `{}`.\nDescription: {}\nTool access hint: {}\n\nSubagent instructions:\n{}\n\nDelegated task:\n{}",
+        agent.name, agent.description, tools, agent.prompt, task
+    )
+}
+
+fn render_summary(
+    task: &str,
+    skill: Option<&str>,
+    agent: Option<&crate::core::agents::AgentSpec>,
+    steps: usize,
+    result: &RunResult,
+) -> String {
     let tool_calls = if result.tool_events.is_empty() {
         "none".to_string()
     } else {
@@ -110,6 +462,12 @@ fn render_summary(task: &str, skill: Option<&str>, steps: usize, result: &RunRes
         summary.push_str(&format!(
             "meta.child_skill={}\n",
             sanitize_meta_value(skill)
+        ));
+    }
+    if let Some(agent) = agent {
+        summary.push_str(&format!(
+            "meta.child_agent={}\n",
+            sanitize_meta_value(&agent.name)
         ));
     }
     summary.push_str(&format!("meta.child_budget={steps}\n"));
@@ -349,7 +707,7 @@ mod tests {
             }],
             usage: TokenUsage::default(),
         };
-        let summary = render_summary("inspect file", None, 2, &result);
+        let summary = render_summary("inspect file", None, None, 2, &result);
         assert!(summary.contains("meta.child_outcome=blocked"));
         assert!(summary.contains("meta.child_next_action=replan_parent"));
         assert!(summary.contains("meta.child_files=src/lib.rs"));
@@ -372,7 +730,7 @@ mod tests {
             }],
             usage: TokenUsage::default(),
         };
-        let summary = render_summary("inspect entrypoint", None, 2, &result);
+        let summary = render_summary("inspect entrypoint", None, None, 2, &result);
         assert!(summary.contains("meta.child_next_action=read_file:src/main.rs"));
     }
 
@@ -383,7 +741,7 @@ mod tests {
             tool_events: Vec::new(),
             usage: TokenUsage::default(),
         };
-        let summary = render_summary("inspect symbol", None, 2, &result);
+        let summary = render_summary("inspect symbol", None, None, 2, &result);
         assert!(summary.contains("meta.child_next_action=search_text:route_benchmark_subcommand"));
     }
 
@@ -410,8 +768,126 @@ mod tests {
             ],
             usage: TokenUsage::default(),
         };
-        let summary = render_summary("fix route", None, 4, &result);
+        let summary = render_summary("fix route", None, None, 4, &result);
         assert!(summary.contains("meta.child_files=src/lib.rs"));
         assert!(summary.contains("meta.child_next_action=read_file:src/lib.rs"));
+    }
+
+    #[test]
+    fn render_summary_includes_custom_agent_metadata() {
+        let agent = crate::core::agents::AgentSpec {
+            name: "reviewer".to_string(),
+            description: "Reviews code".to_string(),
+            tools: vec!["read_file".to_string()],
+            model: None,
+            prompt: "Review carefully.".to_string(),
+            path: ".dscode/agents/reviewer.md".into(),
+            source: crate::core::agents::AgentSource::Project,
+        };
+        let result = RunResult {
+            final_message: "done".to_string(),
+            tool_events: Vec::new(),
+            usage: TokenUsage::default(),
+        };
+
+        let summary = render_summary("review code", None, Some(&agent), 2, &result);
+
+        assert!(summary.contains("meta.child_agent=reviewer"));
+    }
+
+    #[test]
+    fn render_agent_task_includes_custom_agent_prompt() {
+        let agent = crate::core::agents::AgentSpec {
+            name: "reviewer".to_string(),
+            description: "Reviews code".to_string(),
+            tools: vec!["read_file".to_string(), "search_text".to_string()],
+            model: None,
+            prompt: "Review carefully.".to_string(),
+            path: ".dscode/agents/reviewer.md".into(),
+            source: crate::core::agents::AgentSource::Project,
+        };
+
+        let task = render_agent_task(&agent, "Inspect src/lib.rs");
+
+        assert!(task.contains("custom subagent `reviewer`"));
+        assert!(task.contains("read_file, search_text"));
+        assert!(task.contains("Review carefully."));
+        assert!(task.contains("Inspect src/lib.rs"));
+    }
+
+    #[test]
+    fn parse_parallel_requests_reads_json_array() {
+        let requests = parse_parallel_requests(Some(
+            r#"[{"task":"review src/a.rs","agent":"reviewer","steps":"3"},{"task":"inspect docs","skill":"doc"}]"#,
+        ))
+        .unwrap();
+
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].task, "review src/a.rs");
+        assert_eq!(requests[0].agent_name.as_deref(), Some("reviewer"));
+        assert_eq!(requests[0].steps, 3);
+        assert_eq!(requests[1].skill.as_deref(), Some("doc"));
+        assert_eq!(requests[1].steps, DEFAULT_SUBAGENT_STEPS);
+    }
+
+    #[test]
+    fn parse_parallel_requests_rejects_too_many_tasks() {
+        let raw = r#"[
+            {"task":"one"},
+            {"task":"two"},
+            {"task":"three"},
+            {"task":"four"},
+            {"task":"five"}
+        ]"#;
+
+        assert!(parse_parallel_requests(Some(raw)).is_err());
+    }
+
+    #[test]
+    fn render_parallel_summary_includes_thread_metadata() {
+        let child = ParallelChildSummary {
+            thread_id: "thread-1".to_string(),
+            request: SubagentRequest {
+                task: "inspect src/lib.rs".to_string(),
+                skill: None,
+                agent_name: None,
+                steps: 2,
+            },
+            summary: "meta.child_outcome=ok\nmeta.child_next_action=read_file:src/lib.rs\nchild final message".to_string(),
+            artifact: Some(".dscode/agent-threads/thread-1.md".into()),
+        };
+
+        let summary = render_parallel_summary(&[child]);
+
+        assert!(summary.contains("meta.parallel_children=1"));
+        assert!(summary.contains("meta.parallel_child_1_thread=thread-1"));
+        assert!(summary.contains("meta.parallel_child_1_outcome=ok"));
+        assert!(summary.contains("meta.parallel_child_1_next_action=read_file:src/lib.rs"));
+        assert!(summary.contains("[thread-1] task: inspect src/lib.rs"));
+    }
+
+    #[test]
+    fn thread_id_validation_rejects_path_escape() {
+        assert!(validate_thread_id("thread-123"));
+        assert!(!validate_thread_id("../thread-123"));
+        assert!(!validate_thread_id(".hidden"));
+    }
+
+    #[test]
+    fn render_agent_thread_file_records_summary() {
+        let request = SubagentRequest {
+            task: "review".to_string(),
+            skill: Some("security".to_string()),
+            agent_name: Some("reviewer".to_string()),
+            steps: 4,
+        };
+
+        let body = render_agent_thread_file("thread-1", &request, "summary");
+
+        assert!(body.contains("# Agent Thread thread-1"));
+        assert!(body.contains("Task: review"));
+        assert!(body.contains("Agent: reviewer"));
+        assert!(body.contains("Skill: security"));
+        assert!(body.contains("summary"));
     }
 }

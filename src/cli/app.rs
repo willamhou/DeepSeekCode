@@ -49,15 +49,31 @@ pub enum DogfoodAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoreAction {
+    Snapshot { label: Option<String> },
+    List { limit: usize },
+    Show { id: String, patch: bool },
+    RevertTurn { id: String, apply: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpAction {
     List,
     Doctor,
     Tools {
         server: Option<String>,
     },
+    Prompts {
+        server: Option<String>,
+    },
     Call {
         server: String,
         tool: String,
+        arguments_json: Option<String>,
+    },
+    Prompt {
+        server: String,
+        prompt: String,
         arguments_json: Option<String>,
     },
     Init {
@@ -233,10 +249,17 @@ impl Cli {
             "benchmark" => Command::Benchmark(parse_benchmark_args(args)),
             "dogfood" => Command::Dogfood(parse_dogfood_subcommand(args)?),
             "run" => Command::Run(parse_run_args(args)),
+            "exec" => Command::Exec(parse_exec_subcommand(args)?),
+            "agents" => Command::Agents(parse_agents_subcommand(args)?),
+            "diagnostics" | "diag" => Command::Diagnostics(parse_diagnostics_args(args)?),
             "diff" => Command::Diff(DiffArgs {}),
             "resume" => Command::Resume(ResumeArgs { session: None }),
+            "restore" => Command::Restore(parse_restore_subcommand(args)?),
             "config" => Command::Config(parse_config_args(args)?),
-            "doctor" => Command::Doctor(DoctorArgs {}),
+            "doctor" => Command::Doctor(parse_doctor_args(args)?),
+            "serve" => Command::Serve(parse_serve_args(args)?),
+            "tui" => Command::Tui(parse_tui_args(args)?),
+            "update" => Command::Update(parse_update_args(args)?),
             "smoke" => Command::Smoke(parse_smoke_args(args)),
             "pr" => Command::Pr(parse_pr_subcommand(args)?),
             "mcp" => Command::Mcp(parse_mcp_subcommand(args)?),
@@ -263,10 +286,17 @@ pub enum Command {
     Chat(ChatArgs),
     Completion(CompletionShell),
     Run(RunArgs),
+    Exec(ExecAction),
+    Agents(AgentsAction),
+    Diagnostics(DiagnosticsArgs),
     Diff(DiffArgs),
     Resume(ResumeArgs),
+    Restore(RestoreAction),
     Config(ConfigArgs),
     Doctor(DoctorArgs),
+    Serve(ServeArgs),
+    Tui(TuiArgs),
+    Update(UpdateArgs),
     Smoke(SmokeArgs),
     Pr(PrAction),
     Mcp(McpAction),
@@ -319,6 +349,90 @@ pub struct RunArgs {
 }
 
 #[derive(Debug)]
+pub enum ExecAction {
+    Run(ExecArgs),
+    Resume(ExecResumeArgs),
+}
+
+#[derive(Debug)]
+pub struct ExecArgs {
+    pub task: String,
+    pub skill: Option<String>,
+    pub budget: Option<usize>,
+    pub images: Vec<String>,
+    pub json: bool,
+}
+
+#[derive(Debug)]
+pub struct ExecResumeArgs {
+    pub session: Option<String>,
+    pub task: Option<String>,
+    pub skill: Option<String>,
+    pub budget: Option<usize>,
+    pub images: Vec<String>,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentsAction {
+    List,
+    Show {
+        name: String,
+    },
+    Validate {
+        path: Option<String>,
+    },
+    RunTask {
+        id: String,
+        budget: Option<usize>,
+        json: bool,
+    },
+    Daemon {
+        budget: Option<usize>,
+        interval_ms: u64,
+        once: bool,
+        json: bool,
+    },
+    Service(AgentsServiceArgs),
+    Threads,
+    ShowThread {
+        id: String,
+    },
+    SwitchThread {
+        id: String,
+    },
+    CurrentThread,
+    ClearThread,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentsServiceKind {
+    Systemd,
+    Launchd,
+    All,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentsServiceArgs {
+    pub kind: AgentsServiceKind,
+    pub out: Option<String>,
+    pub bin: Option<String>,
+    pub workdir: Option<String>,
+    pub addr: String,
+    pub interval_ms: u64,
+    pub budget: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticsArgs {
+    pub changed: bool,
+    pub watch: bool,
+    pub once: bool,
+    pub interval_ms: u64,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug)]
 pub struct DiffArgs {}
 
 #[derive(Debug)]
@@ -333,8 +447,107 @@ pub struct ConfigArgs {
     pub force: bool,
 }
 
-#[derive(Debug)]
-pub struct DoctorArgs {}
+#[derive(Debug, Default)]
+pub struct DoctorArgs {
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServeArgs {
+    pub action: ServeAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServeAction {
+    Http(ServeHttpArgs),
+    Mcp,
+    Acp,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TuiArgs {
+    pub demo: bool,
+    pub once: bool,
+    pub runtime_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServeHttpArgs {
+    pub addr: String,
+    pub once: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct UpdateArgs {
+    pub check: bool,
+    pub print_command: bool,
+    pub action: UpdateAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateAction {
+    Status,
+    Package(UpdatePackageArgs),
+    VerifyInstall(UpdateVerifyInstallArgs),
+    InstallPackage(UpdateInstallPackageArgs),
+    Rollback(UpdateRollbackArgs),
+    HomebrewFormula(UpdateHomebrewFormulaArgs),
+}
+
+impl Default for UpdateAction {
+    fn default() -> Self {
+        Self::Status
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdatePackageArgs {
+    pub out: Option<String>,
+    pub bin: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdateVerifyInstallArgs {
+    pub bin: Option<String>,
+    pub workdir: Option<String>,
+    pub keep_workdir: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdateInstallPackageArgs {
+    pub package: Option<String>,
+    pub dest: Option<String>,
+    pub backup_dir: Option<String>,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdateRollbackArgs {
+    pub backup: Option<String>,
+    pub dest: Option<String>,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateHomebrewFormulaArgs {
+    pub version: String,
+    pub repo: String,
+    pub dist: String,
+    pub formula: String,
+    pub out: Option<String>,
+}
+
+impl Default for UpdateHomebrewFormulaArgs {
+    fn default() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            repo: "willamhou/DeepseekCode".to_string(),
+            dist: "dist".to_string(),
+            formula: "packaging/homebrew/deepseek.rb".to_string(),
+            out: None,
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct SmokeArgs {
@@ -407,6 +620,14 @@ fn parse_mcp_subcommand(args: Vec<String>) -> Result<McpAction, String> {
                 server: args.get(1).cloned(),
             })
         }
+        "prompts" => {
+            if args.len() > 2 {
+                return Err("mcp prompts accepts at most one server name".to_string());
+            }
+            Ok(McpAction::Prompts {
+                server: args.get(1).cloned(),
+            })
+        }
         "call" => {
             if args.len() < 3 {
                 return Err("mcp call requires <server> <tool> [json-args]".to_string());
@@ -417,6 +638,19 @@ fn parse_mcp_subcommand(args: Vec<String>) -> Result<McpAction, String> {
             Ok(McpAction::Call {
                 server: args[1].clone(),
                 tool: args[2].clone(),
+                arguments_json: args.get(3).cloned(),
+            })
+        }
+        "prompt" => {
+            if args.len() < 3 {
+                return Err("mcp prompt requires <server> <prompt> [json-args]".to_string());
+            }
+            if args.len() > 4 {
+                return Err("mcp prompt accepts at most one JSON arguments object".to_string());
+            }
+            Ok(McpAction::Prompt {
+                server: args[1].clone(),
+                prompt: args[2].clone(),
                 arguments_json: args.get(3).cloned(),
             })
         }
@@ -431,7 +665,7 @@ fn parse_mcp_subcommand(args: Vec<String>) -> Result<McpAction, String> {
             Ok(McpAction::Init { force })
         }
         other => Err(format!(
-            "unknown mcp sub-action `{other}`; expected list|doctor|tools|call|init"
+            "unknown mcp sub-action `{other}`; expected list|doctor|tools|prompts|call|prompt|init"
         )),
     }
 }
@@ -463,6 +697,334 @@ fn parse_config_args(args: Vec<String>) -> Result<ConfigArgs, String> {
         return Err("config --force requires init".to_string());
     }
 
+    Ok(parsed)
+}
+
+fn parse_tui_args(args: Vec<String>) -> Result<TuiArgs, String> {
+    let mut parsed = TuiArgs::default();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--demo" => parsed.demo = true,
+            "--once" => parsed.once = true,
+            "--runtime-url" => {
+                let Some(value) = iter.next() else {
+                    return Err("tui --runtime-url requires a URL".to_string());
+                };
+                parsed.runtime_url = Some(value);
+            }
+            other => {
+                if let Some(value) = other.strip_prefix("--runtime-url=") {
+                    if value.is_empty() {
+                        return Err("tui --runtime-url requires a URL".to_string());
+                    }
+                    parsed.runtime_url = Some(value.to_string());
+                    continue;
+                }
+                return Err(format!(
+                    "unknown tui argument `{other}`; expected --demo|--once|--runtime-url <url>"
+                ));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_doctor_args(args: Vec<String>) -> Result<DoctorArgs, String> {
+    let mut parsed = DoctorArgs::default();
+    for arg in args {
+        match arg.as_str() {
+            "--json" => parsed.json = true,
+            other => {
+                return Err(format!(
+                    "unknown doctor argument `{other}`; expected --json"
+                ));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_serve_args(args: Vec<String>) -> Result<ServeArgs, String> {
+    if args.is_empty() {
+        return Err("serve requires one mode: --http|--mcp|--acp".to_string());
+    }
+    match args[0].as_str() {
+        "--http" => Ok(ServeArgs {
+            action: ServeAction::Http(parse_serve_http_args(args.into_iter().skip(1).collect())?),
+        }),
+        "--mcp" => {
+            if args.len() > 1 {
+                return Err("serve --mcp does not accept flags yet".to_string());
+            }
+            Ok(ServeArgs {
+                action: ServeAction::Mcp,
+            })
+        }
+        "--acp" => {
+            if args.len() > 1 {
+                return Err("serve --acp does not accept flags yet".to_string());
+            }
+            Ok(ServeArgs {
+                action: ServeAction::Acp,
+            })
+        }
+        other => Err(format!(
+            "unknown serve mode `{other}`; expected --http|--mcp|--acp"
+        )),
+    }
+}
+
+fn parse_serve_http_args(args: Vec<String>) -> Result<ServeHttpArgs, String> {
+    let mut parsed = ServeHttpArgs {
+        addr: "127.0.0.1:8765".to_string(),
+        once: false,
+    };
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--addr" if index + 1 < args.len() => {
+                parsed.addr = args[index + 1].clone();
+                index += 2;
+            }
+            "--addr" => return Err("serve --http --addr requires a value".to_string()),
+            "--once" => {
+                parsed.once = true;
+                index += 1;
+            }
+            other => {
+                return Err(format!(
+                    "unknown flag for `serve --http`: {other}; expected --addr|--once"
+                ));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_update_args(args: Vec<String>) -> Result<UpdateArgs, String> {
+    let mut parsed = UpdateArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--check" => {
+                parsed.check = true;
+                index += 1;
+            }
+            "--print-command" => {
+                parsed.print_command = true;
+                index += 1;
+            }
+            "package" => {
+                parsed.action = UpdateAction::Package(parse_update_package_args(
+                    args.into_iter().skip(index + 1).collect(),
+                )?);
+                return Ok(parsed);
+            }
+            "verify-install" => {
+                parsed.action = UpdateAction::VerifyInstall(parse_update_verify_install_args(
+                    args.into_iter().skip(index + 1).collect(),
+                )?);
+                return Ok(parsed);
+            }
+            "install-package" => {
+                parsed.action = UpdateAction::InstallPackage(parse_update_install_package_args(
+                    args.into_iter().skip(index + 1).collect(),
+                )?);
+                return Ok(parsed);
+            }
+            "rollback" => {
+                parsed.action = UpdateAction::Rollback(parse_update_rollback_args(
+                    args.into_iter().skip(index + 1).collect(),
+                )?);
+                return Ok(parsed);
+            }
+            "homebrew-formula" => {
+                parsed.action = UpdateAction::HomebrewFormula(parse_update_homebrew_formula_args(
+                    args.into_iter().skip(index + 1).collect(),
+                )?);
+                return Ok(parsed);
+            }
+            other => {
+                return Err(format!(
+                    "unknown update argument `{other}`; expected --check|--print-command|package|verify-install|install-package|rollback|homebrew-formula"
+                ));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_update_package_args(args: Vec<String>) -> Result<UpdatePackageArgs, String> {
+    let mut parsed = UpdatePackageArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--out" if index + 1 < args.len() => {
+                parsed.out = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--out" => return Err("update package --out requires a path".to_string()),
+            "--bin" if index + 1 < args.len() => {
+                parsed.bin = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--bin" => return Err("update package --bin requires a path".to_string()),
+            other => {
+                return Err(format!(
+                    "unknown flag for `update package`: {other}; expected --out|--bin"
+                ));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_update_verify_install_args(args: Vec<String>) -> Result<UpdateVerifyInstallArgs, String> {
+    let mut parsed = UpdateVerifyInstallArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--bin" if index + 1 < args.len() => {
+                parsed.bin = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--bin" => return Err("update verify-install --bin requires a path".to_string()),
+            "--workdir" if index + 1 < args.len() => {
+                parsed.workdir = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--workdir" => {
+                return Err("update verify-install --workdir requires a path".to_string())
+            }
+            "--keep-workdir" => {
+                parsed.keep_workdir = true;
+                index += 1;
+            }
+            other => {
+                return Err(format!(
+                    "unknown flag for `update verify-install`: {other}; expected --bin|--workdir|--keep-workdir"
+                ));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_update_install_package_args(
+    args: Vec<String>,
+) -> Result<UpdateInstallPackageArgs, String> {
+    let mut parsed = UpdateInstallPackageArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--package" if index + 1 < args.len() => {
+                parsed.package = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--package" => {
+                return Err("update install-package --package requires a path".to_string())
+            }
+            "--dest" if index + 1 < args.len() => {
+                parsed.dest = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--dest" => return Err("update install-package --dest requires a path".to_string()),
+            "--backup-dir" if index + 1 < args.len() => {
+                parsed.backup_dir = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--backup-dir" => {
+                return Err("update install-package --backup-dir requires a path".to_string())
+            }
+            "--dry-run" => {
+                parsed.dry_run = true;
+                index += 1;
+            }
+            other => {
+                return Err(format!(
+                    "unknown flag for `update install-package`: {other}; expected --package|--dest|--backup-dir|--dry-run"
+                ));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_update_rollback_args(args: Vec<String>) -> Result<UpdateRollbackArgs, String> {
+    let mut parsed = UpdateRollbackArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--backup" if index + 1 < args.len() => {
+                parsed.backup = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--backup" => return Err("update rollback --backup requires a path".to_string()),
+            "--dest" if index + 1 < args.len() => {
+                parsed.dest = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--dest" => return Err("update rollback --dest requires a path".to_string()),
+            "--dry-run" => {
+                parsed.dry_run = true;
+                index += 1;
+            }
+            other => {
+                return Err(format!(
+                    "unknown flag for `update rollback`: {other}; expected --backup|--dest|--dry-run"
+                ));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_update_homebrew_formula_args(
+    args: Vec<String>,
+) -> Result<UpdateHomebrewFormulaArgs, String> {
+    let mut parsed = UpdateHomebrewFormulaArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--version" if index + 1 < args.len() => {
+                parsed.version = args[index + 1].clone();
+                index += 2;
+            }
+            "--version" => {
+                return Err("update homebrew-formula --version requires a value".to_string())
+            }
+            "--repo" if index + 1 < args.len() => {
+                parsed.repo = args[index + 1].clone();
+                index += 2;
+            }
+            "--repo" => {
+                return Err("update homebrew-formula --repo requires owner/name".to_string())
+            }
+            "--dist" if index + 1 < args.len() => {
+                parsed.dist = args[index + 1].clone();
+                index += 2;
+            }
+            "--dist" => return Err("update homebrew-formula --dist requires a path".to_string()),
+            "--formula" if index + 1 < args.len() => {
+                parsed.formula = args[index + 1].clone();
+                index += 2;
+            }
+            "--formula" => {
+                return Err("update homebrew-formula --formula requires a path".to_string())
+            }
+            "--out" if index + 1 < args.len() => {
+                parsed.out = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--out" => return Err("update homebrew-formula --out requires a path".to_string()),
+            other => {
+                return Err(format!(
+                    "unknown flag for `update homebrew-formula`: {other}; expected --version|--repo|--dist|--formula|--out"
+                ));
+            }
+        }
+    }
     Ok(parsed)
 }
 
@@ -544,6 +1106,566 @@ fn parse_run_args(args: Vec<String>) -> RunArgs {
         budget,
         benchmark_gate,
     }
+}
+
+fn parse_exec_subcommand(args: Vec<String>) -> Result<ExecAction, String> {
+    if args.first().map(|arg| arg.as_str()) == Some("resume") {
+        parse_exec_resume_args(args.into_iter().skip(1).collect()).map(ExecAction::Resume)
+    } else {
+        parse_exec_args(args).map(ExecAction::Run)
+    }
+}
+
+fn parse_diagnostics_args(args: Vec<String>) -> Result<DiagnosticsArgs, String> {
+    let mut changed = false;
+    let mut watch = false;
+    let mut once = false;
+    let mut interval_ms = 1_000_u64;
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--changed" => {
+                changed = true;
+                index += 1;
+            }
+            "--watch" => {
+                watch = true;
+                index += 1;
+            }
+            "--once" => {
+                once = true;
+                index += 1;
+            }
+            "--interval-ms" if index + 1 < args.len() => {
+                interval_ms = args[index + 1]
+                    .parse::<u64>()
+                    .map_err(|_| "diagnostics --interval-ms must be a number".to_string())?;
+                index += 2;
+            }
+            "--interval-ms" => {
+                return Err("diagnostics --interval-ms requires a value".to_string());
+            }
+            "--" => {
+                paths.extend(args.into_iter().skip(index + 1));
+                break;
+            }
+            other if other.starts_with('-') => {
+                return Err(format!(
+                    "unknown flag for `diagnostics`: {other}; expected --changed|--watch|--once|--interval-ms"
+                ));
+            }
+            value => {
+                paths.push(value.to_string());
+                index += 1;
+            }
+        }
+    }
+    Ok(DiagnosticsArgs {
+        changed,
+        watch,
+        once,
+        interval_ms,
+        paths,
+    })
+}
+
+fn parse_restore_subcommand(args: Vec<String>) -> Result<RestoreAction, String> {
+    if args.is_empty() {
+        return Ok(RestoreAction::List { limit: 20 });
+    }
+
+    match args[0].as_str() {
+        "snapshot" => {
+            let mut label = None;
+            let mut label_parts = Vec::new();
+            let mut index = 1;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--label" if index + 1 < args.len() => {
+                        if !label_parts.is_empty() {
+                            return Err(
+                                "restore snapshot accepts either --label or a positional label"
+                                    .to_string(),
+                            );
+                        }
+                        label = Some(args[index + 1].clone());
+                        index += 2;
+                    }
+                    "--label" => {
+                        return Err("restore snapshot --label requires a value".to_string())
+                    }
+                    other if other.starts_with('-') => {
+                        return Err(format!("unknown flag for `restore snapshot`: {other}"));
+                    }
+                    value => {
+                        if label.is_some() {
+                            return Err(
+                                "restore snapshot accepts either --label or a positional label"
+                                    .to_string(),
+                            );
+                        }
+                        label_parts.push(value.to_string());
+                        index += 1;
+                    }
+                }
+            }
+            if label.is_none() && !label_parts.is_empty() {
+                label = Some(label_parts.join(" "));
+            }
+            Ok(RestoreAction::Snapshot { label })
+        }
+        "list" => {
+            let mut limit = 20;
+            let mut index = 1;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--limit" if index + 1 < args.len() => {
+                        limit = args[index + 1]
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|value| (1..=200).contains(value))
+                            .unwrap_or(20);
+                        index += 2;
+                    }
+                    "--limit" => return Err("restore list --limit requires a value".to_string()),
+                    other => return Err(format!("unknown flag for `restore list`: {other}")),
+                }
+            }
+            Ok(RestoreAction::List { limit })
+        }
+        "show" => {
+            let id = args
+                .get(1)
+                .cloned()
+                .ok_or_else(|| "restore show requires a snapshot id".to_string())?;
+            let mut patch = false;
+            for arg in args.iter().skip(2) {
+                match arg.as_str() {
+                    "--patch" => patch = true,
+                    other => return Err(format!("unknown flag for `restore show`: {other}")),
+                }
+            }
+            Ok(RestoreAction::Show { id, patch })
+        }
+        "revert-turn" | "revert_turn" => {
+            let id = args
+                .get(1)
+                .cloned()
+                .ok_or_else(|| "restore revert-turn requires a snapshot id".to_string())?;
+            let mut apply = false;
+            for arg in args.iter().skip(2) {
+                match arg.as_str() {
+                    "--apply" => apply = true,
+                    other => {
+                        return Err(format!("unknown flag for `restore revert-turn`: {other}"))
+                    }
+                }
+            }
+            Ok(RestoreAction::RevertTurn { id, apply })
+        }
+        other => Err(format!(
+            "unknown restore sub-action `{other}`; expected snapshot|list|show|revert-turn"
+        )),
+    }
+}
+
+fn parse_agents_subcommand(args: Vec<String>) -> Result<AgentsAction, String> {
+    if args.is_empty() {
+        return Ok(AgentsAction::List);
+    }
+
+    match args[0].as_str() {
+        "list" => {
+            if args.len() > 1 {
+                return Err("agents list accepts no arguments".to_string());
+            }
+            Ok(AgentsAction::List)
+        }
+        "show" => {
+            if args.len() != 2 {
+                return Err("agents show requires exactly one agent name".to_string());
+            }
+            Ok(AgentsAction::Show {
+                name: args[1].clone(),
+            })
+        }
+        "validate" => {
+            if args.len() > 2 {
+                return Err("agents validate accepts at most one path".to_string());
+            }
+            Ok(AgentsAction::Validate {
+                path: args.get(1).cloned(),
+            })
+        }
+        "run-task" => parse_agents_run_task_args(args.into_iter().skip(1).collect()),
+        "daemon" => parse_agents_daemon_args(args.into_iter().skip(1).collect()),
+        "service" => parse_agents_service_args(args.into_iter().skip(1).collect()),
+        "threads" => {
+            if args.len() > 1 {
+                return Err("agents threads accepts no arguments".to_string());
+            }
+            Ok(AgentsAction::Threads)
+        }
+        "show-thread" => {
+            if args.len() != 2 {
+                return Err("agents show-thread requires exactly one thread id".to_string());
+            }
+            Ok(AgentsAction::ShowThread {
+                id: args[1].clone(),
+            })
+        }
+        "switch" => {
+            if args.len() != 2 {
+                return Err("agents switch requires exactly one thread id".to_string());
+            }
+            Ok(AgentsAction::SwitchThread {
+                id: args[1].clone(),
+            })
+        }
+        "current" => {
+            if args.len() > 1 {
+                return Err("agents current accepts no arguments".to_string());
+            }
+            Ok(AgentsAction::CurrentThread)
+        }
+        "clear-current" => {
+            if args.len() > 1 {
+                return Err("agents clear-current accepts no arguments".to_string());
+            }
+            Ok(AgentsAction::ClearThread)
+        }
+        other => Err(format!(
+            "unknown agents sub-action `{other}`; expected list|show|validate|run-task|daemon|service|threads|show-thread|switch|current|clear-current"
+        )),
+    }
+}
+
+fn parse_agents_run_task_args(args: Vec<String>) -> Result<AgentsAction, String> {
+    let mut id = None;
+    let mut budget = None;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--budget" if index + 1 < args.len() => {
+                budget = Some(
+                    args[index + 1]
+                        .parse::<usize>()
+                        .map_err(|_| "agents run-task --budget must be a number".to_string())?,
+                );
+                index += 2;
+            }
+            "--budget" => return Err("agents run-task --budget requires a value".to_string()),
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown flag for `agents run-task`: {value}; expected --budget|--json"
+                ));
+            }
+            value => {
+                if id.is_some() {
+                    return Err("agents run-task accepts exactly one task id".to_string());
+                }
+                id = Some(value.to_string());
+                index += 1;
+            }
+        }
+    }
+    let id = id.ok_or_else(|| "agents run-task requires a task id".to_string())?;
+    Ok(AgentsAction::RunTask { id, budget, json })
+}
+
+fn parse_agents_daemon_args(args: Vec<String>) -> Result<AgentsAction, String> {
+    let mut budget = None;
+    let mut interval_ms = 1_000_u64;
+    let mut once = false;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--budget" if index + 1 < args.len() => {
+                budget = Some(
+                    args[index + 1]
+                        .parse::<usize>()
+                        .map_err(|_| "agents daemon --budget must be a number".to_string())?,
+                );
+                index += 2;
+            }
+            "--budget" => return Err("agents daemon --budget requires a value".to_string()),
+            "--interval-ms" if index + 1 < args.len() => {
+                interval_ms = args[index + 1]
+                    .parse::<u64>()
+                    .map_err(|_| "agents daemon --interval-ms must be a number".to_string())?;
+                index += 2;
+            }
+            "--interval-ms" => {
+                return Err("agents daemon --interval-ms requires a value".to_string());
+            }
+            "--once" => {
+                once = true;
+                index += 1;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            value => {
+                return Err(format!(
+                    "unknown flag for `agents daemon`: {value}; expected --budget|--interval-ms|--once|--json"
+                ));
+            }
+        }
+    }
+    Ok(AgentsAction::Daemon {
+        budget,
+        interval_ms,
+        once,
+        json,
+    })
+}
+
+fn parse_agents_service_args(args: Vec<String>) -> Result<AgentsAction, String> {
+    let mut parsed = AgentsServiceArgs {
+        kind: default_agents_service_kind(),
+        out: None,
+        bin: None,
+        workdir: None,
+        addr: "127.0.0.1:8765".to_string(),
+        interval_ms: 1_000,
+        budget: None,
+    };
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" if index + 1 < args.len() => {
+                parsed.kind = match args[index + 1].as_str() {
+                    "systemd" => AgentsServiceKind::Systemd,
+                    "launchd" => AgentsServiceKind::Launchd,
+                    "all" => AgentsServiceKind::All,
+                    value => {
+                        return Err(format!(
+                            "agents service --kind must be systemd, launchd, or all; got {value}"
+                        ));
+                    }
+                };
+                index += 2;
+            }
+            "--kind" => return Err("agents service --kind requires a value".to_string()),
+            "--out" if index + 1 < args.len() => {
+                parsed.out = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--out" => return Err("agents service --out requires a directory".to_string()),
+            "--bin" if index + 1 < args.len() => {
+                parsed.bin = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--bin" => return Err("agents service --bin requires a path".to_string()),
+            "--workdir" if index + 1 < args.len() => {
+                parsed.workdir = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--workdir" => return Err("agents service --workdir requires a path".to_string()),
+            "--addr" if index + 1 < args.len() => {
+                parsed.addr = args[index + 1].clone();
+                index += 2;
+            }
+            "--addr" => return Err("agents service --addr requires a value".to_string()),
+            "--interval-ms" if index + 1 < args.len() => {
+                parsed.interval_ms = args[index + 1]
+                    .parse::<u64>()
+                    .map_err(|_| "agents service --interval-ms must be a number".to_string())?;
+                index += 2;
+            }
+            "--interval-ms" => {
+                return Err("agents service --interval-ms requires a value".to_string());
+            }
+            "--budget" if index + 1 < args.len() => {
+                parsed.budget = Some(
+                    args[index + 1]
+                        .parse::<usize>()
+                        .map_err(|_| "agents service --budget must be a number".to_string())?,
+                );
+                index += 2;
+            }
+            "--budget" => return Err("agents service --budget requires a value".to_string()),
+            value => {
+                return Err(format!(
+                    "unknown flag for `agents service`: {value}; expected --kind|--out|--bin|--workdir|--addr|--interval-ms|--budget"
+                ));
+            }
+        }
+    }
+    Ok(AgentsAction::Service(parsed))
+}
+
+fn default_agents_service_kind() -> AgentsServiceKind {
+    if cfg!(target_os = "macos") {
+        AgentsServiceKind::Launchd
+    } else {
+        AgentsServiceKind::Systemd
+    }
+}
+
+fn parse_exec_args(args: Vec<String>) -> Result<ExecArgs, String> {
+    let mut skill = None;
+    let mut budget = None;
+    let mut images = Vec::new();
+    let mut json = false;
+    let mut positional = Vec::new();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--" => {
+                positional.extend(args.iter().skip(index + 1).cloned());
+                break;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            "--skill" if index + 1 < args.len() => {
+                skill = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--skill" => return Err("exec --skill requires a value".to_string()),
+            "--budget" if index + 1 < args.len() => {
+                budget = parse_budget_flag("exec", &args[index + 1])?;
+                index += 2;
+            }
+            "--budget" => return Err("exec --budget requires a value".to_string()),
+            "--image" | "-i" if index + 1 < args.len() => {
+                images.extend(parse_image_flag_values(&args[index + 1]));
+                index += 2;
+            }
+            "--image" | "-i" => return Err("exec --image requires a value".to_string()),
+            other if other.starts_with("--") => {
+                return Err(format!("unknown flag for `exec`: {other}"));
+            }
+            _ => {
+                positional.push(args[index].clone());
+                index += 1;
+            }
+        }
+    }
+
+    let task = positional.join(" ");
+    if task.trim().is_empty() {
+        return Err("exec requires a prompt or `-` to read stdin".to_string());
+    }
+
+    Ok(ExecArgs {
+        task,
+        skill,
+        budget,
+        images,
+        json,
+    })
+}
+
+fn parse_exec_resume_args(args: Vec<String>) -> Result<ExecResumeArgs, String> {
+    let mut skill = None;
+    let mut budget = None;
+    let mut images = Vec::new();
+    let mut json = false;
+    let mut last = false;
+    let mut positional = Vec::new();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--" => {
+                positional.extend(args.iter().skip(index + 1).cloned());
+                break;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            "--last" => {
+                last = true;
+                index += 1;
+            }
+            "--skill" if index + 1 < args.len() => {
+                skill = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--skill" => return Err("exec resume --skill requires a value".to_string()),
+            "--budget" if index + 1 < args.len() => {
+                budget = parse_budget_flag("exec resume", &args[index + 1])?;
+                index += 2;
+            }
+            "--budget" => return Err("exec resume --budget requires a value".to_string()),
+            "--image" | "-i" if index + 1 < args.len() => {
+                images.extend(parse_image_flag_values(&args[index + 1]));
+                index += 2;
+            }
+            "--image" | "-i" => return Err("exec resume --image requires a value".to_string()),
+            other if other.starts_with("--") => {
+                return Err(format!("unknown flag for `exec resume`: {other}"));
+            }
+            _ => {
+                positional.push(args[index].clone());
+                index += 1;
+            }
+        }
+    }
+
+    let session = if positional
+        .first()
+        .map(|arg| looks_like_session_id(arg))
+        .unwrap_or(false)
+    {
+        Some(positional.remove(0))
+    } else {
+        None
+    };
+
+    if last && session.is_some() {
+        return Err("exec resume accepts either --last or SESSION_ID, not both".to_string());
+    }
+
+    let task = if positional.is_empty() {
+        None
+    } else {
+        Some(positional.join(" "))
+    };
+
+    Ok(ExecResumeArgs {
+        session,
+        task,
+        skill,
+        budget,
+        images,
+        json,
+    })
+}
+
+fn parse_image_flag_values(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn parse_budget_flag(context: &str, raw: &str) -> Result<Option<usize>, String> {
+    let value = raw
+        .parse::<usize>()
+        .map_err(|_| format!("{context} --budget must be a number from 1 to 200"))?;
+    if !(1..=200).contains(&value) {
+        return Err(format!("{context} --budget must be between 1 and 200"));
+    }
+    Ok(Some(value))
+}
+
+fn looks_like_session_id(value: &str) -> bool {
+    value.starts_with("session-")
 }
 
 fn parse_dogfood_subcommand(args: Vec<String>) -> Result<DogfoodAction, String> {
@@ -890,6 +2012,158 @@ mod tests {
     }
 
     #[test]
+    fn parses_restore_subcommands() {
+        let snapshot = Cli::from_argv(vec![
+            "restore".to_string(),
+            "snapshot".to_string(),
+            "--label".to_string(),
+            "before turn".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            snapshot.command,
+            Some(Command::Restore(RestoreAction::Snapshot {
+                label: Some(ref value)
+            })) if value == "before turn"
+        ));
+
+        let positional_snapshot = Cli::from_argv(vec![
+            "restore".to_string(),
+            "snapshot".to_string(),
+            "before".to_string(),
+            "risky".to_string(),
+            "turn".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            positional_snapshot.command,
+            Some(Command::Restore(RestoreAction::Snapshot {
+                label: Some(ref value)
+            })) if value == "before risky turn"
+        ));
+
+        let list = Cli::from_argv(vec![
+            "restore".to_string(),
+            "list".to_string(),
+            "--limit".to_string(),
+            "5".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            list.command,
+            Some(Command::Restore(RestoreAction::List { limit: 5 }))
+        ));
+
+        let show = Cli::from_argv(vec![
+            "restore".to_string(),
+            "show".to_string(),
+            "snapshot-123".to_string(),
+            "--patch".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            show.command,
+            Some(Command::Restore(RestoreAction::Show {
+                ref id,
+                patch: true
+            })) if id == "snapshot-123"
+        ));
+
+        let revert = Cli::from_argv(vec![
+            "restore".to_string(),
+            "revert-turn".to_string(),
+            "snapshot-123".to_string(),
+            "--apply".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            revert.command,
+            Some(Command::Restore(RestoreAction::RevertTurn {
+                ref id,
+                apply: true
+            })) if id == "snapshot-123"
+        ));
+    }
+
+    #[test]
+    fn parses_diagnostics_args() {
+        let parsed = Cli::from_argv(vec![
+            "diagnostics".to_string(),
+            "--changed".to_string(),
+            "src/lib.rs".to_string(),
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Diagnostics(DiagnosticsArgs {
+                changed: true,
+                watch: false,
+                once: false,
+                interval_ms: 1000,
+                ref paths,
+            })) if paths == &vec!["src/lib.rs".to_string()]
+        ));
+
+        let alias = Cli::from_argv(vec![
+            "diag".to_string(),
+            "--watch".to_string(),
+            "--once".to_string(),
+            "--interval-ms".to_string(),
+            "250".to_string(),
+            "src/main.rs".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            alias.command,
+            Some(Command::Diagnostics(DiagnosticsArgs {
+                changed: false,
+                watch: true,
+                once: true,
+                interval_ms: 250,
+                ref paths,
+            })) if paths == &vec!["src/main.rs".to_string()]
+        ));
+    }
+
+    #[test]
+    fn parses_tui_args() {
+        let parsed = Cli::from_argv(vec![
+            "tui".to_string(),
+            "--demo".to_string(),
+            "--once".to_string(),
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Tui(TuiArgs {
+                demo: true,
+                once: true,
+                runtime_url: None
+            }))
+        ));
+
+        let parsed = Cli::from_argv(vec![
+            "tui".to_string(),
+            "--runtime-url".to_string(),
+            "http://127.0.0.1:13000".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Tui(TuiArgs {
+                demo: false,
+                once: false,
+                runtime_url: Some(ref url)
+            })) if url == "http://127.0.0.1:13000"
+        ));
+
+        let error = Cli::from_argv(vec!["tui".to_string(), "--bad".to_string()]).unwrap_err();
+        assert!(error.contains("unknown tui argument"));
+    }
+
+    #[test]
     fn parses_mcp_subcommands() {
         let list = Cli::from_argv(vec!["mcp".to_string()]).unwrap();
         assert!(matches!(list.command, Some(Command::Mcp(McpAction::List))));
@@ -913,6 +2187,19 @@ mod tests {
             })) if name == "filesystem"
         ));
 
+        let prompts = Cli::from_argv(vec![
+            "mcp".to_string(),
+            "prompts".to_string(),
+            "github".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            prompts.command,
+            Some(Command::Mcp(McpAction::Prompts {
+                server: Some(ref name)
+            })) if name == "github"
+        ));
+
         let call = Cli::from_argv(vec![
             "mcp".to_string(),
             "call".to_string(),
@@ -928,6 +2215,23 @@ mod tests {
                 tool,
                 arguments_json: Some(ref args)
             })) if server == "filesystem" && tool == "read_file" && args.contains("README.md")
+        ));
+
+        let prompt = Cli::from_argv(vec![
+            "mcp".to_string(),
+            "prompt".to_string(),
+            "github".to_string(),
+            "review_pr".to_string(),
+            r#"{"number":42}"#.to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            prompt.command,
+            Some(Command::Mcp(McpAction::Prompt {
+                server,
+                prompt,
+                arguments_json: Some(ref args)
+            })) if server == "github" && prompt == "review_pr" && args.contains("42")
         ));
 
         let init = Cli::from_argv(vec![
@@ -1263,6 +2567,230 @@ mod tests {
     }
 
     #[test]
+    fn cli_from_argv_routes_exec_json_stdin() {
+        let cli = Cli::from_argv(vec![
+            "exec".to_string(),
+            "--json".to_string(),
+            "--skill".to_string(),
+            "debug".to_string(),
+            "--budget".to_string(),
+            "7".to_string(),
+            "--image".to_string(),
+            "a.png,b.jpg".to_string(),
+            "-".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Exec(ExecAction::Run(args))) => {
+                assert!(args.json);
+                assert_eq!(args.skill.as_deref(), Some("debug"));
+                assert_eq!(args.budget, Some(7));
+                assert_eq!(args.images, vec!["a.png", "b.jpg"]);
+                assert_eq!(args.task, "-");
+            }
+            other => panic!("expected Command::Exec(Run), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_exec_resume_last_with_followup() {
+        let cli = Cli::from_argv(vec![
+            "exec".to_string(),
+            "resume".to_string(),
+            "--last".to_string(),
+            "--json".to_string(),
+            "Fix".to_string(),
+            "the".to_string(),
+            "tests".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Exec(ExecAction::Resume(args))) => {
+                assert!(args.json);
+                assert_eq!(args.session, None);
+                assert_eq!(args.task.as_deref(), Some("Fix the tests"));
+            }
+            other => panic!("expected Command::Exec(Resume), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_exec_resume_with_session() {
+        let cli = Cli::from_argv(vec![
+            "exec".to_string(),
+            "resume".to_string(),
+            "session-123".to_string(),
+            "--budget".to_string(),
+            "12".to_string(),
+            "-i".to_string(),
+            "screen.png".to_string(),
+            "-".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Exec(ExecAction::Resume(args))) => {
+                assert_eq!(args.session.as_deref(), Some("session-123"));
+                assert_eq!(args.budget, Some(12));
+                assert_eq!(args.images, vec!["screen.png"]);
+                assert_eq!(args.task.as_deref(), Some("-"));
+            }
+            other => panic!("expected Command::Exec(Resume), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_rejects_exec_without_prompt() {
+        let error = Cli::from_argv(vec!["exec".to_string()]).expect_err("parse should fail");
+        assert!(error.contains("requires a prompt"));
+    }
+
+    #[test]
+    fn cli_from_argv_routes_agents_subcommands() {
+        let list = Cli::from_argv(vec!["agents".to_string()]).expect("parse should succeed");
+        assert!(matches!(
+            list.command,
+            Some(Command::Agents(AgentsAction::List))
+        ));
+
+        let show = Cli::from_argv(vec![
+            "agents".to_string(),
+            "show".to_string(),
+            "reviewer".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            show.command,
+            Some(Command::Agents(AgentsAction::Show { ref name })) if name == "reviewer"
+        ));
+
+        let validate = Cli::from_argv(vec![
+            "agents".to_string(),
+            "validate".to_string(),
+            ".dscode/agents/reviewer.md".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            validate.command,
+            Some(Command::Agents(AgentsAction::Validate {
+                path: Some(ref path)
+            })) if path == ".dscode/agents/reviewer.md"
+        ));
+
+        let run_task = Cli::from_argv(vec![
+            "agents".to_string(),
+            "run-task".to_string(),
+            "--budget".to_string(),
+            "7".to_string(),
+            "--json".to_string(),
+            "task-123".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            run_task.command,
+            Some(Command::Agents(AgentsAction::RunTask {
+                ref id,
+                budget: Some(7),
+                json: true
+            })) if id == "task-123"
+        ));
+
+        let daemon = Cli::from_argv(vec![
+            "agents".to_string(),
+            "daemon".to_string(),
+            "--budget".to_string(),
+            "3".to_string(),
+            "--interval-ms".to_string(),
+            "250".to_string(),
+            "--once".to_string(),
+            "--json".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            daemon.command,
+            Some(Command::Agents(AgentsAction::Daemon {
+                budget: Some(3),
+                interval_ms: 250,
+                once: true,
+                json: true,
+            }))
+        ));
+
+        let service = Cli::from_argv(vec![
+            "agents".to_string(),
+            "service".to_string(),
+            "--kind".to_string(),
+            "systemd".to_string(),
+            "--out".to_string(),
+            "target/services".to_string(),
+            "--bin".to_string(),
+            "/usr/local/bin/deepseek".to_string(),
+            "--workdir".to_string(),
+            "/work/repo".to_string(),
+            "--addr".to_string(),
+            "127.0.0.1:9999".to_string(),
+            "--interval-ms".to_string(),
+            "500".to_string(),
+            "--budget".to_string(),
+            "9".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            service.command,
+            Some(Command::Agents(AgentsAction::Service(AgentsServiceArgs {
+                kind: AgentsServiceKind::Systemd,
+                ref out,
+                ref bin,
+                ref workdir,
+                ref addr,
+                interval_ms: 500,
+                budget: Some(9),
+            }))) if out.as_deref() == Some("target/services")
+                && bin.as_deref() == Some("/usr/local/bin/deepseek")
+                && workdir.as_deref() == Some("/work/repo")
+                && addr == "127.0.0.1:9999"
+        ));
+
+        let threads = Cli::from_argv(vec!["agents".to_string(), "threads".to_string()])
+            .expect("parse should succeed");
+        assert!(matches!(
+            threads.command,
+            Some(Command::Agents(AgentsAction::Threads))
+        ));
+
+        let show_thread = Cli::from_argv(vec![
+            "agents".to_string(),
+            "show-thread".to_string(),
+            "thread-1".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            show_thread.command,
+            Some(Command::Agents(AgentsAction::ShowThread { ref id })) if id == "thread-1"
+        ));
+
+        let switch = Cli::from_argv(vec![
+            "agents".to_string(),
+            "switch".to_string(),
+            "thread-1".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            switch.command,
+            Some(Command::Agents(AgentsAction::SwitchThread { ref id })) if id == "thread-1"
+        ));
+
+        let current = Cli::from_argv(vec!["agents".to_string(), "current".to_string()])
+            .expect("parse should succeed");
+        assert!(matches!(
+            current.command,
+            Some(Command::Agents(AgentsAction::CurrentThread))
+        ));
+    }
+
+    #[test]
     fn cli_from_argv_routes_dogfood_subcommand() {
         let cli = Cli::from_argv(vec![
             "dogfood".to_string(),
@@ -1317,6 +2845,212 @@ mod tests {
                 assert!(!args.print_default);
             }
             other => panic!("expected Command::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_doctor_json() {
+        let cli = Cli::from_argv(vec!["doctor".to_string(), "--json".to_string()])
+            .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Doctor(args)) => assert!(args.json),
+            other => panic!("expected Command::Doctor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_rejects_unknown_doctor_arg() {
+        let error = Cli::from_argv(vec!["doctor".to_string(), "--verbose".to_string()])
+            .expect_err("parse should fail");
+
+        assert!(error.contains("unknown doctor argument"));
+    }
+
+    #[test]
+    fn cli_from_argv_routes_serve_http() {
+        let cli = Cli::from_argv(vec![
+            "serve".to_string(),
+            "--http".to_string(),
+            "--addr".to_string(),
+            "127.0.0.1:0".to_string(),
+            "--once".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Serve(args)) => match args.action {
+                ServeAction::Http(http) => {
+                    assert_eq!(http.addr, "127.0.0.1:0");
+                    assert!(http.once);
+                }
+                other => panic!("expected serve --http, got {other:?}"),
+            },
+            other => panic!("expected Command::Serve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_rejects_serve_without_mode() {
+        let error = Cli::from_argv(vec!["serve".to_string()]).expect_err("parse should fail");
+
+        assert!(error.contains("serve requires one mode"));
+    }
+
+    #[test]
+    fn cli_from_argv_routes_update_flags() {
+        let cli = Cli::from_argv(vec![
+            "update".to_string(),
+            "--check".to_string(),
+            "--print-command".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Update(args)) => {
+                assert!(args.check);
+                assert!(args.print_command);
+                assert!(matches!(args.action, UpdateAction::Status));
+            }
+            other => panic!("expected Command::Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_update_package() {
+        let cli = Cli::from_argv(vec![
+            "update".to_string(),
+            "package".to_string(),
+            "--out".to_string(),
+            "dist".to_string(),
+            "--bin".to_string(),
+            "target/release/deepseek".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Update(args)) => match args.action {
+                UpdateAction::Package(package) => {
+                    assert_eq!(package.out.as_deref(), Some("dist"));
+                    assert_eq!(package.bin.as_deref(), Some("target/release/deepseek"));
+                }
+                other => panic!("expected update package, got {other:?}"),
+            },
+            other => panic!("expected Command::Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_update_verify_install() {
+        let cli = Cli::from_argv(vec![
+            "update".to_string(),
+            "verify-install".to_string(),
+            "--bin".to_string(),
+            "/tmp/deepseek".to_string(),
+            "--workdir".to_string(),
+            "/tmp/verify".to_string(),
+            "--keep-workdir".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Update(args)) => match args.action {
+                UpdateAction::VerifyInstall(verify) => {
+                    assert_eq!(verify.bin.as_deref(), Some("/tmp/deepseek"));
+                    assert_eq!(verify.workdir.as_deref(), Some("/tmp/verify"));
+                    assert!(verify.keep_workdir);
+                }
+                other => panic!("expected update verify-install, got {other:?}"),
+            },
+            other => panic!("expected Command::Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_update_install_package_and_rollback() {
+        let install = Cli::from_argv(vec![
+            "update".to_string(),
+            "install-package".to_string(),
+            "--package".to_string(),
+            "dist/deepseek".to_string(),
+            "--dest".to_string(),
+            "/tmp/bin/deepseek".to_string(),
+            "--backup-dir".to_string(),
+            "/tmp/rollback".to_string(),
+            "--dry-run".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match install.command {
+            Some(Command::Update(args)) => match args.action {
+                UpdateAction::InstallPackage(install) => {
+                    assert_eq!(install.package.as_deref(), Some("dist/deepseek"));
+                    assert_eq!(install.dest.as_deref(), Some("/tmp/bin/deepseek"));
+                    assert_eq!(install.backup_dir.as_deref(), Some("/tmp/rollback"));
+                    assert!(install.dry_run);
+                }
+                other => panic!("expected update install-package, got {other:?}"),
+            },
+            other => panic!("expected Command::Update, got {other:?}"),
+        }
+
+        let rollback = Cli::from_argv(vec![
+            "update".to_string(),
+            "rollback".to_string(),
+            "--backup".to_string(),
+            "/tmp/rollback/deepseek.previous".to_string(),
+            "--dest".to_string(),
+            "/tmp/bin/deepseek".to_string(),
+            "--dry-run".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match rollback.command {
+            Some(Command::Update(args)) => match args.action {
+                UpdateAction::Rollback(rollback) => {
+                    assert_eq!(
+                        rollback.backup.as_deref(),
+                        Some("/tmp/rollback/deepseek.previous")
+                    );
+                    assert_eq!(rollback.dest.as_deref(), Some("/tmp/bin/deepseek"));
+                    assert!(rollback.dry_run);
+                }
+                other => panic!("expected update rollback, got {other:?}"),
+            },
+            other => panic!("expected Command::Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_update_homebrew_formula() {
+        let cli = Cli::from_argv(vec![
+            "update".to_string(),
+            "homebrew-formula".to_string(),
+            "--version".to_string(),
+            "1.2.3".to_string(),
+            "--repo".to_string(),
+            "example/deepseek".to_string(),
+            "--dist".to_string(),
+            "dist".to_string(),
+            "--formula".to_string(),
+            "packaging/homebrew/deepseek.rb".to_string(),
+            "--out".to_string(),
+            "target/deepseek.rb".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Update(args)) => match args.action {
+                UpdateAction::HomebrewFormula(formula) => {
+                    assert_eq!(formula.version, "1.2.3");
+                    assert_eq!(formula.repo, "example/deepseek");
+                    assert_eq!(formula.dist, "dist");
+                    assert_eq!(formula.formula, "packaging/homebrew/deepseek.rb");
+                    assert_eq!(formula.out.as_deref(), Some("target/deepseek.rb"));
+                }
+                other => panic!("expected update homebrew-formula, got {other:?}"),
+            },
+            other => panic!("expected Command::Update, got {other:?}"),
         }
     }
 

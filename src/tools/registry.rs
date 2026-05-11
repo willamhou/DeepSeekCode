@@ -9,8 +9,10 @@ use crate::core::todos::TodoList;
 use crate::error::{app_error, policy_denied, tool_failure, AppResult};
 use crate::skills::schema::SkillSpec;
 use crate::tools::apply_patch::ApplyPatchTool;
-use crate::tools::dispatch_subagent::DispatchSubagentTool;
+use crate::tools::diagnostics::DiagnosticsTool;
+use crate::tools::dispatch_subagent::{DispatchSubagentTool, DispatchSubagentsTool};
 use crate::tools::git_diff::GitDiffTool;
+use crate::tools::git_history::{GitBlameTool, GitLogTool, GitShowTool};
 use crate::tools::list_files::ListFilesTool;
 use crate::tools::mcp::{
     remote_tool_registry_name, McpCallTool, McpListToolsTool, McpRemoteToolTool,
@@ -20,9 +22,16 @@ use crate::tools::run_shell::{is_safe_shell_command, RunShellTool};
 use crate::tools::search_text::SearchTextTool;
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
 use crate::ui::confirm::confirm;
+use crate::util::cancel::CancellationCheck;
 
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionRequest {
+    pub kind: String,
+    pub target: String,
 }
 
 pub const MAX_SUBAGENT_DEPTH: usize = 2;
@@ -51,6 +60,16 @@ impl ToolRegistry {
         name: &str,
         input: ToolInput,
         policy: &ExecutionPolicy,
+    ) -> AppResult<ToolOutput> {
+        self.execute_with_policy_and_cancel(name, input, policy, None)
+    }
+
+    pub fn execute_with_policy_and_cancel(
+        &self,
+        name: &str,
+        input: ToolInput,
+        policy: &ExecutionPolicy,
+        cancel_check: Option<&mut dyn CancellationCheck>,
     ) -> AppResult<ToolOutput> {
         let tool = self
             .tools
@@ -130,7 +149,12 @@ impl ToolRegistry {
             }
 
             if policy.require_mcp_confirmation && !policy.auto_approve_mcp {
-                let prompt = format!("Call MCP tool {}?", sanitize_for_prompt(&target));
+                let args = describe_mcp_arguments(&input);
+                let prompt = format!(
+                    "Call MCP tool {} with {}?",
+                    sanitize_for_prompt(&target),
+                    sanitize_for_prompt(&args)
+                );
                 if !confirm(&prompt) {
                     return Err(policy_denied(format!(
                         "mcp tool call declined for {}; set DSCODE_AUTO_APPROVE_MCP=1 to skip prompts or relax approval.require_mcp_confirmation",
@@ -140,13 +164,74 @@ impl ToolRegistry {
             }
         }
 
-        tool.execute(input).map_err(|error| {
-            if error.downcast_ref::<crate::error::AppError>().is_some() {
-                error
-            } else {
-                tool_failure(error.to_string())
+        tool.execute_with_cancel(input, cancel_check)
+            .map_err(|error| {
+                if error.downcast_ref::<crate::error::AppError>().is_some() {
+                    error
+                } else {
+                    tool_failure(error.to_string())
+                }
+            })
+    }
+
+    pub fn permission_request_for(
+        &self,
+        name: &str,
+        input: &ToolInput,
+        policy: &ExecutionPolicy,
+    ) -> Option<PermissionRequest> {
+        let tool = self.tools.iter().find(|tool| tool.name() == name)?;
+        if !policy.allows_tool(name) {
+            return None;
+        }
+
+        if name == "apply_patch" && policy.require_write_confirmation && !policy.auto_approve_writes
+        {
+            return Some(PermissionRequest {
+                kind: "write".to_string(),
+                target: describe_apply_patch_target(input),
+            });
+        }
+
+        if name == "run_shell" && policy.require_shell_confirmation && !policy.auto_approve_shell {
+            let command = input.get("command")?;
+            if !policy.shell_allowlist.is_empty()
+                && !policy
+                    .shell_allowlist
+                    .iter()
+                    .any(|prefix| command.trim().starts_with(prefix))
+            {
+                return None;
             }
-        })
+            if !is_safe_shell_command(command) {
+                return None;
+            }
+            return Some(PermissionRequest {
+                kind: "shell".to_string(),
+                target: command.to_string(),
+            });
+        }
+
+        let mcp_target = if name == "mcp_call" {
+            mcp_call_target(input).ok()
+        } else {
+            tool.mcp_target()
+        };
+        if let Some((server, remote_tool)) = mcp_target {
+            if policy.require_mcp_confirmation && !policy.auto_approve_mcp {
+                if !policy.mcp_call_allowlist.is_empty()
+                    && !mcp_call_matches_allowlist(&policy.mcp_call_allowlist, server, remote_tool)
+                {
+                    return None;
+                }
+                return Some(PermissionRequest {
+                    kind: "mcp".to_string(),
+                    target: format!("{server}/{remote_tool}"),
+                });
+            }
+        }
+
+        None
     }
 }
 
@@ -202,6 +287,17 @@ impl ExecutionPolicy {
     pub fn allows_tool(&self, name: &str) -> bool {
         self.allowed_tools.is_empty() || self.allowed_tools.iter().any(|tool| tool == name)
     }
+
+    pub fn with_auto_approved_permission(&self, kind: &str) -> Self {
+        let mut policy = self.clone();
+        match kind {
+            "write" => policy.auto_approve_writes = true,
+            "shell" => policy.auto_approve_shell = true,
+            "mcp" => policy.auto_approve_mcp = true,
+            _ => {}
+        }
+        policy
+    }
 }
 
 fn env_flag(name: &str) -> bool {
@@ -237,6 +333,27 @@ fn mcp_call_matches_allowlist(patterns: &[String], server: &str, tool: &str) -> 
     patterns
         .iter()
         .any(|pattern| mcp_call_pattern_matches(pattern, server, tool))
+}
+
+fn describe_mcp_arguments(input: &ToolInput) -> String {
+    if let Some(arguments) = input.get("arguments") {
+        let trimmed = arguments.trim();
+        if trimmed.is_empty() {
+            return "{}".to_string();
+        }
+        return trimmed.to_string();
+    }
+    let args = input
+        .args
+        .iter()
+        .filter(|(key, _)| !matches!(key.as_str(), "server" | "tool"))
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>();
+    if args.is_empty() {
+        "{}".to_string()
+    } else {
+        args.join(", ")
+    }
 }
 
 fn mcp_call_pattern_matches(pattern: &str, server: &str, tool: &str) -> bool {
@@ -290,9 +407,13 @@ pub fn default_registry_with_context(
         Box::new(ListFilesTool),
         Box::new(ReadFileTool),
         Box::new(SearchTextTool),
-        Box::new(ApplyPatchTool),
+        Box::new(ApplyPatchTool::new(config.diagnostics.clone())),
         Box::new(RunShellTool),
         Box::new(GitDiffTool),
+        Box::new(DiagnosticsTool),
+        Box::new(GitLogTool),
+        Box::new(GitShowTool),
+        Box::new(GitBlameTool),
         Box::new(crate::tools::todo::TodoWriteTool {
             list: todos.clone(),
         }),
@@ -315,6 +436,11 @@ pub fn default_registry_with_context(
             ) {
                 let name = remote_tool_registry_name(&remote.server, &remote.tool);
                 if names.insert(name.clone()) {
+                    crate::tools::mcp::cache_dynamic_tool_schema(
+                        &name,
+                        remote.description.clone(),
+                        remote.input_schema.clone(),
+                    );
                     tools.push(Box::new(McpRemoteToolTool {
                         name,
                         server: remote.server,
@@ -327,6 +453,10 @@ pub fn default_registry_with_context(
     }
     if subagent_depth < MAX_SUBAGENT_DEPTH {
         tools.push(Box::new(DispatchSubagentTool {
+            config: config.clone(),
+            parent_depth: subagent_depth,
+        }));
+        tools.push(Box::new(DispatchSubagentsTool {
             config,
             parent_depth: subagent_depth,
         }));
@@ -424,6 +554,19 @@ done
     }
 
     #[test]
+    fn default_registry_includes_read_only_git_history_tools() {
+        let registry = default_registry();
+        let approval = ApprovalConfig::default();
+        let policy = ExecutionPolicy::new(&approval, None);
+        let names = registry.names_for_policy(&policy);
+
+        assert!(names.contains(&"git_log"));
+        assert!(names.contains(&"git_show"));
+        assert!(names.contains(&"git_blame"));
+        assert!(names.contains(&"diagnostics"));
+    }
+
+    #[test]
     fn execute_with_policy_blocks_non_allowlisted_shell_command() {
         let registry = default_registry();
         let policy = ExecutionPolicy {
@@ -439,6 +582,76 @@ done
             .unwrap_err();
         assert_eq!(classify(error.as_ref()), AppErrorKind::PolicyDenied);
         assert!(error.to_string().contains("allowlist"));
+    }
+
+    #[test]
+    fn permission_request_for_reports_write_shell_and_mcp_prompts() {
+        let root = temp_root("permission-request");
+        std::fs::create_dir_all(&root).unwrap();
+        let mcp_file = root.join("mcp.json");
+        std::fs::write(
+            &mcp_file,
+            r#"{"mcpServers":{"fake":{"disabled":true,"transport":"stdio"}}}"#,
+        )
+        .unwrap();
+        let mut config = AppConfig::default();
+        config.mcp.project_file = mcp_file.display().to_string();
+        config.mcp.user_file = root.join("missing-user.json").display().to_string();
+        let registry =
+            default_registry_with_context(config, 0, Rc::new(RefCell::new(TodoList::default())));
+        let policy = deny_writes_policy();
+
+        let write = registry
+            .permission_request_for(
+                "apply_patch",
+                &ToolInput::new().with_arg("path", "src/lib.rs"),
+                &policy,
+            )
+            .unwrap();
+        assert_eq!(write.kind, "write");
+        assert_eq!(write.target, "src/lib.rs");
+
+        let shell = registry
+            .permission_request_for(
+                "run_shell",
+                &ToolInput::new()
+                    .with_arg("cwd", ".")
+                    .with_arg("command", "cargo test"),
+                &policy,
+            )
+            .unwrap();
+        assert_eq!(shell.kind, "shell");
+        assert_eq!(shell.target, "cargo test");
+
+        let mcp_policy = ExecutionPolicy {
+            allowed_tools: vec!["mcp_call".to_string()],
+            ..deny_writes_policy()
+        };
+        let mcp = registry
+            .permission_request_for(
+                "mcp_call",
+                &ToolInput::new()
+                    .with_arg("server", "fake")
+                    .with_arg("tool", "echo"),
+                &mcp_policy,
+            )
+            .unwrap();
+        assert_eq!(mcp.kind, "mcp");
+        assert_eq!(mcp.target, "fake/echo");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn describe_mcp_arguments_handles_wrapped_and_direct_args() {
+        let wrapped = ToolInput::new().with_arg("arguments", r#"{"path":"README.md"}"#);
+        assert_eq!(describe_mcp_arguments(&wrapped), r#"{"path":"README.md"}"#);
+
+        let direct = ToolInput::new()
+            .with_arg("server", "fake")
+            .with_arg("tool", "echo")
+            .with_arg("text", "hello");
+        assert_eq!(describe_mcp_arguments(&direct), "text=hello");
     }
 
     #[test]
@@ -596,6 +809,9 @@ done
         assert!(root
             .names_for_policy(&ExecutionPolicy::new(&approval, None))
             .contains(&"dispatch_subagent"));
+        assert!(root
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"dispatch_subagents"));
 
         let nested = default_registry_with_context(
             AppConfig::default(),
@@ -605,6 +821,9 @@ done
         assert!(nested
             .names_for_policy(&ExecutionPolicy::new(&approval, None))
             .contains(&"dispatch_subagent"));
+        assert!(nested
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"dispatch_subagents"));
 
         let at_limit = default_registry_with_context(
             AppConfig::default(),
@@ -614,6 +833,9 @@ done
         assert!(!at_limit
             .names_for_policy(&ExecutionPolicy::new(&approval, None))
             .contains(&"dispatch_subagent"));
+        assert!(!at_limit
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"dispatch_subagents"));
     }
 
     #[test]

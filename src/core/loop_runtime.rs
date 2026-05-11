@@ -1,21 +1,28 @@
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::rc::Rc;
 
 use crate::config::types::AppConfig;
 use crate::core::context::TaskContext;
 use crate::core::memory::MemoryState;
 use crate::core::observations::{compact_observations, summarize_for_kind};
 use crate::core::session::{SessionSnapshot, SessionStore};
-use crate::error::AppResult;
+use crate::error::{app_error, AppResult};
 use crate::language::detect::detect_profile;
 use crate::language::infer::default_test_command;
 use crate::model::client::ModelClient;
 use crate::model::deepseek::DeepSeekClient;
-use crate::model::protocol::{ModelAction, ModelRequest, Observation, ObservationKind};
+use crate::model::protocol::{
+    ModelAction, ModelRequest, ModelResponse, Observation, ObservationKind, TokenUsage,
+};
 use crate::skills::registry::SkillRegistry;
 use crate::skills::resolver::{resolve_skill, SkillResolution};
 use crate::skills::schema::SkillSpec;
 use crate::tools::registry::ExecutionPolicy;
 use crate::ui::render::print_banner;
+use crate::ui::stream::StreamEvents;
+use crate::util::cancel::CancellationCheck;
 
 pub struct AgentLoopOptions {
     pub steps: usize,
@@ -24,6 +31,10 @@ pub struct AgentLoopOptions {
     pub subagent_depth: usize,
     pub emit_progress: bool,
     pub persist_session: bool,
+    pub stream_events: Option<Box<dyn crate::ui::stream::StreamEvents>>,
+    pub run_events: Option<SharedAgentRunEvents>,
+    pub approval_resolver: Option<SharedAgentApprovalResolver>,
+    pub cancel_check: Option<SharedAgentCancelCheck>,
 }
 
 impl Default for AgentLoopOptions {
@@ -37,6 +48,10 @@ impl Default for AgentLoopOptions {
             subagent_depth: 0,
             emit_progress: true,
             persist_session: true,
+            stream_events: None,
+            run_events: None,
+            approval_resolver: None,
+            cancel_check: None,
         }
     }
 }
@@ -44,7 +59,7 @@ impl Default for AgentLoopOptions {
 #[derive(Debug, Clone)]
 pub struct ToolEvent {
     pub tool_name: String,
-    pub input: std::collections::BTreeMap<String, String>,
+    pub input: BTreeMap<String, String>,
     pub output: String,
     pub status: crate::model::protocol::ObservationStatus,
 }
@@ -54,6 +69,58 @@ pub struct RunResult {
     pub final_message: String,
     pub tool_events: Vec<ToolEvent>,
     pub usage: crate::model::protocol::TokenUsage,
+}
+
+pub type SharedAgentRunEvents = Rc<RefCell<dyn AgentRunEvents>>;
+
+pub trait AgentRunEvents {
+    fn on_tool_call(&mut self, tool_name: &str, input: &BTreeMap<String, String>);
+
+    fn on_permission_request(
+        &mut self,
+        tool_name: &str,
+        input: &BTreeMap<String, String>,
+        kind: &str,
+        target: &str,
+    );
+
+    fn on_tool_result(&mut self, event: &ToolEvent);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentApprovalRequest {
+    pub tool_name: String,
+    pub input: BTreeMap<String, String>,
+    pub kind: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentApprovalDecision {
+    Approved,
+    Denied,
+}
+
+pub type SharedAgentApprovalResolver = Rc<RefCell<dyn AgentApprovalResolver>>;
+
+pub trait AgentApprovalResolver {
+    fn resolve(&mut self, request: &AgentApprovalRequest) -> AppResult<AgentApprovalDecision>;
+}
+
+pub type SharedAgentCancelCheck = Rc<RefCell<dyn AgentCancelCheck>>;
+
+pub trait AgentCancelCheck {
+    fn is_cancelled(&mut self) -> AppResult<bool>;
+}
+
+struct AgentCancelAdapter<'a> {
+    inner: &'a mut dyn AgentCancelCheck,
+}
+
+impl CancellationCheck for AgentCancelAdapter<'_> {
+    fn is_cancelled(&mut self) -> AppResult<bool> {
+        self.inner.is_cancelled()
+    }
 }
 
 pub struct AgentLoop {
@@ -94,6 +161,10 @@ impl AgentLoop {
             subagent_depth,
             emit_progress,
             persist_session,
+            mut stream_events,
+            run_events,
+            approval_resolver,
+            cancel_check,
         } = options;
         if emit_progress {
             print_banner("DeepseekCode");
@@ -199,6 +270,12 @@ impl AgentLoop {
         }
 
         let mut observations = initial_observations;
+        if let Some(hook_context) = hooks.session_start(&context.task, "startup")? {
+            observations.push(Observation::ok(
+                "hook",
+                format!("session_start: {hook_context}"),
+            ));
+        }
         if let Some(hook_context) = hooks.user_prompt_submit(&context.task)? {
             observations.push(Observation::ok(
                 "hook",
@@ -210,9 +287,10 @@ impl AgentLoop {
         let mut total_usage = crate::model::protocol::TokenUsage::default();
         let mut renderer = emit_progress.then(crate::ui::stream::TtyRenderer::from_stdout);
         let mut noop_events = crate::ui::stream::NoopStreamEvents;
-        // Phase 10c-1: accumulate prior assistant messages so each step sees what it
-        // already said. Without this, dscode run loops on "I'll start by …" because
-        // the LLM never sees its own progress (REPL has Repl.transcript; one-shot did not).
+        // Phase 10c-1: accumulate prior assistant messages and compact reasoning
+        // summaries so each step sees what it already considered. Without this,
+        // dscode run loops on "I'll start by …" because the LLM never sees its own
+        // progress (REPL has Repl.transcript; one-shot did not).
         let mut recent_steps_log: Vec<String> = Vec::new();
         const RECENT_STEPS_KEEP: usize = 3;
         // Phase 10c-2: repeat-call detection. Track fingerprints of the last
@@ -223,6 +301,7 @@ impl AgentLoop {
         let mut recent_call_fingerprints: Vec<String> = Vec::new();
         const REPEAT_WINDOW: usize = 3;
         for step in 0..steps {
+            check_cancelled(cancel_check.as_ref())?;
             let recent_window = recent_steps_log
                 .iter()
                 .rev()
@@ -239,10 +318,11 @@ impl AgentLoop {
                     !todo_snapshot.is_empty(),
                     available_tools
                         .iter()
-                        .any(|tool| tool == "dispatch_subagent"),
+                        .any(|tool| tool == "dispatch_subagent" || tool == "dispatch_subagents"),
                     &workspace_instructions,
                 ),
                 task: context.task.clone(),
+                image_inputs: context.image_inputs.clone(),
                 profile_name: profile.name.clone(),
                 profile_hints: profile.hints.clone(),
                 primary_file: primary_file.clone(),
@@ -257,23 +337,52 @@ impl AgentLoop {
             if let Some(renderer) = renderer.as_mut() {
                 renderer.paint_step_divider(step + 1);
             }
-            let (response, step_usage) = if let Some(renderer) = renderer.as_mut() {
-                client.respond(request, renderer)?
-            } else {
-                client.respond(request, &mut noop_events)?
-            };
+            let (response, step_usage, step_reasoning) =
+                if let Some(events) = stream_events.as_deref_mut() {
+                    let mut capture = ReasoningCaptureEvents::new(events);
+                    let outcome = model_respond_with_cancel(
+                        client,
+                        request,
+                        &mut capture,
+                        cancel_check.as_ref(),
+                    )?;
+                    let reasoning = capture.into_reasoning();
+                    (outcome.0, outcome.1, reasoning)
+                } else if let Some(renderer) = renderer.as_mut() {
+                    let mut capture = ReasoningCaptureEvents::new(renderer);
+                    let outcome = model_respond_with_cancel(
+                        client,
+                        request,
+                        &mut capture,
+                        cancel_check.as_ref(),
+                    )?;
+                    let reasoning = capture.into_reasoning();
+                    (outcome.0, outcome.1, reasoning)
+                } else {
+                    let mut capture = ReasoningCaptureEvents::new(&mut noop_events);
+                    let outcome = model_respond_with_cancel(
+                        client,
+                        request,
+                        &mut capture,
+                        cancel_check.as_ref(),
+                    )?;
+                    let reasoning = capture.into_reasoning();
+                    (outcome.0, outcome.1, reasoning)
+                };
             if let Some(usage) = step_usage {
-                total_usage.prompt += usage.prompt;
-                total_usage.completion += usage.completion;
+                total_usage.add_assign(&usage);
             }
+            check_cancelled(cancel_check.as_ref())?;
             last_message = response.message.clone();
-            if !response.message.trim().is_empty() {
-                recent_steps_log.push(response.message.clone());
+            if let Some(entry) = recent_step_replay_entry(&response.message, &step_reasoning) {
+                recent_steps_log.push(entry);
             }
 
             match response.action {
                 ModelAction::CallTool { tool_name, input } => {
+                    check_cancelled(cancel_check.as_ref())?;
                     let event_input = input.args.clone();
+                    emit_tool_call(run_events.as_ref(), &tool_name, &event_input);
 
                     // Phase 10c-2: compute fingerprint and check window BEFORE executing.
                     let fingerprint = format!(
@@ -317,12 +426,16 @@ impl AgentLoop {
                         }
                         let event_name = tool_name.clone();
                         observations.push(Observation::failed(tool_name, stuck_msg.clone()));
-                        tool_events.push(ToolEvent {
-                            tool_name: event_name,
-                            input: event_input,
-                            output: stuck_msg,
-                            status: crate::model::protocol::ObservationStatus::Failed,
-                        });
+                        push_tool_event(
+                            &mut tool_events,
+                            run_events.as_ref(),
+                            ToolEvent {
+                                tool_name: event_name,
+                                input: event_input,
+                                output: stuck_msg,
+                                status: crate::model::protocol::ObservationStatus::Failed,
+                            },
+                        );
                         continue;
                     }
 
@@ -360,18 +473,127 @@ impl AgentLoop {
                                 tool_name,
                                 format!("pre_tool_use hook blocked tool: {raw}"),
                             ));
-                            tool_events.push(ToolEvent {
-                                tool_name: event_name,
-                                input: event_input,
-                                output: raw,
-                                status: crate::model::protocol::ObservationStatus::Failed,
-                            });
+                            push_tool_event(
+                                &mut tool_events,
+                                run_events.as_ref(),
+                                ToolEvent {
+                                    tool_name: event_name,
+                                    input: event_input,
+                                    output: raw,
+                                    status: crate::model::protocol::ObservationStatus::Failed,
+                                },
+                            );
                             continue;
                         }
                     }
 
-                    match registry.execute_with_policy(&tool_name, input, &policy) {
+                    let mut execution_policy = policy.clone();
+                    if let Some(permission) =
+                        registry.permission_request_for(&tool_name, &input, &policy)
+                    {
+                        emit_permission_request(
+                            run_events.as_ref(),
+                            &tool_name,
+                            &event_input,
+                            &permission.kind,
+                            &permission.target,
+                        );
+                        match hooks.permission_request(
+                            &context.task,
+                            &tool_name,
+                            &input,
+                            &permission.kind,
+                            &permission.target,
+                        ) {
+                            Ok(Some(hook_context)) => {
+                                observations.push(Observation::ok(
+                                    "hook",
+                                    format!("permission_request: {hook_context}"),
+                                ));
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                let raw = error.to_string();
+                                if let Some(renderer) = renderer.as_mut() {
+                                    renderer.paint_tool_result(
+                                        crate::ui::stream::ToolResultKind::Denied,
+                                        &tool_name,
+                                        "hook",
+                                        &raw,
+                                    );
+                                }
+                                let event_name = tool_name.clone();
+                                observations.push(Observation::failed(
+                                    tool_name,
+                                    format!("permission_request hook blocked tool: {raw}"),
+                                ));
+                                push_tool_event(
+                                    &mut tool_events,
+                                    run_events.as_ref(),
+                                    ToolEvent {
+                                        tool_name: event_name,
+                                        input: event_input,
+                                        output: raw,
+                                        status: crate::model::protocol::ObservationStatus::Failed,
+                                    },
+                                );
+                                continue;
+                            }
+                        }
+
+                        if let Some(resolver) = approval_resolver.as_ref() {
+                            let approval_request = AgentApprovalRequest {
+                                tool_name: tool_name.clone(),
+                                input: event_input.clone(),
+                                kind: permission.kind.clone(),
+                                target: permission.target.clone(),
+                            };
+                            match resolver.borrow_mut().resolve(&approval_request)? {
+                                AgentApprovalDecision::Approved => {
+                                    execution_policy =
+                                        policy.with_auto_approved_permission(&permission.kind);
+                                }
+                                AgentApprovalDecision::Denied => {
+                                    let raw = format!(
+                                        "permission denied for {}: {}",
+                                        permission.kind, permission.target
+                                    );
+                                    if let Some(renderer) = renderer.as_mut() {
+                                        renderer.paint_tool_result(
+                                            crate::ui::stream::ToolResultKind::Denied,
+                                            &tool_name,
+                                            &permission.kind,
+                                            &raw,
+                                        );
+                                    }
+                                    let event_name = tool_name.clone();
+                                    observations.push(Observation::failed(tool_name, raw.clone()));
+                                    push_tool_event(
+                                        &mut tool_events,
+                                        run_events.as_ref(),
+                                        ToolEvent {
+                                            tool_name: event_name,
+                                            input: event_input,
+                                            output: raw,
+                                            status:
+                                                crate::model::protocol::ObservationStatus::Failed,
+                                        },
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
+                    match execute_tool_with_cancel(
+                        &registry,
+                        &tool_name,
+                        input,
+                        &execution_policy,
+                        cancel_check.as_ref(),
+                    ) {
                         Ok(mut output) => {
+                            check_cancelled(cancel_check.as_ref())?;
                             if tool_name == "dispatch_subagent" {
                                 if let Some(delegated_task) = event_input.get("task") {
                                     if todos
@@ -412,12 +634,16 @@ impl AgentLoop {
                             {
                                 observations.push(Observation::ok("replan_hint", replan_hint));
                             }
-                            tool_events.push(ToolEvent {
-                                tool_name: event_name,
-                                input: event_input,
-                                output: output.summary,
-                                status: crate::model::protocol::ObservationStatus::Ok,
-                            });
+                            push_tool_event(
+                                &mut tool_events,
+                                run_events.as_ref(),
+                                ToolEvent {
+                                    tool_name: event_name,
+                                    input: event_input,
+                                    output: output.summary,
+                                    status: crate::model::protocol::ObservationStatus::Ok,
+                                },
+                            );
                             push_post_tool_hook_observation(
                                 &hooks,
                                 &context.task,
@@ -426,6 +652,7 @@ impl AgentLoop {
                             );
                         }
                         Err(error) => {
+                            check_cancelled(cancel_check.as_ref())?;
                             let kind = ObservationKind::from_tool_name(&tool_name);
                             let raw = error.to_string();
                             let observation_summary = summarize_for_kind(&raw, kind);
@@ -460,12 +687,16 @@ impl AgentLoop {
                             {
                                 observations.push(Observation::ok("replan_hint", replan_hint));
                             }
-                            tool_events.push(ToolEvent {
-                                tool_name: event_name,
-                                input: event_input,
-                                output: raw,
-                                status: crate::model::protocol::ObservationStatus::Failed,
-                            });
+                            push_tool_event(
+                                &mut tool_events,
+                                run_events.as_ref(),
+                                ToolEvent {
+                                    tool_name: event_name,
+                                    input: event_input,
+                                    output: raw,
+                                    status: crate::model::protocol::ObservationStatus::Failed,
+                                },
+                            );
                             push_post_tool_hook_observation(
                                 &hooks,
                                 &context.task,
@@ -488,6 +719,8 @@ impl AgentLoop {
             }
         }
 
+        let _ = hooks.session_stop(&context.task, "finish", &last_message)?;
+
         if persist_session {
             let store = SessionStore::new(self.config.workspace.session_dir());
             let snapshot = SessionSnapshot::new(context.task, profile.name);
@@ -500,6 +733,141 @@ impl AgentLoop {
             usage: total_usage,
         })
     }
+}
+
+struct ReasoningCaptureEvents<'a> {
+    inner: &'a mut dyn StreamEvents,
+    reasoning: String,
+}
+
+impl<'a> ReasoningCaptureEvents<'a> {
+    fn new(inner: &'a mut dyn StreamEvents) -> Self {
+        Self {
+            inner,
+            reasoning: String::new(),
+        }
+    }
+
+    fn into_reasoning(self) -> String {
+        self.reasoning
+    }
+}
+
+impl StreamEvents for ReasoningCaptureEvents<'_> {
+    fn on_reasoning_delta(&mut self, chunk: &str) {
+        if !chunk.is_empty() {
+            self.reasoning.push_str(chunk);
+        }
+        self.inner.on_reasoning_delta(chunk);
+    }
+
+    fn on_text_delta(&mut self, chunk: &str) {
+        self.inner.on_text_delta(chunk);
+    }
+
+    fn on_assistant_done(&mut self, full_text: &str) {
+        self.inner.on_assistant_done(full_text);
+    }
+
+    fn on_tool_call(&mut self, name: &str, input: &BTreeMap<String, String>) {
+        self.inner.on_tool_call(name, input);
+    }
+}
+
+fn recent_step_replay_entry(message: &str, reasoning: &str) -> Option<String> {
+    let message = compact_replay_text(message, 120);
+    let reasoning = compact_replay_text(reasoning, 160);
+    match (message.is_empty(), reasoning.is_empty()) {
+        (true, true) => None,
+        (false, true) => Some(message),
+        (true, false) => Some(format!("reasoning: {reasoning}")),
+        (false, false) => Some(format!("reasoning: {reasoning} | assistant: {message}")),
+    }
+}
+
+fn compact_replay_text(value: &str, max_chars: usize) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    let head = normalized.chars().take(max_chars).collect::<String>();
+    format!("{head}...")
+}
+
+fn emit_tool_call(
+    run_events: Option<&SharedAgentRunEvents>,
+    tool_name: &str,
+    input: &BTreeMap<String, String>,
+) {
+    if let Some(events) = run_events {
+        events.borrow_mut().on_tool_call(tool_name, input);
+    }
+}
+
+fn emit_permission_request(
+    run_events: Option<&SharedAgentRunEvents>,
+    tool_name: &str,
+    input: &BTreeMap<String, String>,
+    kind: &str,
+    target: &str,
+) {
+    if let Some(events) = run_events {
+        events
+            .borrow_mut()
+            .on_permission_request(tool_name, input, kind, target);
+    }
+}
+
+fn push_tool_event(
+    tool_events: &mut Vec<ToolEvent>,
+    run_events: Option<&SharedAgentRunEvents>,
+    event: ToolEvent,
+) {
+    if let Some(events) = run_events {
+        events.borrow_mut().on_tool_result(&event);
+    }
+    tool_events.push(event);
+}
+
+fn model_respond_with_cancel<C: ModelClient>(
+    client: &C,
+    request: ModelRequest,
+    events: &mut dyn StreamEvents,
+    cancel_check: Option<&SharedAgentCancelCheck>,
+) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
+    if let Some(check) = cancel_check {
+        let mut guard = check.borrow_mut();
+        let mut adapter = AgentCancelAdapter { inner: &mut *guard };
+        client.respond_with_cancel(request, events, Some(&mut adapter))
+    } else {
+        client.respond_with_cancel(request, events, None)
+    }
+}
+
+fn execute_tool_with_cancel(
+    registry: &crate::tools::registry::ToolRegistry,
+    tool_name: &str,
+    input: crate::tools::types::ToolInput,
+    policy: &ExecutionPolicy,
+    cancel_check: Option<&SharedAgentCancelCheck>,
+) -> AppResult<crate::tools::types::ToolOutput> {
+    if let Some(check) = cancel_check {
+        let mut guard = check.borrow_mut();
+        let mut adapter = AgentCancelAdapter { inner: &mut *guard };
+        registry.execute_with_policy_and_cancel(tool_name, input, policy, Some(&mut adapter))
+    } else {
+        registry.execute_with_policy_and_cancel(tool_name, input, policy, None)
+    }
+}
+
+fn check_cancelled(cancel_check: Option<&SharedAgentCancelCheck>) -> AppResult<()> {
+    if let Some(check) = cancel_check {
+        let mut guard = check.borrow_mut();
+        if AgentCancelCheck::is_cancelled(&mut *guard)? {
+            return Err(app_error("agent run cancelled"));
+        }
+    }
+    Ok(())
 }
 
 fn push_post_tool_hook_observation(
@@ -582,7 +950,7 @@ fn derive_recovery_hint_after_failure(
             None,
             None,
         ),
-        "dispatch_subagent" => format_recovery_hint(
+        "dispatch_subagent" | "dispatch_subagents" => format_recovery_hint(
             "dispatch_subagent",
             preferred_search_or_listing_tool(available_tools)?,
             "subagent dispatch failed, continue locally with a direct inspection step",
@@ -621,6 +989,13 @@ fn derive_replan_hint(
         );
     }
 
+    if tool_name == "dispatch_subagents" && parallel_child_blocked(output) {
+        return Some(
+            "reason=subagent blocker; action=replan parent todo list around the blocker"
+                .to_string(),
+        );
+    }
+
     if tool_name == "recovery_hint" {
         return None;
     }
@@ -638,6 +1013,12 @@ fn derive_replan_hint(
     }
 
     None
+}
+
+fn parallel_child_blocked(output: &str) -> bool {
+    output
+        .lines()
+        .any(|line| line.starts_with("meta.parallel_child_") && line.contains("_outcome=blocked"))
 }
 
 fn child_outcome(summary: &str) -> Option<&str> {
@@ -950,7 +1331,7 @@ fn primary_file(profile: &crate::language::profile::LanguageProfile) -> Option<&
 }
 
 const TODO_NUDGE: &str = "\n\nYou have access to a todo_write tool. Use it proactively when the request:\n- involves three or more distinct steps,\n- spans multiple files or non-trivial refactoring,\n- requires running tests or shell commands as part of completion.\n\nEach todo has fields: content (imperative, e.g. \"Run tests\"), activeForm (present continuous, e.g. \"Running tests\"), status (\"pending\" | \"in_progress\" | \"completed\").\n\nMark exactly one todo as in_progress at a time. Update the list (mark completed, add discovered tasks) before moving to the next step. Skip todo_write only for trivial single-step requests.";
-const SUBAGENT_NUDGE: &str = "\n\n[sub-agent delegation]\nYou may call `dispatch_subagent` for an independent subtask that can be completed separately from the parent plan.\n- Only dispatch self-contained workstreams with a concrete task.\n- Prefer dispatch after a todo plan exists, or when the split is already obvious.\n- Nested dispatch is bounded; use it only when the child has its own clearly separable subtask.\n- Do NOT dispatch trivial reads, tiny edits, or work you can finish directly in one step.\n- Treat the child result as a summarized observation, then continue the parent plan.";
+const SUBAGENT_NUDGE: &str = "\n\n[sub-agent delegation]\nYou may call `dispatch_subagent` for one independent subtask, or `dispatch_subagents` when the user explicitly asks for parallel work or when multiple independent workstreams can run concurrently.\n- Only dispatch self-contained workstreams with concrete tasks and disjoint write scopes.\n- Prefer dispatch after a todo plan exists, or when the split is already obvious.\n- Nested dispatch is bounded; use it only when the child has its own clearly separable subtask.\n- Do NOT dispatch trivial reads, tiny edits, or work you can finish directly in one step.\n- Treat child results as summarized observations, read back child-edited files before relying on patches, then continue the parent plan.";
 const EXPLICIT_PLANNING_BOOTSTRAP_NUDGE: &str = "\n\n[explicit-planning mode]\nThis task is large enough that you MUST create and follow a concrete plan.\n- If no todo plan exists yet, your NEXT turn MUST call todo_write with 3-7 concrete steps before repository inspection, edits, or test runs.\n- Keep exactly one todo in_progress at a time.\n- After a plan exists, execute the current in_progress step instead of starting over.\n- Do NOT rewrite the whole plan unless new evidence changes the approach.\n- Your assistant message should say which plan step you are executing now.";
 const EXPLICIT_PLAN_EXECUTION_NUDGE: &str = "\n\n[plan execution]\nA todo plan already exists.\n- Continue from the current in_progress step.\n- Update todo_write only when a step changes status or new work is discovered.\n- Do NOT recreate the plan from scratch while execution is already in progress.";
 
@@ -1055,6 +1436,12 @@ fn should_use_explicit_planning(
         "production ready",
         "product-ready",
         "product ready",
+        "productize",
+        "productionize",
+        "ship-ready",
+        "ship ready",
+        "daily coding",
+        "daily use",
         " implement",
         " refactor",
         " debug",
@@ -1363,6 +1750,17 @@ mod tests {
     }
 
     #[test]
+    fn derive_replan_hint_triggers_for_blocked_parallel_subagent_summary() {
+        let hint = super::derive_replan_hint(
+            "dispatch_subagents",
+            "meta.parallel_child_1_outcome=ok\nmeta.parallel_child_2_outcome=blocked",
+            &[],
+        )
+        .expect("expected parallel subagent blocker replan hint");
+        assert!(hint.contains("subagent blocker"));
+    }
+
+    #[test]
     fn shell_recovery_directive_uses_read_file_for_failed_test_path() {
         let tools = vec!["read_file".to_string(), "search_text".to_string()];
         let output = "meta.command_kind=test\nmeta.exit_code=101\nmeta.result=failed\nmeta.failure_kind=test_failure\nmeta.failed_tests=src/cli/app.rs::cli_from_argv_routes_benchmark_subcommand\nmeta.stderr_summary=test failed\nexit_code: 101";
@@ -1474,6 +1872,16 @@ mod tests {
             None,
             &tools,
         ));
+        assert!(super::should_use_explicit_planning(
+            "productionize DeepseekCode for daily coding work",
+            None,
+            &tools,
+        ));
+        assert!(super::should_use_explicit_planning(
+            "make this ship-ready for daily use",
+            None,
+            &tools,
+        ));
     }
 
     #[test]
@@ -1510,10 +1918,11 @@ mod tests {
 mod cr1_regression_test {
     use super::*;
     use std::cell::RefCell;
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
     use std::rc::Rc;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use crate::core::context::TaskContext;
     use crate::core::todos::{TodoList, TodoStatus};
@@ -1634,6 +2043,298 @@ mod cr1_regression_test {
         assert_eq!(captured[2].len(), 2);
         assert!(captured[2][0].contains("step ONE"));
         assert!(captured[2][1].contains("step TWO"));
+    }
+
+    struct ScriptedReasoningClient {
+        captured_recent_steps: RefCell<Vec<Vec<String>>>,
+    }
+
+    impl ModelClient for ScriptedReasoningClient {
+        fn respond(
+            &self,
+            input: ModelRequest,
+            events: &mut dyn StreamEvents,
+        ) -> crate::error::AppResult<(ModelResponse, Option<TokenUsage>)> {
+            self.captured_recent_steps
+                .borrow_mut()
+                .push(input.recent_steps.clone());
+            let n = self.captured_recent_steps.borrow().len() - 1;
+            events.on_reasoning_delta(&format!("thinking through step {n}"));
+            let action = if n == 0 {
+                let mut tin = ToolInput::new();
+                tin.args.insert("root".to_string(), ".".to_string());
+                tin.args.insert("max_depth".to_string(), "1".to_string());
+                tin.args.insert("limit".to_string(), "5".to_string());
+                ModelAction::CallTool {
+                    tool_name: "list_files".to_string(),
+                    input: tin,
+                }
+            } else {
+                ModelAction::Finish
+            };
+            Ok((
+                ModelResponse {
+                    message: format!("assistant message {n}"),
+                    action,
+                },
+                None,
+            ))
+        }
+    }
+
+    #[test]
+    fn run_with_client_replays_recent_reasoning_into_next_request() {
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("dummy".to_string(), None);
+        let client = ScriptedReasoningClient {
+            captured_recent_steps: RefCell::new(Vec::new()),
+        };
+
+        let _ = agent.run_with_client(
+            context,
+            AgentLoopOptions {
+                steps: 2,
+                emit_progress: false,
+                ..AgentLoopOptions::default()
+            },
+            &client,
+        );
+
+        let captured = client.captured_recent_steps.borrow();
+        assert_eq!(captured.len(), 2);
+        assert!(captured[0].is_empty());
+        assert_eq!(captured[1].len(), 1);
+        assert!(captured[1][0].contains("reasoning: thinking through step 0"));
+        assert!(captured[1][0].contains("assistant: assistant message 0"));
+    }
+
+    struct CapturingRunEvents {
+        entries: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl AgentRunEvents for CapturingRunEvents {
+        fn on_tool_call(&mut self, tool_name: &str, _input: &BTreeMap<String, String>) {
+            self.entries.borrow_mut().push(format!("call:{tool_name}"));
+        }
+
+        fn on_permission_request(
+            &mut self,
+            tool_name: &str,
+            _input: &BTreeMap<String, String>,
+            kind: &str,
+            target: &str,
+        ) {
+            self.entries
+                .borrow_mut()
+                .push(format!("permission:{tool_name}:{kind}:{target}"));
+        }
+
+        fn on_tool_result(&mut self, event: &ToolEvent) {
+            self.entries.borrow_mut().push(format!(
+                "result:{}:{}",
+                event.tool_name,
+                match event.status {
+                    crate::model::protocol::ObservationStatus::Ok => "ok",
+                    crate::model::protocol::ObservationStatus::Failed => "failed",
+                }
+            ));
+        }
+    }
+
+    struct CountingCancelCheck {
+        calls: usize,
+        cancel_after: usize,
+    }
+
+    impl AgentCancelCheck for CountingCancelCheck {
+        fn is_cancelled(&mut self) -> AppResult<bool> {
+            self.calls += 1;
+            Ok(self.calls >= self.cancel_after)
+        }
+    }
+
+    #[test]
+    fn run_with_client_stops_when_cancel_check_trips() {
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("dummy".to_string(), None);
+        let client = ScriptedReplyClient {
+            replies: RefCell::new(vec!["step one".to_string(), "step two".to_string()]),
+            captured_recent_steps: RefCell::new(Vec::new()),
+        };
+        let cancel_check: SharedAgentCancelCheck = Rc::new(RefCell::new(CountingCancelCheck {
+            calls: 0,
+            cancel_after: 2,
+        }));
+
+        let error = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 3,
+                    emit_progress: false,
+                    cancel_check: Some(cancel_check),
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("agent run cancelled"));
+        assert_eq!(client.captured_recent_steps.borrow().len(), 1);
+    }
+
+    #[test]
+    fn run_with_client_emits_live_tool_call_and_result_events() {
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("dummy".to_string(), None);
+        let todos = Rc::new(RefCell::new(TodoList::default()));
+        let entries = Rc::new(RefCell::new(Vec::new()));
+        let sink: SharedAgentRunEvents = Rc::new(RefCell::new(CapturingRunEvents {
+            entries: entries.clone(),
+        }));
+        let client = ScriptedReplyClient {
+            replies: RefCell::new(vec!["step ONE: looking at files".to_string()]),
+            captured_recent_steps: RefCell::new(Vec::new()),
+        };
+
+        agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 1,
+                    initial_observations: Vec::new(),
+                    todos,
+                    emit_progress: false,
+                    run_events: Some(sink),
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(
+            entries.borrow().as_slice(),
+            ["call:list_files", "result:list_files:ok"]
+        );
+    }
+
+    struct FixedApprovalResolver {
+        decision: AgentApprovalDecision,
+        seen: Rc<RefCell<Vec<AgentApprovalRequest>>>,
+    }
+
+    impl AgentApprovalResolver for FixedApprovalResolver {
+        fn resolve(
+            &mut self,
+            request: &AgentApprovalRequest,
+        ) -> crate::error::AppResult<AgentApprovalDecision> {
+            self.seen.borrow_mut().push(request.clone());
+            Ok(self.decision)
+        }
+    }
+
+    #[test]
+    fn run_with_client_uses_approval_resolver_for_permissioned_tools() {
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("dummy".to_string(), None);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let resolver: SharedAgentApprovalResolver = Rc::new(RefCell::new(FixedApprovalResolver {
+            decision: AgentApprovalDecision::Approved,
+            seen: seen.clone(),
+        }));
+        let client = ScriptedActionsClient {
+            captured_observations: RefCell::new(Vec::new()),
+            actions: vec![
+                ModelAction::CallTool {
+                    tool_name: "run_shell".to_string(),
+                    input: ToolInput::new()
+                        .with_arg("command", "pwd")
+                        .with_arg("cwd", "."),
+                },
+                ModelAction::Finish,
+            ],
+            calls: RefCell::new(0),
+        };
+
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 2,
+                    initial_observations: Vec::new(),
+                    todos: Rc::new(RefCell::new(TodoList::default())),
+                    emit_progress: false,
+                    approval_resolver: Some(resolver),
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(seen.borrow().len(), 1);
+        assert_eq!(seen.borrow()[0].kind, "shell");
+        assert_eq!(seen.borrow()[0].target, "pwd");
+        assert_eq!(result.tool_events.len(), 1);
+        assert!(result.tool_events[0].output.contains("exit_code: 0"));
+        assert_eq!(
+            result.tool_events[0].status,
+            crate::model::protocol::ObservationStatus::Ok
+        );
+    }
+
+    #[test]
+    fn run_with_client_stops_permissioned_tool_when_resolver_denies() {
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("dummy".to_string(), None);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let resolver: SharedAgentApprovalResolver = Rc::new(RefCell::new(FixedApprovalResolver {
+            decision: AgentApprovalDecision::Denied,
+            seen: seen.clone(),
+        }));
+        let client = ScriptedActionsClient {
+            captured_observations: RefCell::new(Vec::new()),
+            actions: vec![
+                ModelAction::CallTool {
+                    tool_name: "run_shell".to_string(),
+                    input: ToolInput::new()
+                        .with_arg("command", "pwd")
+                        .with_arg("cwd", "."),
+                },
+                ModelAction::Finish,
+            ],
+            calls: RefCell::new(0),
+        };
+
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 2,
+                    initial_observations: Vec::new(),
+                    todos: Rc::new(RefCell::new(TodoList::default())),
+                    emit_progress: false,
+                    approval_resolver: Some(resolver),
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(seen.borrow().len(), 1);
+        assert_eq!(result.tool_events.len(), 1);
+        assert_eq!(
+            result.tool_events[0].status,
+            crate::model::protocol::ObservationStatus::Failed
+        );
+        assert!(result.tool_events[0]
+            .output
+            .contains("permission denied for shell: pwd"));
+        assert!(!result.tool_events[0].output.contains("exit_code: 0"));
     }
 
     /// Phase 10c-2: scripted client emits N identical list_files calls in a row.
@@ -1884,6 +2585,49 @@ mod cr1_regression_test {
                 None,
             ))
         }
+    }
+
+    #[test]
+    fn run_with_client_cancels_in_flight_shell_tool() {
+        let mut cfg = crate::config::types::AppConfig::default();
+        cfg.approval.require_shell_confirmation = false;
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("run cancellable shell".to_string(), None);
+        let client = ScriptedActionsClient {
+            captured_observations: RefCell::new(Vec::new()),
+            actions: vec![ModelAction::CallTool {
+                tool_name: "run_shell".to_string(),
+                input: ToolInput::new()
+                    .with_arg("command", "tail -f /dev/null")
+                    .with_arg("cwd", "."),
+            }],
+            calls: RefCell::new(0),
+        };
+        let cancel_check: SharedAgentCancelCheck = Rc::new(RefCell::new(CountingCancelCheck {
+            calls: 0,
+            cancel_after: 4,
+        }));
+
+        let started = Instant::now();
+        let error = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 1,
+                    emit_progress: false,
+                    cancel_check: Some(cancel_check),
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("agent run cancelled"));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "agent loop should abort the shell process promptly"
+        );
+        assert_eq!(*client.calls.borrow(), 1);
     }
 
     #[test]

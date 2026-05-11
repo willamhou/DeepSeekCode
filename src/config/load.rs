@@ -72,6 +72,11 @@ fn apply_env_overrides(config: &mut AppConfig) {
             config.model.api_key_env = api_key_env;
         }
     }
+    if let Ok(reasoning_effort) = std::env::var("DEEPSEEK_REASONING_EFFORT") {
+        if !reasoning_effort.trim().is_empty() {
+            config.model.reasoning_effort = reasoning_effort;
+        }
+    }
 }
 
 fn parse_config(content: &str, config: &mut AppConfig) -> AppResult<()> {
@@ -91,6 +96,7 @@ fn parse_config(content: &str, config: &mut AppConfig) -> AppResult<()> {
             "model.base_url" => config.model.base_url = unquote(value),
             "model.model" => config.model.model = unquote(value),
             "model.api_key_env" => config.model.api_key_env = unquote(value),
+            "model.reasoning_effort" => config.model.reasoning_effort = unquote(value),
             "approval.require_write_confirmation" => {
                 config.approval.require_write_confirmation = parse_bool(value)?
             }
@@ -126,6 +132,9 @@ fn parse_config(content: &str, config: &mut AppConfig) -> AppResult<()> {
             }
             "mcp.user_file" => {
                 config.mcp.user_file = unquote(value);
+            }
+            "diagnostics.post_edit" => {
+                config.diagnostics.post_edit = parse_bool(value)?;
             }
             "workspace.config_dir" => config.workspace.config_dir = unquote(value),
             "workspace.session_dir" => config.workspace.session_dir = unquote(value),
@@ -243,6 +252,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_config_overrides_model_reasoning_effort_from_toml() {
+        let mut config = AppConfig::default();
+        let toml = "model.reasoning_effort = \"max\"\n";
+        parse_config(toml, &mut config).unwrap();
+        assert_eq!(config.model.reasoning_effort, "max");
+    }
+
+    #[test]
     fn parse_config_overrides_approval_from_toml() {
         let mut config = AppConfig::default();
         let toml = r#"
@@ -303,6 +320,15 @@ mcp.user_file = "/custom/user-mcp.json"
         assert!(config.mcp.expose_remote_tools);
         assert_eq!(config.mcp.project_file, ".dscode/custom-mcp.json");
         assert_eq!(config.mcp.user_file, "/custom/user-mcp.json");
+    }
+
+    #[test]
+    fn parse_config_overrides_diagnostics_from_toml() {
+        let mut config = AppConfig::default();
+        let toml = "diagnostics.post_edit = true\n";
+        parse_config(toml, &mut config).unwrap();
+
+        assert!(config.diagnostics.post_edit);
     }
 
     #[test]

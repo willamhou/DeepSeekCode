@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::path::Path;
 use std::process::Command;
@@ -6,18 +7,247 @@ use crate::cli::app::DoctorArgs;
 use crate::config::load::load_or_default;
 use crate::config::types::AppConfig;
 use crate::error::AppResult;
+use crate::util::json::{json_value_to_string, JsonValue};
 
-pub fn run(_args: DoctorArgs) -> AppResult<()> {
+pub fn run(args: DoctorArgs) -> AppResult<()> {
     let config = load_or_default()?;
+    if args.json {
+        println!("{}", render_json_report(&config));
+        return Ok(());
+    }
+
     println!("DeepseekCode doctor");
     print_workspace_section(&config);
     print_skills_section(&config);
     print_model_section(&config);
+    print_capabilities_section(&config);
     print_api_key_section(&config);
     print_network_section(&config);
     print_github_section();
     print_hints_section(&config);
     Ok(())
+}
+
+fn render_json_report(config: &AppConfig) -> String {
+    json_value_to_string(&JsonValue::Object(build_json_report(config)))
+}
+
+fn build_json_report(config: &AppConfig) -> BTreeMap<String, JsonValue> {
+    let mut root = BTreeMap::new();
+    root.insert(
+        "version".to_string(),
+        JsonValue::String(env!("CARGO_PKG_VERSION").to_string()),
+    );
+    root.insert(
+        "workspace".to_string(),
+        JsonValue::Object(build_workspace_json(config)),
+    );
+    root.insert(
+        "model".to_string(),
+        JsonValue::Object(build_model_json(config)),
+    );
+    root.insert(
+        "capabilities".to_string(),
+        JsonValue::Object(build_capabilities_json(config)),
+    );
+    root.insert(
+        "api_key".to_string(),
+        JsonValue::Object(build_api_key_json(config)),
+    );
+    root.insert(
+        "skills".to_string(),
+        JsonValue::Object(build_skills_json(config)),
+    );
+    root.insert("mcp".to_string(), JsonValue::Object(build_mcp_json(config)));
+    root.insert(
+        "network".to_string(),
+        JsonValue::Object(object([
+            (
+                "probe",
+                JsonValue::String("skipped_in_json_mode".to_string()),
+            ),
+            (
+                "reason",
+                JsonValue::String(
+                    "doctor --json is stable for local supervisors and does not perform live network probes"
+                        .to_string(),
+                ),
+            ),
+        ])),
+    );
+    root.insert(
+        "binaries".to_string(),
+        JsonValue::Object(object([
+            ("curl", JsonValue::Bool(command_available("curl"))),
+            ("gh", JsonValue::Bool(command_available("gh"))),
+        ])),
+    );
+    root
+}
+
+fn build_workspace_json(config: &AppConfig) -> BTreeMap<String, JsonValue> {
+    let config_path = config.workspace.config_path();
+    let session_dir = config.workspace.session_dir();
+    object([
+        (
+            "cwd",
+            JsonValue::String(
+                env::current_dir()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| ".".to_string()),
+            ),
+        ),
+        (
+            "config_path",
+            JsonValue::String(config_path.display().to_string()),
+        ),
+        ("config_present", JsonValue::Bool(config_path.exists())),
+        (
+            "session_dir",
+            JsonValue::String(session_dir.display().to_string()),
+        ),
+        ("session_dir_present", JsonValue::Bool(session_dir.exists())),
+        (
+            "commands_dir",
+            JsonValue::String(config.workspace.commands_dir().display().to_string()),
+        ),
+        (
+            "user_commands_dir",
+            JsonValue::String(config.workspace.user_commands_dir().display().to_string()),
+        ),
+        (
+            "user_instructions_file",
+            JsonValue::String(config.workspace.user_instructions_file.clone()),
+        ),
+    ])
+}
+
+fn build_model_json(config: &AppConfig) -> BTreeMap<String, JsonValue> {
+    let flavor = ApiFlavor::detect(&config.model.base_url);
+    object([
+        ("base_url", JsonValue::String(config.model.base_url.clone())),
+        ("model", JsonValue::String(config.model.model.clone())),
+        (
+            "api_key_env",
+            JsonValue::String(config.model.api_key_env.clone()),
+        ),
+        ("protocol", JsonValue::String(flavor.label().to_string())),
+        (
+            "endpoint",
+            JsonValue::String(flavor.endpoint(&config.model.base_url)),
+        ),
+    ])
+}
+
+fn build_capabilities_json(config: &AppConfig) -> BTreeMap<String, JsonValue> {
+    let capabilities = infer_model_capabilities(&config.model.model, &config.model.base_url);
+    object([
+        (
+            "context_window",
+            JsonValue::String(capabilities.context_window),
+        ),
+        (
+            "max_output_tokens",
+            JsonValue::String(capabilities.max_output_tokens),
+        ),
+        (
+            "coding_optimized",
+            JsonValue::Bool(capabilities.coding_optimized),
+        ),
+        ("image_input", JsonValue::Bool(capabilities.image_input)),
+        ("web_search", JsonValue::Bool(capabilities.web_search)),
+        ("note", JsonValue::String(capabilities.note)),
+    ])
+}
+
+fn build_api_key_json(config: &AppConfig) -> BTreeMap<String, JsonValue> {
+    match env::var(&config.model.api_key_env) {
+        Ok(value) if !value.trim().is_empty() => object([
+            ("env", JsonValue::String(config.model.api_key_env.clone())),
+            ("source", JsonValue::String("env".to_string())),
+            ("present", JsonValue::Bool(true)),
+            ("empty", JsonValue::Bool(false)),
+            ("masked", JsonValue::String("redacted".to_string())),
+        ]),
+        Ok(_) => object([
+            ("env", JsonValue::String(config.model.api_key_env.clone())),
+            ("source", JsonValue::String("env_empty".to_string())),
+            ("present", JsonValue::Bool(false)),
+            ("empty", JsonValue::Bool(true)),
+            ("masked", JsonValue::String(String::new())),
+        ]),
+        Err(_) => object([
+            ("env", JsonValue::String(config.model.api_key_env.clone())),
+            ("source", JsonValue::String("missing".to_string())),
+            ("present", JsonValue::Bool(false)),
+            ("empty", JsonValue::Bool(false)),
+            ("masked", JsonValue::String(String::new())),
+        ]),
+    }
+}
+
+fn build_skills_json(config: &AppConfig) -> BTreeMap<String, JsonValue> {
+    let user_dir = crate::skills::tilde::expand_tilde(&config.workspace.user_skills_dir);
+    let repo_path = crate::skills::paths::resolve_repo_skills_dir();
+    match crate::skills::registry::SkillRegistry::load_dirs(&[
+        repo_path.as_path(),
+        user_dir.as_path(),
+    ]) {
+        Ok((_registry, stats)) => {
+            let mut paths = Vec::new();
+            for (path, count) in stats.by_path {
+                paths.push(JsonValue::Object(object([
+                    ("path", JsonValue::String(path.display().to_string())),
+                    ("present", JsonValue::Bool(path.exists())),
+                    ("count", JsonValue::Number(count.to_string())),
+                ])));
+            }
+            object([
+                ("status", JsonValue::String("ok".to_string())),
+                ("total", JsonValue::Number(stats.total.to_string())),
+                ("paths", JsonValue::Array(paths)),
+                (
+                    "overridden",
+                    JsonValue::Array(
+                        stats
+                            .overridden
+                            .into_iter()
+                            .map(JsonValue::String)
+                            .collect(),
+                    ),
+                ),
+            ])
+        }
+        Err(error) => object([
+            ("status", JsonValue::String("error".to_string())),
+            ("total", JsonValue::Number("0".to_string())),
+            ("paths", JsonValue::Array(Vec::new())),
+            ("overridden", JsonValue::Array(Vec::new())),
+            ("error", JsonValue::String(error.to_string())),
+        ]),
+    }
+}
+
+fn build_mcp_json(config: &AppConfig) -> BTreeMap<String, JsonValue> {
+    let project_file = config.mcp.project_file_path();
+    let user_file = config.mcp.user_file_path();
+    object([
+        ("enabled", JsonValue::Bool(config.mcp.enabled)),
+        (
+            "expose_remote_tools",
+            JsonValue::Bool(config.mcp.expose_remote_tools),
+        ),
+        (
+            "project_file",
+            JsonValue::String(project_file.display().to_string()),
+        ),
+        ("project_present", JsonValue::Bool(project_file.exists())),
+        (
+            "user_file",
+            JsonValue::String(user_file.display().to_string()),
+        ),
+        ("user_present", JsonValue::Bool(user_file.exists())),
+    ])
 }
 
 fn print_workspace_section(config: &AppConfig) {
@@ -77,6 +307,23 @@ fn print_model_section(config: &AppConfig) {
     println!("  api_key_env: {}", config.model.api_key_env);
     println!("  protocol: {}", flavor.label());
     println!("  endpoint: {}", flavor.endpoint(&config.model.base_url));
+}
+
+fn print_capabilities_section(config: &AppConfig) {
+    let capabilities = infer_model_capabilities(&config.model.model, &config.model.base_url);
+    println!();
+    println!("[capabilities]");
+    println!("  context_window: {}", capabilities.context_window);
+    println!("  max_output_tokens: {}", capabilities.max_output_tokens);
+    println!(
+        "  coding_optimized: {}",
+        yes_no(capabilities.coding_optimized)
+    );
+    println!("  image_input: {}", yes_no(capabilities.image_input));
+    println!("  web_search: {}", yes_no(capabilities.web_search));
+    if !capabilities.note.is_empty() {
+        println!("  note: {}", capabilities.note);
+    }
 }
 
 fn print_api_key_section(config: &AppConfig) {
@@ -176,6 +423,87 @@ fn print_hints_section(config: &AppConfig) {
     println!(
         "  Run `deepseek smoke` (or `deepseek smoke --flavor anthropic`) to send a single live request."
     );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelCapabilities {
+    context_window: String,
+    max_output_tokens: String,
+    coding_optimized: bool,
+    image_input: bool,
+    web_search: bool,
+    note: String,
+}
+
+fn infer_model_capabilities(model: &str, base_url: &str) -> ModelCapabilities {
+    let model_lower = model.to_ascii_lowercase();
+    let base_lower = base_url.to_ascii_lowercase();
+    if matches!(
+        model_lower.trim(),
+        "auto" | "auto-deepseek" | "deepseek-auto"
+    ) {
+        return ModelCapabilities {
+            context_window: "1000000".to_string(),
+            max_output_tokens: "provider-default".to_string(),
+            coding_optimized: true,
+            image_input: false,
+            web_search: false,
+            note: "DeepSeek auto router profile; simple tasks use v4-flash, complex planning/review work uses v4-pro."
+                .to_string(),
+        };
+    }
+    if model_lower.contains("codex-mini") {
+        return ModelCapabilities {
+            context_window: "200000".to_string(),
+            max_output_tokens: "100000".to_string(),
+            coding_optimized: true,
+            image_input: true,
+            web_search: false,
+            note:
+                "Codex-mini-style capability profile; verify provider limits with `deepseek smoke`."
+                    .to_string(),
+        };
+    }
+    if model_lower.contains("codex") || model_lower.contains("gpt-5") {
+        return ModelCapabilities {
+            context_window: "400000".to_string(),
+            max_output_tokens: "128000".to_string(),
+            coding_optimized: model_lower.contains("codex"),
+            image_input: true,
+            web_search: false,
+            note:
+                "OpenAI Codex/GPT-5-style profile; exact limits depend on the configured provider."
+                    .to_string(),
+        };
+    }
+    if model_lower.contains("deepseek") || base_lower.contains("deepseek") {
+        return ModelCapabilities {
+            context_window: "provider-default".to_string(),
+            max_output_tokens: "provider-default".to_string(),
+            coding_optimized: model_lower.contains("coder"),
+            image_input: false,
+            web_search: false,
+            note: "`deepseek exec --image` keeps file references for DeepSeek text-only profiles; OpenAI/Anthropic vision-capable profiles send native image payloads.".to_string(),
+        };
+    }
+
+    ModelCapabilities {
+        context_window: "unknown".to_string(),
+        max_output_tokens: "unknown".to_string(),
+        coding_optimized: false,
+        image_input: false,
+        web_search: false,
+        note: "Unknown provider profile; use `deepseek smoke` and provider docs to verify limits."
+            .to_string(),
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 fn existence_label(path: &Path) -> &'static str {
@@ -304,9 +632,26 @@ fn host_from_url(base_url: &str) -> Option<String> {
     }
 }
 
+fn command_available(name: &str) -> bool {
+    Command::new(name)
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn object<const N: usize>(items: [(&str, JsonValue); N]) -> BTreeMap<String, JsonValue> {
+    let mut map = BTreeMap::new();
+    for (key, value) in items {
+        map.insert(key.to_string(), value);
+    }
+    map
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::json::{json_as_object, json_as_string, parse_root_object};
 
     #[test]
     fn detects_anthropic_base_url() {
@@ -369,10 +714,83 @@ mod tests {
     }
 
     #[test]
+    fn infer_model_capabilities_recognizes_codex_and_deepseek_profiles() {
+        let codex = infer_model_capabilities("gpt-5.3-codex", "https://api.openai.com/v1");
+        assert_eq!(codex.context_window, "400000");
+        assert!(codex.image_input);
+        assert!(codex.coding_optimized);
+
+        let deepseek = infer_model_capabilities("deepseek-coder", "https://api.deepseek.com");
+        assert_eq!(deepseek.context_window, "provider-default");
+        assert!(!deepseek.image_input);
+        assert!(deepseek.coding_optimized);
+
+        let auto = infer_model_capabilities("auto", "https://api.deepseek.com");
+        assert_eq!(auto.context_window, "1000000");
+        assert!(auto.coding_optimized);
+    }
+
+    #[test]
     fn print_skills_section_does_not_panic() {
         // Smoke: with a default config, calling print_skills_section should not panic
         // even if the user-skills directory doesn't exist (it usually won't).
         let config = AppConfig::default();
         super::print_skills_section(&config);
+    }
+
+    #[test]
+    fn json_report_is_valid_and_includes_stable_sections() {
+        let config = AppConfig::default();
+        let report = render_json_report(&config);
+        let root = parse_root_object(&report).expect("doctor json should parse");
+
+        assert_eq!(
+            root.get("version").and_then(json_as_string),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert!(root.get("workspace").and_then(json_as_object).is_some());
+        assert!(root.get("model").and_then(json_as_object).is_some());
+        assert!(root.get("capabilities").and_then(json_as_object).is_some());
+        assert!(root.get("api_key").and_then(json_as_object).is_some());
+        assert!(root.get("skills").and_then(json_as_object).is_some());
+        assert!(root.get("mcp").and_then(json_as_object).is_some());
+        assert!(root.get("network").and_then(json_as_object).is_some());
+        assert!(root.get("binaries").and_then(json_as_object).is_some());
+    }
+
+    #[test]
+    fn json_report_skips_live_network_probe() {
+        let config = AppConfig::default();
+        let report = render_json_report(&config);
+        let root = parse_root_object(&report).expect("doctor json should parse");
+        let network = root
+            .get("network")
+            .and_then(json_as_object)
+            .expect("network object should exist");
+
+        assert_eq!(
+            network.get("probe").and_then(json_as_string),
+            Some("skipped_in_json_mode")
+        );
+    }
+
+    #[test]
+    fn json_api_key_status_does_not_include_secret_tail() {
+        let env_name = format!(
+            "DSCODE_DOCTOR_JSON_TEST_KEY_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        );
+        std::env::set_var(&env_name, "sk-test-secret-tail-123456");
+        let mut config = AppConfig::default();
+        config.model.api_key_env = env_name.clone();
+
+        let api_key = build_api_key_json(&config);
+        assert_eq!(
+            api_key.get("masked").and_then(json_as_string),
+            Some("redacted")
+        );
+        assert!(!json_value_to_string(&JsonValue::Object(api_key)).contains("123456"));
+        std::env::remove_var(env_name);
     }
 }

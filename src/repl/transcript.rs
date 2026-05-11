@@ -24,6 +24,14 @@ pub struct Transcript {
     pub turns: Vec<Turn>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactStats {
+    pub before_turns: usize,
+    pub after_turns: usize,
+    pub summarized_turns: usize,
+    pub kept_tail_turns: usize,
+}
+
 impl Transcript {
     pub fn push_user(&mut self, content: impl Into<String>) {
         self.turns.push(Turn {
@@ -73,8 +81,45 @@ use crate::core::observations::summarize_for_kind;
 use crate::model::protocol::ObservationKind;
 
 const RECENT_ASSISTANT_TURNS_KEPT_FULL: usize = 3;
+const COMPACT_KEEP_TAIL_TURNS: usize = 8;
+const COMPACT_SUMMARY_LIMIT: usize = 12 * 1024;
+const COMPACT_PREVIEW_CHARS: usize = 180;
 
 impl Transcript {
+    pub fn compact(&mut self) -> CompactStats {
+        let before_turns = self.turns.len();
+        if before_turns <= COMPACT_KEEP_TAIL_TURNS {
+            return CompactStats {
+                before_turns,
+                after_turns: before_turns,
+                summarized_turns: 0,
+                kept_tail_turns: before_turns,
+            };
+        }
+
+        let kept_tail_turns = COMPACT_KEEP_TAIL_TURNS;
+        let summarized_turns = before_turns - kept_tail_turns;
+        let summary = compact_summary(&self.turns[..summarized_turns], kept_tail_turns);
+        let mut compacted = Vec::with_capacity(kept_tail_turns + 1);
+        compacted.push(Turn {
+            role: TurnRole::Assistant,
+            content: summary,
+            tool_name: None,
+            tool_input: None,
+            tool_output: None,
+            status: ObservationStatus::Ok,
+        });
+        compacted.extend_from_slice(&self.turns[summarized_turns..]);
+        self.turns = compacted;
+
+        CompactStats {
+            before_turns,
+            after_turns: self.turns.len(),
+            summarized_turns,
+            kept_tail_turns,
+        }
+    }
+
     pub fn render_for_prompt(&self) -> String {
         if self.turns.is_empty() {
             return String::new();
@@ -123,32 +168,8 @@ impl Transcript {
                         .as_ref()
                         .map(|o| summarize_for_kind(o, kind))
                         .unwrap_or_default();
-                    let status_label = match turn.status {
-                        crate::model::protocol::ObservationStatus::Ok => "ok",
-                        crate::model::protocol::ObservationStatus::Failed => "failed",
-                    };
-                    let input_repr = if name == "todo_write" {
-                        turn.tool_input
-                            .as_ref()
-                            .and_then(|m| m.get("items"))
-                            .and_then(|s| crate::util::json::parse_json_value(s).ok())
-                            .and_then(|v| match v {
-                                crate::util::json::JsonValue::Array(a) => {
-                                    Some(format!("items=<{} todos>", a.len()))
-                                }
-                                _ => None,
-                            })
-                            .unwrap_or_else(|| "items=<malformed>".to_string())
-                    } else {
-                        turn.tool_input
-                            .as_ref()
-                            .map(|map| {
-                                let parts: Vec<String> =
-                                    map.iter().map(|(k, v)| format!("{k}={v}")).collect();
-                                parts.join(", ")
-                            })
-                            .unwrap_or_default()
-                    };
+                    let status_label = status_label(turn.status);
+                    let input_repr = tool_input_repr(name, turn.tool_input.as_ref());
                     out.push_str(&format!(
                         "[tool] {name}({input_repr}) -> {status_label}\n{trimmed_output}\n\n",
                     ));
@@ -159,6 +180,126 @@ impl Transcript {
         out.push_str("(end of conversation; respond to the latest user message above)\n");
         out
     }
+}
+
+fn compact_summary(turns: &[Turn], kept_tail_turns: usize) -> String {
+    let mut user_turns = 0usize;
+    let mut assistant_turns = 0usize;
+    let mut tool_turns = 0usize;
+    for turn in turns {
+        match turn.role {
+            TurnRole::User => user_turns += 1,
+            TurnRole::Assistant => assistant_turns += 1,
+            TurnRole::Tool => tool_turns += 1,
+        }
+    }
+
+    let mut out = format!(
+        "Compacted conversation summary:\n- Summarized turns: {}\n- Recent turns kept verbatim: {kept_tail_turns}\n- Role counts: user={user_turns}, assistant={assistant_turns}, tool={tool_turns}\n\n",
+        turns.len()
+    );
+
+    for (index, turn) in turns.iter().enumerate() {
+        let turn_number = index + 1;
+        let line = match turn.role {
+            TurnRole::User => format!(
+                "- turn {turn_number} user: {}\n",
+                first_line_preview(&turn.content, COMPACT_PREVIEW_CHARS)
+            ),
+            TurnRole::Assistant => format!(
+                "- turn {turn_number} assistant: {}\n",
+                first_line_preview(&turn.content, COMPACT_PREVIEW_CHARS)
+            ),
+            TurnRole::Tool => {
+                let name = turn.tool_name.as_deref().unwrap_or("?");
+                let kind = ObservationKind::from_tool_name(name);
+                let output = turn
+                    .tool_output
+                    .as_ref()
+                    .map(|o| summarize_for_kind(o, kind))
+                    .unwrap_or_default();
+                format!(
+                    "- turn {turn_number} tool: {name}({}) -> {}; output: {}\n",
+                    tool_input_repr(name, turn.tool_input.as_ref()),
+                    status_label(turn.status),
+                    first_line_preview(&output, COMPACT_PREVIEW_CHARS)
+                )
+            }
+        };
+        if !push_limited(&mut out, &line, COMPACT_SUMMARY_LIMIT) {
+            let _ = push_limited(&mut out, "\n(summary truncated)\n", COMPACT_SUMMARY_LIMIT);
+            break;
+        }
+    }
+
+    out
+}
+
+fn first_line_preview(value: &str, max_chars: usize) -> String {
+    let line = value
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    if line.is_empty() {
+        return "(empty)".to_string();
+    }
+
+    let mut preview = String::new();
+    for (index, ch) in line.chars().enumerate() {
+        if index == max_chars {
+            preview.push_str("...");
+            return preview;
+        }
+        preview.push(ch);
+    }
+    preview
+}
+
+fn push_limited(out: &mut String, value: &str, limit: usize) -> bool {
+    if out.len() + value.len() <= limit {
+        out.push_str(value);
+        return true;
+    }
+    if out.len() >= limit {
+        return false;
+    }
+
+    let mut end = limit - out.len();
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    out.push_str(&value[..end]);
+    false
+}
+
+fn status_label(status: ObservationStatus) -> &'static str {
+    match status {
+        ObservationStatus::Ok => "ok",
+        ObservationStatus::Failed => "failed",
+    }
+}
+
+fn tool_input_repr(name: &str, input: Option<&BTreeMap<String, String>>) -> String {
+    if name == "todo_write" {
+        return input
+            .and_then(|m| m.get("items"))
+            .and_then(|s| crate::util::json::parse_json_value(s).ok())
+            .and_then(|v| match v {
+                crate::util::json::JsonValue::Array(a) => {
+                    Some(format!("items=<{} todos>", a.len()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| "items=<malformed>".to_string());
+    }
+
+    input
+        .map(|map| {
+            let parts: Vec<String> = map.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            parts.join(", ")
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -293,5 +434,79 @@ mod tests {
         );
         let render = transcript.render_for_prompt();
         assert!(render.contains("items=<malformed>"));
+    }
+
+    #[test]
+    fn compact_noops_when_transcript_is_short() {
+        let mut transcript = Transcript::default();
+        transcript.push_user("short");
+        transcript.push_assistant("reply");
+
+        let stats = transcript.compact();
+
+        assert_eq!(
+            stats,
+            CompactStats {
+                before_turns: 2,
+                after_turns: 2,
+                summarized_turns: 0,
+                kept_tail_turns: 2,
+            }
+        );
+        assert_eq!(transcript.turns[0].content, "short");
+        assert_eq!(transcript.turns[1].content, "reply");
+    }
+
+    #[test]
+    fn compact_replaces_old_turns_with_summary_and_keeps_tail() {
+        let mut transcript = Transcript::default();
+        for index in 0..12 {
+            if index == 1 {
+                transcript.push_assistant("old first line\nold secret body");
+            } else {
+                transcript.push_user(format!("turn {index}"));
+            }
+        }
+
+        let stats = transcript.compact();
+
+        assert_eq!(stats.before_turns, 12);
+        assert_eq!(stats.after_turns, 9);
+        assert_eq!(stats.summarized_turns, 4);
+        assert_eq!(stats.kept_tail_turns, 8);
+        assert_eq!(transcript.turns[0].role, TurnRole::Assistant);
+        assert!(transcript.turns[0]
+            .content
+            .contains("Compacted conversation summary"));
+        assert!(transcript.turns[0].content.contains("old first line"));
+        assert!(!transcript.turns[0].content.contains("old secret body"));
+        assert_eq!(transcript.turns[1].content, "turn 4");
+        assert_eq!(transcript.turns.last().unwrap().content, "turn 11");
+    }
+
+    #[test]
+    fn compact_summarises_tool_turns() {
+        let mut transcript = Transcript::default();
+        for index in 0..4 {
+            transcript.push_user(format!("old {index}"));
+        }
+        let mut input = BTreeMap::new();
+        input.insert("path".to_string(), "src/lib.rs".to_string());
+        transcript.push_tool(
+            "read_file",
+            input,
+            "line one\nline two\nline three",
+            ObservationStatus::Failed,
+        );
+        for index in 0..8 {
+            transcript.push_user(format!("tail {index}"));
+        }
+
+        let stats = transcript.compact();
+
+        assert_eq!(stats.summarized_turns, 5);
+        let summary = &transcript.turns[0].content;
+        assert!(summary.contains("tool: read_file(path=src/lib.rs) -> failed"));
+        assert!(summary.contains("line one"));
     }
 }

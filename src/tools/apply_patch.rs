@@ -1,6 +1,9 @@
+use crate::config::types::DiagnosticsConfig;
 use crate::error::app_error;
 use crate::error::AppResult;
+use crate::language::diagnostics::WarmDiagnosticSession;
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fs;
 use std::fs::File;
@@ -9,7 +12,25 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub struct ApplyPatchTool;
+pub struct ApplyPatchTool {
+    pub diagnostics: DiagnosticsConfig,
+    warm_diagnostics: RefCell<Option<WarmDiagnosticSession>>,
+}
+
+impl ApplyPatchTool {
+    pub fn new(diagnostics: DiagnosticsConfig) -> Self {
+        Self {
+            diagnostics,
+            warm_diagnostics: RefCell::new(None),
+        }
+    }
+}
+
+impl Default for ApplyPatchTool {
+    fn default() -> Self {
+        Self::new(DiagnosticsConfig::default())
+    }
+}
 
 impl Tool for ApplyPatchTool {
     fn name(&self) -> &str {
@@ -19,14 +40,27 @@ impl Tool for ApplyPatchTool {
     fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
         if let Some(patch) = input.get("patch") {
             let cwd = input.get("cwd").unwrap_or(".");
-            apply_unified_patch(cwd, patch)
+            apply_unified_patch_with_session(
+                cwd,
+                patch,
+                &self.diagnostics,
+                Some(&self.warm_diagnostics),
+            )
         } else {
-            apply_text_replacement(&input)
+            apply_text_replacement_with_session(
+                &input,
+                &self.diagnostics,
+                Some(&self.warm_diagnostics),
+            )
         }
     }
 }
 
-fn apply_text_replacement(input: &ToolInput) -> AppResult<ToolOutput> {
+fn apply_text_replacement_with_session(
+    input: &ToolInput,
+    diagnostics: &DiagnosticsConfig,
+    warm_session: Option<&RefCell<Option<WarmDiagnosticSession>>>,
+) -> AppResult<ToolOutput> {
     let path = input
         .get("path")
         .ok_or_else(|| app_error("apply_patch requires a path"))?;
@@ -52,13 +86,20 @@ fn apply_text_replacement(input: &ToolInput) -> AppResult<ToolOutput> {
     let updated = apply_replacement(&original, find, replace, replace_all)?;
     fs::write(path, updated)?;
 
-    Ok(ToolOutput {
-        summary: format!(
-            "Updated {} using {} replacement mode.",
-            path.display(),
-            if replace_all { "global" } else { "single" }
-        ),
-    })
+    let mut summary = format!(
+        "Updated {} using {} replacement mode.",
+        path.display(),
+        if replace_all { "global" } else { "single" }
+    );
+    append_post_edit_diagnostics(
+        &mut summary,
+        Path::new("."),
+        &[path.display().to_string()],
+        diagnostics,
+        warm_session,
+    );
+
+    Ok(ToolOutput { summary })
 }
 
 fn apply_replacement(
@@ -84,7 +125,21 @@ fn apply_replacement(
     Ok(updated)
 }
 
-fn apply_unified_patch(cwd: &str, patch: &str) -> AppResult<ToolOutput> {
+#[cfg(test)]
+fn apply_unified_patch(
+    cwd: &str,
+    patch: &str,
+    diagnostics: &DiagnosticsConfig,
+) -> AppResult<ToolOutput> {
+    apply_unified_patch_with_session(cwd, patch, diagnostics, None)
+}
+
+fn apply_unified_patch_with_session(
+    cwd: &str,
+    patch: &str,
+    diagnostics: &DiagnosticsConfig,
+    warm_session: Option<&RefCell<Option<WarmDiagnosticSession>>>,
+) -> AppResult<ToolOutput> {
     if patch.trim().is_empty() {
         return Err(app_error("patch content cannot be empty"));
     }
@@ -127,9 +182,56 @@ fn apply_unified_patch(cwd: &str, patch: &str) -> AppResult<ToolOutput> {
         )));
     }
 
+    let affected_paths = summary.affected_paths_owned();
+    let mut output_summary = format_success_summary(cwd, &summary, &apply.stdout, &apply.stderr);
+    append_post_edit_diagnostics(
+        &mut output_summary,
+        Path::new(cwd),
+        &affected_paths,
+        diagnostics,
+        warm_session,
+    );
+
     Ok(ToolOutput {
-        summary: format_success_summary(cwd, &summary, &apply.stdout, &apply.stderr),
+        summary: output_summary,
     })
+}
+
+fn append_post_edit_diagnostics(
+    summary: &mut String,
+    cwd: &Path,
+    files: &[String],
+    diagnostics: &DiagnosticsConfig,
+    warm_session: Option<&RefCell<Option<WarmDiagnosticSession>>>,
+) {
+    if !diagnostics.post_edit {
+        return;
+    }
+    let report = match warm_session {
+        Some(warm_session) => run_warmed_post_edit_diagnostics(cwd, files, warm_session),
+        None => crate::language::diagnostics::run_diagnostics(cwd, files),
+    };
+    summary.push_str("\n\npost-edit diagnostics:\n");
+    summary.push_str(&report.render_text());
+}
+
+fn run_warmed_post_edit_diagnostics(
+    cwd: &Path,
+    files: &[String],
+    warm_session: &RefCell<Option<WarmDiagnosticSession>>,
+) -> crate::language::diagnostics::DiagnosticReport {
+    let cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let mut slot = warm_session.borrow_mut();
+    let reset = slot
+        .as_ref()
+        .map(|session| session.cwd() != cwd.as_path())
+        .unwrap_or(true);
+    if reset {
+        *slot = Some(WarmDiagnosticSession::new(cwd.clone(), files));
+    }
+    slot.as_mut()
+        .expect("warm diagnostic session initialized")
+        .run(files)
 }
 
 fn run_patch_cli(cwd: &str, patch_path: &Path, dry_run: bool) -> std::io::Result<PatchOutput> {
@@ -295,6 +397,13 @@ impl PatchSummary {
             }
         }
         set
+    }
+
+    fn affected_paths_owned(&self) -> Vec<String> {
+        self.affected_paths()
+            .into_iter()
+            .map(str::to_string)
+            .collect()
     }
 }
 
@@ -597,7 +706,9 @@ mod tests {
             file.display()
         );
 
-        let summary = apply_unified_patch(dir.to_str().unwrap(), &patch).unwrap();
+        let summary =
+            apply_unified_patch(dir.to_str().unwrap(), &patch, &DiagnosticsConfig::default())
+                .unwrap();
         let content = fs::read_to_string(&file).unwrap();
 
         assert!(summary.summary.contains("Applied unified patch"));
@@ -623,7 +734,9 @@ mod tests {
             two.display(),
         );
 
-        let result = apply_unified_patch(dir.to_str().unwrap(), &patch).unwrap();
+        let result =
+            apply_unified_patch(dir.to_str().unwrap(), &patch, &DiagnosticsConfig::default())
+                .unwrap();
         assert!(result.summary.contains("touched 2 files"));
         assert!(result.summary.contains("one.txt"));
         assert!(result.summary.contains("two.txt"));
@@ -635,12 +748,54 @@ mod tests {
     }
 
     #[test]
+    fn post_edit_diagnostics_can_be_enabled_for_unified_patch() {
+        let dir = unique_test_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("demo.txt");
+        fs::write(&file, "alpha\n").unwrap();
+        let patch = "--- demo.txt\n+++ demo.txt\n@@ -1 +1 @@\n-alpha\n+beta\n";
+        let diagnostics = DiagnosticsConfig { post_edit: true };
+
+        let result = apply_unified_patch(dir.to_str().unwrap(), patch, &diagnostics).unwrap();
+
+        assert!(result.summary.contains("post-edit diagnostics:"));
+        assert!(result.summary.contains("diagnostics: unavailable"));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "beta\n");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn apply_patch_tool_uses_warmed_post_edit_diagnostics_path() {
+        let dir = unique_test_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("demo.txt");
+        fs::write(&file, "alpha\n").unwrap();
+        let patch = "--- demo.txt\n+++ demo.txt\n@@ -1 +1 @@\n-alpha\n+beta\n";
+        let tool = ApplyPatchTool::new(DiagnosticsConfig { post_edit: true });
+
+        let result = tool
+            .execute(
+                ToolInput::new()
+                    .with_arg("cwd", dir.display().to_string())
+                    .with_arg("patch", patch),
+            )
+            .unwrap();
+
+        assert!(result.summary.contains("post-edit diagnostics:"));
+        assert!(result.summary.contains("diagnostics: unavailable"));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "beta\n");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn rejects_patch_with_parent_escape() {
         let dir = unique_test_dir();
         fs::create_dir_all(&dir).unwrap();
 
         let patch = "--- a/../escape.txt\n+++ b/../escape.txt\n@@ -1 +1 @@\n-x\n+y\n";
-        let error = apply_unified_patch(dir.to_str().unwrap(), patch).unwrap_err();
+        let error =
+            apply_unified_patch(dir.to_str().unwrap(), patch, &DiagnosticsConfig::default())
+                .unwrap_err();
         assert!(error.to_string().contains("escapes cwd"));
 
         let _ = fs::remove_dir_all(dir);
@@ -652,7 +807,9 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let patch = "garbage without headers\n";
-        let error = apply_unified_patch(dir.to_str().unwrap(), patch).unwrap_err();
+        let error =
+            apply_unified_patch(dir.to_str().unwrap(), patch, &DiagnosticsConfig::default())
+                .unwrap_err();
         assert!(error
             .to_string()
             .contains("did not declare any file headers"));
@@ -666,7 +823,9 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let patch = "--- ghost.txt\n+++ ghost.txt\n@@ -1 +1 @@\n-ghost\n+ghost!\n";
-        let error = apply_unified_patch(dir.to_str().unwrap(), patch).unwrap_err();
+        let error =
+            apply_unified_patch(dir.to_str().unwrap(), patch, &DiagnosticsConfig::default())
+                .unwrap_err();
         let message = error.to_string();
         assert!(message.contains("does not exist"), "got: {message}");
 
@@ -808,7 +967,7 @@ mod tests {
         fs::write(&file, "alpha\r\nbeta gamma\r\ndelta\r\n").unwrap();
 
         let plan = build_single_line_diff(file.to_str().unwrap(), "gamma", "GAMMA").unwrap();
-        apply_unified_patch(&plan.cwd, &plan.patch).unwrap();
+        apply_unified_patch(&plan.cwd, &plan.patch, &DiagnosticsConfig::default()).unwrap();
         assert_eq!(
             fs::read_to_string(&file).unwrap(),
             "alpha\r\nbeta GAMMA\r\ndelta\r\n"
@@ -826,7 +985,7 @@ mod tests {
 
         let plan = build_single_line_diff(file.to_str().unwrap(), "gamma", "GAMMA").unwrap();
 
-        apply_unified_patch(&plan.cwd, &plan.patch).unwrap();
+        apply_unified_patch(&plan.cwd, &plan.patch, &DiagnosticsConfig::default()).unwrap();
         assert_eq!(
             fs::read_to_string(&file).unwrap(),
             "alpha\nbeta GAMMA\ndelta\n"

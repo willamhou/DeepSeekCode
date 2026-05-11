@@ -1,21 +1,26 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::env;
-use std::io::BufRead;
+use std::io::{self, BufRead, Read};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
 
 use crate::config::types::ModelConfig;
 use crate::error::app_error;
 use crate::error::tool_failure;
 use crate::error::AppResult;
 use crate::model::client::ModelClient;
-use crate::model::protocol::{ModelAction, ModelRequest, ModelResponse, TokenUsage};
+use crate::model::protocol::{ImageInput, ModelAction, ModelRequest, ModelResponse, TokenUsage};
 use crate::tools::types::ToolInput;
 use crate::ui::stream::StreamEvents;
+use crate::util::cancel::CancellationCheck;
 use crate::util::json::{
-    json_as_array, json_as_object, json_as_string, json_as_u64, json_escape, parse_root_object,
-    JsonValue,
+    json_as_array, json_as_object, json_as_string, json_as_u64, json_escape, json_value_to_string,
+    parse_root_object, JsonValue,
 };
-use crate::util::sse::read_frame;
+use crate::util::process::StreamingProcess;
+use crate::util::sse::{read_frame, SseFrame};
 
 pub struct DeepSeekClient {
     pub config: ModelConfig,
@@ -27,6 +32,15 @@ impl ModelClient for DeepSeekClient {
         input: ModelRequest,
         events: &mut dyn crate::ui::stream::StreamEvents,
     ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
+        self.respond_with_cancel(input, events, None)
+    }
+
+    fn respond_with_cancel(
+        &self,
+        input: ModelRequest,
+        events: &mut dyn crate::ui::stream::StreamEvents,
+        mut cancel_check: Option<&mut dyn CancellationCheck>,
+    ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
         let api_key = env::var(&self.config.api_key_env)
             .ok()
             .filter(|key| !key.trim().is_empty());
@@ -35,9 +49,10 @@ impl ModelClient for DeepSeekClient {
             // Remote stream attempted: surface success or error directly.
             // Stream errors propagate so partial text isn't double-rendered
             // by the offline fallback (per StreamEvents "exactly once" contract).
-            return self.respond_remote(&input, &api_key, events);
+            return self.respond_remote(&input, &api_key, events, cancel_check);
         }
 
+        poll_model_cancel(&mut cancel_check)?;
         // No API key configured → run offline planner and drive events.
         let response = self.respond_offline(input);
         events.on_text_delta(&response.message);
@@ -45,6 +60,7 @@ impl ModelClient for DeepSeekClient {
         if let ModelAction::CallTool { tool_name, input } = &response.action {
             events.on_tool_call(tool_name, &input.args);
         }
+        poll_model_cancel(&mut cancel_check)?;
         Ok((response, None))
     }
 }
@@ -55,10 +71,16 @@ impl DeepSeekClient {
         input: &ModelRequest,
         api_key: &str,
         events: &mut dyn StreamEvents,
+        cancel_check: Option<&mut dyn CancellationCheck>,
     ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
+        let route = ModelRoute::resolve(&self.config, input);
         match api_flavor(&self.config.base_url) {
-            ApiFlavor::OpenAi => self.respond_remote_openai(input, api_key, events),
-            ApiFlavor::Anthropic => self.respond_remote_anthropic(input, api_key, events),
+            ApiFlavor::OpenAi => {
+                self.respond_remote_openai(input, api_key, events, &route, cancel_check)
+            }
+            ApiFlavor::Anthropic => {
+                self.respond_remote_anthropic(input, api_key, events, &route, cancel_check)
+            }
         }
     }
 
@@ -67,6 +89,8 @@ impl DeepSeekClient {
         input: &ModelRequest,
         api_key: &str,
         events: &mut dyn StreamEvents,
+        route: &ModelRoute,
+        cancel_check: Option<&mut dyn CancellationCheck>,
     ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
         let endpoint = format!(
             "{}/chat/completions",
@@ -74,28 +98,45 @@ impl DeepSeekClient {
         );
         let system_prompt = build_openai_tool_system_prompt(&input.system_prompt);
         let user_prompt = build_user_prompt(input);
+        let user_message = build_openai_user_message(input, &user_prompt, &self.config)?;
         let tools = build_openai_tools(&input.available_tools);
+        let reasoning = route.reasoning;
+        let temperature_field = if reasoning.thinking_enabled() {
+            ""
+        } else {
+            "\"temperature\":0,"
+        };
+        let tool_choice_field = if reasoning.thinking_enabled() {
+            ""
+        } else {
+            "\"tool_choice\":\"auto\","
+        };
+        let reasoning_fields = reasoning.openai_fields();
         let body = format!(
             concat!(
                 "{{",
                 "\"model\":\"{}\",",
-                "\"temperature\":0,",
+                "{}",
+                "{}",
                 "\"max_tokens\":1024,",
                 "\"stream\":true,",
                 "\"stream_options\":{{\"include_usage\":true}},",
-                "\"tool_choice\":\"auto\",",
+                "{}",
                 "\"parallel_tool_calls\":false,",
                 "\"tools\":{},",
                 "\"messages\":[",
                 "{{\"role\":\"system\",\"content\":\"{}\"}},",
-                "{{\"role\":\"user\",\"content\":\"{}\"}}",
+                "{}",
                 "]",
                 "}}"
             ),
-            json_escape(&self.config.model),
+            json_escape(&route.model),
+            temperature_field,
+            reasoning_fields,
+            tool_choice_field,
             tools,
             json_escape(&system_prompt),
-            json_escape(&user_prompt)
+            user_message,
         );
 
         let auth = format!("Authorization: Bearer {api_key}");
@@ -114,17 +155,22 @@ impl DeepSeekClient {
             "-H",
             "Accept: text/event-stream",
             "--data-binary",
-            body.as_str(),
+            "@-",
         ];
 
-        let mut process = match crate::util::process::spawn_streaming("curl", &args) {
-            Ok(p) => p,
-            Err(error) => {
-                events.on_assistant_done("");
-                return Err(error);
-            }
-        };
-        let parsed = parse_openai_stream(&mut process.stdout, events);
+        let mut process =
+            match crate::util::process::spawn_streaming_with_stdin("curl", &args, body.as_str()) {
+                Ok(p) => p,
+                Err(error) => {
+                    events.on_assistant_done("");
+                    return Err(error);
+                }
+            };
+        let parsed = parse_openai_process_stream(&mut process, events, cancel_check);
+        if parsed.is_err() {
+            drop(process);
+            return attach_usage_model(parsed, &route.model);
+        }
         let (status, stderr_tail) = process.finish()?;
         if !status.success() {
             return Err(tool_failure(format!(
@@ -133,7 +179,7 @@ impl DeepSeekClient {
                 stderr_tail.trim()
             )));
         }
-        parsed
+        attach_usage_model(parsed, &route.model)
     }
 
     fn respond_remote_anthropic(
@@ -141,29 +187,42 @@ impl DeepSeekClient {
         input: &ModelRequest,
         api_key: &str,
         events: &mut dyn StreamEvents,
+        route: &ModelRoute,
+        cancel_check: Option<&mut dyn CancellationCheck>,
     ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
         let endpoint = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
         let system_prompt = build_anthropic_tool_system_prompt(&input.system_prompt);
         let user_prompt = build_user_prompt(input);
+        let user_content = build_anthropic_user_content(input, &user_prompt, &self.config)?;
         let tools = build_anthropic_tools(&input.available_tools);
+        let reasoning = route.reasoning;
+        let tool_choice_field = if reasoning.thinking_enabled() {
+            ""
+        } else {
+            "\"tool_choice\":{{\"type\":\"auto\"}},"
+        };
+        let reasoning_fields = reasoning.anthropic_fields();
         let body = format!(
             concat!(
                 "{{",
                 "\"model\":\"{}\",",
                 "\"max_tokens\":1024,",
                 "\"stream\":true,",
-                "\"tool_choice\":{{\"type\":\"auto\"}},",
+                "{}",
+                "{}",
                 "\"tools\":{},",
                 "\"system\":\"{}\",",
                 "\"messages\":[",
-                "{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"{}\"}}]}}",
+                "{{\"role\":\"user\",\"content\":{}}}",
                 "]",
                 "}}"
             ),
-            json_escape(&self.config.model),
+            json_escape(&route.model),
+            tool_choice_field,
+            reasoning_fields,
             tools,
             json_escape(&system_prompt),
-            json_escape(&user_prompt)
+            user_content,
         );
 
         let api_header = format!("x-api-key: {api_key}");
@@ -184,17 +243,22 @@ impl DeepSeekClient {
             "-H",
             "Accept: text/event-stream",
             "--data-binary",
-            body.as_str(),
+            "@-",
         ];
 
-        let mut process = match crate::util::process::spawn_streaming("curl", &args) {
-            Ok(p) => p,
-            Err(error) => {
-                events.on_assistant_done("");
-                return Err(error);
-            }
-        };
-        let parsed = parse_anthropic_stream(&mut process.stdout, events);
+        let mut process =
+            match crate::util::process::spawn_streaming_with_stdin("curl", &args, body.as_str()) {
+                Ok(p) => p,
+                Err(error) => {
+                    events.on_assistant_done("");
+                    return Err(error);
+                }
+            };
+        let parsed = parse_anthropic_process_stream(&mut process, events, cancel_check);
+        if parsed.is_err() {
+            drop(process);
+            return attach_usage_model(parsed, &route.model);
+        }
         let (status, stderr_tail) = process.finish()?;
         if !status.success() {
             return Err(tool_failure(format!(
@@ -203,10 +267,12 @@ impl DeepSeekClient {
                 stderr_tail.trim()
             )));
         }
-        parsed
+        attach_usage_model(parsed, &route.model)
     }
 
     fn respond_offline(&self, input: ModelRequest) -> ModelResponse {
+        let route = ModelRoute::resolve(&self.config, &input);
+        let model_name = route.model.as_str();
         let task = input.task.clone();
         let task_lower = task.to_lowercase();
         let mut used_tools: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
@@ -252,7 +318,7 @@ impl DeepSeekClient {
             return ModelResponse {
                 message: format!(
                     "{} planner is creating a concrete execution plan before acting.",
-                    self.config.model
+                    model_name
                 ),
                 action: ModelAction::CallTool {
                     tool_name: "todo_write".to_string(),
@@ -269,24 +335,30 @@ impl DeepSeekClient {
             return ModelResponse {
                 message: format!(
                     "{} planner prepared the execution plan and is stopping before acting, as requested.",
-                    self.config.model
+                    model_name
                 ),
                 action: ModelAction::Finish,
             };
         }
 
-        if let Some(replan_response) = build_replan_response(&self.config.model, &input) {
+        if let Some(replan_response) = build_replan_response(model_name, &input) {
             return replan_response;
         }
 
         if let Some(recovery_response) = build_recovery_response(
-            &self.config.model,
+            model_name,
             &input,
             &used_tools,
             &succeeded_tools,
             search_query.as_deref(),
         ) {
             return recovery_response;
+        }
+
+        if let Some(git_response) =
+            build_git_history_response(model_name, &input, &used_tools, &task_lower)
+        {
+            return git_response;
         }
 
         if task_requests_failure_repro(&task_lower)
@@ -298,7 +370,7 @@ impl DeepSeekClient {
             return ModelResponse {
                 message: format!(
                     "{} offline planner reproduced the failure and inspected the relevant file, so it is stopping before speculative follow-up.",
-                    self.config.model
+                    model_name
                 ),
                 action: ModelAction::Finish,
             };
@@ -313,7 +385,7 @@ impl DeepSeekClient {
                 return ModelResponse {
                     message: format!(
                         "{} planner is reproducing the failing validation first with `{}`.",
-                        self.config.model, test_command
+                        model_name, test_command
                     ),
                     action: ModelAction::CallTool {
                         tool_name: "run_shell".to_string(),
@@ -329,7 +401,7 @@ impl DeepSeekClient {
             return ModelResponse {
                 message: format!(
                     "{} planner is delegating an independent exploration step to a subagent before continuing the parent plan.",
-                    self.config.model
+                    model_name
                 ),
                 action: ModelAction::CallTool {
                     tool_name: "dispatch_subagent".to_string(),
@@ -352,7 +424,7 @@ impl DeepSeekClient {
                     return ModelResponse {
                         message: format!(
                             "{} planner is reading the most relevant changed file from the PR context `{path}`.",
-                            self.config.model
+                            model_name
                         ),
                         action: ModelAction::CallTool {
                             tool_name: "read_file".to_string(),
@@ -373,10 +445,7 @@ impl DeepSeekClient {
                         || query_looks_code_like(query))
                 {
                     return ModelResponse {
-                        message: format!(
-                            "{} planner is searching for `{query}`.",
-                            self.config.model
-                        ),
+                        message: format!("{} planner is searching for `{query}`.", model_name),
                         action: ModelAction::CallTool {
                             tool_name: "search_text".to_string(),
                             input: ToolInput::new()
@@ -399,7 +468,7 @@ impl DeepSeekClient {
                     return ModelResponse {
                         message: format!(
                             "{} planner is reading the most relevant matched file `{path}`.",
-                            self.config.model
+                            model_name
                         ),
                         action: ModelAction::CallTool {
                             tool_name: "read_file".to_string(),
@@ -425,7 +494,7 @@ impl DeepSeekClient {
                     return ModelResponse {
                         message: format!(
                             "{} planner skipped inspection; applying a unified diff patch directly in {}.",
-                            self.config.model, edit_request.path
+                            model_name, edit_request.path
                         ),
                         action: ModelAction::CallTool {
                             tool_name: "apply_patch".to_string(),
@@ -447,7 +516,7 @@ impl DeepSeekClient {
             return ModelResponse {
                 message: format!(
                     "{} offline planner reviewed the most relevant PR/CI file and is stopping to avoid speculative follow-up without stronger context.",
-                    self.config.model
+                    model_name
                 ),
                 action: ModelAction::Finish,
             };
@@ -460,7 +529,7 @@ impl DeepSeekClient {
             return ModelResponse {
                 message: format!(
                     "{} planner is exploring the repository layout first.",
-                    self.config.model
+                    model_name
                 ),
                 action: ModelAction::CallTool {
                     tool_name: "list_files".to_string(),
@@ -482,7 +551,7 @@ impl DeepSeekClient {
                     return ModelResponse {
                         message: format!(
                             "{} planner is following the subagent hint and searching for `{query}`.",
-                            self.config.model
+                            model_name
                         ),
                         action: ModelAction::CallTool {
                             tool_name: "search_text".to_string(),
@@ -504,7 +573,7 @@ impl DeepSeekClient {
                 return ModelResponse {
                     message: format!(
                         "{} planner is reading the edit target before applying changes.",
-                        self.config.model
+                        model_name
                     ),
                     action: ModelAction::CallTool {
                         tool_name: "read_file".to_string(),
@@ -526,7 +595,7 @@ impl DeepSeekClient {
                     return ModelResponse {
                         message: format!(
                             "{} planner is applying a targeted retry in {} after the failed validation and readback.",
-                            self.config.model, retry_request.path
+                            model_name, retry_request.path
                         ),
                         action: ModelAction::CallTool {
                             tool_name: "apply_patch".to_string(),
@@ -553,7 +622,7 @@ impl DeepSeekClient {
                         return ModelResponse {
                             message: format!(
                                 "{} planner is applying a unified diff patch in {}.",
-                                self.config.model, edit_request.path
+                                model_name, edit_request.path
                             ),
                             action: ModelAction::CallTool {
                                 tool_name: "apply_patch".to_string(),
@@ -567,7 +636,7 @@ impl DeepSeekClient {
                     return ModelResponse {
                         message: format!(
                             "{} planner is applying a direct text replacement in {} (patch mode unavailable for this edit).",
-                            self.config.model, edit_request.path
+                            model_name, edit_request.path
                         ),
                         action: ModelAction::CallTool {
                             tool_name: "apply_patch".to_string(),
@@ -583,7 +652,7 @@ impl DeepSeekClient {
                     return ModelResponse {
                         message: format!(
                             "{} planner retrying with text replacement after patch-mode failure in {}.",
-                            self.config.model, edit_request.path
+                            model_name, edit_request.path
                         ),
                         action: ModelAction::CallTool {
                             tool_name: "apply_patch".to_string(),
@@ -601,10 +670,7 @@ impl DeepSeekClient {
             if let Some(primary_file) = input.primary_file.as_deref() {
                 if !used_tools.contains("read_file") && tool_available("read_file") {
                     return ModelResponse {
-                        message: format!(
-                            "{} planner is reading the primary file.",
-                            self.config.model
-                        ),
+                        message: format!("{} planner is reading the primary file.", model_name),
                         action: ModelAction::CallTool {
                             tool_name: "read_file".to_string(),
                             input: ToolInput::new()
@@ -618,10 +684,7 @@ impl DeepSeekClient {
 
         if successful_apply_patch_count > git_diff_call_count && tool_available("git_diff") {
             return ModelResponse {
-                message: format!(
-                    "{} planner is reviewing the resulting diff.",
-                    self.config.model
-                ),
+                message: format!("{} planner is reviewing the resulting diff.", model_name),
                 action: ModelAction::CallTool {
                     tool_name: "git_diff".to_string(),
                     input: ToolInput::new(),
@@ -642,7 +705,7 @@ impl DeepSeekClient {
                 return ModelResponse {
                     message: format!(
                         "{} planner is validating with `{}`.",
-                        self.config.model, test_command
+                        model_name, test_command
                     ),
                     action: ModelAction::CallTool {
                         tool_name: "run_shell".to_string(),
@@ -656,7 +719,7 @@ impl DeepSeekClient {
 
         let mut message = format!(
             "{} offline planner finished after {} observation(s) for {}.",
-            self.config.model,
+            model_name,
             input.observations.len(),
             input.profile_name
         );
@@ -675,6 +738,191 @@ impl DeepSeekClient {
         ModelResponse {
             message,
             action: ModelAction::Finish,
+        }
+    }
+}
+
+fn attach_usage_model(
+    parsed: AppResult<(ModelResponse, Option<TokenUsage>)>,
+    model: &str,
+) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
+    let (response, usage) = parsed?;
+    Ok((
+        response,
+        usage.map(|mut usage| {
+            if usage.model.is_none() {
+                usage.model = Some(model.to_string());
+            }
+            usage
+        }),
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelRoute {
+    model: String,
+    reasoning: ReasoningTier,
+}
+
+impl ModelRoute {
+    fn resolve(config: &ModelConfig, input: &ModelRequest) -> Self {
+        let complexity = RouteComplexity::classify(input);
+        let model = if is_auto_model(&config.model) {
+            match complexity {
+                RouteComplexity::Simple => "deepseek-v4-flash".to_string(),
+                RouteComplexity::Complex | RouteComplexity::Deep => "deepseek-v4-pro".to_string(),
+            }
+        } else {
+            config.model.trim().to_string()
+        };
+        let reasoning = if is_auto_reasoning(&config.reasoning_effort) {
+            match complexity {
+                RouteComplexity::Simple => ReasoningTier::Off,
+                RouteComplexity::Complex => ReasoningTier::High,
+                RouteComplexity::Deep => ReasoningTier::Max,
+            }
+        } else {
+            ReasoningTier::from_config(&config.reasoning_effort)
+        };
+        Self { model, reasoning }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteComplexity {
+    Simple,
+    Complex,
+    Deep,
+}
+
+impl RouteComplexity {
+    fn classify(input: &ModelRequest) -> Self {
+        let mut score = 0u8;
+        let text = route_text(input);
+        if input.planning_mode {
+            score = score.saturating_add(2);
+        }
+        if !input.image_inputs.is_empty() {
+            score = score.saturating_add(2);
+        }
+        if input
+            .observations
+            .iter()
+            .any(|observation| observation.is_failure())
+        {
+            score = score.saturating_add(2);
+        }
+        if input.observations.len() >= 4 {
+            score = score.saturating_add(2);
+        } else if input.observations.len() >= 2 {
+            score = score.saturating_add(1);
+        }
+        if input.todos.len() >= 4 {
+            score = score.saturating_add(1);
+        }
+        if text.len() >= 2_000 {
+            score = score.saturating_add(2);
+        } else if text.len() >= 800 {
+            score = score.saturating_add(1);
+        }
+        for needle in [
+            "architecture",
+            "architectural",
+            "设计",
+            "架构",
+            "threat model",
+            "security",
+            "安全",
+            "migration",
+            "migrate",
+            "重构",
+            "refactor",
+            "performance",
+            "性能",
+            "review",
+            "audit",
+            "parity",
+            "差距",
+            "roadmap",
+            "multi-step",
+            "complex",
+            "复杂",
+        ] {
+            if text.contains(needle) {
+                score = score.saturating_add(2);
+            }
+        }
+        for needle in ["quick", "simple", "trivial", "read-only", "lookup", "简单"] {
+            if text.contains(needle) {
+                score = score.saturating_sub(1);
+            }
+        }
+
+        if score >= 6 {
+            Self::Deep
+        } else if score >= 3 {
+            Self::Complex
+        } else {
+            Self::Simple
+        }
+    }
+}
+
+fn route_text(input: &ModelRequest) -> String {
+    let mut text = input.task.to_ascii_lowercase();
+    text.push(' ');
+    text.push_str(&input.profile_name.to_ascii_lowercase());
+    for hint in &input.profile_hints {
+        text.push(' ');
+        text.push_str(&hint.to_ascii_lowercase());
+    }
+    text
+}
+
+fn is_auto_model(model: &str) -> bool {
+    matches!(
+        model.trim().to_ascii_lowercase().as_str(),
+        "auto" | "auto-deepseek" | "deepseek-auto"
+    )
+}
+
+fn is_auto_reasoning(value: &str) -> bool {
+    matches!(value.trim().to_ascii_lowercase().as_str(), "auto")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReasoningTier {
+    Off,
+    High,
+    Max,
+}
+
+impl ReasoningTier {
+    fn from_config(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "high" | "low" | "medium" | "enabled" | "on" => Self::High,
+            "max" | "xhigh" => Self::Max,
+            _ => Self::Off,
+        }
+    }
+
+    fn thinking_enabled(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    fn openai_fields(self) -> &'static str {
+        match self {
+            Self::Off => "\"thinking\":{\"type\":\"disabled\"},",
+            Self::High => "\"thinking\":{\"type\":\"enabled\"},\"reasoning_effort\":\"high\",",
+            Self::Max => "\"thinking\":{\"type\":\"enabled\"},\"reasoning_effort\":\"max\",",
+        }
+    }
+
+    fn anthropic_fields(self) -> &'static str {
+        match self {
+            Self::Off => "",
+            Self::High => "\"output_config\":{\"effort\":\"high\"},",
+            Self::Max => "\"output_config\":{\"effort\":\"max\"},",
         }
     }
 }
@@ -705,6 +953,87 @@ fn build_anthropic_tool_system_prompt(base: &str) -> String {
         "{}\nUse the provided tools when a tool is needed. If no tool is needed, reply with a short plain-text summary.",
         base
     )
+}
+
+fn build_openai_user_message(
+    input: &ModelRequest,
+    user_prompt: &str,
+    config: &ModelConfig,
+) -> AppResult<String> {
+    if input.image_inputs.is_empty() || !supports_native_image_input(config) {
+        return Ok(format!(
+            r#"{{"role":"user","content":"{}"}}"#,
+            json_escape(user_prompt)
+        ));
+    }
+
+    let mut parts = vec![format!(
+        r#"{{"type":"text","text":"{}"}}"#,
+        json_escape(user_prompt)
+    )];
+    for image in &input.image_inputs {
+        validate_supported_image_media_type(image)?;
+        parts.push(format!(
+            r#"{{"type":"image_url","image_url":{{"url":"data:{};base64,{}"}}}}"#,
+            json_escape(&image.media_type),
+            image.data_base64,
+        ));
+    }
+    Ok(format!(
+        r#"{{"role":"user","content":[{}]}}"#,
+        parts.join(",")
+    ))
+}
+
+fn build_anthropic_user_content(
+    input: &ModelRequest,
+    user_prompt: &str,
+    config: &ModelConfig,
+) -> AppResult<String> {
+    let mut parts = Vec::new();
+    if supports_native_image_input(config) {
+        for image in &input.image_inputs {
+            validate_supported_image_media_type(image)?;
+            parts.push(format!(
+                r#"{{"type":"image","source":{{"type":"base64","media_type":"{}","data":"{}"}}}}"#,
+                json_escape(&image.media_type),
+                image.data_base64,
+            ));
+        }
+    }
+    parts.push(format!(
+        r#"{{"type":"text","text":"{}"}}"#,
+        json_escape(user_prompt)
+    ));
+    Ok(format!("[{}]", parts.join(",")))
+}
+
+fn supports_native_image_input(config: &ModelConfig) -> bool {
+    let model = config.model.to_ascii_lowercase();
+    let base_url = config.base_url.to_ascii_lowercase();
+    if model.contains("deepseek") || base_url.contains("deepseek") {
+        return false;
+    }
+    match api_flavor(&config.base_url) {
+        ApiFlavor::Anthropic => model.contains("claude"),
+        ApiFlavor::OpenAi => {
+            model.contains("codex")
+                || model.contains("gpt-4")
+                || model.contains("gpt-5")
+                || model.contains("o3")
+                || model.contains("o4")
+        }
+    }
+}
+
+fn validate_supported_image_media_type(image: &ImageInput) -> AppResult<()> {
+    match image.media_type.as_str() {
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" => Ok(()),
+        other => Err(app_error(format!(
+            "unsupported native image media type `{other}` for {}",
+            image.path
+        ))),
+    }
 }
 
 fn build_user_prompt(input: &ModelRequest) -> String {
@@ -744,7 +1073,7 @@ fn build_user_prompt(input: &ModelRequest) -> String {
         );
     }
     if !input.recent_steps.is_empty() {
-        prompt.push_str("Recent agent steps (your prior assistant messages, oldest first — do NOT repeat work already done):\n");
+        prompt.push_str("Recent agent steps (prior assistant messages and reasoning summaries, oldest first — do NOT repeat work already done):\n");
         let base = input.recent_steps.len();
         for (offset, msg) in input.recent_steps.iter().enumerate() {
             // Trim each line; one-line summary per step keeps prompt compact.
@@ -894,6 +1223,7 @@ fn collect_plan_steps(input: &ModelRequest, replan_reason: Option<&str>) -> Vec<
     let search_query = derive_search_query(&input.task);
     let failure_repro_first =
         input.suggested_test_command.is_some() && task_requests_failure_repro(&task_lower);
+    let product_readiness = task_looks_like_product_readiness(&task_lower);
 
     if let Some(reason) = replan_reason {
         let reason = clip_reason_for_todo(reason);
@@ -903,7 +1233,12 @@ fn collect_plan_steps(input: &ModelRequest, replan_reason: Option<&str>) -> Vec<
         ));
     }
 
-    if failure_repro_first && tool_available("run_shell") {
+    if product_readiness {
+        steps.push((
+            "Assess current capability gaps against the target product behavior".to_string(),
+            "Assessing current capability gaps against the target product behavior".to_string(),
+        ));
+    } else if failure_repro_first && tool_available("run_shell") {
         steps.push((
             "Reproduce the failing validation command".to_string(),
             "Reproducing the failing validation command".to_string(),
@@ -930,7 +1265,12 @@ fn collect_plan_steps(input: &ModelRequest, replan_reason: Option<&str>) -> Vec<
         ));
     }
 
-    if tool_available("read_file") {
+    if product_readiness && tool_available("read_file") {
+        steps.push((
+            "Read the implementation and roadmap sections behind the selected gap".to_string(),
+            "Reading the implementation and roadmap sections behind the selected gap".to_string(),
+        ));
+    } else if tool_available("read_file") {
         steps.push((
             "Read the most relevant files".to_string(),
             "Reading the most relevant files".to_string(),
@@ -941,6 +1281,11 @@ fn collect_plan_steps(input: &ModelRequest, replan_reason: Option<&str>) -> Vec<
         steps.push((
             "Report the planned execution steps".to_string(),
             "Reporting the planned execution steps".to_string(),
+        ));
+    } else if product_readiness && tool_available("apply_patch") {
+        steps.push((
+            "Implement the smallest high-impact product gap closure slice".to_string(),
+            "Implementing the smallest high-impact product gap closure slice".to_string(),
         ));
     } else if tool_available("apply_patch") {
         steps.push((
@@ -954,7 +1299,12 @@ fn collect_plan_steps(input: &ModelRequest, replan_reason: Option<&str>) -> Vec<
         ));
     }
 
-    if let Some(command) = input.suggested_test_command.as_deref() {
+    if product_readiness && tool_available("run_shell") {
+        steps.push((
+            "Validate the product gap slice with tests or benchmark".to_string(),
+            "Validating the product gap slice with tests or benchmark".to_string(),
+        ));
+    } else if let Some(command) = input.suggested_test_command.as_deref() {
         if tool_available("run_shell")
             && wants_validation(&task_lower)
             && !task_is_lookup_heavy(&task_lower)
@@ -1232,6 +1582,74 @@ fn build_recovery_response(
     }
 }
 
+fn build_git_history_response(
+    model_name: &str,
+    input: &ModelRequest,
+    used_tools: &std::collections::BTreeSet<&str>,
+    task_lower: &str,
+) -> Option<ModelResponse> {
+    let tool_available = |name: &str| input.available_tools.iter().any(|tool| tool == name);
+    if used_tools.contains("git_log")
+        || used_tools.contains("git_show")
+        || used_tools.contains("git_blame")
+    {
+        return Some(ModelResponse {
+            message: format!(
+                "{model_name} offline planner inspected the requested Git history and is stopping."
+            ),
+            action: ModelAction::Finish,
+        });
+    }
+
+    if task_requests_git_blame(task_lower) && tool_available("git_blame") {
+        let path = derive_git_path(input)?;
+        let mut tool_input = ToolInput::new().with_arg("path", path.clone());
+        if let Some(line) = derive_line_number(task_lower) {
+            let line = line.to_string();
+            tool_input = tool_input
+                .with_arg("line_start", line.clone())
+                .with_arg("line_end", line);
+        }
+        return Some(ModelResponse {
+            message: format!("{model_name} planner is inspecting git blame for `{path}`."),
+            action: ModelAction::CallTool {
+                tool_name: "git_blame".to_string(),
+                input: tool_input,
+            },
+        });
+    }
+
+    if task_requests_git_show(task_lower) && tool_available("git_show") {
+        let mut tool_input = ToolInput::new();
+        if let Some(path) = derive_git_path(input) {
+            tool_input = tool_input.with_arg("path", path);
+        }
+        return Some(ModelResponse {
+            message: format!("{model_name} planner is showing the requested git revision."),
+            action: ModelAction::CallTool {
+                tool_name: "git_show".to_string(),
+                input: tool_input,
+            },
+        });
+    }
+
+    if task_requests_git_log(task_lower) && tool_available("git_log") {
+        let mut tool_input = ToolInput::new().with_arg("limit", "10");
+        if let Some(path) = derive_git_path(input) {
+            tool_input = tool_input.with_arg("path", path);
+        }
+        return Some(ModelResponse {
+            message: format!("{model_name} planner is reading recent git history."),
+            action: ModelAction::CallTool {
+                tool_name: "git_log".to_string(),
+                input: tool_input,
+            },
+        });
+    }
+
+    None
+}
+
 fn latest_recovery_hint(
     observations: &[crate::model::protocol::Observation],
 ) -> Option<ParsedRecoveryHint<'_>> {
@@ -1302,6 +1720,50 @@ fn preferred_read_path(
         return Some(path);
     }
     primary_file.map(str::to_string)
+}
+
+fn task_requests_git_log(task_lower: &str) -> bool {
+    task_lower.contains("git log")
+        || task_lower.contains("commit history")
+        || task_lower.contains("recent commits")
+        || task_lower.contains("recent git commits")
+}
+
+fn task_requests_git_show(task_lower: &str) -> bool {
+    task_lower.contains("git show")
+        || task_lower.contains("show head")
+        || task_lower.contains("show latest commit")
+        || task_lower.contains("show last commit")
+}
+
+fn task_requests_git_blame(task_lower: &str) -> bool {
+    task_lower.contains("git blame") || task_lower.starts_with("blame ")
+}
+
+fn derive_git_path(input: &ModelRequest) -> Option<String> {
+    input
+        .primary_file
+        .clone()
+        .or_else(|| path_like_tokens(&input.task).into_iter().next())
+}
+
+fn derive_line_number(task_lower: &str) -> Option<usize> {
+    for marker in ["line ", "lines "] {
+        let Some(index) = task_lower.find(marker) else {
+            continue;
+        };
+        let digits = task_lower[index + marker.len()..]
+            .chars()
+            .skip_while(|ch| !ch.is_ascii_digit())
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        if let Ok(line) = digits.parse::<usize>() {
+            if line > 0 {
+                return Some(line);
+            }
+        }
+    }
+    None
 }
 
 fn observations_include_repo_signal(observations: &[crate::model::protocol::Observation]) -> bool {
@@ -1715,6 +2177,28 @@ fn task_requests_plan_only(task_lower: &str) -> bool {
         && !task_lower.contains("apply the fix")
 }
 
+fn task_looks_like_product_readiness(task_lower: &str) -> bool {
+    [
+        " more like ",
+        "close the gap",
+        "gap closure",
+        "production-ready",
+        "production ready",
+        "product-ready",
+        "product ready",
+        "productize",
+        "productionize",
+        "ship-ready",
+        "ship ready",
+        "daily coding",
+        "daily use",
+        "match codex",
+        "match claude",
+    ]
+    .iter()
+    .any(|marker| task_lower.contains(marker))
+}
+
 fn task_is_lookup_heavy(task_lower: &str) -> bool {
     [
         "find where",
@@ -1865,6 +2349,22 @@ fn dynamic_mcp_tool_spec(name: &str) -> Option<ToolSpec> {
     if !name.starts_with(crate::tools::mcp::MCP_DYNAMIC_TOOL_PREFIX) {
         return None;
     }
+    if let Some(schema) = crate::tools::mcp::dynamic_tool_schema(name) {
+        if let Some(input_schema) = schema.input_schema.as_deref() {
+            if let Some((properties_json, required_json)) =
+                mcp_input_schema_to_tool_parts(input_schema)
+            {
+                return Some(ToolSpec {
+                    name: Cow::Owned(name.to_string()),
+                    description: Cow::Owned(schema.description.unwrap_or_else(|| {
+                        format!("Call the configured MCP remote tool `{name}` directly.")
+                    })),
+                    properties_json: Cow::Owned(properties_json),
+                    required_json: Cow::Owned(required_json),
+                });
+            }
+        }
+    }
     Some(ToolSpec {
         name: Cow::Owned(name.to_string()),
         description: Cow::Owned(format!(
@@ -1875,6 +2375,23 @@ fn dynamic_mcp_tool_spec(name: &str) -> Option<ToolSpec> {
         ),
         required_json: Cow::Borrowed(r#"[]"#),
     })
+}
+
+fn mcp_input_schema_to_tool_parts(input_schema: &str) -> Option<(String, String)> {
+    let root = crate::util::json::parse_root_object(input_schema).ok()?;
+    if root.get("type").and_then(json_as_string) != Some("object") {
+        return None;
+    }
+    let properties = root.get("properties").and_then(json_as_object)?;
+    let required = root
+        .get("required")
+        .and_then(json_as_array)
+        .cloned()
+        .unwrap_or_default();
+    Some((
+        json_value_to_string(&JsonValue::Object(properties.clone())),
+        json_value_to_string(&JsonValue::Array(required)),
+    ))
 }
 
 const TOOL_SPECS: &[StaticToolSpec] = &[
@@ -1915,6 +2432,30 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
         required_json: r#"[]"#,
     },
     StaticToolSpec {
+        name: "diagnostics",
+        description: "Run local language diagnostics for the workspace or a set of edited files. Uses stdio LSP publishDiagnostics for opened files when available, then falls back to compiler/type-check commands.",
+        properties_json: r#"{"cwd":{"type":"string","description":"Working directory to run diagnostics in. Defaults to `.`."},"paths":{"type":"string","description":"Optional comma-, semicolon-, or newline-separated list of edited paths to scope diagnostics."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "git_log",
+        description: "Show recent git commit history, optionally scoped to a ref or path.",
+        properties_json: r#"{"cwd":{"type":"string","description":"Working directory for the git command. Defaults to `.`."},"limit":{"type":"string","description":"Maximum number of commits to return, encoded as a string integer."},"ref":{"type":"string","description":"Optional git revision or branch to inspect."},"path":{"type":"string","description":"Optional repository path to limit the history to."},"max_chars":{"type":"string","description":"Maximum output characters to return, encoded as a string integer."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "git_show",
+        description: "Show a git commit, tag, or revision with stat and patch.",
+        properties_json: r#"{"cwd":{"type":"string","description":"Working directory for the git command. Defaults to `.`."},"ref":{"type":"string","description":"Git revision, commit SHA, branch, or tag to show. Defaults to HEAD."},"path":{"type":"string","description":"Optional repository path to limit the shown patch to."},"max_chars":{"type":"string","description":"Maximum output characters to return, encoded as a string integer."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "git_blame",
+        description: "Show git blame for a file and optional line range.",
+        properties_json: r#"{"cwd":{"type":"string","description":"Working directory for the git command. Defaults to `.`."},"path":{"type":"string","description":"Repository file path to blame."},"line_start":{"type":"string","description":"Optional first line to blame, encoded as a string integer."},"line_end":{"type":"string","description":"Optional last line to blame, encoded as a string integer."},"limit":{"type":"string","description":"Number of lines to blame when line_end is omitted, encoded as a string integer."},"ref":{"type":"string","description":"Optional git revision to blame from. Defaults to HEAD."},"max_chars":{"type":"string","description":"Maximum output characters to return, encoded as a string integer."}}"#,
+        required_json: r#"["path"]"#,
+    },
+    StaticToolSpec {
         name: "todo_write",
         description: "Replace the entire todo list with a new set of items. Use proactively for tasks with 3+ steps; mark exactly one item as in_progress at a time.",
         properties_json: r#"{"items":{"type":"string","description":"JSON array of objects with fields {content: string, activeForm: string, status: \"pending\"|\"in_progress\"|\"completed\"}. content is imperative form (e.g. \"Run tests\"); activeForm is present continuous (e.g. \"Running tests\")."}}"#,
@@ -1923,8 +2464,14 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
     StaticToolSpec {
         name: "dispatch_subagent",
         description: "Delegate an independent subtask to a child agent with its own budget and todo list.",
-        properties_json: r#"{"task":{"type":"string","description":"Concrete self-contained subtask for the child agent."},"skill":{"type":"string","description":"Optional skill name for the child agent."},"steps":{"type":"string","description":"Optional step budget for the child agent, as a positive integer up to 12."}}"#,
+        properties_json: r#"{"task":{"type":"string","description":"Concrete self-contained subtask for the child agent."},"agent":{"type":"string","description":"Optional custom subagent name from `.dscode/agents` or `~/.config/dscode/agents`."},"skill":{"type":"string","description":"Optional skill name for the child agent."},"steps":{"type":"string","description":"Optional step budget for the child agent, as a positive integer up to 12."}}"#,
         required_json: r#"["task"]"#,
+    },
+    StaticToolSpec {
+        name: "dispatch_subagents",
+        description: "Delegate multiple independent subtasks to child agents in parallel and return consolidated thread summaries.",
+        properties_json: r#"{"tasks":{"type":"string","description":"JSON array of child task objects. Each object requires task and may include agent, skill, and steps, for example [{\"task\":\"review src/api.rs\",\"agent\":\"reviewer\",\"steps\":\"4\"}]. Maximum 4 child tasks."}}"#,
+        required_json: r#"["tasks"]"#,
     },
     StaticToolSpec {
         name: "mcp_list_tools",
@@ -1949,12 +2496,181 @@ struct OpenAiToolAssembly {
     arguments: String,
 }
 
+fn read_cancelable_frame<R: BufRead>(
+    reader: &mut R,
+    cancel_check: &mut Option<&mut dyn CancellationCheck>,
+) -> AppResult<Option<SseFrame>> {
+    poll_model_cancel(cancel_check)?;
+    let frame = read_frame(reader).map_err(|e| app_error(format!("sse read failed: {e}")))?;
+    poll_model_cancel(cancel_check)?;
+    Ok(frame)
+}
+
+fn poll_model_cancel(cancel_check: &mut Option<&mut dyn CancellationCheck>) -> AppResult<()> {
+    if let Some(check) = cancel_check.as_mut() {
+        if check.is_cancelled()? {
+            return Err(app_error("agent run cancelled"));
+        }
+    }
+    Ok(())
+}
+
+fn parse_openai_process_stream(
+    process: &mut StreamingProcess,
+    events: &mut dyn StreamEvents,
+    cancel_check: Option<&mut dyn CancellationCheck>,
+) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
+    if let Some(cancel_check) = cancel_check {
+        let stdout = process.take_stdout()?;
+        let mut reader = CancelAwarePipeReader::spawn(stdout, cancel_check);
+        parse_openai_stream_with_cancel(&mut reader, events, None)
+    } else {
+        parse_openai_stream_with_cancel(process.stdout_mut()?, events, None)
+    }
+}
+
+fn parse_anthropic_process_stream(
+    process: &mut StreamingProcess,
+    events: &mut dyn StreamEvents,
+    cancel_check: Option<&mut dyn CancellationCheck>,
+) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
+    if let Some(cancel_check) = cancel_check {
+        let stdout = process.take_stdout()?;
+        let mut reader = CancelAwarePipeReader::spawn(stdout, cancel_check);
+        parse_anthropic_stream_with_cancel(&mut reader, events, None)
+    } else {
+        parse_anthropic_stream_with_cancel(process.stdout_mut()?, events, None)
+    }
+}
+
+enum PipeChunk {
+    Data(Vec<u8>),
+    Eof,
+    Error(String),
+}
+
+struct CancelAwarePipeReader<'a> {
+    receiver: Receiver<PipeChunk>,
+    buffer: Vec<u8>,
+    position: usize,
+    done: bool,
+    cancel_check: &'a mut dyn CancellationCheck,
+}
+
+impl<'a> CancelAwarePipeReader<'a> {
+    fn spawn<R>(mut reader: R, cancel_check: &'a mut dyn CancellationCheck) -> Self
+    where
+        R: Read + Send + 'static,
+    {
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let mut chunk = [0_u8; 8192];
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) => {
+                        let _ = sender.send(PipeChunk::Eof);
+                        break;
+                    }
+                    Ok(bytes) => {
+                        if sender
+                            .send(PipeChunk::Data(chunk[..bytes].to_vec()))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(PipeChunk::Error(error.to_string()));
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            receiver,
+            buffer: Vec::new(),
+            position: 0,
+            done: false,
+            cancel_check,
+        }
+    }
+
+    fn poll_cancel(&mut self) -> io::Result<()> {
+        if self
+            .cancel_check
+            .is_cancelled()
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?
+        {
+            return Err(io::Error::new(io::ErrorKind::Other, "agent run cancelled"));
+        }
+        Ok(())
+    }
+}
+
+impl Read for CancelAwarePipeReader<'_> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        let available = self.fill_buf()?;
+        if available.is_empty() {
+            return Ok(0);
+        }
+        let bytes = available.len().min(output.len());
+        output[..bytes].copy_from_slice(&available[..bytes]);
+        self.consume(bytes);
+        Ok(bytes)
+    }
+}
+
+impl BufRead for CancelAwarePipeReader<'_> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        loop {
+            if self.position < self.buffer.len() {
+                return Ok(&self.buffer[self.position..]);
+            }
+            self.buffer.clear();
+            self.position = 0;
+            if self.done {
+                return Ok(&[]);
+            }
+            self.poll_cancel()?;
+            match self.receiver.recv_timeout(Duration::from_millis(100)) {
+                Ok(PipeChunk::Data(bytes)) => {
+                    self.buffer = bytes;
+                }
+                Ok(PipeChunk::Eof) | Err(RecvTimeoutError::Disconnected) => {
+                    self.done = true;
+                    return Ok(&[]);
+                }
+                Ok(PipeChunk::Error(error)) => {
+                    return Err(io::Error::new(io::ErrorKind::Other, error));
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.position = self.position.saturating_add(amount).min(self.buffer.len());
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn parse_openai_stream<R: BufRead>(
     reader: &mut R,
     events: &mut dyn StreamEvents,
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
+    parse_openai_stream_with_cancel(reader, events, None)
+}
+
+fn parse_openai_stream_with_cancel<R: BufRead>(
+    reader: &mut R,
+    events: &mut dyn StreamEvents,
+    cancel_check: Option<&mut dyn CancellationCheck>,
+) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     let mut full_text = String::new();
-    let result = parse_openai_stream_inner(reader, events, &mut full_text);
+    let result = parse_openai_stream_inner(reader, events, &mut full_text, cancel_check);
     events.on_assistant_done(&full_text);
     result
 }
@@ -1963,14 +2679,13 @@ fn parse_openai_stream_inner<R: BufRead>(
     reader: &mut R,
     events: &mut dyn StreamEvents,
     full_text: &mut String,
+    mut cancel_check: Option<&mut dyn CancellationCheck>,
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     let mut usage: Option<TokenUsage> = None;
     let mut tool_assembly: Option<OpenAiToolAssembly> = None;
     let mut done_seen = false;
 
-    while let Some(frame) =
-        read_frame(reader).map_err(|e| app_error(format!("sse read failed: {e}")))?
-    {
+    while let Some(frame) = read_cancelable_frame(reader, &mut cancel_check)? {
         let data = frame.data.trim();
         if data.is_empty() {
             continue;
@@ -1992,14 +2707,8 @@ fn parse_openai_stream_inner<R: BufRead>(
         }
 
         if let Some(usage_obj) = root.get("usage").and_then(json_as_object) {
-            if let (Some(p), Some(c)) = (
-                usage_obj.get("prompt_tokens").and_then(json_as_u64),
-                usage_obj.get("completion_tokens").and_then(json_as_u64),
-            ) {
-                usage = Some(TokenUsage {
-                    prompt: p,
-                    completion: c,
-                });
+            if let Some(parsed_usage) = parse_openai_usage_object(usage_obj) {
+                usage = Some(parsed_usage);
             }
         }
 
@@ -2011,6 +2720,11 @@ fn parse_openai_stream_inner<R: BufRead>(
         };
         if let Some(delta) = choice.get("delta").and_then(json_as_object) {
             if !done_seen {
+                if let Some(reasoning) = delta.get("reasoning_content").and_then(json_as_string) {
+                    if !reasoning.is_empty() {
+                        events.on_reasoning_delta(reasoning);
+                    }
+                }
                 if let Some(content) = delta.get("content").and_then(json_as_string) {
                     if !content.is_empty() {
                         events.on_text_delta(content);
@@ -2098,12 +2812,21 @@ struct AnthropicToolAssembly {
     partial_json: String,
 }
 
+#[cfg(test)]
 pub(crate) fn parse_anthropic_stream<R: BufRead>(
     reader: &mut R,
     events: &mut dyn StreamEvents,
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
+    parse_anthropic_stream_with_cancel(reader, events, None)
+}
+
+fn parse_anthropic_stream_with_cancel<R: BufRead>(
+    reader: &mut R,
+    events: &mut dyn StreamEvents,
+    cancel_check: Option<&mut dyn CancellationCheck>,
+) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     let mut full_text = String::new();
-    let result = parse_anthropic_stream_inner(reader, events, &mut full_text);
+    let result = parse_anthropic_stream_inner(reader, events, &mut full_text, cancel_check);
     events.on_assistant_done(&full_text);
     result
 }
@@ -2112,14 +2835,15 @@ fn parse_anthropic_stream_inner<R: BufRead>(
     reader: &mut R,
     events: &mut dyn StreamEvents,
     full_text: &mut String,
+    mut cancel_check: Option<&mut dyn CancellationCheck>,
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     let mut tool_assembly: Option<AnthropicToolAssembly> = None;
     let mut usage_prompt: Option<u64> = None;
     let mut usage_completion: Option<u64> = None;
+    let mut usage_prompt_cache_hit: Option<u64> = None;
+    let mut usage_prompt_cache_miss: Option<u64> = None;
 
-    while let Some(frame) =
-        read_frame(reader).map_err(|e| app_error(format!("sse read failed: {e}")))?
-    {
+    while let Some(frame) = read_cancelable_frame(reader, &mut cancel_check)? {
         let event_kind = frame.event.as_deref().unwrap_or("");
         let data = frame.data.trim();
         if data.is_empty() {
@@ -2135,12 +2859,13 @@ fn parse_anthropic_stream_inner<R: BufRead>(
             "message_start" => {
                 if let Some(message) = root.get("message").and_then(json_as_object) {
                     if let Some(usage_obj) = message.get("usage").and_then(json_as_object) {
-                        if let Some(p) = usage_obj.get("input_tokens").and_then(json_as_u64) {
-                            usage_prompt = Some(p);
-                        }
-                        if let Some(c) = usage_obj.get("output_tokens").and_then(json_as_u64) {
-                            usage_completion = Some(c);
-                        }
+                        apply_anthropic_usage_delta(
+                            usage_obj,
+                            &mut usage_prompt,
+                            &mut usage_completion,
+                            &mut usage_prompt_cache_hit,
+                            &mut usage_prompt_cache_miss,
+                        );
                     }
                 }
             }
@@ -2187,6 +2912,18 @@ fn parse_anthropic_stream_inner<R: BufRead>(
                                 }
                             }
                         }
+                        "thinking_delta" | "reasoning_delta" => {
+                            if let Some(reasoning) = delta
+                                .get("thinking")
+                                .or_else(|| delta.get("reasoning_content"))
+                                .or_else(|| delta.get("text"))
+                                .and_then(json_as_string)
+                            {
+                                if !reasoning.is_empty() {
+                                    events.on_reasoning_delta(reasoning);
+                                }
+                            }
+                        }
                         "input_json_delta" => {
                             if let Some(partial) =
                                 delta.get("partial_json").and_then(json_as_string)
@@ -2209,12 +2946,13 @@ fn parse_anthropic_stream_inner<R: BufRead>(
             }
             "message_delta" => {
                 if let Some(usage_obj) = root.get("usage").and_then(json_as_object) {
-                    if let Some(c) = usage_obj.get("output_tokens").and_then(json_as_u64) {
-                        usage_completion = Some(c);
-                    }
-                    if let Some(p) = usage_obj.get("input_tokens").and_then(json_as_u64) {
-                        usage_prompt = Some(p);
-                    }
+                    apply_anthropic_usage_delta(
+                        usage_obj,
+                        &mut usage_prompt,
+                        &mut usage_completion,
+                        &mut usage_prompt_cache_hit,
+                        &mut usage_prompt_cache_miss,
+                    );
                 }
             }
             "message_stop" => {
@@ -2252,10 +2990,13 @@ fn parse_anthropic_stream_inner<R: BufRead>(
     };
 
     let usage = match (usage_prompt, usage_completion) {
-        (Some(p), Some(c)) => Some(TokenUsage {
-            prompt: p,
-            completion: c,
-        }),
+        (Some(p), Some(c)) => Some(TokenUsage::with_prompt_cache(
+            p,
+            c,
+            usage_prompt_cache_hit.unwrap_or(0),
+            usage_prompt_cache_miss
+                .unwrap_or_else(|| p.saturating_sub(usage_prompt_cache_hit.unwrap_or(0))),
+        )),
         _ => None,
     };
 
@@ -2335,9 +3076,39 @@ fn parse_openai_chat_completion(body: &str) -> AppResult<ModelResponse> {
 fn parse_openai_usage(body: &str) -> Option<TokenUsage> {
     let root = parse_root_object(body).ok()?;
     let usage = json_as_object(root.get("usage")?)?;
+    parse_openai_usage_object(usage)
+}
+
+fn parse_openai_usage_object(usage: &BTreeMap<String, JsonValue>) -> Option<TokenUsage> {
     let prompt = json_as_u64(usage.get("prompt_tokens")?)?;
     let completion = json_as_u64(usage.get("completion_tokens")?)?;
-    Some(TokenUsage { prompt, completion })
+    let (cache_hit, cache_miss) = openai_prompt_cache_tokens(usage, prompt);
+    Some(TokenUsage::with_prompt_cache(
+        prompt, completion, cache_hit, cache_miss,
+    ))
+}
+
+fn openai_prompt_cache_tokens(usage: &BTreeMap<String, JsonValue>, prompt: u64) -> (u64, u64) {
+    let direct_hit = usage.get("prompt_cache_hit_tokens").and_then(json_as_u64);
+    let direct_miss = usage.get("prompt_cache_miss_tokens").and_then(json_as_u64);
+    if direct_hit.is_some() || direct_miss.is_some() {
+        let hit = direct_hit.unwrap_or_else(|| prompt.saturating_sub(direct_miss.unwrap_or(0)));
+        let miss = direct_miss.unwrap_or_else(|| prompt.saturating_sub(hit));
+        return (hit, miss);
+    }
+
+    let details_hit = usage
+        .get("prompt_tokens_details")
+        .and_then(json_as_object)
+        .and_then(|details| {
+            details
+                .get("cached_tokens")
+                .or_else(|| details.get("cache_read_tokens"))
+                .or_else(|| details.get("prompt_cache_hit_tokens"))
+                .and_then(json_as_u64)
+        })
+        .unwrap_or(0);
+    (details_hit, prompt.saturating_sub(details_hit))
 }
 
 #[allow(dead_code)]
@@ -2411,9 +3182,63 @@ fn parse_anthropic_messages(body: &str) -> AppResult<ModelResponse> {
 fn parse_anthropic_usage(body: &str) -> Option<TokenUsage> {
     let root = parse_root_object(body).ok()?;
     let usage = json_as_object(root.get("usage")?)?;
+    parse_anthropic_usage_object(usage)
+}
+
+fn parse_anthropic_usage_object(usage: &BTreeMap<String, JsonValue>) -> Option<TokenUsage> {
     let prompt = json_as_u64(usage.get("input_tokens")?)?;
     let completion = json_as_u64(usage.get("output_tokens")?)?;
-    Some(TokenUsage { prompt, completion })
+    let (cache_hit, cache_miss) = anthropic_prompt_cache_tokens(usage, prompt);
+    Some(TokenUsage::with_prompt_cache(
+        prompt, completion, cache_hit, cache_miss,
+    ))
+}
+
+fn apply_anthropic_usage_delta(
+    usage: &BTreeMap<String, JsonValue>,
+    prompt: &mut Option<u64>,
+    completion: &mut Option<u64>,
+    cache_hit: &mut Option<u64>,
+    cache_miss: &mut Option<u64>,
+) {
+    if let Some(p) = usage.get("input_tokens").and_then(json_as_u64) {
+        *prompt = Some(p);
+    }
+    if let Some(c) = usage.get("output_tokens").and_then(json_as_u64) {
+        *completion = Some(c);
+    }
+    if let Some(hit) = usage
+        .get("prompt_cache_hit_tokens")
+        .or_else(|| usage.get("cache_read_input_tokens"))
+        .and_then(json_as_u64)
+    {
+        *cache_hit = Some(hit);
+    }
+    if let Some(miss) = usage
+        .get("prompt_cache_miss_tokens")
+        .or_else(|| usage.get("cache_creation_input_tokens"))
+        .and_then(json_as_u64)
+    {
+        *cache_miss = Some(miss);
+    }
+}
+
+fn anthropic_prompt_cache_tokens(usage: &BTreeMap<String, JsonValue>, prompt: u64) -> (u64, u64) {
+    let hit = usage
+        .get("prompt_cache_hit_tokens")
+        .or_else(|| usage.get("cache_read_input_tokens"))
+        .and_then(json_as_u64);
+    let miss = usage
+        .get("prompt_cache_miss_tokens")
+        .or_else(|| usage.get("cache_creation_input_tokens"))
+        .and_then(json_as_u64);
+    if hit.is_some() || miss.is_some() {
+        let hit = hit.unwrap_or_else(|| prompt.saturating_sub(miss.unwrap_or(0)));
+        let miss = miss.unwrap_or_else(|| prompt.saturating_sub(hit));
+        (hit, miss)
+    } else {
+        (0, prompt)
+    }
 }
 
 fn json_object_to_string_args(value: &JsonValue) -> AppResult<BTreeMap<String, String>> {
@@ -2626,7 +3451,7 @@ mod tests {
     };
     use crate::config::types::ModelConfig;
     use crate::model::client::ModelClient;
-    use crate::model::protocol::{ModelAction, ModelRequest, Observation};
+    use crate::model::protocol::{ImageInput, ModelAction, ModelRequest, Observation};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2681,9 +3506,21 @@ mod tests {
 
     #[test]
     fn builds_openai_tool_specs_for_known_tools() {
-        let tools = build_openai_tools(&["read_file".to_string(), "git_diff".to_string()]);
+        let tools = build_openai_tools(&[
+            "read_file".to_string(),
+            "git_diff".to_string(),
+            "git_log".to_string(),
+            "git_show".to_string(),
+            "git_blame".to_string(),
+            "diagnostics".to_string(),
+        ]);
         assert!(tools.contains("\"name\":\"read_file\""));
         assert!(tools.contains("\"name\":\"git_diff\""));
+        assert!(tools.contains("\"name\":\"git_log\""));
+        assert!(tools.contains("\"name\":\"git_show\""));
+        assert!(tools.contains("\"name\":\"git_blame\""));
+        assert!(tools.contains("\"name\":\"diagnostics\""));
+        assert!(tools.contains("\"path\""));
     }
 
     #[test]
@@ -2731,6 +3568,18 @@ mod tests {
     }
 
     #[test]
+    fn build_tools_include_dispatch_subagents() {
+        let openai = build_openai_tools(&["dispatch_subagents".to_string()]);
+        assert!(openai.contains("\"name\":\"dispatch_subagents\""));
+        assert!(openai.contains("\"tasks\""));
+        assert!(openai.contains("Maximum 4 child tasks"));
+
+        let anthropic = build_anthropic_tools(&["dispatch_subagents".to_string()]);
+        assert!(anthropic.contains("\"name\":\"dispatch_subagents\""));
+        assert!(anthropic.contains("\"tasks\""));
+    }
+
+    #[test]
     fn build_tool_specs_include_mcp_bridge_tools() {
         let openai = build_openai_tools(&["mcp_list_tools".to_string(), "mcp_call".to_string()]);
         assert!(openai.contains("\"name\":\"mcp_list_tools\""));
@@ -2749,16 +3598,37 @@ mod tests {
 
     #[test]
     fn build_tool_specs_include_dynamic_mcp_tools() {
-        let tools = build_openai_tools(&["mcp__fake__echo".to_string()]);
-        assert!(tools.contains("\"name\":\"mcp__fake__echo\""));
+        let tools = build_openai_tools(&["mcp__fallback__echo".to_string()]);
+        assert!(tools.contains("\"name\":\"mcp__fallback__echo\""));
         assert!(tools.contains("\"arguments\""));
         assert!(tools.contains("Call the configured MCP remote tool"));
+    }
+
+    #[test]
+    fn build_tool_specs_use_cached_dynamic_mcp_schema() {
+        crate::tools::mcp::cache_dynamic_tool_schema(
+            "mcp__schema__read_file",
+            Some("Read a file through MCP".to_string()),
+            Some(
+                r#"{"type":"object","properties":{"path":{"type":"string","description":"File path"}},"required":["path"]}"#
+                    .to_string(),
+            ),
+        );
+
+        let tools = build_openai_tools(&["mcp__schema__read_file".to_string()]);
+
+        assert!(tools.contains("\"name\":\"mcp__schema__read_file\""));
+        assert!(tools.contains("Read a file through MCP"));
+        assert!(tools.contains("\"path\""));
+        assert!(tools.contains("\"required\":[\"path\"]"));
+        assert!(!tools.contains("\"arguments\""));
     }
 
     fn empty_request_with_todos(todos: Vec<crate::core::todos::Todo>) -> ModelRequest {
         ModelRequest {
             system_prompt: String::new(),
             task: "test".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "rust".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -2769,6 +3639,76 @@ mod tests {
             planning_mode: false,
             recent_steps: Vec::new(),
         }
+    }
+
+    fn one_pixel_png_input() -> ImageInput {
+        ImageInput {
+            path: "screenshot.png".to_string(),
+            media_type: "image/png".to_string(),
+            data_base64: "iVBORw0KGgo=".to_string(),
+        }
+    }
+
+    fn openai_vision_config() -> ModelConfig {
+        ModelConfig {
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "gpt-5.3-codex".to_string(),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            reasoning_effort: "off".to_string(),
+        }
+    }
+
+    fn anthropic_vision_config() -> ModelConfig {
+        ModelConfig {
+            base_url: "https://api.anthropic.com/v1/anthropic".to_string(),
+            model: "claude-sonnet-4-5".to_string(),
+            api_key_env: "ANTHROPIC_API_KEY".to_string(),
+            reasoning_effort: "off".to_string(),
+        }
+    }
+
+    #[test]
+    fn openai_user_message_uses_native_image_parts_for_supported_models() {
+        let mut request = empty_request_with_todos(Vec::new());
+        request.image_inputs = vec![one_pixel_png_input()];
+
+        let message =
+            super::build_openai_user_message(&request, "Inspect this", &openai_vision_config())
+                .unwrap();
+
+        assert!(message.contains(r#""role":"user""#));
+        assert!(message.contains(r#""type":"text""#));
+        assert!(message.contains(r#""type":"image_url""#));
+        assert!(message.contains("data:image/png;base64,iVBORw0KGgo="));
+    }
+
+    #[test]
+    fn openai_user_message_keeps_text_for_non_vision_profile() {
+        let mut request = empty_request_with_todos(Vec::new());
+        request.image_inputs = vec![one_pixel_png_input()];
+        let config = ModelConfig::default();
+
+        let message = super::build_openai_user_message(&request, "Inspect this", &config).unwrap();
+
+        assert_eq!(message, r#"{"role":"user","content":"Inspect this"}"#);
+    }
+
+    #[test]
+    fn anthropic_user_content_uses_native_image_blocks_for_supported_models() {
+        let mut request = empty_request_with_todos(Vec::new());
+        request.image_inputs = vec![one_pixel_png_input()];
+
+        let content = super::build_anthropic_user_content(
+            &request,
+            "Inspect this",
+            &anthropic_vision_config(),
+        )
+        .unwrap();
+
+        assert!(content.contains(r#""type":"image""#));
+        assert!(content.contains(r#""media_type":"image/png""#));
+        assert!(content.contains(r#""data":"iVBORw0KGgo=""#));
+        assert!(content.contains(r#""type":"text""#));
     }
 
     #[test]
@@ -2929,6 +3869,96 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_tier_maps_off_high_and_max_to_api_fields() {
+        let off = super::ReasoningTier::from_config("off");
+        assert!(!off.thinking_enabled());
+        assert!(off.openai_fields().contains("\"disabled\""));
+        assert_eq!(off.anthropic_fields(), "");
+
+        let high = super::ReasoningTier::from_config("high");
+        assert!(high.thinking_enabled());
+        assert!(high
+            .openai_fields()
+            .contains("\"reasoning_effort\":\"high\""));
+        assert!(high.anthropic_fields().contains("\"effort\":\"high\""));
+
+        let max = super::ReasoningTier::from_config("xhigh");
+        assert!(max.thinking_enabled());
+        assert!(max.openai_fields().contains("\"reasoning_effort\":\"max\""));
+        assert!(max.anthropic_fields().contains("\"effort\":\"max\""));
+    }
+
+    #[test]
+    fn auto_route_uses_flash_without_reasoning_for_simple_tasks() {
+        let config = ModelConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            model: "auto".to_string(),
+            api_key_env: "DSCODE_TEST_NO_KEY".to_string(),
+            reasoning_effort: "auto".to_string(),
+        };
+        let mut request = empty_request_with_todos(Vec::new());
+        request.task = "quick read-only lookup".to_string();
+
+        let route = super::ModelRoute::resolve(&config, &request);
+
+        assert_eq!(route.model, "deepseek-v4-flash");
+        assert_eq!(route.reasoning, super::ReasoningTier::Off);
+    }
+
+    #[test]
+    fn auto_route_uses_pro_and_max_reasoning_for_deep_tasks() {
+        let config = ModelConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            model: "deepseek-auto".to_string(),
+            api_key_env: "DSCODE_TEST_NO_KEY".to_string(),
+            reasoning_effort: "auto".to_string(),
+        };
+        let mut request = empty_request_with_todos(Vec::new());
+        request.task =
+            "audit the architecture and close the DeepSeek-TUI parity gap with a multi-step plan"
+                .to_string();
+        request.planning_mode = true;
+
+        let route = super::ModelRoute::resolve(&config, &request);
+
+        assert_eq!(route.model, "deepseek-v4-pro");
+        assert_eq!(route.reasoning, super::ReasoningTier::Max);
+    }
+
+    #[test]
+    fn auto_route_respects_explicit_model_and_reasoning() {
+        let config = ModelConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            model: "deepseek-chat".to_string(),
+            api_key_env: "DSCODE_TEST_NO_KEY".to_string(),
+            reasoning_effort: "off".to_string(),
+        };
+        let mut request = empty_request_with_todos(Vec::new());
+        request.task = "complex architecture refactor with failed diagnostics".to_string();
+        request.observations = vec![Observation::failed("diagnostics", "type errors")];
+
+        let route = super::ModelRoute::resolve(&config, &request);
+
+        assert_eq!(route.model, "deepseek-chat");
+        assert_eq!(route.reasoning, super::ReasoningTier::Off);
+    }
+
+    #[test]
+    fn remote_usage_records_resolved_model() {
+        let parsed = Ok((
+            crate::model::protocol::ModelResponse {
+                message: "ok".to_string(),
+                action: ModelAction::Finish,
+            },
+            Some(crate::model::protocol::TokenUsage::new(5, 2)),
+        ));
+
+        let (_, usage) = super::attach_usage_model(parsed, "deepseek-v4-flash").unwrap();
+
+        assert_eq!(usage.unwrap().model.as_deref(), Some("deepseek-v4-flash"));
+    }
+
+    #[test]
     fn deepseek_body_contains_tool_choice_auto() {
         // NEW-2: pin tool_choice="auto" against future PR drift.
         // Inspect the source file directly to confirm the literal is present.
@@ -3067,8 +4097,66 @@ mod tests {
                 base_url: "https://api.deepseek.com".to_string(),
                 model: "deepseek-coder".to_string(),
                 api_key_env: "DSCODE_TEST_NO_KEY".to_string(),
+                reasoning_effort: "off".to_string(),
             },
         }
+    }
+
+    #[test]
+    fn offline_planner_routes_recent_commits_to_git_log() {
+        let mut request = empty_request_with_todos(Vec::new());
+        request.task = "show recent git commits".to_string();
+        request.available_tools = vec!["git_log".to_string(), "list_files".to_string()];
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "git_log");
+                assert_eq!(input.get("limit"), Some("10"));
+            }
+            ModelAction::Finish => panic!("expected git_log"),
+        }
+    }
+
+    #[test]
+    fn offline_planner_routes_git_blame_with_path_and_line() {
+        let mut request = empty_request_with_todos(Vec::new());
+        request.task = "git blame src/tools/registry.rs line 42".to_string();
+        request.available_tools = vec!["git_blame".to_string(), "list_files".to_string()];
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "git_blame");
+                assert_eq!(input.get("path"), Some("src/tools/registry.rs"));
+                assert_eq!(input.get("line_start"), Some("42"));
+                assert_eq!(input.get("line_end"), Some("42"));
+            }
+            ModelAction::Finish => panic!("expected git_blame"),
+        }
+    }
+
+    #[test]
+    fn offline_planner_finishes_after_git_history_tool() {
+        let mut request = empty_request_with_todos(Vec::new());
+        request.task = "show recent git commits".to_string();
+        request.available_tools = vec!["git_log".to_string(), "list_files".to_string()];
+        request.observations = vec![Observation::ok(
+            "git_log",
+            "meta.git_command=log\nmeta.result=ok\nabc123 initial commit",
+        )];
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        assert!(matches!(response.action, ModelAction::Finish));
     }
 
     #[test]
@@ -3082,6 +4170,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: format!("replace \"gamma\" with \"GAMMA\" in {path}"),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -3132,6 +4221,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: format!("replace \"gamma\" with \"GAMMA\" in {path}"),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -3178,6 +4268,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: format!("replace \"alpha\" with \"ALPHA\" in {path}"),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -3224,6 +4315,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: format!("replace \"gamma\" with \"GAMMA\" in {path}"),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -3270,6 +4362,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: format!("replace \"missing\" with \"x\" in {path}"),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -3345,6 +4438,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "CI job `test-rust` failed. Reproduce locally, replace `route_bench_subcommand()` with `route_benchmark_subcommand()` in src/cli/app.rs, and rerun cargo test.".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "rust".to_string(),
             profile_hints: Vec::new(),
             primary_file: Some("src/cli/app.rs".to_string()),
@@ -3390,6 +4484,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "CI job `test-rust` failed. Reproduce locally, replace `route_bench_subcommand()` with `route_benchmark_subcommand()` in src/cli/app.rs, and rerun cargo test.".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "rust".to_string(),
             profile_hints: Vec::new(),
             primary_file: Some("src/cli/app.rs".to_string()),
@@ -3439,6 +4534,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "implement the feature and verify the tests still pass".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -3488,6 +4584,7 @@ mod tests {
             system_prompt: String::new(),
             task: "find where `route_benchmark_subcommand` is implemented and inspect the code"
                 .to_string(),
+            image_inputs: Vec::new(),
             profile_name: "rust".to_string(),
             profile_hints: Vec::new(),
             primary_file: Some("Cargo.toml".to_string()),
@@ -3531,6 +4628,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "inspect repository".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -3561,6 +4659,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "inspect the repo and implement the feature across multiple files".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -3624,6 +4723,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "inspect the repo and implement the feature across multiple files".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -3681,6 +4781,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "plan an end-to-end improvement for benchmark reliability and report the execution steps before acting".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: Some("Cargo.toml".to_string()),
@@ -3721,6 +4822,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "find where dispatch_subagent is implemented and summarize how parent and child loops coordinate".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: Some("Cargo.toml".to_string()),
@@ -3767,6 +4869,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "find where dispatch_subagent is implemented and inspect the code".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: Some("Cargo.toml".to_string()),
@@ -3803,6 +4906,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "inspect the repository layout and continue from the subagent findings".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: Some("Cargo.toml".to_string()),
@@ -3839,6 +4943,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "inspect the repository layout and continue from the subagent findings".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: Some("Cargo.toml".to_string()),
@@ -3878,6 +4983,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "Review pull request #42 'Route benchmark command'. Inspect the touched files before summarizing risks.".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "rust".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -3917,6 +5023,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "Review pull request #42 'Route benchmark command'. Inspect the touched files before summarizing risks.".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "rust".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -3958,6 +5065,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "Address review feedback or apply the requested change in PR #42 'Route benchmark command'. PR diff is the current head; propose minimal additional changes.".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "rust".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -3999,6 +5107,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "Address review feedback or apply the requested change in PR #42 'Route benchmark command'. PR diff is the current head; propose minimal additional changes.".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "rust".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -4029,6 +5138,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "Address review feedback or apply the requested change in PR #42 'Route benchmark command'. PR diff is the current head; propose minimal additional changes.".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "rust".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -4070,6 +5180,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "CI job `test-rust` (run #555) on PR #42 failed at step `cargo test`. Reproduce locally, fix the root cause, and rerun the failing test. Failed log tail follows.".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "rust".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -4108,6 +5219,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "investigate the code path the subagent just found".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -4143,6 +5255,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "inspect the repository layout and continue from the subagent findings".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: Some("Cargo.toml".to_string()),
@@ -4213,6 +5326,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "inspect repository layout and summarize the main entrypoints".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -4252,6 +5366,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "find where missing_symbol is implemented".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -4291,6 +5406,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "find where dispatch_subagent is implemented and inspect the code".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -4330,6 +5446,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "implement the fix and validate with cargo test".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: Some("src/lib.rs".to_string()),
@@ -4368,6 +5485,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "implement the fix and validate with cargo test".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "rust".to_string(),
             profile_hints: Vec::new(),
             primary_file: Some("Cargo.toml".to_string()),
@@ -4416,6 +5534,7 @@ mod tests {
             task:
                 "replace `a - b` with `a * b` in src/lib.rs and validate with cargo test until the tests pass"
                     .to_string(),
+            image_inputs: Vec::new(),
             profile_name: "rust".to_string(),
             profile_hints: vec![],
             primary_file: Some("src/lib.rs".to_string()),
@@ -4464,6 +5583,7 @@ mod tests {
             task:
                 "replace `a - b` with `a * b` in src/math.js and validate with npm test until the tests pass"
                     .to_string(),
+            image_inputs: Vec::new(),
             profile_name: "javascript".to_string(),
             profile_hints: vec![],
             primary_file: Some("src/math.js".to_string()),
@@ -4517,6 +5637,7 @@ mod tests {
             task:
                 "replace `a - b` with `a * b` in src/lib.rs and validate with cargo test until the tests pass"
                     .to_string(),
+            image_inputs: Vec::new(),
             profile_name: "rust".to_string(),
             profile_hints: vec![],
             primary_file: Some("src/lib.rs".to_string()),
@@ -4551,6 +5672,7 @@ mod tests {
             task:
                 "replace `a - b` with `a * b` in src/lib.rs and validate with cargo test until the tests pass"
                     .to_string(),
+            image_inputs: Vec::new(),
             profile_name: "rust".to_string(),
             profile_hints: vec![],
             primary_file: Some("src/lib.rs".to_string()),
@@ -4598,6 +5720,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "fix the lint failure".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -4630,6 +5753,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "investigate the failing test".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -4662,6 +5786,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "investigate why npm test fails in the JavaScript CLI and inspect the failing test file before retrying".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "javascript".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -4714,6 +5839,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "investigate why npm test fails in the JavaScript CLI and inspect the failing test file before retrying".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "javascript".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -4760,6 +5886,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "investigate why npm test fails in the JavaScript CLI and inspect the failing test file before retrying".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "javascript".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -4794,6 +5921,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "investigate why npm test fails in the JavaScript CLI and inspect the failing test file before retrying".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "javascript".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,
@@ -4819,10 +5947,50 @@ mod tests {
     }
 
     #[test]
+    fn build_initial_todo_plan_specializes_product_readiness_requests() {
+        let request = ModelRequest {
+            system_prompt: String::new(),
+            task: "productionize DeepseekCode for daily coding work".to_string(),
+            image_inputs: Vec::new(),
+            profile_name: "rust".to_string(),
+            profile_hints: Vec::new(),
+            primary_file: None,
+            suggested_test_command: None,
+            available_tools: vec![
+                "todo_write".to_string(),
+                "search_text".to_string(),
+                "read_file".to_string(),
+                "apply_patch".to_string(),
+                "run_shell".to_string(),
+                "git_diff".to_string(),
+            ],
+            observations: Vec::new(),
+            todos: Vec::new(),
+            planning_mode: true,
+            recent_steps: Vec::new(),
+        };
+
+        let plan = super::build_initial_todo_plan_json(&request);
+        assert!(
+            plan.contains("Assess current capability gaps against the target product behavior"),
+            "plan: {plan}"
+        );
+        assert!(
+            plan.contains("Implement the smallest high-impact product gap closure slice"),
+            "plan: {plan}"
+        );
+        assert!(
+            plan.contains("Validate the product gap slice with tests or benchmark"),
+            "plan: {plan}"
+        );
+    }
+
+    #[test]
     fn offline_planner_replans_after_replan_hint() {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "implement the fix and validate with cargo test".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: Some("src/lib.rs".to_string()),
@@ -4875,11 +6043,18 @@ mod tests {
     fn parse_openai_usage_extracts_prompt_and_completion() {
         let body = r#"{
             "choices": [{"message": {"role": "assistant", "content": "ok"}}],
-            "usage": {"prompt_tokens": 12, "completion_tokens": 5}
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 5,
+                "prompt_cache_hit_tokens": 7,
+                "prompt_cache_miss_tokens": 5
+            }
         }"#;
         let usage = parse_openai_usage(body).unwrap();
         assert_eq!(usage.prompt, 12);
         assert_eq!(usage.completion, 5);
+        assert_eq!(usage.prompt_cache_hit, 7);
+        assert_eq!(usage.prompt_cache_miss, 5);
     }
 
     #[test]
@@ -4892,26 +6067,39 @@ mod tests {
     fn parse_anthropic_usage_extracts_input_and_output() {
         let body = r#"{
             "content": [{"type":"text","text":"ok"}],
-            "usage": {"input_tokens": 30, "output_tokens": 11}
+            "usage": {
+                "input_tokens": 30,
+                "output_tokens": 11,
+                "cache_read_input_tokens": 9,
+                "cache_creation_input_tokens": 21
+            }
         }"#;
         let usage = parse_anthropic_usage(body).unwrap();
         assert_eq!(usage.prompt, 30);
         assert_eq!(usage.completion, 11);
+        assert_eq!(usage.prompt_cache_hit, 9);
+        assert_eq!(usage.prompt_cache_miss, 21);
     }
 
+    use crate::error::AppResult;
     use crate::ui::stream::{NoopStreamEvents, StreamEvents};
+    use crate::util::cancel::CancellationCheck;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::io::Cursor;
 
     #[derive(Default)]
     struct CapturingEvents {
+        reasoning: RefCell<Vec<String>>,
         chunks: RefCell<Vec<String>>,
         done: RefCell<Vec<String>>,
         tool_calls: RefCell<Vec<(String, BTreeMap<String, String>)>>,
     }
 
     impl StreamEvents for CapturingEvents {
+        fn on_reasoning_delta(&mut self, chunk: &str) {
+            self.reasoning.borrow_mut().push(chunk.to_string());
+        }
         fn on_text_delta(&mut self, chunk: &str) {
             self.chunks.borrow_mut().push(chunk.to_string());
         }
@@ -4925,13 +6113,26 @@ mod tests {
         }
     }
 
+    struct CancelAfterPoll {
+        calls: usize,
+        cancel_after: usize,
+    }
+
+    impl CancellationCheck for CancelAfterPoll {
+        fn is_cancelled(&mut self) -> AppResult<bool> {
+            self.calls += 1;
+            Ok(self.calls >= self.cancel_after)
+        }
+    }
+
     #[test]
     fn parse_openai_stream_emits_text_deltas_and_finishes() {
         let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Thinking\"},\"finish_reason\":null}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"},\"finish_reason\":null}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":null}]}\n\n",
             "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-            "data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n",
+            "data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":1}}}\n\n",
             "data: [DONE]\n\n",
         );
         let mut cur = Cursor::new(body.as_bytes().to_vec());
@@ -4942,10 +6143,61 @@ mod tests {
         let usage = usage.expect("usage");
         assert_eq!(usage.prompt, 3);
         assert_eq!(usage.completion, 2);
+        assert_eq!(usage.prompt_cache_hit, 1);
+        assert_eq!(usage.prompt_cache_miss, 2);
         let chunks = events.chunks.borrow();
         assert_eq!(*chunks, vec!["Hel".to_string(), "lo".to_string()]);
+        let reasoning = events.reasoning.borrow();
+        assert_eq!(*reasoning, vec!["Thinking".to_string()]);
         assert_eq!(events.done.borrow().len(), 1);
         assert!(events.tool_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn parse_openai_stream_with_cancel_stops_between_frames() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut cur = Cursor::new(body.as_bytes().to_vec());
+        let mut events = CapturingEvents::default();
+        let mut cancel = CancelAfterPoll {
+            calls: 0,
+            cancel_after: 3,
+        };
+        let error =
+            super::parse_openai_stream_with_cancel(&mut cur, &mut events, Some(&mut cancel))
+                .unwrap_err();
+
+        assert!(error.to_string().contains("agent run cancelled"));
+        assert_eq!(*events.chunks.borrow(), vec!["Hel".to_string()]);
+        assert_eq!(*events.done.borrow(), vec!["Hel".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_openai_process_stream_with_cancel_stops_blocked_read() {
+        let mut process = crate::util::process::spawn_streaming(
+            "sh",
+            &["-c", "sleep 5; printf 'data: [DONE]\\n\\n'"],
+        )
+        .unwrap();
+        let mut events = CapturingEvents::default();
+        let mut cancel = CancelAfterPoll {
+            calls: 0,
+            cancel_after: 2,
+        };
+        let started = std::time::Instant::now();
+        let error =
+            super::parse_openai_process_stream(&mut process, &mut events, Some(&mut cancel))
+                .unwrap_err();
+
+        assert!(error.to_string().contains("agent run cancelled"));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "cancel should not wait for the blocked producer"
+        );
     }
 
     #[test]
@@ -5001,8 +6253,9 @@ mod tests {
     #[test]
     fn parse_anthropic_stream_emits_text_deltas_and_message_stop() {
         let body = concat!(
-            "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+            "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":0,\"cache_read_input_tokens\":4}}}\n\n",
             "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Reasoning\"}}\n\n",
             "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi \"}}\n\n",
             "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"there\"}}\n\n",
             "event: content_block_stop\ndata: {\"index\":0}\n\n",
@@ -5017,8 +6270,12 @@ mod tests {
         let usage = usage.expect("usage");
         assert_eq!(usage.prompt, 10);
         assert_eq!(usage.completion, 2);
+        assert_eq!(usage.prompt_cache_hit, 4);
+        assert_eq!(usage.prompt_cache_miss, 6);
         let chunks = events.chunks.borrow();
         assert_eq!(*chunks, vec!["hi ".to_string(), "there".to_string()]);
+        let reasoning = events.reasoning.borrow();
+        assert_eq!(*reasoning, vec!["Reasoning".to_string()]);
     }
 
     #[test]
@@ -5358,6 +6615,7 @@ mod tests {
         let request = ModelRequest {
             system_prompt: String::new(),
             task: "say hi".to_string(),
+            image_inputs: Vec::new(),
             profile_name: "generic".to_string(),
             profile_hints: Vec::new(),
             primary_file: None,

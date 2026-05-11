@@ -1,0 +1,13 @@
+[Unit]
+Description=DeepseekCode runtime task daemon
+After=network.target deepseek-runtime.service
+
+[Service]
+Type=simple
+WorkingDirectory=__WORKDIR__
+ExecStart=/usr/bin/env __DEEPSEEK_BIN__ agents daemon --interval-ms __INTERVAL_MS__ --json
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

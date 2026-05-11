@@ -1,8 +1,11 @@
+pub mod agents;
 pub mod context;
 pub mod hooks;
 pub mod instructions;
 pub mod loop_runtime;
 pub mod memory;
 pub mod observations;
+pub mod rollback;
+pub mod runtime;
 pub mod session;
 pub mod todos;

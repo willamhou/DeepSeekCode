@@ -1,11 +1,14 @@
 use crate::error::app_error;
 use crate::error::AppResult;
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
+use crate::util::cancel::{check_cancelled, CancellationCheck};
 use std::ffi::OsString;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub struct RunShellTool;
 
@@ -15,6 +18,24 @@ impl Tool for RunShellTool {
     }
 
     fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
+        self.execute_inner(input, None)
+    }
+
+    fn execute_with_cancel(
+        &self,
+        input: ToolInput,
+        cancel_check: Option<&mut dyn CancellationCheck>,
+    ) -> AppResult<ToolOutput> {
+        self.execute_inner(input, cancel_check)
+    }
+}
+
+impl RunShellTool {
+    fn execute_inner(
+        &self,
+        input: ToolInput,
+        cancel_check: Option<&mut dyn CancellationCheck>,
+    ) -> AppResult<ToolOutput> {
         let command = input
             .get("command")
             .ok_or_else(|| app_error("run_shell requires a command"))?;
@@ -31,7 +52,7 @@ impl Tool for RunShellTool {
         }
         let pycache_prefix = configure_python_cache_prefix(&mut process, command);
 
-        let output_result = process.output();
+        let output_result = run_command_output(process, cancel_check);
         if let Some(prefix) = pycache_prefix {
             let _ = fs::remove_dir_all(prefix);
         }
@@ -82,6 +103,95 @@ impl Tool for RunShellTool {
         }
 
         Ok(ToolOutput { summary })
+    }
+}
+
+fn run_command_output(
+    mut process: Command,
+    mut cancel_check: Option<&mut dyn CancellationCheck>,
+) -> AppResult<Output> {
+    configure_process_group(&mut process);
+    process.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = process.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| app_error("run_shell child produced no stdout pipe"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| app_error("run_shell child produced no stderr pipe"))?;
+    let stdout_reader = spawn_pipe_reader(stdout);
+    let stderr_reader = spawn_pipe_reader(stderr);
+
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Output {
+                status,
+                stdout: join_pipe_reader(stdout_reader, "stdout")?,
+                stderr: join_pipe_reader(stderr_reader, "stderr")?,
+            });
+        }
+        if let Some(check) = cancel_check.as_deref_mut() {
+            if let Err(error) = check_cancelled(Some(check)) {
+                kill_child_process_group(&mut child);
+                let _ = child.wait();
+                let _ = join_pipe_reader(stdout_reader, "stdout");
+                let _ = join_pipe_reader(stderr_reader, "stderr");
+                return Err(error);
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(unix)]
+fn configure_process_group(process: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    process.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_process: &mut Command) {}
+
+fn kill_child_process_group(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        const SIGKILL: i32 = 9;
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        let process_group = -(child.id() as i32);
+        unsafe {
+            let _ = kill(process_group, SIGKILL);
+        }
+    }
+    let _ = child.kill();
+}
+
+fn spawn_pipe_reader<R>(mut reader: R) -> thread::JoinHandle<std::io::Result<Vec<u8>>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf)?;
+        Ok(buf)
+    })
+}
+
+fn join_pipe_reader(
+    handle: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    stream_name: &str,
+) -> AppResult<Vec<u8>> {
+    match handle.join() {
+        Ok(Ok(buf)) => Ok(buf),
+        Ok(Err(error)) => Err(app_error(format!(
+            "failed to read run_shell {stream_name}: {error}"
+        ))),
+        Err(_) => Err(app_error(format!(
+            "run_shell {stream_name} reader panicked"
+        ))),
     }
 }
 
@@ -336,6 +446,19 @@ pub fn is_safe_shell_command(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
+    struct CancelAfter {
+        calls: usize,
+        cancel_after: usize,
+    }
+
+    impl CancellationCheck for CancelAfter {
+        fn is_cancelled(&mut self) -> AppResult<bool> {
+            self.calls += 1;
+            Ok(self.calls >= self.cancel_after)
+        }
+    }
 
     #[test]
     fn classify_command_kind_recognizes_test_and_build_commands() {
@@ -412,5 +535,30 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn execute_with_cancel_kills_running_command() {
+        let tool = RunShellTool;
+        let mut cancel = CancelAfter {
+            calls: 0,
+            cancel_after: 2,
+        };
+        let started = Instant::now();
+        let result = Tool::execute_with_cancel(
+            &tool,
+            ToolInput::new()
+                .with_arg("command", "tail -f /dev/null")
+                .with_arg("cwd", "."),
+            Some(&mut cancel),
+        );
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("agent run cancelled"));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cancel should kill the running shell promptly"
+        );
+        assert!(cancel.calls >= 2);
     }
 }

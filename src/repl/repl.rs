@@ -18,6 +18,7 @@ pub struct Repl {
     pub tokens_prompt: u64,
     pub tokens_completion: u64,
     pub todos: std::rc::Rc<std::cell::RefCell<crate::core::todos::TodoList>>,
+    pub last_rollback_snapshot_id: Option<String>,
 }
 
 impl Repl {
@@ -32,6 +33,7 @@ impl Repl {
             todos: std::rc::Rc::new(std::cell::RefCell::new(
                 crate::core::todos::TodoList::default(),
             )),
+            last_rollback_snapshot_id: None,
         }
     }
 
@@ -89,6 +91,10 @@ impl Repl {
     }
 
     fn dispatch_prompt(&mut self, prompt: String) -> AppResult<ControlFlow> {
+        let snapshot_id = self.create_turn_snapshot(&prompt);
+        if snapshot_id.is_some() {
+            self.last_rollback_snapshot_id = snapshot_id.clone();
+        }
         self.transcript.push_user(&prompt);
         let prompt = self.transcript.render_for_prompt();
         let context = crate::core::context::TaskContext::new(prompt, self.skill.clone());
@@ -105,6 +111,7 @@ impl Repl {
 
         self.tokens_prompt += result.usage.prompt;
         self.tokens_completion += result.usage.completion;
+        let had_tool_events = !result.tool_events.is_empty();
         for event in result.tool_events {
             self.transcript
                 .push_tool(event.tool_name, event.input, event.output, event.status);
@@ -112,8 +119,38 @@ impl Repl {
         if !result.final_message.is_empty() {
             self.transcript.push_assistant(result.final_message);
         }
+        if had_tool_events {
+            if let Some(snapshot_id) = snapshot_id {
+                println!("rollback snapshot: {snapshot_id} (/revert_turn last --apply)");
+            }
+        }
         Ok(ControlFlow::Continue)
     }
+
+    fn create_turn_snapshot(&self, prompt: &str) -> Option<String> {
+        let cwd = std::env::current_dir().ok()?;
+        let store = crate::core::rollback::RollbackStore::new(
+            std::path::PathBuf::from(&self.config.workspace.config_dir).join("rollback"),
+        );
+        store
+            .create_snapshot(&cwd, repl_turn_snapshot_label(prompt))
+            .ok()
+            .map(|snapshot| snapshot.id)
+    }
+}
+
+fn repl_turn_snapshot_label(prompt: &str) -> String {
+    let mut summary = prompt
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(80)
+        .collect::<String>();
+    if summary.is_empty() {
+        summary = "empty prompt".to_string();
+    }
+    format!("REPL turn before: {summary}")
 }
 
 fn invoked_binary_name() -> String {
@@ -141,6 +178,7 @@ mod tests {
         assert_eq!(r.tokens_prompt, 0);
         assert_eq!(r.tokens_completion, 0);
         assert!(r.skill.is_none());
+        assert!(r.last_rollback_snapshot_id.is_none());
     }
 
     #[test]
@@ -196,5 +234,13 @@ mod tests {
     fn invoked_binary_name_falls_back_to_deepseek_when_missing() {
         let name = invoked_binary_name();
         assert!(!name.trim().is_empty());
+    }
+
+    #[test]
+    fn repl_turn_snapshot_label_compacts_prompt() {
+        let label = repl_turn_snapshot_label("  edit   the file\n\nand run tests  ");
+        assert_eq!(label, "REPL turn before: edit the file and run tests");
+        let long = repl_turn_snapshot_label(&"x ".repeat(200));
+        assert!(long.len() <= "REPL turn before: ".len() + 80);
     }
 }

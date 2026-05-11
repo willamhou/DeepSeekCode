@@ -46,6 +46,39 @@ workdir = "fixtures/rust-cli-mini"
 notes = "Real workdir fixture for search_text -> read_file on a small Rust CLI"
 budget = 6
 
+name = "git-log-recent-history"
+task = "show recent git commits"
+category = "read_only"
+expect_tool = "git_log"
+expect_tool_sequence = ["git_log"]
+expect_last_tool_output_contains = "meta.result=ok"
+max_tool_calls = 1
+max_failed_tools = 0
+notes = "Read-only Git history tool route for recent commit inspection"
+budget = 2
+
+name = "git-show-latest-commit"
+task = "show latest commit with git show"
+category = "read_only"
+expect_tool = "git_show"
+expect_tool_sequence = ["git_show"]
+expect_last_tool_output_contains = "meta.result=ok"
+max_tool_calls = 1
+max_failed_tools = 0
+notes = "Read-only Git show tool route for latest commit inspection"
+budget = 2
+
+name = "git-blame-registry-line"
+task = "git blame src/tools/registry.rs line 1"
+category = "read_only"
+expect_tool = "git_blame"
+expect_tool_sequence = ["git_blame"]
+expect_last_tool_output_contains = "meta.result=ok"
+max_tool_calls = 1
+max_failed_tools = 0
+notes = "Read-only Git blame tool route for file ownership/history inspection"
+budget = 2
+
 name = "fixture-write-validate-rust-mini"
 task = "replace `a - b` with `a + b` in src/lib.rs and validate with cargo test"
 category = "write_validate"
@@ -361,6 +394,222 @@ notes = "Seeded subagent v2 summary should drive parent next-action merge-back"
 seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:src/tools/dispatch_subagent.rs\nmeta.child_files=src/tools/dispatch_subagent.rs\nmeta.child_final_message=read the subagent implementation"
 budget = 3
 
+name = "subagent-read-loop-runtime"
+task = "continue from the subagent findings and inspect the next implementation file"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:AgentLoopOptions"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to loop runtime"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:src/core/loop_runtime.rs\nmeta.child_files=src/core/loop_runtime.rs\nmeta.child_final_message=read the runtime implementation"
+budget = 2
+
+name = "subagent-read-model-client"
+task = "continue from the subagent findings and inspect the model client implementation"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:DeepSeekClient"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to model transport"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:src/model/deepseek.rs\nmeta.child_files=src/model/deepseek.rs\nmeta.child_final_message=read the DeepSeek transport"
+budget = 2
+
+name = "subagent-read-cli-app"
+task = "inspect the repository layout and continue from the subagent findings"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:pub struct Cli"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to CLI parser"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:src/cli/app.rs\nmeta.child_files=src/cli/app.rs\nmeta.child_final_message=read the CLI parser"
+budget = 2
+
+name = "subagent-read-exec-command"
+task = "continue from the subagent findings and inspect the exec command"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:ExecAction"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to scriptable exec"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:src/cli/commands/exec.rs\nmeta.child_files=src/cli/commands/exec.rs\nmeta.child_final_message=read the exec command"
+budget = 2
+
+name = "subagent-read-hooks"
+task = "continue from the subagent findings and inspect the hook implementation"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:HookEvent"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to hooks"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:src/core/hooks.rs\nmeta.child_files=src/core/hooks.rs\nmeta.child_final_message=read the hooks implementation"
+budget = 2
+
+name = "subagent-read-mcp-tool"
+task = "inspect the repository layout and continue from the subagent findings"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:McpDynamicToolSchema"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to MCP dynamic tools"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:src/tools/mcp.rs\nmeta.child_files=src/tools/mcp.rs\nmeta.child_final_message=read the MCP tool implementation"
+budget = 2
+
+name = "subagent-read-registry"
+task = "continue from the subagent findings and inspect the tool registry"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:ToolRegistry"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to tool registry"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:src/tools/registry.rs\nmeta.child_files=src/tools/registry.rs\nmeta.child_final_message=read the tool registry"
+budget = 2
+
+name = "subagent-read-doctor"
+task = "continue from the subagent findings and inspect the doctor command"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:DeepseekCode doctor"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to doctor capability reporting"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:src/cli/commands/doctor.rs\nmeta.child_files=src/cli/commands/doctor.rs\nmeta.child_final_message=read the doctor command"
+budget = 2
+
+name = "subagent-read-agents-doc"
+task = "continue from the subagent findings and inspect the custom subagent docs"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:Custom Subagents"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to custom agent docs"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:docs/agents.md\nmeta.child_files=docs/agents.md\nmeta.child_final_message=read the custom subagent docs"
+budget = 2
+
+name = "subagent-read-exec-doc"
+task = "continue from the subagent findings and inspect the scriptable exec docs"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:Scriptable Exec CLI"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to exec docs"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:docs/exec.md\nmeta.child_files=docs/exec.md\nmeta.child_final_message=read the exec docs"
+budget = 2
+
+name = "subagent-read-roadmap"
+task = "continue from the subagent findings and inspect the roadmap"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:Roadmap"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to roadmap context"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:docs/roadmap.md\nmeta.child_files=docs/roadmap.md\nmeta.child_final_message=read the roadmap"
+budget = 2
+
+name = "subagent-read-benchmark"
+task = "continue from the subagent findings and inspect the benchmark implementation"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:BenchmarkArgs"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to benchmark command"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:src/cli/commands/benchmark.rs\nmeta.child_files=src/cli/commands/benchmark.rs\nmeta.child_final_message=read the benchmark command"
+budget = 2
+
+name = "subagent-read-dogfood"
+task = "continue from the subagent findings and inspect the dogfood command"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:DogfoodAction"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to dogfood command"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:src/cli/commands/dogfood.rs\nmeta.child_files=src/cli/commands/dogfood.rs\nmeta.child_final_message=read the dogfood command"
+budget = 2
+
+name = "subagent-read-update"
+task = "continue from the subagent findings and inspect the update command"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:DeepseekCode update"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to update command"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:src/cli/commands/update.rs\nmeta.child_files=src/cli/commands/update.rs\nmeta.child_final_message=read the update command"
+budget = 2
+
+name = "subagent-read-agent-loader"
+task = "continue from the subagent findings and inspect the custom agent loader"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:AgentSpec"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to custom agent loader"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:src/core/agents.rs\nmeta.child_files=src/core/agents.rs\nmeta.child_final_message=read the custom agent loader"
+budget = 2
+
+name = "subagent-read-repl-slash"
+task = "continue from the subagent findings and inspect the slash command implementation"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:try_handle_slash"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to REPL slash commands"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:src/repl/slash.rs\nmeta.child_files=src/repl/slash.rs\nmeta.child_final_message=read the slash command implementation"
+budget = 2
+
+name = "subagent-read-install-doc"
+task = "continue from the subagent findings and inspect the install docs"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:安装"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to install docs"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:docs/install.md\nmeta.child_files=docs/install.md\nmeta.child_final_message=read the install docs"
+budget = 2
+
+name = "subagent-read-repl-doc"
+task = "inspect the repository layout and continue from the subagent findings"
+category = "subagent"
+expect_tool = "read_file"
+expect_tool_sequence = ["read_file"]
+expect_tool_output_contains = "read_file:REPL"
+max_tool_calls = 2
+max_failed_tools = 0
+notes = "Seeded subagent summary should route parent readback to REPL docs"
+seed_observations = "dispatch_subagent:ok:meta.child_outcome=ok\nmeta.child_next_action=read_file:docs/repl.md\nmeta.child_files=docs/repl.md\nmeta.child_final_message=read the REPL docs"
+budget = 2
+
 name = "recover-empty-search"
 task = "find where zzzxq_missing_symbol_20260505 is implemented, and if there are no matches inspect the repository layout instead"
 category = "recovery"
@@ -433,6 +682,16 @@ task = "make DeepseekCode more like Claude Code"
 category = "planning"
 assertion_bundle = "planning_todo_only"
 notes = "Product gap closure requests should trigger a first-turn todo plan before inspect/edit actions"
+budget = 1
+max_tool_calls = 1
+max_failed_tools = 0
+
+name = "plan-product-readiness"
+task = "productionize DeepseekCode for daily coding work"
+category = "planning"
+assertion_bundle = "planning_todo_only"
+expect_tool_output_contains = "todo_write:Assessing current capability gaps against the target product behavior"
+notes = "Product readiness requests should trigger a product-gap audit plan before inspect/edit actions"
 budget = 1
 max_tool_calls = 1
 max_failed_tools = 0

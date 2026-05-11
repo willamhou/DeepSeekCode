@@ -1,0 +1,36 @@
+{
+  "name": "@deepseek-code/cli",
+  "version": "0.1.0",
+  "description": "npm wrapper for the DeepSeek Code CLI",
+  "license": "SEE LICENSE IN LICENSE",
+  "homepage": "https://github.com/willamhou/DeepseekCode",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/willamhou/DeepseekCode.git",
+    "directory": "npm"
+  },
+  "bin": {
+    "deepseek": "bin/deepseek.js"
+  },
+  "optionalDependencies": {
+    "@deepseek-code/cli-linux-x64": "0.1.0",
+    "@deepseek-code/cli-macos-arm64": "0.1.0",
+    "@deepseek-code/cli-macos-x64": "0.1.0",
+    "@deepseek-code/cli-windows-x64": "0.1.0"
+  },
+  "files": [
+    "bin",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "check:version": "node scripts/check-version-sync.js",
+    "test": "node --check bin/deepseek.js && node scripts/test-wrapper-resolution.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

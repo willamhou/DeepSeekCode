@@ -350,6 +350,7 @@ pub fn post_pr_comment(repo: &str, number: u64, body: &str) -> AppResult<()> {
 }
 
 pub fn current_branch() -> Option<String> {
+    let _cwd_guard = crate::util::cwd::lock_cwd().ok()?;
     let captured = run_capture("git", &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
     if !captured.success {
         return None;

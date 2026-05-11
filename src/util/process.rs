@@ -43,7 +43,7 @@ use std::process::{ChildStdout, ExitStatus, Stdio};
 
 pub struct StreamingProcess {
     child: std::process::Child,
-    pub stdout: BufReader<ChildStdout>,
+    stdout: Option<BufReader<ChildStdout>>,
 }
 
 pub fn spawn_streaming(bin: &str, args: &[&str]) -> AppResult<StreamingProcess> {
@@ -67,15 +67,70 @@ pub fn spawn_streaming(bin: &str, args: &[&str]) -> AppResult<StreamingProcess> 
         .ok_or_else(|| app_error(format!("{bin} produced no stdout pipe")))?;
     Ok(StreamingProcess {
         child,
-        stdout: BufReader::new(stdout),
+        stdout: Some(BufReader::new(stdout)),
+    })
+}
+
+pub fn spawn_streaming_with_stdin(
+    bin: &str,
+    args: &[&str],
+    stdin_body: &str,
+) -> AppResult<StreamingProcess> {
+    use std::io::Write;
+
+    let mut child = Command::new(bin)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                app_error(format!(
+                    "{bin} not found in PATH; install it before retrying"
+                ))
+            } else {
+                app_error(format!("could not invoke {bin}: {error}"))
+            }
+        })?;
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| app_error(format!("{bin} produced no stdin pipe")))?;
+        stdin
+            .write_all(stdin_body.as_bytes())
+            .map_err(|error| app_error(format!("failed to write stdin to {bin}: {error}")))?;
+    }
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| app_error(format!("{bin} produced no stdout pipe")))?;
+    Ok(StreamingProcess {
+        child,
+        stdout: Some(BufReader::new(stdout)),
     })
 }
 
 impl StreamingProcess {
+    pub fn stdout_mut(&mut self) -> AppResult<&mut BufReader<ChildStdout>> {
+        self.stdout
+            .as_mut()
+            .ok_or_else(|| app_error("streaming process stdout was already taken"))
+    }
+
+    pub fn take_stdout(&mut self) -> AppResult<BufReader<ChildStdout>> {
+        self.stdout
+            .take()
+            .ok_or_else(|| app_error("streaming process stdout was already taken"))
+    }
+
     pub fn finish(mut self) -> AppResult<(ExitStatus, String)> {
         use std::io::Read;
-        let mut sink = Vec::new();
-        let _ = self.stdout.read_to_end(&mut sink);
+        if let Some(mut stdout) = self.stdout.take() {
+            let mut sink = Vec::new();
+            let _ = stdout.read_to_end(&mut sink);
+        }
 
         let mut stderr_buf = String::new();
         if let Some(mut stderr) = self.child.stderr.take() {

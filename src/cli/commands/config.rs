@@ -27,6 +27,7 @@ fn print_config(config: &AppConfig) {
     println!("model.base_url = {}", config.model.base_url);
     println!("model.model = {}", config.model.model);
     println!("model.api_key_env = {}", config.model.api_key_env);
+    println!("model.reasoning_effort = {}", config.model.reasoning_effort);
     println!(
         "approval.require_write_confirmation = {}",
         config.approval.require_write_confirmation
@@ -68,6 +69,7 @@ fn print_config(config: &AppConfig) {
     );
     println!("mcp.project_file = {}", config.mcp.project_file);
     println!("mcp.user_file = {}", config.mcp.user_file);
+    println!("diagnostics.post_edit = {}", config.diagnostics.post_edit);
 }
 
 pub(crate) fn init_config_at(root: &std::path::Path, force: bool) -> AppResult<std::path::PathBuf> {
@@ -86,8 +88,19 @@ pub(crate) fn init_config_at(root: &std::path::Path, force: bool) -> AppResult<s
     std::fs::write(&config_path, render_default_config(&config))?;
     std::fs::create_dir_all(root.join(&config.workspace.session_dir))?;
     std::fs::create_dir_all(root.join(&config.workspace.config_dir).join("commands"))?;
+    std::fs::create_dir_all(root.join(&config.workspace.config_dir).join("agents"))?;
 
-    for event in ["user_prompt_submit", "pre_tool_use", "post_tool_use"] {
+    for event in [
+        "session_start",
+        "session_stop",
+        "user_prompt_submit",
+        "pre_tool_use",
+        "permission_request",
+        "post_tool_use",
+        "subagent_start",
+        "subagent_stop",
+        "pre_compact",
+    ] {
         std::fs::create_dir_all(root.join(&config.hooks.project_dir).join(event))?;
     }
     let mcp_path = root.join(config.mcp.project_file_path());
@@ -107,6 +120,7 @@ fn render_default_config(config: &AppConfig) -> String {
 model.base_url = "{base_url}"
 model.model = "{model}"
 model.api_key_env = "{api_key_env}"
+model.reasoning_effort = "{reasoning_effort}"
 
 approval.require_write_confirmation = {require_write_confirmation}
 approval.require_shell_confirmation = {require_shell_confirmation}
@@ -132,10 +146,15 @@ mcp.enabled = {mcp_enabled}
 mcp.expose_remote_tools = {mcp_expose_remote_tools}
 mcp.project_file = "{mcp_project_file}"
 mcp.user_file = "{mcp_user_file}"
+
+# Diagnostics can be run manually with `deepseek diagnostics`.
+# Set post_edit to true to append diagnostics after successful apply_patch calls.
+diagnostics.post_edit = {diagnostics_post_edit}
 "#,
         base_url = config.model.base_url,
         model = config.model.model,
         api_key_env = config.model.api_key_env,
+        reasoning_effort = config.model.reasoning_effort,
         require_write_confirmation = config.approval.require_write_confirmation,
         require_shell_confirmation = config.approval.require_shell_confirmation,
         require_mcp_confirmation = config.approval.require_mcp_confirmation,
@@ -153,6 +172,7 @@ mcp.user_file = "{mcp_user_file}"
         mcp_expose_remote_tools = config.mcp.expose_remote_tools,
         mcp_project_file = config.mcp.project_file,
         mcp_user_file = config.mcp.user_file,
+        diagnostics_post_edit = config.diagnostics.post_edit,
     )
 }
 

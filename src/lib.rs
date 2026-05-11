@@ -8,6 +8,7 @@ pub mod model;
 pub mod repl;
 pub mod skills;
 pub mod tools;
+pub mod tui;
 pub mod ui;
 pub mod util;
 

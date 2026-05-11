@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.deepseek.agents</string>
+  <key>WorkingDirectory</key>
+  <string>__WORKDIR__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>__DEEPSEEK_BIN__</string>
+    <string>agents</string>
+    <string>daemon</string>
+    <string>--interval-ms</string>
+    <string>__INTERVAL_MS__</string>
+    <string>--json</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/deepseek-agents.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/deepseek-agents.err.log</string>
+</dict>
+</plist>

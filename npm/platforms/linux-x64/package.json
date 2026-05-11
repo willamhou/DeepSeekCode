@@ -1,0 +1,28 @@
+{
+  "name": "@deepseek-code/cli-linux-x64",
+  "version": "0.1.0",
+  "description": "Linux x64 binary for the DeepSeek Code CLI",
+  "license": "SEE LICENSE IN LICENSE",
+  "homepage": "https://github.com/willamhou/DeepseekCode",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/willamhou/DeepseekCode.git",
+    "directory": "npm/platforms/linux-x64"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

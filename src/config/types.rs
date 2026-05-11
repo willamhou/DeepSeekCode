@@ -5,6 +5,7 @@ pub struct AppConfig {
     pub workspace: WorkspaceConfig,
     pub hooks: HooksConfig,
     pub mcp: McpConfig,
+    pub diagnostics: DiagnosticsConfig,
 }
 
 impl Default for AppConfig {
@@ -15,6 +16,7 @@ impl Default for AppConfig {
             workspace: WorkspaceConfig::default(),
             hooks: HooksConfig::default(),
             mcp: McpConfig::default(),
+            diagnostics: DiagnosticsConfig::default(),
         }
     }
 }
@@ -24,6 +26,7 @@ pub struct ModelConfig {
     pub base_url: String,
     pub model: String,
     pub api_key_env: String,
+    pub reasoning_effort: String,
 }
 
 impl Default for ModelConfig {
@@ -32,6 +35,7 @@ impl Default for ModelConfig {
             base_url: "https://api.deepseek.com".to_string(),
             model: "deepseek-coder".to_string(),
             api_key_env: "DEEPSEEK_API_KEY".to_string(),
+            reasoning_effort: "off".to_string(),
         }
     }
 }
@@ -90,6 +94,17 @@ impl Default for McpConfig {
             project_file: ".dscode/mcp.json".to_string(),
             user_file: "~/.config/dscode/mcp.json".to_string(),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DiagnosticsConfig {
+    pub post_edit: bool,
+}
+
+impl Default for DiagnosticsConfig {
+    fn default() -> Self {
+        Self { post_edit: false }
     }
 }
 

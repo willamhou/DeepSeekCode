@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::error::AppResult;
+use crate::util::cancel::CancellationCheck;
 
 #[derive(Debug, Clone, Default)]
 pub struct ToolInput {
@@ -33,4 +34,11 @@ pub trait Tool {
         None
     }
     fn execute(&self, input: ToolInput) -> AppResult<ToolOutput>;
+    fn execute_with_cancel(
+        &self,
+        input: ToolInput,
+        _cancel_check: Option<&mut dyn CancellationCheck>,
+    ) -> AppResult<ToolOutput> {
+        self.execute(input)
+    }
 }

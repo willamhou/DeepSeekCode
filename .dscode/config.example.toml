@@ -25,12 +25,18 @@ model.base_url = "https://api.deepseek.com"
 # model.base_url = "https://api.deepseek.com/anthropic"
 
 # DeepSeek 模型名
-# 常见值：deepseek-coder、deepseek-chat
-model.model = "deepseek-coder"
+# 常见值：auto、deepseek-v4-flash、deepseek-v4-pro、deepseek-chat
+# auto 会按任务复杂度在 v4-flash / v4-pro 之间路由，并在 usage 记录实际模型名。
+model.model = "auto"
 
 # 读取 API key 的环境变量名
 # 仅指定变量名，不要把 key 本身写到这里
 model.api_key_env = "DEEPSEEK_API_KEY"
+
+# DeepSeek V4 thinking/reasoning tier: off、high、max、auto
+# off 会显式发送 thinking.disabled；high/max 会发送官方 reasoning_effort。
+# auto 会让模型路由器按任务复杂度选择 off/high/max。
+model.reasoning_effort = "off"
 
 # -----------------------------------------------------------------------------
 # approval: 写入、shell 命令与 agent MCP 调用的审批策略
@@ -99,6 +105,15 @@ mcp.enabled = true
 mcp.expose_remote_tools = false
 mcp.project_file = ".dscode/mcp.json"
 mcp.user_file = "~/.config/dscode/mcp.json"
+
+# -----------------------------------------------------------------------------
+# diagnostics: local post-edit checks
+# -----------------------------------------------------------------------------
+
+# Manual diagnostics are available with `deepseek diagnostics`.
+# Keep automatic post-edit diagnostics off unless you want apply_patch to run the
+# local fallback checker after successful writes.
+diagnostics.post_edit = false
 
 # -----------------------------------------------------------------------------
 # pr: GitHub PR integration (Phase 8a)

@@ -1,8 +1,20 @@
+use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
+
 use crate::config::types::AppConfig;
 use crate::error::{app_error, AppResult};
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
+use crate::util::json::{json_value_to_string, JsonValue};
 
 pub const MCP_DYNAMIC_TOOL_PREFIX: &str = "mcp__";
+static MCP_DYNAMIC_TOOL_SCHEMAS: OnceLock<Mutex<BTreeMap<String, McpDynamicToolSchema>>> =
+    OnceLock::new();
+
+#[derive(Debug, Clone)]
+pub struct McpDynamicToolSchema {
+    pub description: Option<String>,
+    pub input_schema: Option<String>,
+}
 
 #[derive(Clone)]
 pub struct McpListToolsTool {
@@ -71,9 +83,16 @@ impl Tool for McpRemoteToolTool {
     }
 
     fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
-        let arguments = input
+        let direct_arguments;
+        let arguments = if let Some(arguments) = input
             .get("arguments")
-            .filter(|value| !value.trim().is_empty());
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(arguments)
+        } else {
+            direct_arguments = tool_input_as_json_object(&input);
+            Some(direct_arguments.as_str())
+        };
         let summary = crate::cli::commands::mcp::call_remote_tool_summary(
             &self.config,
             &self.server,
@@ -84,12 +103,46 @@ impl Tool for McpRemoteToolTool {
     }
 }
 
+pub fn cache_dynamic_tool_schema(
+    registry_name: &str,
+    description: Option<String>,
+    input_schema: Option<String>,
+) {
+    let schemas = MCP_DYNAMIC_TOOL_SCHEMAS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Ok(mut schemas) = schemas.lock() {
+        schemas.insert(
+            registry_name.to_string(),
+            McpDynamicToolSchema {
+                description,
+                input_schema,
+            },
+        );
+    }
+}
+
+pub fn dynamic_tool_schema(registry_name: &str) -> Option<McpDynamicToolSchema> {
+    MCP_DYNAMIC_TOOL_SCHEMAS
+        .get()
+        .and_then(|schemas| schemas.lock().ok()?.get(registry_name).cloned())
+}
+
 pub fn remote_tool_registry_name(server: &str, tool: &str) -> String {
     format!(
         "{MCP_DYNAMIC_TOOL_PREFIX}{}__{}",
         sanitize_tool_name_segment(server),
         sanitize_tool_name_segment(tool)
     )
+}
+
+fn tool_input_as_json_object(input: &ToolInput) -> String {
+    json_value_to_string(&JsonValue::Object(
+        input
+            .args
+            .iter()
+            .filter(|(key, _)| key.as_str() != "arguments")
+            .map(|(key, value)| (key.clone(), JsonValue::String(value.clone())))
+            .collect(),
+    ))
 }
 
 fn sanitize_tool_name_segment(value: &str) -> String {
@@ -222,6 +275,32 @@ done
         assert!(output.summary.contains("echo: hello"));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mcp_remote_tool_serializes_direct_schema_arguments() {
+        let input = ToolInput::new()
+            .with_arg("path", "README.md")
+            .with_arg("limit", "5");
+
+        assert_eq!(
+            tool_input_as_json_object(&input),
+            r#"{"limit":"5","path":"README.md"}"#
+        );
+    }
+
+    #[test]
+    fn dynamic_tool_schema_round_trips_cached_schema() {
+        cache_dynamic_tool_schema(
+            "mcp__fake__echo",
+            Some("Echo input".to_string()),
+            Some(r#"{"type":"object"}"#.to_string()),
+        );
+
+        let schema = dynamic_tool_schema("mcp__fake__echo").unwrap();
+
+        assert_eq!(schema.description.as_deref(), Some("Echo input"));
+        assert_eq!(schema.input_schema.as_deref(), Some(r#"{"type":"object"}"#));
     }
 
     #[test]
