@@ -22,6 +22,14 @@ pub fn run(action: RestoreAction) -> AppResult<()> {
             println!("  staged_patch_bytes: {}", snapshot.staged_patch_bytes);
             println!("  unstaged_patch_bytes: {}", snapshot.unstaged_patch_bytes);
             println!("  untracked_files: {}", snapshot.untracked_files.len());
+            println!(
+                "  untracked_directories: {}",
+                snapshot.untracked_directories.len()
+            );
+            println!(
+                "  untracked_symlinks: {}",
+                snapshot.untracked_symlinks.len()
+            );
             println!("  untracked_bytes: {}", snapshot.untracked_bytes);
             println!("  tracked_only: {}", snapshot.tracked_only);
         }
@@ -36,7 +44,9 @@ pub fn run(action: RestoreAction) -> AppResult<()> {
                         snapshot.id,
                         snapshot.created_at,
                         snapshot.patch_bytes,
-                        snapshot.untracked_files.len(),
+                        snapshot.untracked_files.len()
+                            + snapshot.untracked_directories.len()
+                            + snapshot.untracked_symlinks.len(),
                         snapshot.runtime_turn_id.as_deref().unwrap_or("-"),
                         snapshot.label
                     );
@@ -63,12 +73,32 @@ pub fn run(action: RestoreAction) -> AppResult<()> {
             println!("  staged_patch_bytes: {}", snapshot.staged_patch_bytes);
             println!("  unstaged_patch_bytes: {}", snapshot.unstaged_patch_bytes);
             println!("  untracked_files: {}", snapshot.untracked_files.len());
+            println!(
+                "  untracked_directories: {}",
+                snapshot.untracked_directories.len()
+            );
+            println!(
+                "  untracked_symlinks: {}",
+                snapshot.untracked_symlinks.len()
+            );
             println!("  untracked_bytes: {}", snapshot.untracked_bytes);
             println!("  tracked_only: {}", snapshot.tracked_only);
             if !snapshot.untracked_files.is_empty() {
-                println!("  untracked paths:");
+                println!("  untracked file paths:");
                 for file in &snapshot.untracked_files {
                     println!("    - {file}");
+                }
+            }
+            if !snapshot.untracked_directories.is_empty() {
+                println!("  untracked directory paths:");
+                for directory in &snapshot.untracked_directories {
+                    println!("    - {directory}");
+                }
+            }
+            if !snapshot.untracked_symlinks.is_empty() {
+                println!("  untracked symlink paths:");
+                for symlink in &snapshot.untracked_symlinks {
+                    println!("    - {} -> {}", symlink.path, symlink.target);
                 }
             }
             if patch {

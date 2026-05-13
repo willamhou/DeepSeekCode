@@ -238,10 +238,12 @@ fn handle_restore(repl: &Repl, args: &[&str]) {
         ["snapshot"] => match std::env::current_dir() {
             Ok(cwd) => match store.create_snapshot(&cwd, "manual REPL snapshot".to_string()) {
                 Ok(snapshot) => println!(
-                    "snapshot {} created (patch_bytes={}, untracked_files={}, tracked_only={})",
+                    "snapshot {} created (patch_bytes={}, untracked_entries={}, tracked_only={})",
                     snapshot.id,
                     snapshot.patch_bytes,
-                    snapshot.untracked_files.len(),
+                    snapshot.untracked_files.len()
+                        + snapshot.untracked_directories.len()
+                        + snapshot.untracked_symlinks.len(),
                     snapshot.tracked_only
                 ),
                 Err(error) => println!("snapshot failed: {error}"),
@@ -253,10 +255,12 @@ fn handle_restore(repl: &Repl, args: &[&str]) {
             match std::env::current_dir() {
                 Ok(cwd) => match store.create_snapshot(&cwd, label) {
                     Ok(snapshot) => println!(
-                        "snapshot {} created (patch_bytes={}, untracked_files={}, tracked_only={})",
+                        "snapshot {} created (patch_bytes={}, untracked_entries={}, tracked_only={})",
                         snapshot.id,
                         snapshot.patch_bytes,
-                        snapshot.untracked_files.len(),
+                        snapshot.untracked_files.len()
+                            + snapshot.untracked_directories.len()
+                            + snapshot.untracked_symlinks.len(),
                         snapshot.tracked_only
                     ),
                     Err(error) => println!("snapshot failed: {error}"),
@@ -273,7 +277,9 @@ fn handle_restore(repl: &Repl, args: &[&str]) {
                         snapshot.id,
                         snapshot.created_at,
                         snapshot.patch_bytes,
-                        snapshot.untracked_files.len(),
+                        snapshot.untracked_files.len()
+                            + snapshot.untracked_directories.len()
+                            + snapshot.untracked_symlinks.len(),
                         snapshot.runtime_turn_id.as_deref().unwrap_or("-"),
                         snapshot.label
                     );
@@ -299,12 +305,32 @@ fn handle_restore(repl: &Repl, args: &[&str]) {
                     println!("  staged_patch_bytes: {}", snapshot.staged_patch_bytes);
                     println!("  unstaged_patch_bytes: {}", snapshot.unstaged_patch_bytes);
                     println!("  untracked_files: {}", snapshot.untracked_files.len());
+                    println!(
+                        "  untracked_directories: {}",
+                        snapshot.untracked_directories.len()
+                    );
+                    println!(
+                        "  untracked_symlinks: {}",
+                        snapshot.untracked_symlinks.len()
+                    );
                     println!("  untracked_bytes: {}", snapshot.untracked_bytes);
                     println!("  tracked_only: {}", snapshot.tracked_only);
                     if !snapshot.untracked_files.is_empty() {
-                        println!("  untracked paths:");
+                        println!("  untracked file paths:");
                         for file in &snapshot.untracked_files {
                             println!("    - {file}");
+                        }
+                    }
+                    if !snapshot.untracked_directories.is_empty() {
+                        println!("  untracked directory paths:");
+                        for directory in &snapshot.untracked_directories {
+                            println!("    - {directory}");
+                        }
+                    }
+                    if !snapshot.untracked_symlinks.is_empty() {
+                        println!("  untracked symlink paths:");
+                        for symlink in &snapshot.untracked_symlinks {
+                            println!("    - {} -> {}", symlink.path, symlink.target);
                         }
                     }
                 }

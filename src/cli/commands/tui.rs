@@ -1457,7 +1457,9 @@ fn handle_tui_action_with_live(
                         "created rollback snapshot {} (patch_bytes={}, untracked_entries={})",
                         snapshot.id,
                         snapshot.patch_bytes,
-                        snapshot.untracked_files.len() + snapshot.untracked_symlinks.len()
+                        snapshot.untracked_files.len()
+                            + snapshot.untracked_directories.len()
+                            + snapshot.untracked_symlinks.len()
                     ));
                     app.set_mcp_detail(
                         TuiMcpDetailKind::Rollback,
@@ -1513,7 +1515,9 @@ fn handle_tui_action_with_live(
                         snapshot.patch_bytes,
                         snapshot.staged_patch_bytes,
                         snapshot.unstaged_patch_bytes,
-                        snapshot.untracked_files.len() + snapshot.untracked_symlinks.len()
+                        snapshot.untracked_files.len()
+                            + snapshot.untracked_directories.len()
+                            + snapshot.untracked_symlinks.len()
                     ));
                     app.set_mcp_detail(
                         TuiMcpDetailKind::Rollback,
@@ -2032,8 +2036,9 @@ fn render_rollback_snapshot_list(snapshots: &[SnapshotRecord]) -> String {
             snapshot.patch_bytes, snapshot.staged_patch_bytes, snapshot.unstaged_patch_bytes
         ));
         detail.push_str(&format!(
-            "  untracked: files {}, symlinks {}\n\n",
+            "  untracked: files {}, dirs {}, symlinks {}\n\n",
             snapshot.untracked_files.len(),
+            snapshot.untracked_directories.len(),
             snapshot.untracked_symlinks.len()
         ));
     }
@@ -2079,6 +2084,19 @@ fn render_rollback_snapshot_detail(snapshot: &SnapshotRecord, patch: Option<&str
         detail.push_str(&format!(
             "  - ... {} more\n",
             snapshot.untracked_files.len() - 20
+        ));
+    }
+    detail.push_str(&format!(
+        "untracked directories: {}\n",
+        snapshot.untracked_directories.len()
+    ));
+    for directory in snapshot.untracked_directories.iter().take(20) {
+        detail.push_str(&format!("  - {directory}\n"));
+    }
+    if snapshot.untracked_directories.len() > 20 {
+        detail.push_str(&format!(
+            "  - ... {} more\n",
+            snapshot.untracked_directories.len() - 20
         ));
     }
     detail.push_str(&format!(

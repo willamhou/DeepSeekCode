@@ -14,7 +14,7 @@ toolchains, generated fixtures, and local project wiring.
 - Restore captured symlinks without dereferencing their targets.
 - Preserve older snapshots that do not contain symlink manifest entries.
 - Keep existing untracked regular file capture and restore behavior.
-- Leave directories and other special files as explicit future work.
+- Leave directory trees and other special files as explicit future work.
 
 ## Implementation
 
@@ -26,8 +26,8 @@ toolchains, generated fixtures, and local project wiring.
 - Snapshot JSON serialization and parsing include optional
   `untracked_symlinks`, preserving backward compatibility for older manifests.
 - Runtime docs and the DeepSeek-TUI parity plan now describe regular-file plus
-  Unix-symlink fidelity and keep directory/special-file support as remaining
-  work.
+  Unix-symlink fidelity and keep broader directory/special-file support as
+  remaining work.
 
 ## Verification
 
@@ -37,6 +37,6 @@ toolchains, generated fixtures, and local project wiring.
 
 ## Remaining
 
-Directory trees, device nodes, sockets, fifos, platform-specific Windows
-symlink recreation, and a full side-worktree capture strategy remain out of
-this slice.
+Non-empty directory trees, device nodes, sockets, fifos, platform-specific
+Windows symlink recreation, and a full side-worktree capture strategy remain out
+of this slice.

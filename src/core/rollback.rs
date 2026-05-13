@@ -25,6 +25,7 @@ pub struct SnapshotRecord {
     pub unstaged_patch_bytes: u64,
     pub untracked_bytes: u64,
     pub untracked_files: Vec<String>,
+    pub untracked_directories: Vec<String>,
     pub untracked_symlinks: Vec<UntrackedSymlinkRecord>,
     pub tracked_only: bool,
     pub runtime_thread_id: Option<String>,
@@ -104,7 +105,11 @@ impl RollbackStore {
                 &dir,
                 &untracked_candidates,
             )?;
-        let tracked_only = untracked_files.is_empty() && untracked_symlinks.is_empty();
+        let untracked_directories =
+            capture_empty_untracked_directories(Path::new(&git_root), &self.root)?;
+        let tracked_only = untracked_files.is_empty()
+            && untracked_directories.is_empty()
+            && untracked_symlinks.is_empty();
         let record = SnapshotRecord {
             id,
             label: if label.trim().is_empty() {
@@ -122,6 +127,7 @@ impl RollbackStore {
             unstaged_patch_bytes: unstaged_patch.len() as u64,
             untracked_bytes,
             untracked_files,
+            untracked_directories,
             untracked_symlinks,
             tracked_only,
             runtime_thread_id: None,
@@ -271,6 +277,7 @@ impl RollbackStore {
                 root,
                 &snapshot_dir,
                 &record.untracked_files,
+                &record.untracked_directories,
                 &record.untracked_symlinks,
             )?;
         }
@@ -281,6 +288,7 @@ impl RollbackStore {
         };
         if apply {
             changed_files.extend(record.untracked_files.iter().cloned());
+            changed_files.extend(record.untracked_directories.iter().cloned());
             changed_files.extend(
                 record
                     .untracked_symlinks
@@ -383,6 +391,17 @@ pub fn snapshot_to_json(record: &SnapshotRecord) -> JsonValue {
         ),
     );
     value.insert(
+        "untracked_directories".to_string(),
+        JsonValue::Array(
+            record
+                .untracked_directories
+                .iter()
+                .cloned()
+                .map(JsonValue::String)
+                .collect(),
+        ),
+    );
+    value.insert(
         "untracked_symlinks".to_string(),
         JsonValue::Array(
             record
@@ -416,6 +435,7 @@ fn parse_snapshot_record(root: &BTreeMap<String, JsonValue>) -> AppResult<Snapsh
         unstaged_patch_bytes: optional_u64(root, "unstaged_patch_bytes")?,
         untracked_bytes: optional_u64(root, "untracked_bytes")?,
         untracked_files: optional_string_array(root, "untracked_files")?,
+        untracked_directories: optional_string_array(root, "untracked_directories")?,
         untracked_symlinks: optional_untracked_symlinks(root)?,
         tracked_only: matches!(root.get("tracked_only"), Some(JsonValue::Bool(true))),
         runtime_thread_id: optional_safe_string(root, "runtime_thread_id")?,
@@ -661,12 +681,128 @@ fn capture_untracked_entries_to_snapshot(
     Ok((captured_files, captured_symlinks, total_bytes))
 }
 
+fn capture_empty_untracked_directories(
+    git_root: &Path,
+    store_root: &Path,
+) -> AppResult<Vec<String>> {
+    let store_prefix = store_root_relative_prefix(git_root, store_root);
+    let mut directories = Vec::new();
+    collect_empty_untracked_directories(
+        git_root,
+        git_root,
+        store_prefix.as_deref(),
+        &mut directories,
+    )?;
+    normalize_file_list(&mut directories);
+    Ok(directories)
+}
+
+fn collect_empty_untracked_directories(
+    git_root: &Path,
+    current: &Path,
+    store_prefix: Option<&str>,
+    directories: &mut Vec<String>,
+) -> AppResult<bool> {
+    let Some(relative) = relative_git_path(git_root, current)? else {
+        let mut has_entries = false;
+        for entry in fs::read_dir(current)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            has_entries = true;
+            if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+                collect_empty_untracked_directories(git_root, &path, store_prefix, directories)?;
+            }
+        }
+        return Ok(has_entries);
+    };
+
+    if is_rollback_internal_path(&relative, store_prefix) || is_git_internal_path(&relative) {
+        return Ok(true);
+    }
+    if is_git_ignored_path(git_root, &relative)? {
+        return Ok(true);
+    }
+
+    let mut has_entries = false;
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        has_entries = true;
+        if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+            collect_empty_untracked_directories(git_root, &path, store_prefix, directories)?;
+        }
+    }
+    if !has_entries {
+        safe_relative_path(&relative)?;
+        directories.push(relative);
+    }
+    Ok(has_entries)
+}
+
+fn relative_git_path(git_root: &Path, path: &Path) -> AppResult<Option<String>> {
+    let relative = path.strip_prefix(git_root).map_err(|error| {
+        app_error(format!(
+            "failed to compute rollback relative path for `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            Component::CurDir => {}
+            _ => {
+                return Err(app_error(format!(
+                    "unsafe rollback directory path `{}`",
+                    path.display()
+                )))
+            }
+        }
+    }
+    Ok((!parts.is_empty()).then(|| parts.join("/")))
+}
+
+fn is_rollback_internal_path(path: &str, store_prefix: Option<&str>) -> bool {
+    let Some(store_prefix) = store_prefix else {
+        return false;
+    };
+    path == store_prefix || path.starts_with(&format!("{store_prefix}/"))
+}
+
+fn is_git_internal_path(path: &str) -> bool {
+    path == ".git" || path.starts_with(".git/")
+}
+
+fn is_git_ignored_path(git_root: &Path, path: &str) -> AppResult<bool> {
+    let output = Command::new("git")
+        .args(["check-ignore", "-q", "--", path])
+        .current_dir(git_root)
+        .output()
+        .map_err(|error| app_error(format!("could not invoke git check-ignore: {error}")))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(app_error(format!(
+            "git check-ignore failed for `{path}`: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))),
+    }
+}
+
 fn restore_untracked_entries(
     git_root: &Path,
     snapshot_dir: &Path,
     files: &[String],
+    directories: &[String],
     symlinks: &[UntrackedSymlinkRecord],
 ) -> AppResult<()> {
+    for directory in directories {
+        let relative = safe_relative_path(directory)?;
+        let target = git_root.join(&relative);
+        restore_untracked_directory(&target)?;
+    }
     for file in files {
         let relative = safe_relative_path(file)?;
         let source = snapshot_dir.join("untracked").join(&relative);
@@ -701,6 +837,39 @@ fn restore_untracked_entries(
         })?;
     }
     Ok(())
+}
+
+fn restore_untracked_directory(target: &Path) -> AppResult<()> {
+    match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+            Ok(())
+        }
+        Ok(_) => {
+            fs::remove_file(target).map_err(|error| {
+                app_error(format!(
+                    "failed to remove existing restore target `{}`: {error}",
+                    target.display()
+                ))
+            })?;
+            fs::create_dir_all(target).map_err(|error| {
+                app_error(format!(
+                    "failed to restore untracked directory `{}`: {error}",
+                    target.display()
+                ))
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir_all(target)
+            .map_err(|error| {
+                app_error(format!(
+                    "failed to restore untracked directory `{}`: {error}",
+                    target.display()
+                ))
+            }),
+        Err(error) => Err(app_error(format!(
+            "failed to inspect restore target `{}`: {error}",
+            target.display()
+        ))),
+    }
 }
 
 fn remove_existing_restore_target(target: &Path) -> AppResult<()> {
@@ -1055,6 +1224,83 @@ mod tests {
         assert_eq!(loaded.untracked_bytes, snapshot.untracked_bytes);
     }
 
+    #[test]
+    fn snapshot_restore_round_trip_empty_untracked_directories() {
+        let repo = temp_root("empty-dir");
+        fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init"]);
+        fs::write(repo.join("src.txt"), "base\n").unwrap();
+        run_git(&repo, &["add", "src.txt"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+
+        let store_root = repo.join(".dscode/rollback");
+        fs::create_dir_all(store_root.join("snapshots/old")).unwrap();
+        fs::create_dir_all(repo.join("notes/empty")).unwrap();
+        let store = RollbackStore::new(store_root);
+        let snapshot = store
+            .create_snapshot(&repo, "capture empty directory".to_string())
+            .unwrap();
+
+        assert!(!snapshot.tracked_only);
+        assert!(snapshot.untracked_files.is_empty());
+        assert_eq!(
+            snapshot.untracked_directories,
+            vec!["notes/empty".to_string()]
+        );
+
+        fs::remove_dir_all(repo.join("notes")).unwrap();
+        fs::create_dir_all(repo.join("notes")).unwrap();
+        fs::write(repo.join("notes/empty"), "later file\n").unwrap();
+        let plan = store.restore_snapshot(&snapshot.id, true).unwrap();
+
+        assert!(repo.join("notes/empty").is_dir());
+        assert_eq!(plan.changed_files, vec!["notes/empty".to_string()]);
+
+        let loaded = store.load_snapshot(&snapshot.id).unwrap();
+        assert_eq!(loaded.untracked_directories, snapshot.untracked_directories);
+    }
+
+    #[test]
+    fn snapshot_ignores_ignored_empty_directories() {
+        let repo = temp_root("ignored-empty-dir");
+        fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init"]);
+        fs::write(repo.join(".gitignore"), "ignored/\n").unwrap();
+        fs::write(repo.join("src.txt"), "base\n").unwrap();
+        run_git(&repo, &["add", ".gitignore", "src.txt"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+
+        fs::create_dir_all(repo.join("ignored/empty")).unwrap();
+        let store = RollbackStore::new(repo.join(".dscode/rollback"));
+        let snapshot = store
+            .create_snapshot(&repo, "ignore empty directory".to_string())
+            .unwrap();
+
+        assert!(snapshot.untracked_directories.is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn snapshot_restore_round_trip_untracked_symlinks() {
@@ -1126,6 +1372,7 @@ mod tests {
 
         assert_eq!(record.id, "snapshot-legacy");
         assert!(record.untracked_files.is_empty());
+        assert!(record.untracked_directories.is_empty());
         assert!(record.untracked_symlinks.is_empty());
     }
 
