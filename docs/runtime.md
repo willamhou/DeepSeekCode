@@ -1132,8 +1132,10 @@ tasks gather `github_pr_context include_diff=true` first and then run `review`
 over the gathered context. If the task asks to draft or prepare a PR comment and
 `pr_review_comment_plan` is available, the planner turns the structured review
 JSON plus optional PR context into Markdown body text, evidence JSON, and a
-dry-run `github_comment` input. The planner still does not post comments without
-the guarded `github_comment` write tool and its approval path.
+dry-run `github_comment` input. If the task explicitly says to post, publish,
+leave, add, submit, or send the comment, the planner can pass that prepared
+input to the guarded `github_comment` write tool with `dry_run=false`; the
+normal write-approval path still controls whether the GitHub mutation runs.
 Agent-visible skill tooling includes DeepSeek-TUI-compatible `load_skill`.
 DeepSeekCode maps that tool onto its existing TOML skill registry: repo skills
 and the configured `workspace.user_skills_dir` are searched with user skills
@@ -1227,7 +1229,9 @@ requires acceptance criteria plus `files_changed`, `tests_run`, and
 For PR review comments, `pr_review_comment_plan` can prepare the body and
 evidence without invoking `gh`; callers can then pass its dry-run
 `github_comment_input` through the normal approval-gated mutation path when they
-explicitly want to post.
+explicitly want to post. The offline planner performs that handoff only for
+explicit post/publish/leave/add/submit/send wording; draft and prepare tasks stop
+at the read-only plan.
 
 Agent runs also expose DeepSeek-TUI-compatible `revert_turn`. It restores
 workspace files from rollback snapshots by `snapshot_id`, `checkpoint_id`,

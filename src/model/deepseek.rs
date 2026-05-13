@@ -296,6 +296,8 @@ impl DeepSeekClient {
         let latest_github_pr_context =
             latest_successful_tool_summary(&input.observations, "github_pr_context");
         let latest_review_output = latest_successful_tool_summary(&input.observations, "review");
+        let latest_pr_review_comment_plan =
+            latest_successful_tool_summary(&input.observations, "pr_review_comment_plan");
         let successful_apply_patch_count =
             successful_tool_call_count(&input.observations, "apply_patch");
         let git_diff_call_count = tool_call_count(&input.observations, "git_diff");
@@ -473,6 +475,37 @@ impl DeepSeekClient {
                         },
                     };
                 }
+            }
+            if succeeded_tools.contains("pr_review_comment_plan")
+                && task_requests_remote_pr_comment_post(&task_lower)
+                && tool_available("github_comment")
+                && !used_tools.contains("github_comment")
+            {
+                if let Some(plan) = latest_pr_review_comment_plan {
+                    if let Some(tool_input) =
+                        github_comment_input_from_pr_review_comment_plan(plan, false)
+                    {
+                        return ModelResponse {
+                            message: format!(
+                                "{} planner is posting the prepared PR review comment through the guarded GitHub write tool.",
+                                model_name
+                            ),
+                            action: ModelAction::CallTool {
+                                tool_name: "github_comment".to_string(),
+                                input: tool_input,
+                            },
+                        };
+                    }
+                }
+            }
+            if succeeded_tools.contains("github_comment") {
+                return ModelResponse {
+                    message: format!(
+                        "{} offline planner completed the guarded PR review comment step.",
+                        model_name
+                    ),
+                    action: ModelAction::Finish,
+                };
             }
             if succeeded_tools.contains("pr_review_comment_plan") {
                 return ModelResponse {
@@ -2347,6 +2380,18 @@ fn task_requests_remote_pr_comment_plan(task_lower: &str) -> bool {
         || task_lower.contains("review response")
 }
 
+fn task_requests_remote_pr_comment_post(task_lower: &str) -> bool {
+    !task_lower.contains("draft")
+        && !task_lower.contains("prepare")
+        && !task_lower.contains("plan only")
+        && (task_lower.contains("post")
+            || task_lower.contains("publish")
+            || task_lower.contains("leave a comment")
+            || task_lower.contains("add a comment")
+            || task_lower.contains("submit comment")
+            || task_lower.contains("send comment"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GithubPrContextRequest {
     number: String,
@@ -2392,6 +2437,53 @@ fn parse_github_pr_url_from_text(task: &str) -> Option<GithubPrContextRequest> {
         number: number.to_string(),
         repo: Some(format!("{owner}/{repo}")),
     })
+}
+
+fn github_comment_input_from_pr_review_comment_plan(
+    plan: &str,
+    dry_run: bool,
+) -> Option<ToolInput> {
+    let root = parse_root_object(plan).ok()?;
+    let input_object = root
+        .get("github_comment_input")
+        .and_then(json_as_object)
+        .unwrap_or(&root);
+    let target = input_object
+        .get("target")
+        .and_then(json_as_string)
+        .unwrap_or("pr");
+    let number = input_object
+        .get("number")
+        .and_then(json_as_string)
+        .or_else(|| root.get("number").and_then(json_as_string))?;
+    let body = input_object
+        .get("body")
+        .and_then(json_as_string)
+        .or_else(|| root.get("comment_body").and_then(json_as_string))?;
+    let evidence = input_object
+        .get("evidence")
+        .or_else(|| root.get("evidence"))
+        .map(json_string_or_serialized)?;
+    let mut tool_input = ToolInput::new()
+        .with_arg("target", target.to_string())
+        .with_arg("number", number.to_string())
+        .with_arg("body", body.to_string())
+        .with_arg("evidence", evidence)
+        .with_arg("dry_run", if dry_run { "true" } else { "false" });
+    if let Some(repo) = input_object
+        .get("repo")
+        .and_then(json_as_string)
+        .or_else(|| root.get("repo").and_then(json_as_string))
+    {
+        tool_input = tool_input.with_arg("repo", repo.to_string());
+    }
+    Some(tool_input)
+}
+
+fn json_string_or_serialized(value: &JsonValue) -> String {
+    json_as_string(value)
+        .map(str::to_string)
+        .unwrap_or_else(|| json_value_to_string(value))
 }
 
 fn first_hash_number(task: &str) -> Option<String> {
@@ -6145,6 +6237,93 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
             }
             ModelAction::Finish => panic!("expected pr_review_comment_plan tool call"),
         }
+    }
+
+    #[test]
+    fn offline_planner_posts_prepared_remote_pr_comment_when_explicit() {
+        let comment_plan = r###"{"comment_body":"## Automated PR Review\n\nFound 1 deterministic issue(s).","evidence":{"tool":"review","issue_count":1},"github_comment_input":{"target":"pr","number":"42","body":"## Automated PR Review\n\nFound 1 deterministic issue(s).","evidence":"{\"tool\":\"review\",\"issue_count\":1}","dry_run":"true","repo":"owner/repo"}}"###;
+        let request = ModelRequest {
+            system_prompt: String::new(),
+            task: "Review pull request #42 on owner/repo and post a PR comment with the findings."
+                .to_string(),
+            image_inputs: Vec::new(),
+            profile_name: "rust".to_string(),
+            profile_hints: Vec::new(),
+            primary_file: None,
+            suggested_test_command: None,
+            available_tools: vec![
+                "github_pr_context".to_string(),
+                "review".to_string(),
+                "pr_review_comment_plan".to_string(),
+                "github_comment".to_string(),
+            ],
+            observations: vec![
+                Observation::ok("github_pr_context", "meta.kind=pr\nmeta.number=42\n"),
+                Observation::ok("review", "{\"issues\":[]}"),
+                Observation::ok("pr_review_comment_plan", comment_plan),
+            ],
+            todos: Vec::new(),
+            planning_mode: false,
+            recent_steps: Vec::new(),
+        };
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "github_comment");
+                assert_eq!(input.get("target"), Some("pr"));
+                assert_eq!(input.get("number"), Some("42"));
+                assert_eq!(input.get("repo"), Some("owner/repo"));
+                assert_eq!(input.get("dry_run"), Some("false"));
+                assert!(input
+                    .get("body")
+                    .unwrap_or_default()
+                    .contains("Automated PR Review"));
+                assert_eq!(
+                    input.get("evidence"),
+                    Some("{\"tool\":\"review\",\"issue_count\":1}")
+                );
+            }
+            ModelAction::Finish => panic!("expected guarded github_comment tool call"),
+        }
+    }
+
+    #[test]
+    fn offline_planner_does_not_post_draft_remote_pr_comment_plan() {
+        let comment_plan = r###"{"comment_body":"draft","evidence":{"tool":"review"},"github_comment_input":{"target":"pr","number":"42","body":"draft","evidence":"{\"tool\":\"review\"}","dry_run":"true","repo":"owner/repo"}}"###;
+        let request = ModelRequest {
+            system_prompt: String::new(),
+            task: "Review pull request #42 on owner/repo and draft a PR comment with the findings."
+                .to_string(),
+            image_inputs: Vec::new(),
+            profile_name: "rust".to_string(),
+            profile_hints: Vec::new(),
+            primary_file: None,
+            suggested_test_command: None,
+            available_tools: vec![
+                "github_pr_context".to_string(),
+                "review".to_string(),
+                "pr_review_comment_plan".to_string(),
+                "github_comment".to_string(),
+            ],
+            observations: vec![
+                Observation::ok("github_pr_context", "meta.kind=pr\nmeta.number=42\n"),
+                Observation::ok("review", "{\"issues\":[]}"),
+                Observation::ok("pr_review_comment_plan", comment_plan),
+            ],
+            todos: Vec::new(),
+            planning_mode: false,
+            recent_steps: Vec::new(),
+        };
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        assert!(matches!(response.action, ModelAction::Finish));
     }
 
     #[test]

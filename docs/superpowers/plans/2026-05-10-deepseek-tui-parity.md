@@ -486,8 +486,12 @@ Remaining:
   structured `review` JSON plus optional `github_pr_context` into Markdown body
   text, evidence JSON, and a dry-run `github_comment` input; the offline planner
   invokes it for remote PR review tasks that ask to draft or prepare a comment
-- Remaining: stronger live end-to-end semantic review fixtures / actual remote
-  PR post/retry loops through the guarded GitHub mutation path
+- Guarded PR comment post planning now exists: when the task explicitly asks to
+  post/publish/leave/add/submit/send the prepared PR comment, the offline
+  planner hands the comment plan to `github_comment` with `dry_run=false`, still
+  relying on the existing write-approval path before any GitHub mutation runs
+- Remaining: stronger live end-to-end semantic review fixtures / remote PR
+  retry loops after failed or denied comment attempts
 
 ### Phase G2: MCP Server Mode
 

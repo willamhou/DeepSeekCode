@@ -46,5 +46,6 @@ posting to GitHub by default.
 - `/home/willamhou/.cargo/bin/cargo test mcp_tools_list_includes_workspace_and_runtime_tools --lib`
 - `/home/willamhou/.cargo/bin/cargo test acp_session_tools_list_new_session_is_read_only --lib`
 
-Actual posting through `github_comment`, inline review comments, and retry loops
-remain guarded GitHub-mutation follow-up work.
+Follow-up work added an explicit-post planner handoff to the guarded
+`github_comment` tool. Inline review comments and retry loops remain
+GitHub-mutation follow-up work.
