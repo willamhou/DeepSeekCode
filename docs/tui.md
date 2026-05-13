@@ -11,6 +11,8 @@ Current surfaces:
   and starts a background agent response in interactive TUI sessions
 - composer `# <note>` memory capture and `/memory` local commands for
   opt-in user memory without starting a model turn
+- composer and command palette custom slash commands from project
+  `.dscode/commands/*.md` or the configured user commands dir
 - composer and command-palette editing preserve terminal modifier keys, including
   Ctrl-based line, word, and cursor controls
 - task panel with active thread status, runtime item count, item state/type
@@ -218,6 +220,7 @@ Command palette commands currently implemented:
 | `thread filter <query>`, `thread filter` | Filter or clear visible threads in the thread navigator |
 | `thread next`, `thread prev` | Move between durable threads in the selected session |
 | `thread <id>` | Jump to a durable thread by id, switching sessions if needed |
+| `/name [args]` | Expand a custom markdown slash command from `.dscode/commands/name.md` or the configured user commands dir, then submit it to the active thread |
 | `tasks`, `task` | Show active-thread task count in the status bar |
 | `task <summary>`, `task create <summary>` | Create a pending active-thread runtime task |
 | `task next`, `task prev` | Move the selected active-thread runtime task |
@@ -307,9 +310,10 @@ refreshes the MCP inventory. The manager also keeps a selected-server action
 strip so `n`/`p` can move selection and `e`/`d`/`x`/`t` can enable, disable,
 open a remove confirmation modal, or inspect tools for that server. The shorter
 discovery commands still use the scrollable right-side detail panel. Rollback,
-memory, and MCP manager commands are
+memory, custom slash commands, and MCP manager commands are
 local-only because they operate on the client's git worktree, project/user MCP
-config, configured MCP transports, and user memory file; HTTP-runtime TUI
+config, configured MCP transports, custom command markdown files, and user
+memory file; HTTP-runtime TUI
 sessions report that those commands require local file-backed TUI. General
 external command execution is currently limited to the allowlisted local
 background shell path.

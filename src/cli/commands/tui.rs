@@ -36,6 +36,7 @@ use crate::core::runtime::{
     RuntimeStore,
 };
 use crate::error::{app_error, AppResult};
+use crate::repl::slash::load_custom_slash_command_from_config;
 use crate::tools::exec_shell::{
     run_trusted_background_shell, ExecShellAttachTool, ExecShellCancelTool, ExecShellInteractTool,
     ExecShellListTool, ExecShellResizeTool, ExecShellShowTool, ExecShellSupervisorStatusTool,
@@ -591,6 +592,9 @@ fn handle_tui_http_action(
             app.set_status(format!(
                 "submitted user message to remote runtime {thread_id}"
             ));
+        }
+        TuiAction::RunCustomSlashCommand { .. } => {
+            app.set_status("custom slash commands require local file-backed TUI".to_string());
         }
         TuiAction::RespondApproval {
             thread_id,
@@ -1195,6 +1199,43 @@ fn handle_tui_action_with_live(
             } else {
                 app.set_status(format!("submitted user message to {thread_id}"));
             }
+        }
+        TuiAction::RunCustomSlashCommand {
+            thread_id,
+            command,
+            args,
+        } => {
+            let Some(config) = config else {
+                app.set_status("custom slash commands require local config".to_string());
+                return Ok(());
+            };
+            let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+            let Some(content) = load_custom_slash_command_from_config(config, &command, &arg_refs)?
+            else {
+                app.set_status(format!("custom slash command not found: {command}"));
+                return Ok(());
+            };
+            let turn = store.append_turn(&thread_id, "user".to_string(), content.clone())?;
+            store.append_item(
+                &thread_id,
+                Some(&turn.id),
+                "message".to_string(),
+                Some("user".to_string()),
+                content.clone(),
+                "completed".to_string(),
+            )?;
+            start_tui_agent_run(
+                store.clone(),
+                config.clone(),
+                thread_id.clone(),
+                content,
+                app.reasoning_replay_limit(),
+                app.reasoning_replay_pinned_turn_ids(),
+                live_tx,
+            );
+            app.set_status(format!(
+                "started custom slash command {command} for {thread_id}"
+            ));
         }
         TuiAction::RespondApproval {
             thread_id,
@@ -3794,6 +3835,27 @@ mod tests {
     }
 
     #[test]
+    fn handle_tui_http_action_rejects_custom_slash_commands_as_local_only() {
+        let client = RuntimeHttpClient::from_url("http://127.0.0.1:9").unwrap();
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_http_action(
+            &client,
+            &mut app,
+            TuiAction::RunCustomSlashCommand {
+                thread_id: "thread-one".to_string(),
+                command: "/review".to_string(),
+                args: vec!["src/lib.rs".to_string()],
+            },
+        )
+        .unwrap();
+
+        assert!(render_once(&app, 120, 36)
+            .unwrap()
+            .contains("custom slash commands require local file-backed TUI"));
+    }
+
+    #[test]
     fn handle_tui_http_action_cancels_remote_task() {
         let store = temp_store("http-task-cancel-action");
         let session = store
@@ -4162,6 +4224,43 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].role, "user");
         assert_eq!(store.list_items(&thread.id, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn handle_tui_action_reports_missing_custom_slash_command() {
+        let root = temp_root("custom-slash-missing");
+        let store = RuntimeStore::new(root.join("runtime"));
+        let config = temp_config(&root);
+        let session = store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Runtime custom slash".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let mut app = app_from_store(&store).unwrap();
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::RunCustomSlashCommand {
+                thread_id: thread.id.clone(),
+                command: "/missing".to_string(),
+                args: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        assert!(render_once(&app, 120, 36)
+            .unwrap()
+            .contains("custom slash command not found: /missing"));
+        assert!(store.list_turns(&thread.id).unwrap().is_empty());
     }
 
     #[test]

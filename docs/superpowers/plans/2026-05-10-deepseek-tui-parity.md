@@ -368,6 +368,10 @@ Landed first slice:
   `/memory show|path|clear|edit|help` commands without starting model turns;
   the command palette also exposes `memory show|path|clear|edit|help` over the
   same opt-in `memory.memory_path` used by the `remember` tool
+- local file-backed TUI composer and command palette now expand project/user
+  custom markdown slash commands from `.dscode/commands/*.md` and the
+  configured user commands dir, reusing REPL argument expansion semantics and
+  submitting the rendered prompt to the active durable thread
 - AgentLoop cancellation now propagates into cancel-aware model/tool execution; `run_shell` starts commands in a process group and kills that group when a durable cancel event is observed, while remote model streams and blocked model process-pipe reads stop through cancel-aware polling
 - deterministic `--once` snapshot path for CI/release smoke tests
 

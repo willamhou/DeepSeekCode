@@ -615,11 +615,28 @@ fn composer_memory_command(content: &str) -> Option<Result<TuiMemoryCommand, Str
     }
 }
 
+fn parse_tui_custom_slash_command(line: &str) -> Option<(String, Vec<String>)> {
+    let mut tokens = line.split_whitespace();
+    let command = tokens.next()?;
+    if command == "/" || !command.starts_with('/') {
+        return None;
+    }
+    Some((
+        command.to_string(),
+        tokens.map(|token| token.to_string()).collect(),
+    ))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiAction {
     SubmitUserMessage {
         thread_id: String,
         content: String,
+    },
+    RunCustomSlashCommand {
+        thread_id: String,
+        command: String,
+        args: Vec<String>,
     },
     RespondApproval {
         thread_id: String,
@@ -2945,6 +2962,13 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some((command, args)) = parse_tui_custom_slash_command(&content) {
+                    if self.request_custom_slash_command(command, args) {
+                        self.composer.clear();
+                        self.composer_cursor = 0;
+                    }
+                    return true;
+                }
                 let Some(thread_id) = self.selected_thread_id.clone() else {
                     self.status = "composer has no active durable thread".to_string();
                     return true;
@@ -3125,6 +3149,10 @@ impl TuiApp {
         let command = command.trim();
         if let Some(command) = command.strip_prefix('!') {
             self.request_shell_run(command.trim().to_string());
+            return;
+        }
+        if let Some((command, args)) = parse_tui_custom_slash_command(command) {
+            self.request_custom_slash_command(command, args);
             return;
         }
         let words = command.split_whitespace().collect::<Vec<_>>();
@@ -4307,6 +4335,20 @@ impl TuiApp {
         });
         self.status =
             format!("compaction requested for {thread_id} (keep_tail_turns={keep_tail_turns})");
+    }
+
+    fn request_custom_slash_command(&mut self, command: String, args: Vec<String>) -> bool {
+        let Some(thread_id) = self.selected_thread_id.clone() else {
+            self.status = "custom slash command has no active durable thread".to_string();
+            return false;
+        };
+        self.pending_actions.push(TuiAction::RunCustomSlashCommand {
+            thread_id,
+            command: command.clone(),
+            args,
+        });
+        self.status = format!("custom slash command queued: {command}");
+        true
     }
 
     fn show_reasoning_list(&mut self) {
@@ -8386,6 +8428,42 @@ mod tests {
     }
 
     #[test]
+    fn command_palette_requests_custom_slash_command() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: ".".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        run_palette_command(&mut app, "/review src/lib.rs --strict");
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::RunCustomSlashCommand {
+                thread_id: "thread-one".to_string(),
+                command: "/review".to_string(),
+                args: vec!["src/lib.rs".to_string(), "--strict".to_string()],
+            }]
+        );
+        assert_eq!(app.status, "custom slash command queued: /review");
+    }
+
+    #[test]
     fn command_palette_requests_shell_job_actions() {
         let mut app = TuiApp::new(Vec::new());
 
@@ -8880,6 +8958,20 @@ mod tests {
             app.drain_actions(),
             vec![TuiAction::Memory {
                 command: TuiMemoryCommand::Path,
+            }]
+        );
+
+        for ch in "/review src/lib.rs".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::RunCustomSlashCommand {
+                thread_id: "thread-one".to_string(),
+                command: "/review".to_string(),
+                args: vec!["src/lib.rs".to_string()],
             }]
         );
 

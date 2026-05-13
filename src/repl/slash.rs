@@ -1,3 +1,4 @@
+use crate::config::types::AppConfig;
 use crate::error::AppResult;
 use crate::repl::repl::{Repl, DEFAULT_BUDGET};
 use crate::skills::registry::SkillRegistry;
@@ -478,15 +479,20 @@ fn load_custom_slash_command(
     command: &str,
     args: &[&str],
 ) -> AppResult<Option<String>> {
+    load_custom_slash_command_from_config(&repl.config, command, args)
+}
+
+pub(crate) fn load_custom_slash_command_from_config(
+    config: &AppConfig,
+    command: &str,
+    args: &[&str],
+) -> AppResult<Option<String>> {
     let Some(relative_path) = custom_command_relative_path(command) else {
         return Ok(None);
     };
     let candidates = [
-        repl.config
-            .workspace
-            .user_commands_dir()
-            .join(&relative_path),
-        repl.config.workspace.commands_dir().join(&relative_path),
+        config.workspace.user_commands_dir().join(&relative_path),
+        config.workspace.commands_dir().join(&relative_path),
     ];
     let Some(path) = candidates.iter().find(|path| path.is_file()) else {
         return Ok(None);

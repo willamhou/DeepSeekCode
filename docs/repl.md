@@ -51,6 +51,8 @@ to inspect the restore plan for the latest REPL turn, and
 Custom commands are prompt-backed markdown files for repeated workflows. Store project commands in
 `.dscode/commands/` and personal commands in `~/.config/dscode/commands/` by default. User commands
 override project commands with the same name.
+The local TUI uses the same command files from both the composer and command
+palette.
 
 Examples:
 
