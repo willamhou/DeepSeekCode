@@ -387,14 +387,14 @@ Landed first slice:
 - `serve --http` exposes `/v1/diagnostics` as a runtime diagnostics broker
   with warmed LSP session reuse inside the runtime process, and HTTP-runtime
   TUI sessions route `diagnostics [--changed|paths...]` through that broker
-- `src/core/rollback.rs` stores rollback snapshots under `.dscode/rollback/snapshots/`, including combined, staged, and unstaged tracked diffs plus captured untracked regular files, empty directories, and Unix symlinks
+- `src/core/rollback.rs` stores rollback snapshots under `.dscode/rollback/snapshots/`, including combined, staged, and unstaged tracked diffs plus captured untracked regular files, empty directories, Unix FIFOs, and Unix symlinks
 - `deepseek restore snapshot [label]`, `restore list`, `restore show <id> [--patch]`, and `restore revert-turn <id> [--apply]`
 - REPL `/restore snapshot [label]`, `/restore list`, `/restore show <id>`, and `/revert_turn <id> [--apply]`
 - Snapshot restore checks that git `HEAD` matches the captured commit, dry-runs by default, and applies only when `--apply` is passed
 - Applied restores now report restored changed files and run post-restore diagnostics through the same fallback diagnostic runner
-- Applied restores now restore captured untracked regular files, restore
-  captured empty directories, restore captured untracked Unix symlinks, and
-  exclude rollback storage from untracked capture
+- Applied restores now restore captured untracked regular files, captured empty
+  directories, captured untracked Unix FIFOs, and captured untracked Unix
+  symlinks, while excluding rollback storage from untracked capture
 - Applied restores preserve the snapshot staged-index versus unstaged-worktree split for new split-patch snapshots
 - `deepseek exec` creates a pre-run rollback snapshot in git worktrees and binds it to the successful assistant runtime turn id; restore/show accept either snapshot id or bound turn id
 - TUI-started agent runs create a pre-run rollback snapshot in git worktrees and bind it to the running assistant turn id as soon as the durable turn exists
@@ -417,8 +417,9 @@ Landed first slice:
 
 Remaining:
 
-- side-git/worktree snapshot strategy for non-empty directory and special-file
-  fidelity beyond empty untracked directories
+- side-git/worktree snapshot strategy for non-empty directory metadata and
+  special-file fidelity beyond Unix FIFOs/symlinks, including sockets, device
+  nodes, and Windows symlink recreation
 
 ### Phase G: Subagent/RLM
 

@@ -26,6 +26,7 @@ pub struct SnapshotRecord {
     pub untracked_bytes: u64,
     pub untracked_files: Vec<String>,
     pub untracked_directories: Vec<String>,
+    pub untracked_fifos: Vec<String>,
     pub untracked_symlinks: Vec<UntrackedSymlinkRecord>,
     pub tracked_only: bool,
     pub runtime_thread_id: Option<String>,
@@ -36,6 +37,15 @@ pub struct SnapshotRecord {
 pub struct UntrackedSymlinkRecord {
     pub path: String,
     pub target: String,
+}
+
+impl SnapshotRecord {
+    pub fn untracked_entry_count(&self) -> usize {
+        self.untracked_files.len()
+            + self.untracked_directories.len()
+            + self.untracked_fifos.len()
+            + self.untracked_symlinks.len()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,8 +117,10 @@ impl RollbackStore {
             )?;
         let untracked_directories =
             capture_empty_untracked_directories(Path::new(&git_root), &self.root)?;
+        let untracked_fifos = capture_untracked_fifos(Path::new(&git_root), &self.root)?;
         let tracked_only = untracked_files.is_empty()
             && untracked_directories.is_empty()
+            && untracked_fifos.is_empty()
             && untracked_symlinks.is_empty();
         let record = SnapshotRecord {
             id,
@@ -128,6 +140,7 @@ impl RollbackStore {
             untracked_bytes,
             untracked_files,
             untracked_directories,
+            untracked_fifos,
             untracked_symlinks,
             tracked_only,
             runtime_thread_id: None,
@@ -278,6 +291,7 @@ impl RollbackStore {
                 &snapshot_dir,
                 &record.untracked_files,
                 &record.untracked_directories,
+                &record.untracked_fifos,
                 &record.untracked_symlinks,
             )?;
         }
@@ -289,6 +303,7 @@ impl RollbackStore {
         if apply {
             changed_files.extend(record.untracked_files.iter().cloned());
             changed_files.extend(record.untracked_directories.iter().cloned());
+            changed_files.extend(record.untracked_fifos.iter().cloned());
             changed_files.extend(
                 record
                     .untracked_symlinks
@@ -411,6 +426,17 @@ pub fn snapshot_to_json(record: &SnapshotRecord) -> JsonValue {
                 .collect(),
         ),
     );
+    value.insert(
+        "untracked_fifos".to_string(),
+        JsonValue::Array(
+            record
+                .untracked_fifos
+                .iter()
+                .cloned()
+                .map(JsonValue::String)
+                .collect(),
+        ),
+    );
     JsonValue::Object(value)
 }
 
@@ -436,6 +462,7 @@ fn parse_snapshot_record(root: &BTreeMap<String, JsonValue>) -> AppResult<Snapsh
         untracked_bytes: optional_u64(root, "untracked_bytes")?,
         untracked_files: optional_string_array(root, "untracked_files")?,
         untracked_directories: optional_string_array(root, "untracked_directories")?,
+        untracked_fifos: optional_string_array(root, "untracked_fifos")?,
         untracked_symlinks: optional_untracked_symlinks(root)?,
         tracked_only: matches!(root.get("tracked_only"), Some(JsonValue::Bool(true))),
         runtime_thread_id: optional_safe_string(root, "runtime_thread_id")?,
@@ -697,6 +724,53 @@ fn capture_empty_untracked_directories(
     Ok(directories)
 }
 
+#[cfg(unix)]
+fn capture_untracked_fifos(git_root: &Path, store_root: &Path) -> AppResult<Vec<String>> {
+    let store_prefix = store_root_relative_prefix(git_root, store_root);
+    let mut fifos = Vec::new();
+    collect_untracked_fifos(git_root, git_root, store_prefix.as_deref(), &mut fifos)?;
+    normalize_file_list(&mut fifos);
+    Ok(fifos)
+}
+
+#[cfg(not(unix))]
+fn capture_untracked_fifos(_git_root: &Path, _store_root: &Path) -> AppResult<Vec<String>> {
+    Ok(Vec::new())
+}
+
+#[cfg(unix)]
+fn collect_untracked_fifos(
+    git_root: &Path,
+    current: &Path,
+    store_prefix: Option<&str>,
+    fifos: &mut Vec<String>,
+) -> AppResult<()> {
+    use std::os::unix::fs::FileTypeExt;
+
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        let Some(relative) = relative_git_path(git_root, &path)? else {
+            continue;
+        };
+        if is_rollback_internal_path(&relative, store_prefix)
+            || is_git_internal_path(&relative)
+            || is_git_ignored_path(git_root, &relative)?
+        {
+            continue;
+        }
+        let file_type = metadata.file_type();
+        if file_type.is_dir() && !file_type.is_symlink() {
+            collect_untracked_fifos(git_root, &path, store_prefix, fifos)?;
+        } else if file_type.is_fifo() && !is_git_tracked_path(git_root, &relative)? {
+            safe_relative_path(&relative)?;
+            fifos.push(relative);
+        }
+    }
+    Ok(())
+}
+
 fn collect_empty_untracked_directories(
     git_root: &Path,
     current: &Path,
@@ -791,11 +865,28 @@ fn is_git_ignored_path(git_root: &Path, path: &str) -> AppResult<bool> {
     }
 }
 
+fn is_git_tracked_path(git_root: &Path, path: &str) -> AppResult<bool> {
+    let output = Command::new("git")
+        .args(["ls-files", "--error-unmatch", "--", path])
+        .current_dir(git_root)
+        .output()
+        .map_err(|error| app_error(format!("could not invoke git ls-files: {error}")))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(app_error(format!(
+            "git ls-files failed for `{path}`: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))),
+    }
+}
+
 fn restore_untracked_entries(
     git_root: &Path,
     snapshot_dir: &Path,
     files: &[String],
     directories: &[String],
+    fifos: &[String],
     symlinks: &[UntrackedSymlinkRecord],
 ) -> AppResult<()> {
     for directory in directories {
@@ -819,6 +910,19 @@ fn restore_untracked_entries(
         fs::copy(&source, &target).map_err(|error| {
             app_error(format!(
                 "failed to restore untracked file `{file}`: {error}"
+            ))
+        })?;
+    }
+    for fifo in fifos {
+        let relative = safe_relative_path(fifo)?;
+        let target = git_root.join(&relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        remove_existing_restore_target(&target)?;
+        create_fifo(&target).map_err(|error| {
+            app_error(format!(
+                "failed to restore untracked FIFO `{fifo}`: {error}"
             ))
         })?;
     }
@@ -905,6 +1009,27 @@ fn create_symlink(_target: &str, _link: &Path) -> std::io::Result<()> {
         std::io::ErrorKind::Unsupported,
         "symlink restore is only supported on Unix",
     ))
+}
+
+#[cfg(unix)]
+fn create_fifo(target: &Path) -> AppResult<()> {
+    let output = Command::new("mkfifo")
+        .arg(target)
+        .output()
+        .map_err(|error| app_error(format!("could not invoke mkfifo: {error}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(app_error(format!(
+            "mkfifo failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+#[cfg(not(unix))]
+fn create_fifo(_target: &Path) -> AppResult<()> {
+    Err(app_error("FIFO restore is only supported on Unix"))
 }
 
 fn safe_relative_path(path: &str) -> AppResult<PathBuf> {
@@ -1354,6 +1479,59 @@ mod tests {
         assert_eq!(loaded.untracked_bytes, snapshot.untracked_bytes);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_restore_round_trip_untracked_fifos() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let repo = temp_root("fifo");
+        fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init"]);
+        fs::write(repo.join("src.txt"), "base\n").unwrap();
+        run_git(&repo, &["add", "src.txt"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+
+        fs::create_dir_all(repo.join("pipes")).unwrap();
+        let fifo_path = repo.join("pipes/input.fifo");
+        let mkfifo_status = Command::new("mkfifo").arg(&fifo_path).status().unwrap();
+        assert!(mkfifo_status.success());
+        let store = RollbackStore::new(repo.join(".dscode/rollback"));
+        let snapshot = store
+            .create_snapshot(&repo, "capture fifo".to_string())
+            .unwrap();
+
+        assert!(!snapshot.tracked_only);
+        assert!(snapshot.untracked_files.is_empty());
+        assert_eq!(
+            snapshot.untracked_fifos,
+            vec!["pipes/input.fifo".to_string()]
+        );
+
+        fs::remove_file(&fifo_path).unwrap();
+        fs::write(&fifo_path, "later file\n").unwrap();
+        let plan = store.restore_snapshot(&snapshot.id, true).unwrap();
+
+        assert!(fs::symlink_metadata(&fifo_path)
+            .unwrap()
+            .file_type()
+            .is_fifo());
+        assert_eq!(plan.changed_files, vec!["pipes/input.fifo".to_string()]);
+
+        let loaded = store.load_snapshot(&snapshot.id).unwrap();
+        assert_eq!(loaded.untracked_fifos, snapshot.untracked_fifos);
+    }
+
     #[test]
     fn legacy_snapshot_manifest_without_symlinks_still_parses() {
         let manifest = r#"{
@@ -1373,6 +1551,7 @@ mod tests {
         assert_eq!(record.id, "snapshot-legacy");
         assert!(record.untracked_files.is_empty());
         assert!(record.untracked_directories.is_empty());
+        assert!(record.untracked_fifos.is_empty());
         assert!(record.untracked_symlinks.is_empty());
     }
 

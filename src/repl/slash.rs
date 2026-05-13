@@ -241,9 +241,7 @@ fn handle_restore(repl: &Repl, args: &[&str]) {
                     "snapshot {} created (patch_bytes={}, untracked_entries={}, tracked_only={})",
                     snapshot.id,
                     snapshot.patch_bytes,
-                    snapshot.untracked_files.len()
-                        + snapshot.untracked_directories.len()
-                        + snapshot.untracked_symlinks.len(),
+                    snapshot.untracked_entry_count(),
                     snapshot.tracked_only
                 ),
                 Err(error) => println!("snapshot failed: {error}"),
@@ -258,9 +256,7 @@ fn handle_restore(repl: &Repl, args: &[&str]) {
                         "snapshot {} created (patch_bytes={}, untracked_entries={}, tracked_only={})",
                         snapshot.id,
                         snapshot.patch_bytes,
-                        snapshot.untracked_files.len()
-                            + snapshot.untracked_directories.len()
-                            + snapshot.untracked_symlinks.len(),
+                        snapshot.untracked_entry_count(),
                         snapshot.tracked_only
                     ),
                     Err(error) => println!("snapshot failed: {error}"),
@@ -277,9 +273,7 @@ fn handle_restore(repl: &Repl, args: &[&str]) {
                         snapshot.id,
                         snapshot.created_at,
                         snapshot.patch_bytes,
-                        snapshot.untracked_files.len()
-                            + snapshot.untracked_directories.len()
-                            + snapshot.untracked_symlinks.len(),
+                        snapshot.untracked_entry_count(),
                         snapshot.runtime_turn_id.as_deref().unwrap_or("-"),
                         snapshot.label
                     );
@@ -313,6 +307,7 @@ fn handle_restore(repl: &Repl, args: &[&str]) {
                         "  untracked_symlinks: {}",
                         snapshot.untracked_symlinks.len()
                     );
+                    println!("  untracked_fifos: {}", snapshot.untracked_fifos.len());
                     println!("  untracked_bytes: {}", snapshot.untracked_bytes);
                     println!("  tracked_only: {}", snapshot.tracked_only);
                     if !snapshot.untracked_files.is_empty() {
@@ -331,6 +326,12 @@ fn handle_restore(repl: &Repl, args: &[&str]) {
                         println!("  untracked symlink paths:");
                         for symlink in &snapshot.untracked_symlinks {
                             println!("    - {} -> {}", symlink.path, symlink.target);
+                        }
+                    }
+                    if !snapshot.untracked_fifos.is_empty() {
+                        println!("  untracked FIFO paths:");
+                        for fifo in &snapshot.untracked_fifos {
+                            println!("    - {fifo}");
                         }
                     }
                 }
