@@ -40,7 +40,7 @@ agent run.
 - `cargo fmt --check`
 - `git diff --check`
 
-## Remaining Differences
+## Follow-Up
 
-- Future work can add richer in-panel search/highlighting and per-turn replay
-  pinning.
+- In-panel search/highlighting and per-turn replay pinning are covered by
+  `2026-05-13-deepseek-tui-tui-reasoning-search-pinning.md`.

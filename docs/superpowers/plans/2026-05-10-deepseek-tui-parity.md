@@ -333,7 +333,7 @@ Remaining:
 - Cost/cache telemetry
 - 1M-context compaction controls
 
-Status: `started`
+Status: `completed`
 
 Landed first slice:
 
@@ -355,11 +355,15 @@ Landed first slice:
 - TUI command palette now exposes a reasoning browser through `reasoning`,
   `reasoning latest`, and `reasoning show <selector>`, and local replay
   controls through `reasoning replay <0..20>` for TUI-started agent runs
+- TUI reasoning browser now supports `reasoning search <query>` with highlighted
+  matching excerpts, plus `reasoning pin <selector>`, `reasoning pins`, and
+  `reasoning unpin <selector|all>` for local per-turn replay pinning beyond the
+  latest-N replay window
 
 Remaining:
 
-- richer reasoning UX can still add in-panel search/highlighting and per-turn
-  replay pinning
+- no open Phase E product UX gaps identified; future work can persist local
+  reasoning pin preferences across TUI restarts if operators ask for it
 
 ### Phase F: LSP + Revert
 

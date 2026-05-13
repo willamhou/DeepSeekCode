@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -606,16 +606,48 @@ impl RuntimeStore {
         thread_id: &str,
         limit: usize,
     ) -> AppResult<Vec<String>> {
+        self.reasoning_replay_entries_with_pinned_turns(thread_id, limit, &[])
+    }
+
+    pub fn reasoning_replay_entries_with_pinned_turns(
+        &self,
+        thread_id: &str,
+        limit: usize,
+        pinned_turn_ids: &[String],
+    ) -> AppResult<Vec<String>> {
         validate_record_id(thread_id)?;
-        if limit == 0 {
+        let pinned_turn_ids = pinned_turn_ids
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .collect::<BTreeSet<_>>();
+        if limit == 0 && pinned_turn_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let mut entries = self
+        let records = self
             .list_items(thread_id, None)?
             .into_iter()
-            .rev()
             .filter(|item| item.item_type == "reasoning" && !item.content.trim().is_empty())
-            .take(limit)
+            .collect::<Vec<_>>();
+        let mut selected_ids = BTreeSet::new();
+        let mut selected = Vec::new();
+        for item in records.iter().rev().take(limit) {
+            selected_ids.insert(item.id.clone());
+            selected.push(item.clone());
+        }
+        for item in &records {
+            if item
+                .turn_id
+                .as_deref()
+                .is_some_and(|turn_id| pinned_turn_ids.contains(turn_id))
+                && selected_ids.insert(item.id.clone())
+            {
+                selected.push(item.clone());
+            }
+        }
+        selected.sort_by_key(|item| item.index);
+        Ok(selected
+            .into_iter()
             .map(|item| {
                 let turn = item
                     .turn_id
@@ -627,9 +659,7 @@ impl RuntimeStore {
                     compact_excerpt(&item.content, 600)
                 )
             })
-            .collect::<Vec<_>>();
-        entries.reverse();
-        Ok(entries)
+            .collect::<Vec<_>>())
     }
 
     pub fn compact_thread(
@@ -3086,6 +3116,64 @@ mod tests {
         assert!(entries[0].contains("old reasoning"));
         assert!(entries[1].contains("latest reasoning with details"));
         assert!(entries[1].contains(&latest_turn.id));
+    }
+
+    #[test]
+    fn reasoning_replay_entries_include_pinned_turns_beyond_latest_limit() {
+        let store = RuntimeStore::new(temp_root("reasoning-replay-pins"));
+        let thread = store
+            .create_thread(
+                "Reasoning replay pins".to_string(),
+                ".".to_string(),
+                "deepseek-v4-flash".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let pinned_turn = store
+            .append_turn(&thread.id, "assistant".to_string(), "pinned".to_string())
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                Some(&pinned_turn.id),
+                "reasoning".to_string(),
+                Some("assistant".to_string()),
+                "pinned old reasoning".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        for index in 1..=3 {
+            let turn = store
+                .append_turn(
+                    &thread.id,
+                    "assistant".to_string(),
+                    format!("latest {index}"),
+                )
+                .unwrap();
+            store
+                .append_item(
+                    &thread.id,
+                    Some(&turn.id),
+                    "reasoning".to_string(),
+                    Some("assistant".to_string()),
+                    format!("latest reasoning {index}"),
+                    "completed".to_string(),
+                )
+                .unwrap();
+        }
+
+        let entries = store
+            .reasoning_replay_entries_with_pinned_turns(
+                &thread.id,
+                1,
+                std::slice::from_ref(&pinned_turn.id),
+            )
+            .unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].contains("pinned old reasoning"));
+        assert!(entries[0].contains(&pinned_turn.id));
+        assert!(entries[1].contains("latest reasoning 3"));
     }
 
     #[test]

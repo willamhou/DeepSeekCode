@@ -807,6 +807,10 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "reasoning latest",
     "reasoning show ",
     "reasoning replay ",
+    "reasoning search ",
+    "reasoning pin ",
+    "reasoning pins",
+    "reasoning unpin ",
     "mcp",
     "mcp manager",
     "mcp manager tab overview",
@@ -901,6 +905,7 @@ pub struct TuiApp {
     composer_focused: bool,
     transcript_scroll: usize,
     reasoning_replay_limit: usize,
+    reasoning_replay_pinned_turn_ids: BTreeSet<String>,
     pending_actions: Vec<TuiAction>,
     status: String,
     mcp_detail: Option<(TuiMcpDetailKind, String)>,
@@ -1059,6 +1064,7 @@ impl TuiApp {
             composer_focused: false,
             transcript_scroll: 0,
             reasoning_replay_limit: DEFAULT_TUI_REASONING_REPLAY_LIMIT,
+            reasoning_replay_pinned_turn_ids: BTreeSet::new(),
             pending_actions: Vec::new(),
             status: "ready".to_string(),
             mcp_detail: None,
@@ -1086,6 +1092,13 @@ impl TuiApp {
 
     pub fn reasoning_replay_limit(&self) -> usize {
         self.reasoning_replay_limit
+    }
+
+    pub fn reasoning_replay_pinned_turn_ids(&self) -> Vec<String> {
+        self.reasoning_replay_pinned_turn_ids
+            .iter()
+            .cloned()
+            .collect()
     }
 
     pub fn set_mcp_detail(&mut self, kind: TuiMcpDetailKind, detail: impl Into<String>) {
@@ -3045,6 +3058,32 @@ impl TuiApp {
             ["reasoning", "show", selector] => {
                 self.show_reasoning_item(selector);
             }
+            ["reasoning", "search"] => {
+                self.status = "reasoning search requires a query".to_string();
+                self.show_reasoning_list();
+            }
+            ["reasoning", "search", query @ ..] => {
+                self.show_reasoning_search(&query.join(" "));
+            }
+            ["reasoning", "pin"] => {
+                self.pin_reasoning_replay_turn("latest");
+            }
+            ["reasoning", "pin", selector] => {
+                self.pin_reasoning_replay_turn(selector);
+            }
+            ["reasoning", "pins"] => {
+                self.show_reasoning_pins();
+            }
+            ["reasoning", "unpin"] => {
+                self.status = "reasoning unpin requires a selector or all".to_string();
+                self.show_reasoning_pins();
+            }
+            ["reasoning", "unpin", "all"] => {
+                self.clear_reasoning_replay_pins();
+            }
+            ["reasoning", "unpin", selector] => {
+                self.unpin_reasoning_replay_turn(selector);
+            }
             ["reasoning", "replay"] => {
                 self.show_reasoning_list();
                 self.status = format!("reasoning replay limit is {}", self.reasoning_replay_limit);
@@ -4082,11 +4121,16 @@ impl TuiApp {
             Some(thread) => {
                 let items = self.active_reasoning_items();
                 let count = items.len();
-                let detail =
-                    render_reasoning_list_detail(&thread, &items, self.reasoning_replay_limit);
+                let detail = render_reasoning_list_detail(
+                    &thread,
+                    &items,
+                    self.reasoning_replay_limit,
+                    &self.reasoning_replay_pinned_turn_ids,
+                );
                 self.status = format!(
-                    "reasoning items={count} replay_limit={}",
-                    self.reasoning_replay_limit
+                    "reasoning items={count} replay_limit={} pinned_turns={}",
+                    self.reasoning_replay_limit,
+                    self.reasoning_replay_pinned_turn_ids.len()
                 );
                 detail
             }
@@ -4096,6 +4140,31 @@ impl TuiApp {
             }
         };
         self.set_mcp_detail(TuiMcpDetailKind::Reasoning, detail);
+    }
+
+    fn select_reasoning_item<'a>(
+        &self,
+        items: &'a [&'a TuiItem],
+        selector: &str,
+    ) -> Option<(usize, &'a TuiItem)> {
+        let selector = selector.trim();
+        if selector.eq_ignore_ascii_case("latest")
+            || selector.eq_ignore_ascii_case("last")
+            || selector.is_empty()
+        {
+            items
+                .last()
+                .map(|item| (items.len().saturating_sub(1), *item))
+        } else if let Ok(index) = selector.parse::<usize>() {
+            index
+                .checked_sub(1)
+                .and_then(|idx| items.get(idx).map(|item| (idx, *item)))
+        } else {
+            items
+                .iter()
+                .position(|item| item.id == selector || item.turn_id.as_deref() == Some(selector))
+                .map(|idx| (idx, items[idx]))
+        }
     }
 
     fn show_reasoning_item(&mut self, selector: &str) {
@@ -4112,28 +4181,15 @@ impl TuiApp {
             self.status = "no reasoning items in active thread".to_string();
             self.set_mcp_detail(
                 TuiMcpDetailKind::Reasoning,
-                render_reasoning_empty_detail(self.reasoning_replay_limit),
+                render_reasoning_empty_detail(
+                    self.reasoning_replay_limit,
+                    &self.reasoning_replay_pinned_turn_ids,
+                ),
             );
             return;
         }
         let selector = selector.trim();
-        let selected = if selector.eq_ignore_ascii_case("latest")
-            || selector.eq_ignore_ascii_case("last")
-            || selector.is_empty()
-        {
-            items
-                .last()
-                .map(|item| (items.len().saturating_sub(1), *item))
-        } else if let Ok(index) = selector.parse::<usize>() {
-            index
-                .checked_sub(1)
-                .and_then(|idx| items.get(idx).map(|item| (idx, *item)))
-        } else {
-            items
-                .iter()
-                .position(|item| item.id == selector || item.turn_id.as_deref() == Some(selector))
-                .map(|idx| (idx, items[idx]))
-        };
+        let selected = self.select_reasoning_item(&items, selector);
         let Some((index, item)) = selected else {
             self.status = format!("reasoning item not found: {selector}");
             self.set_mcp_detail(
@@ -4147,8 +4203,13 @@ impl TuiApp {
         };
         let total = items.len();
         let item_id = item.id.clone();
-        let detail =
-            render_reasoning_item_detail(item, index + 1, total, self.reasoning_replay_limit);
+        let detail = render_reasoning_item_detail(
+            item,
+            index + 1,
+            total,
+            self.reasoning_replay_limit,
+            &self.reasoning_replay_pinned_turn_ids,
+        );
         self.set_mcp_detail(TuiMcpDetailKind::Reasoning, detail);
         self.status = format!(
             "showing reasoning item {}/{} ({})",
@@ -4156,6 +4217,112 @@ impl TuiApp {
             total,
             item_id
         );
+    }
+
+    fn show_reasoning_search(&mut self, query: &str) {
+        let query = query.trim();
+        if query.is_empty() {
+            self.status = "reasoning search requires a query".to_string();
+            self.show_reasoning_list();
+            return;
+        }
+        let detail = match self.active_thread().cloned() {
+            Some(thread) => {
+                let items = self.active_reasoning_items();
+                let matched = count_reasoning_search_matches(&items, query);
+                let detail = render_reasoning_search_detail(
+                    &thread,
+                    &items,
+                    query,
+                    self.reasoning_replay_limit,
+                    &self.reasoning_replay_pinned_turn_ids,
+                );
+                self.status = format!(
+                    "reasoning search `{}` matched {}",
+                    clip_line(query, 40),
+                    matched
+                );
+                detail
+            }
+            None => {
+                self.status = "no active durable thread for reasoning".to_string();
+                "Reasoning search\n\nNo active durable thread.".to_string()
+            }
+        };
+        self.set_mcp_detail(TuiMcpDetailKind::Reasoning, detail);
+    }
+
+    fn pin_reasoning_replay_turn(&mut self, selector: &str) {
+        let selected = {
+            let items = self.active_reasoning_items();
+            if items.is_empty() {
+                None
+            } else {
+                self.select_reasoning_item(&items, selector)
+                    .map(|(_, item)| {
+                        (
+                            item.id.clone(),
+                            item.turn_id.clone(),
+                            item.content.chars().count(),
+                        )
+                    })
+            }
+        };
+        let Some((item_id, turn_id, chars)) = selected else {
+            self.status = format!("reasoning item not found: {selector}");
+            return;
+        };
+        let Some(turn_id) = turn_id else {
+            self.status = format!("reasoning item {item_id} has no turn_id to pin");
+            return;
+        };
+        self.reasoning_replay_pinned_turn_ids
+            .insert(turn_id.clone());
+        self.show_reasoning_pins();
+        self.status = format!("pinned reasoning turn {turn_id} ({item_id}, chars={chars})");
+    }
+
+    fn unpin_reasoning_replay_turn(&mut self, selector: &str) {
+        let turn_id = {
+            let items = self.active_reasoning_items();
+            self.select_reasoning_item(&items, selector)
+                .and_then(|(_, item)| item.turn_id.clone())
+                .or_else(|| Some(selector.trim().to_string()).filter(|value| !value.is_empty()))
+        };
+        let Some(turn_id) = turn_id else {
+            self.status = "reasoning unpin requires a selector".to_string();
+            return;
+        };
+        if self.reasoning_replay_pinned_turn_ids.remove(&turn_id) {
+            self.show_reasoning_pins();
+            self.status = format!("unpinned reasoning turn {turn_id}");
+        } else {
+            self.show_reasoning_pins();
+            self.status = format!("reasoning turn was not pinned: {turn_id}");
+        }
+    }
+
+    fn clear_reasoning_replay_pins(&mut self) {
+        let count = self.reasoning_replay_pinned_turn_ids.len();
+        self.reasoning_replay_pinned_turn_ids.clear();
+        self.show_reasoning_pins();
+        self.status = format!("cleared {count} reasoning replay pin(s)");
+    }
+
+    fn show_reasoning_pins(&mut self) {
+        let detail = match self.active_thread().cloned() {
+            Some(thread) => {
+                let items = self.active_reasoning_items();
+                render_reasoning_pins_detail(
+                    &thread,
+                    &items,
+                    self.reasoning_replay_limit,
+                    &self.reasoning_replay_pinned_turn_ids,
+                )
+            }
+            None => "Reasoning replay pins\n\nNo active durable thread.".to_string(),
+        };
+        self.set_mcp_detail(TuiMcpDetailKind::Reasoning, detail);
     }
 
     fn set_reasoning_replay_limit_from_arg(&mut self, limit: &str) {
@@ -5022,10 +5189,13 @@ fn clip_line(value: &str, max_chars: usize) -> String {
     clipped
 }
 
-fn render_reasoning_empty_detail(replay_limit: usize) -> String {
+fn render_reasoning_empty_detail(
+    replay_limit: usize,
+    pinned_turn_ids: &BTreeSet<String>,
+) -> String {
     format!(
         "Reasoning\n\nNo reasoning items recorded for the active thread.\n\n{}",
-        render_reasoning_replay_control(replay_limit)
+        render_reasoning_replay_control(replay_limit, pinned_turn_ids)
     )
 }
 
@@ -5033,9 +5203,10 @@ fn render_reasoning_list_detail(
     thread: &TuiThread,
     items: &[&TuiItem],
     replay_limit: usize,
+    pinned_turn_ids: &BTreeSet<String>,
 ) -> String {
     if items.is_empty() {
-        return render_reasoning_empty_detail(replay_limit);
+        return render_reasoning_empty_detail(replay_limit, pinned_turn_ids);
     }
 
     let mut detail = String::new();
@@ -5043,15 +5214,23 @@ fn render_reasoning_list_detail(
     detail.push_str(&format!("thread: {}\n", thread.title));
     detail.push_str(&format!("thread_id: {}\n", thread.id));
     detail.push_str(&format!("items: {}\n", items.len()));
-    detail.push_str(&render_reasoning_replay_control(replay_limit));
+    detail.push_str(&render_reasoning_replay_control(
+        replay_limit,
+        pinned_turn_ids,
+    ));
     detail.push_str("\n\nReasoning items:\n");
     for (index, item) in items.iter().enumerate() {
+        let pinned = item
+            .turn_id
+            .as_deref()
+            .is_some_and(|turn_id| pinned_turn_ids.contains(turn_id));
         detail.push_str(&format!(
-            "#{} {} status={} chars={}",
+            "#{} {} status={} chars={}{}",
             index + 1,
             item.id,
             item.status,
-            item.content.chars().count()
+            item.content.chars().count(),
+            if pinned { " pinned" } else { "" }
         ));
         if let Some(turn_id) = item.turn_id.as_deref() {
             detail.push_str(&format!(" turn={turn_id}"));
@@ -5071,6 +5250,7 @@ fn render_reasoning_item_detail(
     position: usize,
     total: usize,
     replay_limit: usize,
+    pinned_turn_ids: &BTreeSet<String>,
 ) -> String {
     let mut detail = String::new();
     detail.push_str("Reasoning item\n");
@@ -5079,10 +5259,16 @@ fn render_reasoning_item_detail(
     detail.push_str(&format!("thread_id: {}\n", item.thread_id));
     if let Some(turn_id) = item.turn_id.as_deref() {
         detail.push_str(&format!("turn_id: {turn_id}\n"));
+        if pinned_turn_ids.contains(turn_id) {
+            detail.push_str("replay_pin: true\n");
+        }
     }
     detail.push_str(&format!("status: {}\n", item.status));
     detail.push_str(&format!("chars: {}\n", item.content.chars().count()));
-    detail.push_str(&render_reasoning_replay_control(replay_limit));
+    detail.push_str(&render_reasoning_replay_control(
+        replay_limit,
+        pinned_turn_ids,
+    ));
     detail.push_str("\n\nContent:\n");
     detail.push_str(&item.content);
     if !item.content.ends_with('\n') {
@@ -5091,12 +5277,172 @@ fn render_reasoning_item_detail(
     detail
 }
 
-fn render_reasoning_replay_control(replay_limit: usize) -> String {
-    format!("replay_limit: {replay_limit} latest persisted reasoning item(s)")
+fn render_reasoning_search_detail(
+    thread: &TuiThread,
+    items: &[&TuiItem],
+    query: &str,
+    replay_limit: usize,
+    pinned_turn_ids: &BTreeSet<String>,
+) -> String {
+    let mut detail = String::new();
+    detail.push_str("Reasoning search\n");
+    detail.push_str(&format!("thread: {}\n", thread.title));
+    detail.push_str(&format!("thread_id: {}\n", thread.id));
+    detail.push_str(&format!("query: {}\n", highlight_query(query, query)));
+    detail.push_str(&render_reasoning_replay_control(
+        replay_limit,
+        pinned_turn_ids,
+    ));
+    detail.push_str("\n\nMatches:\n");
+
+    let mut matched = 0_usize;
+    for (index, item) in items.iter().enumerate() {
+        if !reasoning_item_matches_query(item, query) {
+            continue;
+        }
+        matched += 1;
+        let pinned = item
+            .turn_id
+            .as_deref()
+            .is_some_and(|turn_id| pinned_turn_ids.contains(turn_id));
+        detail.push_str(&format!(
+            "#{} {} status={} chars={}{}",
+            index + 1,
+            item.id,
+            item.status,
+            item.content.chars().count(),
+            if pinned { " pinned" } else { "" }
+        ));
+        if let Some(turn_id) = item.turn_id.as_deref() {
+            detail.push_str(&format!(" turn={}", highlight_query(turn_id, query)));
+        }
+        detail.push('\n');
+        detail.push_str("  ");
+        detail.push_str(&reasoning_search_excerpt(&item.content, query, 180));
+        detail.push('\n');
+    }
+
+    if matched == 0 {
+        detail.push_str("No matching reasoning items.\n");
+    }
+    detail.push_str("\n");
+    detail.push_str(render_reasoning_selector_help());
+    detail
+}
+
+fn render_reasoning_pins_detail(
+    thread: &TuiThread,
+    items: &[&TuiItem],
+    replay_limit: usize,
+    pinned_turn_ids: &BTreeSet<String>,
+) -> String {
+    let mut detail = String::new();
+    detail.push_str("Reasoning replay pins\n");
+    detail.push_str(&format!("thread: {}\n", thread.title));
+    detail.push_str(&format!("thread_id: {}\n", thread.id));
+    detail.push_str(&render_reasoning_replay_control(
+        replay_limit,
+        pinned_turn_ids,
+    ));
+    detail.push_str("\n\nPinned turns:\n");
+    if pinned_turn_ids.is_empty() {
+        detail.push_str("none\n");
+    } else {
+        for turn_id in pinned_turn_ids {
+            let count = items
+                .iter()
+                .filter(|item| item.turn_id.as_deref() == Some(turn_id.as_str()))
+                .count();
+            detail.push_str(&format!("- {turn_id} reasoning_items={count}\n"));
+        }
+    }
+    detail.push_str("\n");
+    detail.push_str(render_reasoning_selector_help());
+    detail
+}
+
+fn render_reasoning_replay_control(
+    replay_limit: usize,
+    pinned_turn_ids: &BTreeSet<String>,
+) -> String {
+    let pins = if pinned_turn_ids.is_empty() {
+        "none".to_string()
+    } else {
+        pinned_turn_ids
+            .iter()
+            .take(6)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let suffix = pinned_turn_ids
+        .len()
+        .checked_sub(6)
+        .filter(|remaining| *remaining > 0)
+        .map(|remaining| format!(" (+{remaining} more)"))
+        .unwrap_or_default();
+    format!(
+        "replay_limit: {replay_limit} latest persisted reasoning item(s)\npinned_turns: {pins}{suffix}"
+    )
 }
 
 fn render_reasoning_selector_help() -> &'static str {
-    "Commands: reasoning list | reasoning latest | reasoning show <latest|index|item-id|turn-id> | reasoning replay <0..20>"
+    "Commands: reasoning list | reasoning search <query> | reasoning show <latest|index|item-id|turn-id> | reasoning replay <0..20> | reasoning pin <selector> | reasoning pins | reasoning unpin <selector|all>"
+}
+
+fn count_reasoning_search_matches(items: &[&TuiItem], query: &str) -> usize {
+    items
+        .iter()
+        .filter(|item| reasoning_item_matches_query(item, query))
+        .count()
+}
+
+fn reasoning_item_matches_query(item: &TuiItem, query: &str) -> bool {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return false;
+    }
+    item.id.to_ascii_lowercase().contains(&query)
+        || item
+            .turn_id
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains(&query)
+        || item.status.to_ascii_lowercase().contains(&query)
+        || item.content.to_ascii_lowercase().contains(&query)
+}
+
+fn reasoning_search_excerpt(content: &str, query: &str, max_chars: usize) -> String {
+    let query_lower = query.trim().to_ascii_lowercase();
+    for line in content.lines() {
+        if line.to_ascii_lowercase().contains(&query_lower) {
+            return highlight_query(&clip_line(line, max_chars), query);
+        }
+    }
+    highlight_query(&clip_line(content, max_chars), query)
+}
+
+fn highlight_query(value: &str, query: &str) -> String {
+    let needle = query.trim();
+    if needle.is_empty() {
+        return value.to_string();
+    }
+    let lower = value.to_ascii_lowercase();
+    let needle_lower = needle.to_ascii_lowercase();
+    let mut offset = 0_usize;
+    let mut highlighted = String::new();
+    while let Some(relative) = lower[offset..].find(&needle_lower) {
+        let start = offset + relative;
+        let end = start + needle_lower.len();
+        highlighted.push_str(&value[offset..start]);
+        highlighted.push_str("[[");
+        highlighted.push_str(&value[start..end]);
+        highlighted.push_str("]]");
+        offset = end;
+    }
+    highlighted.push_str(&value[offset..]);
+    highlighted
 }
 
 fn task_progress_lines(task: &TuiTaskRecord, selected: bool, bulk_selected: bool) -> Vec<String> {
@@ -9056,6 +9402,121 @@ mod tests {
         assert!(output.contains("latest reasoning line one"));
         assert!(output.contains("latest reasoning line two"));
         assert!(app.status.contains("showing reasoning item 2/2"));
+    }
+
+    #[test]
+    fn command_palette_searches_reasoning_with_highlight() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: ".".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: Some("turn-two".to_string()),
+                event_seq: 2,
+            }],
+            vec![
+                TuiItem {
+                    id: "reasoning-one".to_string(),
+                    thread_id: "thread-one".to_string(),
+                    turn_id: Some("turn-one".to_string()),
+                    index: 1,
+                    item_type: "reasoning".to_string(),
+                    role: Some("assistant".to_string()),
+                    content: "alpha planning".to_string(),
+                    status: "completed".to_string(),
+                },
+                TuiItem {
+                    id: "reasoning-two".to_string(),
+                    thread_id: "thread-one".to_string(),
+                    turn_id: Some("turn-two".to_string()),
+                    index: 2,
+                    item_type: "reasoning".to_string(),
+                    role: Some("assistant".to_string()),
+                    content: "beta branch analysis".to_string(),
+                    status: "completed".to_string(),
+                },
+            ],
+        );
+
+        app.show_command_palette = true;
+        app.command_query = "reasoning search beta".to_string();
+        app.command_cursor = app.command_query.len();
+        assert!(app.handle_key(KeyCode::Enter));
+
+        let output = render_once(&app, 140, 36).unwrap();
+        assert!(output.contains("Reasoning search"));
+        assert!(output.contains("reasoning-two"));
+        assert!(output.contains("[[beta]] branch analysis"));
+        let detail = app.mcp_detail.as_ref().unwrap().1.as_str();
+        assert!(!detail.contains("alpha planning"));
+        assert!(app.status.contains("matched 1"));
+    }
+
+    #[test]
+    fn command_palette_pins_reasoning_turns_for_replay() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: ".".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: Some("turn-one".to_string()),
+                event_seq: 1,
+            }],
+            vec![TuiItem {
+                id: "reasoning-one".to_string(),
+                thread_id: "thread-one".to_string(),
+                turn_id: Some("turn-one".to_string()),
+                index: 1,
+                item_type: "reasoning".to_string(),
+                role: Some("assistant".to_string()),
+                content: "pinned reasoning".to_string(),
+                status: "completed".to_string(),
+            }],
+        );
+
+        app.show_command_palette = true;
+        app.command_query = "reasoning pin turn-one".to_string();
+        app.command_cursor = app.command_query.len();
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.reasoning_replay_pinned_turn_ids(),
+            vec!["turn-one".to_string()]
+        );
+        let output = render_once(&app, 140, 36).unwrap();
+        assert!(output.contains("Reasoning replay pins"));
+        assert!(output.contains("pinned_turns: turn-one"));
+        assert!(app.status.contains("pinned reasoning turn turn-one"));
+
+        app.show_command_palette = true;
+        app.command_query = "reasoning unpin all".to_string();
+        app.command_cursor = app.command_query.len();
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert!(app.reasoning_replay_pinned_turn_ids().is_empty());
+        let output = render_once(&app, 140, 36).unwrap();
+        assert!(output.contains("pinned_turns: none"));
+        assert_eq!(app.status, "cleared 1 reasoning replay pin(s)");
     }
 
     #[test]

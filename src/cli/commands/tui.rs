@@ -1159,6 +1159,7 @@ fn handle_tui_action_with_live(
                     thread_id.clone(),
                     content,
                     app.reasoning_replay_limit(),
+                    app.reasoning_replay_pinned_turn_ids(),
                     live_tx,
                 );
                 app.set_status(format!("started agent run for {thread_id}"));
@@ -2351,6 +2352,7 @@ fn start_tui_agent_run(
     thread_id: String,
     prompt: String,
     reasoning_replay_limit: usize,
+    reasoning_replay_pinned_turn_ids: Vec<String>,
     live_tx: Option<Sender<TuiLiveEvent>>,
 ) {
     let _ = thread::spawn(move || {
@@ -2360,6 +2362,7 @@ fn start_tui_agent_run(
             thread_id.clone(),
             prompt,
             reasoning_replay_limit,
+            reasoning_replay_pinned_turn_ids,
             live_tx,
         ) {
             let _ = record_tui_agent_failure(&store, &thread_id, &error.to_string());
@@ -2373,6 +2376,7 @@ fn run_tui_agent_turn(
     thread_id: String,
     prompt: String,
     reasoning_replay_limit: usize,
+    reasoning_replay_pinned_turn_ids: Vec<String>,
     live_tx: Option<Sender<TuiLiveEvent>>,
 ) -> AppResult<()> {
     let model = config.model.model.clone();
@@ -2449,8 +2453,11 @@ fn run_tui_agent_turn(
         TaskContext::new(prompt, None),
         AgentLoopOptions {
             emit_progress: false,
-            initial_recent_steps: store
-                .recent_reasoning_replay_entries(&thread_id, reasoning_replay_limit)?,
+            initial_recent_steps: store.reasoning_replay_entries_with_pinned_turns(
+                &thread_id,
+                reasoning_replay_limit,
+                &reasoning_replay_pinned_turn_ids,
+            )?,
             persist_session: false,
             stream_events: Some(Box::new(stream_events)),
             approval_resolver: Some(resolver),
