@@ -38,4 +38,4 @@ commands that can inspect live RLM state without starting a model worker.
 
 ## Remaining
 
-TUI/ACP subscription polish and daemon package/service UX remain open.
+ACP-specific push subscriptions and daemon package/service UX remain open.

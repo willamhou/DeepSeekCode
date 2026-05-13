@@ -379,6 +379,11 @@ fn follow_runtime_global_events(
                     Ok(Some(frame)) => {
                         if let Ok(event) = runtime_event_from_sse_frame(&frame) {
                             cursor.insert(event.thread_id.clone(), event.seq);
+                            if let Some(status) = rlm_live_status_from_runtime_event(&event) {
+                                if tx.send(TuiLiveEvent::Status(status)).is_err() {
+                                    return;
+                                }
+                            }
                             match runtime_http_snapshot(&client) {
                                 Ok(snapshot) => {
                                     if tx.send(snapshot_live_event(snapshot)).is_err() {
@@ -446,6 +451,21 @@ fn runtime_event_from_sse_frame(frame: &sse::SseFrame) -> AppResult<RuntimeEvent
     let value = parse_json_value(&frame.data)?;
     let root = json_object_value(value, "runtime event SSE frame")?;
     parse_runtime_event(&root)
+}
+
+fn rlm_live_status_from_runtime_event(event: &RuntimeEvent) -> Option<String> {
+    if event.kind != "rlm_live_event" {
+        return None;
+    }
+    let payload = json_as_object(&event.payload)?;
+    let session_id = payload.get("session_id").and_then(json_as_string)?;
+    let rlm_event = payload.get("event").and_then(json_as_object)?;
+    let kind = rlm_event.get("kind").and_then(json_as_string)?;
+    let task_id = rlm_event
+        .get("task_id")
+        .and_then(json_as_string)
+        .unwrap_or("-");
+    Some(format!("rlm {session_id}: {kind} task={task_id}"))
 }
 
 fn runtime_http_snapshot(client: &RuntimeHttpClient) -> AppResult<RuntimeSnapshot> {
@@ -3349,6 +3369,42 @@ mod tests {
         });
         let client = RuntimeHttpClient::from_url(&format!("http://{addr}")).unwrap();
         (client, handle)
+    }
+
+    #[test]
+    fn runtime_http_watcher_formats_rlm_live_event_status() {
+        let event = RuntimeEvent {
+            id: "event_rlm".to_string(),
+            thread_id: "thread_1".to_string(),
+            turn_id: None,
+            seq: 3,
+            kind: "rlm_live_event".to_string(),
+            created_at: "epoch+1".to_string(),
+            payload: JsonValue::Object(BTreeMap::from([
+                (
+                    "session_id".to_string(),
+                    JsonValue::String("live.1".to_string()),
+                ),
+                (
+                    "event".to_string(),
+                    JsonValue::Object(BTreeMap::from([
+                        (
+                            "kind".to_string(),
+                            JsonValue::String("turn_queued".to_string()),
+                        ),
+                        (
+                            "task_id".to_string(),
+                            JsonValue::String("task_1".to_string()),
+                        ),
+                    ])),
+                ),
+            ])),
+        };
+
+        assert_eq!(
+            rlm_live_status_from_runtime_event(&event).as_deref(),
+            Some("rlm live.1: turn_queued task=task_1")
+        );
     }
 
     #[test]

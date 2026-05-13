@@ -937,7 +937,7 @@ impl StreamEvents for RlmLiveWorkerStreamEvents {
             &self.target.session_id,
             "worker_reasoning_delta",
             &self.target.runtime_thread_id,
-            &self.target.task_id,
+            Some(&self.target.task_id),
             vec![
                 ("delta".to_string(), JsonValue::String(chunk.to_string())),
                 (
@@ -957,7 +957,7 @@ impl StreamEvents for RlmLiveWorkerStreamEvents {
             &self.target.session_id,
             "worker_text_delta",
             &self.target.runtime_thread_id,
-            &self.target.task_id,
+            Some(&self.target.task_id),
             vec![
                 ("delta".to_string(), JsonValue::String(chunk.to_string())),
                 (
@@ -975,7 +975,7 @@ impl StreamEvents for RlmLiveWorkerStreamEvents {
             &self.target.session_id,
             "worker_assistant_done",
             &self.target.runtime_thread_id,
-            &self.target.task_id,
+            Some(&self.target.task_id),
             vec![
                 ("text_preview".to_string(), preview),
                 ("text_chars".to_string(), chars),
@@ -990,7 +990,7 @@ impl StreamEvents for RlmLiveWorkerStreamEvents {
             &self.target.session_id,
             "worker_model_tool_call",
             &self.target.runtime_thread_id,
-            &self.target.task_id,
+            Some(&self.target.task_id),
             vec![
                 ("tool_name".to_string(), JsonValue::String(name.to_string())),
                 ("input".to_string(), rlm_string_map_json(input)),
@@ -1010,7 +1010,7 @@ impl AgentRunEvents for RlmLiveWorkerRunEvents {
             &self.target.session_id,
             "worker_tool_call",
             &self.target.runtime_thread_id,
-            &self.target.task_id,
+            Some(&self.target.task_id),
             vec![
                 (
                     "tool_name".to_string(),
@@ -1033,7 +1033,7 @@ impl AgentRunEvents for RlmLiveWorkerRunEvents {
             &self.target.session_id,
             "worker_permission_request",
             &self.target.runtime_thread_id,
-            &self.target.task_id,
+            Some(&self.target.task_id),
             vec![
                 (
                     "tool_name".to_string(),
@@ -1059,7 +1059,7 @@ impl AgentRunEvents for RlmLiveWorkerRunEvents {
             &self.target.session_id,
             "worker_tool_result",
             &self.target.runtime_thread_id,
-            &self.target.task_id,
+            Some(&self.target.task_id),
             vec![
                 (
                     "tool_name".to_string(),
@@ -1891,7 +1891,7 @@ impl Tool for RlmLiveCancelTool {
                         session_id,
                         "worker_interrupted",
                         &runtime_thread_id,
-                        active_turn_id,
+                        Some(active_turn_id),
                         vec![("interrupt".to_string(), interrupt.clone())],
                     );
                 }
@@ -3726,7 +3726,7 @@ fn append_rlm_live_session_json_event(
     session_id: &str,
     kind: &str,
     runtime_thread_id: &str,
-    task_id: &str,
+    task_id: Option<&str>,
     fields: Vec<(String, JsonValue)>,
 ) -> AppResult<()> {
     let path = rlm_live_session_event_log_path(config, session_id);
@@ -3749,15 +3749,18 @@ fn append_rlm_live_session_json_event(
             "runtime_thread_id".to_string(),
             JsonValue::String(runtime_thread_id.to_string()),
         ),
-        (
+    ]);
+    if let Some(task_id) = task_id {
+        root.insert(
             "task_id".to_string(),
             JsonValue::String(task_id.to_string()),
-        ),
-    ]);
+        );
+    }
     for (key, value) in fields {
         root.insert(key, value);
     }
-    let mut event = json_value_to_string(&JsonValue::Object(root));
+    let event_value = JsonValue::Object(root);
+    let mut event = json_value_to_string(&event_value);
     event.push('\n');
     OpenOptions::new()
         .create(true)
@@ -3765,7 +3768,38 @@ fn append_rlm_live_session_json_event(
         .open(path)
         .and_then(|mut file| file.write_all(event.as_bytes()))
         .map_err(|error| tool_failure(format!("rlm live session event write failed: {error}")))?;
+    mirror_rlm_live_event_to_runtime(config, session_id, runtime_thread_id, &event_value)?;
     Ok(())
+}
+
+fn mirror_rlm_live_event_to_runtime(
+    config: &AppConfig,
+    session_id: &str,
+    runtime_thread_id: &str,
+    event: &JsonValue,
+) -> AppResult<()> {
+    rlm_runtime_store(config)
+        .append_thread_event(
+            runtime_thread_id,
+            "rlm_live_event",
+            JsonValue::Object(BTreeMap::from([
+                (
+                    "kind".to_string(),
+                    JsonValue::String("deepseek.rlm.live_event.v1".to_string()),
+                ),
+                (
+                    "session_id".to_string(),
+                    JsonValue::String(session_id.to_string()),
+                ),
+                ("event".to_string(), event.clone()),
+            ])),
+        )
+        .map(|_| ())
+        .map_err(|error| {
+            tool_failure(format!(
+                "rlm live session runtime event mirror failed: {error}"
+            ))
+        })
 }
 
 fn rlm_string_map_json(map: &BTreeMap<String, String>) -> JsonValue {
@@ -3792,32 +3826,20 @@ fn append_rlm_live_session_event(
     task: &str,
     input_label: &str,
 ) -> AppResult<()> {
-    let path = rlm_live_session_event_log_path(config, session_id);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            tool_failure(format!("rlm live session event mkdir failed: {error}"))
-        })?;
-    }
-    let seq = fs::read_to_string(&path)
-        .map(|content| content.lines().count() as u64 + 1)
-        .unwrap_or(1);
-    let event = format!(
-        "{{\"seq\":{},\"created_at\":\"{}\",\"kind\":\"{}\",\"runtime_thread_id\":\"{}\",\"task_id\":\"{}\",\"task\":\"{}\",\"input\":\"{}\"}}\n",
-        seq,
-        json_escape(&rlm_epoch_label()),
-        json_escape(kind),
-        json_escape(runtime_thread_id),
-        json_escape(task_id),
-        json_escape(task),
-        json_escape(input_label)
-    );
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut file| file.write_all(event.as_bytes()))
-        .map_err(|error| tool_failure(format!("rlm live session event write failed: {error}")))?;
-    Ok(())
+    append_rlm_live_session_json_event(
+        config,
+        session_id,
+        kind,
+        runtime_thread_id,
+        Some(task_id),
+        vec![
+            ("task".to_string(), JsonValue::String(task.to_string())),
+            (
+                "input".to_string(),
+                JsonValue::String(input_label.to_string()),
+            ),
+        ],
+    )
 }
 
 fn append_rlm_live_session_cancel_event(
@@ -3828,31 +3850,24 @@ fn append_rlm_live_session_cancel_event(
     task_summary: &str,
     reason: &str,
 ) -> AppResult<()> {
-    let path = rlm_live_session_event_log_path(config, session_id);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            tool_failure(format!("rlm live session event mkdir failed: {error}"))
-        })?;
-    }
-    let seq = fs::read_to_string(&path)
-        .map(|content| content.lines().count() as u64 + 1)
-        .unwrap_or(1);
-    let event = format!(
-        "{{\"seq\":{},\"created_at\":\"{}\",\"kind\":\"turn_cancelled\",\"runtime_thread_id\":\"{}\",\"task_id\":\"{}\",\"task\":\"{}\",\"input\":\"queued turn\",\"reason\":\"{}\"}}\n",
-        seq,
-        json_escape(&rlm_epoch_label()),
-        json_escape(runtime_thread_id),
-        json_escape(task_id),
-        json_escape(task_summary),
-        json_escape(reason)
-    );
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut file| file.write_all(event.as_bytes()))
-        .map_err(|error| tool_failure(format!("rlm live session event write failed: {error}")))?;
-    Ok(())
+    append_rlm_live_session_json_event(
+        config,
+        session_id,
+        "turn_cancelled",
+        runtime_thread_id,
+        Some(task_id),
+        vec![
+            (
+                "task".to_string(),
+                JsonValue::String(task_summary.to_string()),
+            ),
+            (
+                "input".to_string(),
+                JsonValue::String("queued turn".to_string()),
+            ),
+            ("reason".to_string(), JsonValue::String(reason.to_string())),
+        ],
+    )
 }
 
 fn append_rlm_live_session_recovery_event(
@@ -3865,33 +3880,22 @@ fn append_rlm_live_session_recovery_event(
     action: &str,
     reason: &str,
 ) -> AppResult<()> {
-    let path = rlm_live_session_event_log_path(config, session_id);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            tool_failure(format!("rlm live session event mkdir failed: {error}"))
-        })?;
-    }
-    let seq = fs::read_to_string(&path)
-        .map(|content| content.lines().count() as u64 + 1)
-        .unwrap_or(1);
-    let event = format!(
-        "{{\"seq\":{},\"created_at\":\"{}\",\"kind\":\"turn_recovered\",\"runtime_thread_id\":\"{}\",\"task_id\":\"{}\",\"task\":\"{}\",\"mode\":\"{}\",\"action\":\"{}\",\"reason\":\"{}\"}}\n",
-        seq,
-        json_escape(&rlm_epoch_label()),
-        json_escape(runtime_thread_id),
-        json_escape(task_id),
-        json_escape(task_summary),
-        json_escape(mode),
-        json_escape(action),
-        json_escape(reason)
-    );
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut file| file.write_all(event.as_bytes()))
-        .map_err(|error| tool_failure(format!("rlm live session event write failed: {error}")))?;
-    Ok(())
+    append_rlm_live_session_json_event(
+        config,
+        session_id,
+        "turn_recovered",
+        runtime_thread_id,
+        Some(task_id),
+        vec![
+            (
+                "task".to_string(),
+                JsonValue::String(task_summary.to_string()),
+            ),
+            ("mode".to_string(), JsonValue::String(mode.to_string())),
+            ("action".to_string(), JsonValue::String(action.to_string())),
+            ("reason".to_string(), JsonValue::String(reason.to_string())),
+        ],
+    )
 }
 
 fn append_rlm_live_session_stop_event(
@@ -3901,30 +3905,20 @@ fn append_rlm_live_session_stop_event(
     cancelled_count: usize,
     reason: &str,
 ) -> AppResult<()> {
-    let path = rlm_live_session_event_log_path(config, session_id);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            tool_failure(format!("rlm live session event mkdir failed: {error}"))
-        })?;
-    }
-    let seq = fs::read_to_string(&path)
-        .map(|content| content.lines().count() as u64 + 1)
-        .unwrap_or(1);
-    let event = format!(
-        "{{\"seq\":{},\"created_at\":\"{}\",\"kind\":\"session_stopped\",\"runtime_thread_id\":\"{}\",\"cancelled_count\":{},\"reason\":\"{}\"}}\n",
-        seq,
-        json_escape(&rlm_epoch_label()),
-        json_escape(runtime_thread_id),
-        cancelled_count,
-        json_escape(reason)
-    );
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut file| file.write_all(event.as_bytes()))
-        .map_err(|error| tool_failure(format!("rlm live session event write failed: {error}")))?;
-    Ok(())
+    append_rlm_live_session_json_event(
+        config,
+        session_id,
+        "session_stopped",
+        runtime_thread_id,
+        None,
+        vec![
+            (
+                "cancelled_count".to_string(),
+                JsonValue::Number(cancelled_count.to_string()),
+            ),
+            ("reason".to_string(), JsonValue::String(reason.to_string())),
+        ],
+    )
 }
 
 fn ensure_pending_live_rlm_task(task: &TaskRecord, runtime_thread_id: &str) -> AppResult<()> {
@@ -6621,6 +6615,67 @@ mod tests {
         assert!(listed.summary.contains(r#""include_turns":true"#));
         assert!(listed.summary.contains(r#""turns":["#));
         assert!(listed.summary.contains(&first_turn));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rlm_live_events_mirror_runtime_thread_events() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = cwd.join("target").join(format!(
+            "dscode-rlm-live-runtime-events-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut config = AppConfig::default();
+        config.workspace.config_dir = root.join(".dscode").display().to_string();
+        let rlm = RlmTool {
+            tool_name: "rlm_process",
+            config: config.clone(),
+            parent_depth: 0,
+        };
+        let output = rlm
+            .execute(
+                ToolInput::new()
+                    .with_arg("task", "mirror live turn")
+                    .with_arg("content", "alpha")
+                    .with_arg("session_id", "mirror.1")
+                    .with_arg("live", "true"),
+            )
+            .unwrap();
+        let thread_id = meta_value(&output.summary, "meta.rlm_runtime_thread_id").unwrap();
+        let turn_id = meta_value(&output.summary, "meta.rlm_turn_id").unwrap();
+        let store = rlm_runtime_store(&config);
+        let events = store.read_events(&thread_id, 0).unwrap();
+        let mirrored = events
+            .iter()
+            .find(|event| event.kind == "rlm_live_event")
+            .expect("live RLM event should be mirrored into runtime events");
+        let payload = crate::util::json::json_as_object(&mirrored.payload).unwrap();
+        assert_eq!(
+            payload.get("session_id").and_then(json_as_string),
+            Some("mirror.1")
+        );
+        let live_event = payload
+            .get("event")
+            .and_then(crate::util::json::json_as_object)
+            .unwrap();
+        assert_eq!(
+            live_event.get("kind").and_then(json_as_string),
+            Some("turn_queued")
+        );
+        assert_eq!(
+            live_event.get("task_id").and_then(json_as_string),
+            Some(turn_id.as_str())
+        );
+        assert_eq!(
+            live_event.get("runtime_thread_id").and_then(json_as_string),
+            Some(thread_id.as_str())
+        );
+        let thread = store.load_thread(&thread_id).unwrap();
+        assert_eq!(thread.event_seq, mirrored.seq);
         let _ = fs::remove_dir_all(root);
     }
 

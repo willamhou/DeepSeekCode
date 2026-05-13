@@ -36,5 +36,4 @@ running turns before claiming more work.
 
 ## Remaining
 
-TUI/ACP subscription polish and broader explicit lifecycle/status commands
-remain open.
+ACP-specific push subscriptions and daemon package/service UX remain open.

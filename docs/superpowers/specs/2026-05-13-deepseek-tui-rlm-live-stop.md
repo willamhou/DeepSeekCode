@@ -46,5 +46,5 @@ session.
 
 ## Remaining Gap
 
-DeepSeekCode still needs TUI/ACP subscription polish and broader daemon
-lifecycle status commands.
+DeepSeekCode still needs ACP-specific push subscriptions and daemon
+package/service UX.

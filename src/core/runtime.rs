@@ -999,6 +999,29 @@ impl RuntimeStore {
         Ok(events)
     }
 
+    pub fn append_thread_event(
+        &self,
+        thread_id: &str,
+        kind: &str,
+        payload: JsonValue,
+    ) -> AppResult<RuntimeEvent> {
+        validate_record_id(thread_id)?;
+        self.ensure_dirs()?;
+        let mut thread = self.load_thread(thread_id)?;
+        let event = self.append_event(thread_id, None, kind, payload)?;
+        thread.event_seq = event.seq;
+        thread.updated_at = event.created_at.clone();
+        self.write_thread(&thread)?;
+        if let Some(session_id) = thread.session_id.as_deref() {
+            if let Ok(mut session) = self.load_session(session_id) {
+                session.active_thread_id = Some(thread.id.clone());
+                session.updated_at = thread.updated_at.clone();
+                self.write_session(&session)?;
+            }
+        }
+        Ok(event)
+    }
+
     pub fn append_permission_request(
         &self,
         thread_id: &str,
@@ -3078,6 +3101,48 @@ mod tests {
         let events = store.read_events(&thread.id, 0).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "thread_created");
+    }
+
+    #[test]
+    fn runtime_store_appends_external_thread_event() {
+        let store = RuntimeStore::new(temp_root("external-event"));
+        let session = store
+            .create_session("External events".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "External event thread".to_string(),
+                ".".to_string(),
+                "deepseek-v4-flash".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+
+        let event = store
+            .append_thread_event(
+                &thread.id,
+                "external_progress",
+                JsonValue::Object(object([(
+                    "message",
+                    JsonValue::String("running".to_string()),
+                )])),
+            )
+            .unwrap();
+
+        assert_eq!(event.kind, "external_progress");
+        assert_eq!(event.seq, 2);
+        let loaded_thread = store.load_thread(&thread.id).unwrap();
+        assert_eq!(loaded_thread.event_seq, 2);
+        let loaded_session = store.load_session(&session.id).unwrap();
+        assert_eq!(
+            loaded_session.active_thread_id.as_deref(),
+            Some(thread.id.as_str())
+        );
+        assert_eq!(
+            store.read_events(&thread.id, 1).unwrap()[0].kind,
+            "external_progress"
+        );
     }
 
     #[test]

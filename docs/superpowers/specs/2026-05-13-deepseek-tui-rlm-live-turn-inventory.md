@@ -51,4 +51,4 @@ cancelled live RLM turns without reading payload files directly.
 ## Remaining Gap
 
 This is read-only inventory. The remaining live RLM gaps are TUI/ACP
-subscription polish and operator lifecycle commands.
+ACP-specific push subscriptions and daemon package/service UX.

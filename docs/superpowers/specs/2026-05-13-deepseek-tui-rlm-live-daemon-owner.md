@@ -37,4 +37,4 @@ running session, but it could not tell whether that owner still existed.
 
 ## Remaining
 
-TUI/ACP subscription polish and daemon package/service UX remain open.
+ACP-specific push subscriptions and daemon package/service UX remain open.

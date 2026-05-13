@@ -260,7 +260,7 @@ Landed first slice:
 - background TUI agent runs create a running assistant message item, stream assistant deltas into it through durable item updates, and then write final assistant messages, tool result items, usage records, and completed/failed task records back into runtime
 - TUI-started agent runs also send assistant/reasoning item updates through an in-process live event channel drained before each draw, so visible token streaming is no longer tied to the 1s durable refresh interval
 - interactive TUI starts a local runtime watcher that detects external durable runtime writes and sends full snapshot live events into the draw loop for faster item/task/approval/usage visibility
-- HTTP-runtime TUI now follows `/v1/events/stream?follow=1` with a per-thread cursor map, so cross-process writes and newly created remote threads can push a foreground snapshot refresh without waiting for the slower fallback refresh
+- HTTP-runtime TUI now follows `/v1/events/stream?follow=1` with a per-thread cursor map, so cross-process writes and newly created remote threads can push a foreground snapshot refresh without waiting for the slower fallback refresh; mirrored live RLM worker events now arrive on the same aggregate stream as `rlm_live_event` and update the TUI status line
 - TUI-started agent runs use a runtime-backed approval resolver: permissioned write/shell/MCP tool calls append durable `permission_request` events, wait for the modal's `permission_response`, and then continue approved calls or record denied tool observations
 - `deepseek agents run-task` and daemon-executed tasks also append durable permission requests and wait for matching thread `permission_response` events, so external TUI/HTTP clients can approve background tasks
 - TUI-started agent runs now create a running runtime task, expose `c` / `cancel` for the active running assistant turn, write a durable `cancel_requested` event, and mark the turn/item/task `cancelled` at cooperative checkpoints
@@ -521,6 +521,9 @@ Remaining:
   `rlm_process_run_next`;
   `rlm_process_wait` adds cursor-based long-polling for those event logs, and
   `/v1/rlm/live/<session_id>/events/stream` exposes the same log over HTTP SSE;
+  each live RLM event is also mirrored into the owning runtime thread as
+  `rlm_live_event`, so aggregate runtime SSE, HTTP-mode TUI, and runtime-event
+  clients can subscribe through one path;
   `rlm_process_cancel` cancels queued pending or active running live turns,
   marks payloads cancelled when present, refreshes `queued_turns`, preserves a
   live owner while cancellation is pending, and appends `turn_cancelled` events;

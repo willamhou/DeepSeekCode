@@ -83,7 +83,10 @@ deepseek tui --runtime-url http://127.0.0.1:13000
 In HTTP mode, `deepseek tui` builds snapshots from the runtime endpoints,
 writes composer/approval/cancel/task/automation/compaction actions back over
 HTTP, and follows `/v1/events/stream?follow=1` for lower-latency foreground
-refresh across known and newly created threads.
+refresh across known and newly created threads. Mirrored live RLM worker events
+arrive on that aggregate stream as `kind=rlm_live_event`, so HTTP-mode TUI
+instances can show live RLM status without opening a separate per-session
+stream.
 
 Use `--addr HOST:PORT` to override the bind address and `--once` for one
 request in tests:
@@ -1491,7 +1494,11 @@ worker progress events (`worker_reasoning_delta`, `worker_text_delta`,
 for new events before returning, giving clients a simple long-poll bridge.
 `GET /v1/rlm/live/<session_id>/events/stream` exposes the same live RLM event
 log as SSE with `cursor`/`since_seq`, `wait_ms`, `poll_ms`, and `follow=1`
-support for HTTP clients that need a native stream.
+support for HTTP clients that need a native stream. Each live RLM event is also
+mirrored into the owning runtime thread as `kind=rlm_live_event` with
+`payload.session_id` and `payload.event`, making aggregate runtime SSE,
+HTTP-mode TUI refresh, and runtime-event clients share the same subscription
+path.
 This gives the model DeepSeek-TUI-style Recursive Language Model entrypoints for
 synthesis/classification tasks with both file-backed and optional process-backed
 Python helper state. MCP server mode exposes the local RLM planning helpers

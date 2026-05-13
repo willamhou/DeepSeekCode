@@ -75,7 +75,7 @@ recovery before claiming queued live RLM turns; `rlm_process_status` now gives
 TUI/MCP/model clients a read-only lifecycle dashboard with owner, queue, stale,
 and recommended-action state.
 Live PTY resize, attachable terminal replay/supervisor takeover, RLM TUI/ACP
-subscription polish and daemon package/service UX remain open.
+ACP-specific push subscriptions and daemon package/service UX remain open.
 
 ## Next Candidate Specs
 
@@ -85,7 +85,7 @@ subscription polish and daemon package/service UX remain open.
   backend.
 - True live model-backed RLM REPL/daemon implementation now has a design spec:
   `2026-05-13-deepseek-tui-rlm-live-daemon-design.md`. The next executable
-  slice should be TUI/ACP subscription polish or richer RLM lifecycle commands
+  slice should be ACP-specific push subscriptions or daemon package/service UX
   because queueing,
   event replay/wait, HTTP SSE streaming, worker delta/tool event logging, payload persistence,
   queued cancellation, single-step execution, bounded drain, all-session

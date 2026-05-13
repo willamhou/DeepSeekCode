@@ -40,4 +40,4 @@ whether to wait, recover, run-next, drain, or restart a session.
 
 ## Remaining
 
-TUI/ACP subscription polish and daemon package/service UX remain open.
+ACP-specific push subscriptions and daemon package/service UX remain open.

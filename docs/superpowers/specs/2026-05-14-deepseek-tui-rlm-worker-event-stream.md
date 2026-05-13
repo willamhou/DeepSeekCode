@@ -45,4 +45,4 @@ results while a live RLM turn was running.
 
 ## Remaining
 
-TUI/ACP subscription polish and daemon package/service UX remain open.
+ACP-specific push subscriptions and daemon package/service UX remain open.
