@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use std::{fs, io};
 
 use crossterm::{
     event::{
@@ -25,7 +26,10 @@ use crate::core::runtime::{
 };
 use crate::error::AppResult;
 use crate::tools::run_shell::is_safe_shell_command;
-use crate::util::json::{json_as_array, json_as_object, json_as_string, JsonValue};
+use crate::util::json::{
+    json_as_array, json_as_object, json_as_string, json_as_u64, json_value_to_string,
+    parse_root_object, JsonValue,
+};
 
 const USER_INPUT_OTHER_MAX_CHARS: usize = 200;
 
@@ -751,6 +755,7 @@ const DEFAULT_TUI_COMPACTION_KEEP_TAIL_TURNS: usize = 8;
 const MAX_TUI_COMPACTION_KEEP_TAIL_TURNS: usize = 200;
 const DEFAULT_TUI_REASONING_REPLAY_LIMIT: usize = 3;
 const MAX_TUI_REASONING_REPLAY_LIMIT: usize = 20;
+const TUI_REASONING_REPLAY_PREF_KIND: &str = "deepseek.tui.reasoning_replay.v1";
 const MAX_TUI_COMMAND_HISTORY: usize = 100;
 const TUI_PICKER_PAGE_SIZE: usize = 5;
 const TUI_COMMAND_COMPLETIONS: &[&str] = &[
@@ -872,6 +877,74 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "help",
 ];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReasoningReplayPreferences {
+    replay_limit: usize,
+    pinned_turn_ids: BTreeSet<String>,
+}
+
+fn read_reasoning_replay_preferences(path: &Path) -> AppResult<Option<ReasoningReplayPreferences>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(path)?;
+    let root = parse_root_object(&content)?;
+    let replay_limit = root
+        .get("replay_limit")
+        .and_then(json_as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(DEFAULT_TUI_REASONING_REPLAY_LIMIT)
+        .min(MAX_TUI_REASONING_REPLAY_LIMIT);
+    let pinned_turn_ids = root
+        .get("pinned_turn_ids")
+        .and_then(json_as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(json_as_string)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    Ok(Some(ReasoningReplayPreferences {
+        replay_limit,
+        pinned_turn_ids,
+    }))
+}
+
+fn write_reasoning_replay_preferences(
+    path: &Path,
+    replay_limit: usize,
+    pinned_turn_ids: &BTreeSet<String>,
+) -> AppResult<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut root = BTreeMap::new();
+    root.insert(
+        "kind".to_string(),
+        JsonValue::String(TUI_REASONING_REPLAY_PREF_KIND.to_string()),
+    );
+    root.insert(
+        "replay_limit".to_string(),
+        JsonValue::Number(replay_limit.min(MAX_TUI_REASONING_REPLAY_LIMIT).to_string()),
+    );
+    root.insert(
+        "pinned_turn_ids".to_string(),
+        JsonValue::Array(
+            pinned_turn_ids
+                .iter()
+                .cloned()
+                .map(JsonValue::String)
+                .collect(),
+        ),
+    );
+    fs::write(path, json_value_to_string(&JsonValue::Object(root)))?;
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct TuiApp {
     mode: TuiMode,
@@ -916,6 +989,7 @@ pub struct TuiApp {
     transcript_scroll: usize,
     reasoning_replay_limit: usize,
     reasoning_replay_pinned_turn_ids: BTreeSet<String>,
+    reasoning_replay_preferences_path: Option<PathBuf>,
     pending_actions: Vec<TuiAction>,
     status: String,
     mcp_detail: Option<(TuiMcpDetailKind, String)>,
@@ -1075,6 +1149,7 @@ impl TuiApp {
             transcript_scroll: 0,
             reasoning_replay_limit: DEFAULT_TUI_REASONING_REPLAY_LIMIT,
             reasoning_replay_pinned_turn_ids: BTreeSet::new(),
+            reasoning_replay_preferences_path: None,
             pending_actions: Vec::new(),
             status: "ready".to_string(),
             mcp_detail: None,
@@ -1109,6 +1184,39 @@ impl TuiApp {
             .iter()
             .cloned()
             .collect()
+    }
+
+    pub fn enable_reasoning_replay_preferences(&mut self, path: PathBuf) {
+        self.reasoning_replay_preferences_path = Some(path.clone());
+        match read_reasoning_replay_preferences(&path) {
+            Ok(Some(preferences)) => {
+                self.reasoning_replay_limit = preferences.replay_limit;
+                self.reasoning_replay_pinned_turn_ids = preferences.pinned_turn_ids;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.status = format!(
+                    "failed to load reasoning replay preferences from {}: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    fn persist_reasoning_replay_preferences(&mut self) {
+        let Some(path) = self.reasoning_replay_preferences_path.as_ref() else {
+            return;
+        };
+        if let Err(error) = write_reasoning_replay_preferences(
+            path,
+            self.reasoning_replay_limit,
+            &self.reasoning_replay_pinned_turn_ids,
+        ) {
+            self.status = format!(
+                "{}; failed to save replay preferences: {error}",
+                self.status
+            );
+        }
     }
 
     pub fn set_mcp_detail(&mut self, kind: TuiMcpDetailKind, detail: impl Into<String>) {
@@ -4310,6 +4418,7 @@ impl TuiApp {
             .insert(turn_id.clone());
         self.show_reasoning_pins();
         self.status = format!("pinned reasoning turn {turn_id} ({item_id}, chars={chars})");
+        self.persist_reasoning_replay_preferences();
     }
 
     fn unpin_reasoning_replay_turn(&mut self, selector: &str) {
@@ -4326,6 +4435,7 @@ impl TuiApp {
         if self.reasoning_replay_pinned_turn_ids.remove(&turn_id) {
             self.show_reasoning_pins();
             self.status = format!("unpinned reasoning turn {turn_id}");
+            self.persist_reasoning_replay_preferences();
         } else {
             self.show_reasoning_pins();
             self.status = format!("reasoning turn was not pinned: {turn_id}");
@@ -4337,6 +4447,7 @@ impl TuiApp {
         self.reasoning_replay_pinned_turn_ids.clear();
         self.show_reasoning_pins();
         self.status = format!("cleared {count} reasoning replay pin(s)");
+        self.persist_reasoning_replay_preferences();
     }
 
     fn show_reasoning_pins(&mut self) {
@@ -4361,6 +4472,7 @@ impl TuiApp {
                 self.reasoning_replay_limit = value;
                 self.show_reasoning_list();
                 self.status = format!("reasoning replay limit set to {value}");
+                self.persist_reasoning_replay_preferences();
             }
             Ok(_) => {
                 self.status =
@@ -6738,6 +6850,17 @@ mod tests {
             assert!(app.handle_key(KeyCode::Char(ch)));
         }
         assert!(app.handle_key(KeyCode::Enter));
+    }
+
+    fn temp_root(label: &str) -> PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "deepseek-tui-{label}-{}-{suffix}",
+            std::process::id()
+        ))
     }
 
     fn left_click(column: u16, row: u16) -> MouseEvent {
@@ -9626,6 +9749,60 @@ mod tests {
         let output = render_once(&app, 140, 36).unwrap();
         assert!(output.contains("pinned_turns: none"));
         assert_eq!(app.status, "cleared 1 reasoning replay pin(s)");
+    }
+
+    #[test]
+    fn reasoning_replay_preferences_persist_across_tui_instances() {
+        let root = temp_root("reasoning-prefs");
+        let prefs = root.join("reasoning-replay.json");
+        let sessions = vec![TuiSession {
+            id: "session-one".to_string(),
+            title: "One".to_string(),
+            workspace: ".".to_string(),
+            status: "active".to_string(),
+            active_thread_id: Some("thread-one".to_string()),
+            thread_count: 1,
+        }];
+        let threads = vec![TuiThread {
+            id: "thread-one".to_string(),
+            session_id: Some("session-one".to_string()),
+            title: "First thread".to_string(),
+            mode: "agent".to_string(),
+            status: "active".to_string(),
+            latest_turn_id: Some("turn-one".to_string()),
+            event_seq: 1,
+        }];
+        let items = vec![TuiItem {
+            id: "reasoning-one".to_string(),
+            thread_id: "thread-one".to_string(),
+            turn_id: Some("turn-one".to_string()),
+            index: 1,
+            item_type: "reasoning".to_string(),
+            role: Some("assistant".to_string()),
+            content: "persisted reasoning".to_string(),
+            status: "completed".to_string(),
+        }];
+        let mut app = TuiApp::with_runtime(sessions.clone(), threads.clone(), items.clone());
+        app.enable_reasoning_replay_preferences(prefs.clone());
+
+        run_palette_command(&mut app, "reasoning replay 7");
+        run_palette_command(&mut app, "reasoning pin turn-one");
+
+        let saved = fs::read_to_string(&prefs).unwrap();
+        assert!(saved.contains("\"kind\":\"deepseek.tui.reasoning_replay.v1\""));
+        assert!(saved.contains("\"replay_limit\":7"));
+        assert!(saved.contains("\"turn-one\""));
+
+        let mut restored = TuiApp::with_runtime(sessions, threads, items);
+        restored.enable_reasoning_replay_preferences(prefs.clone());
+
+        assert_eq!(restored.reasoning_replay_limit(), 7);
+        assert_eq!(
+            restored.reasoning_replay_pinned_turn_ids(),
+            vec!["turn-one".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

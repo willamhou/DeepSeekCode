@@ -360,11 +360,14 @@ Landed first slice:
   matching excerpts, plus `reasoning pin <selector>`, `reasoning pins`, and
   `reasoning unpin <selector|all>` for local per-turn replay pinning beyond the
   latest-N replay window
+- local file-backed TUI sessions persist the reasoning replay limit and pinned
+  turn ids in `.dscode/tui/reasoning-replay.json`, so operator replay
+  preferences survive TUI restarts without changing durable runtime thread
+  records
 
 Remaining:
 
-- no open Phase E product UX gaps identified; future work can persist local
-  reasoning pin preferences across TUI restarts if operators ask for it
+- no open Phase E product UX gaps identified
 
 ### Phase F: LSP + Revert
 

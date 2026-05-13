@@ -26,8 +26,11 @@ even after they fall outside the latest-N window.
    - `reasoning unpin <selector|all>` removes one pin or clears all pins.
 3. Preserve the existing replay limit behavior: pinned turns are additive to
    `reasoning replay <0..20>` and deduplicated with the latest-N items.
-4. Keep runtime storage unchanged. Pins are local TUI state, while replay entry
-   construction reads existing durable `reasoning` items.
+4. Keep runtime storage unchanged. Pins are local TUI replay preferences, while
+   replay entry construction reads existing durable `reasoning` items.
+5. Persist local file-backed TUI replay preferences in
+   `.dscode/tui/reasoning-replay.json` so the replay limit and pinned turn ids
+   survive TUI restarts.
 
 ## Verification
 
@@ -36,6 +39,7 @@ even after they fall outside the latest-N window.
 - `/home/willamhou/.cargo/bin/cargo test reasoning_replay_entries_include_pinned_turns_beyond_latest_limit --lib`
 - `/home/willamhou/.cargo/bin/cargo test command_palette_opens_reasoning_detail_and_sets_replay_limit --lib`
 - `/home/willamhou/.cargo/bin/cargo test command_palette_shows_reasoning_item_by_selector --lib`
+- `/home/willamhou/.cargo/bin/cargo test reasoning_replay_preferences_persist_across_tui_instances --lib`
 - `/home/willamhou/.cargo/bin/cargo test tui::tests --lib`
 - `/home/willamhou/.cargo/bin/cargo test core::runtime::tests::recent_reasoning_replay_entries_reads_persisted_reasoning_items --lib`
 - `/home/willamhou/.cargo/bin/cargo fmt --check`
@@ -48,6 +52,9 @@ even after they fall outside the latest-N window.
 - The reasoning panel renders search result details, highlighted excerpts, and
   replay pin state in the same scrollable right-side panel as the existing
   browser.
+- Local file-backed TUI sessions load and save replay preferences under
+  `.dscode/tui/reasoning-replay.json`; corrupt or missing files do not prevent
+  the TUI from opening.
 - `RuntimeStore::reasoning_replay_entries_with_pinned_turns` merges latest-N
   reasoning items with pinned-turn reasoning items, deduplicates by item id, and
   returns oldest-first replay entries.

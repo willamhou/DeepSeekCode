@@ -71,7 +71,10 @@ pub fn run(args: TuiArgs) -> AppResult<()> {
     let config = load_or_default()?;
     let runtime_root = PathBuf::from(&config.workspace.config_dir).join("runtime");
     let runtime_store = RuntimeStore::new(runtime_root);
-    let app = app_from_store(&runtime_store)?;
+    let mut app = app_from_store(&runtime_store)?;
+    app.enable_reasoning_replay_preferences(
+        PathBuf::from(&config.workspace.config_dir).join("tui/reasoning-replay.json"),
+    );
 
     if args.once {
         print!("{}", render_once(&app, 120, 36)?);

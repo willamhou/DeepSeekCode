@@ -650,7 +650,10 @@ reasoning in the scrollable right-side detail panel, while
 `reasoning replay <0..20>` controls how many latest persisted reasoning entries
 local TUI-started agent runs preload. `reasoning pin <selector>`,
 `reasoning pins`, and `reasoning unpin <selector|all>` keep selected reasoning
-turns in local replay even after they fall outside the latest-N window.
+turns in local replay even after they fall outside the latest-N window. In the
+local file-backed TUI, the replay limit and pinned turn ids are persisted at
+`.dscode/tui/reasoning-replay.json` so restarts keep the same replay
+preferences without changing durable runtime thread records.
 
 `POST /v1/threads/{id}/compact` appends a non-destructive compaction marker for
 long contexts. The runtime keeps all original turn and item records, then adds a
