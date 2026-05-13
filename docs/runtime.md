@@ -344,6 +344,7 @@ Exposed tools:
 | `rlm_python` | Run restricted pure-compute Python helper code with imports/files/network/subprocess blocked |
 | `rlm_python_sessions` | List or inspect persisted `rlm_python_session` JSON state without running Python |
 | `rlm_process_sessions` | List or inspect persisted `rlm_process` durable model-session summaries, optionally including live daemon manifests, without running a child model |
+| `rlm_process_status` | Summarize live `rlm_process` daemon lifecycle status, queue counts, owner liveness, and recommended next actions without running a child model |
 | `rlm_process_events` | Replay live `rlm_process` daemon event logs by cursor without running a child model |
 | `rlm_process_wait` | Wait for live `rlm_process` daemon event logs after a cursor without running a child model |
 | `rlm_process_cancel` | Hidden by default; exposed with durable runtime approvals, and cancels queued pending live `rlm_process` daemon turns |
@@ -1437,6 +1438,11 @@ turns by default to avoid clobbering an active worker; pass `force=true` only
 when the operator has confirmed the owner should be overridden.
 `rlm_process_recover all=true` scans all live session manifests up to `limit`,
 so a restarted supervisor can repair interrupted turns across the workspace.
+`rlm_process_status [session_id=<id>]` is the read-only lifecycle dashboard for
+live sessions: it reports manifest/runtime queue counts, active turn status,
+daemon owner liveness/stale state, payload/runtime task counts, and recommended
+next commands such as recover, wait, run-next, drain, daemon, or reset. Without
+`session_id`, it summarizes all live sessions and workspace totals.
 `rlm_process_stop session_id=<id>` stops an idle live session, cancels queued
 pending turns, appends `session_stopped`, and blocks accidental reuse until
 `rlm_process live=true reset=true` is supplied for the same `session_id`.

@@ -39,9 +39,9 @@ use crate::tools::revert_turn::RevertTurnTool;
 use crate::tools::review::{PrReviewCommentPlanTool, ReviewTool};
 use crate::tools::rlm::{
     RlmBatchTool, RlmChunkPlanTool, RlmLiveCancelTool, RlmLiveDrainTool, RlmLiveEventsTool,
-    RlmLiveRecoverTool, RlmLiveRunNextTool, RlmLiveStopTool, RlmLiveWaitTool, RlmMapReducePlanTool,
-    RlmModelSessionsTool, RlmPythonSessionTool, RlmPythonSessionsTool, RlmPythonTool,
-    RlmRecursivePlanTool, RlmTool,
+    RlmLiveRecoverTool, RlmLiveRunNextTool, RlmLiveStatusTool, RlmLiveStopTool, RlmLiveWaitTool,
+    RlmMapReducePlanTool, RlmModelSessionsTool, RlmPythonSessionTool, RlmPythonSessionsTool,
+    RlmPythonTool, RlmRecursivePlanTool, RlmTool,
 };
 use crate::tools::run_shell::{is_safe_shell_command, RunShellTool};
 use crate::tools::run_tests::{render_run_tests_command, RunTestsTool};
@@ -996,6 +996,9 @@ pub fn default_registry_with_context(
         tools.push(Box::new(RlmModelSessionsTool {
             config: config.clone(),
         }));
+        tools.push(Box::new(RlmLiveStatusTool {
+            config: config.clone(),
+        }));
         tools.push(Box::new(RlmLiveEventsTool {
             config: config.clone(),
         }));
@@ -1769,6 +1772,9 @@ done
             .contains(&"rlm_process_sessions"));
         assert!(root
             .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_process_status"));
+        assert!(root
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
             .contains(&"rlm_process_events"));
         assert!(root
             .names_for_policy(&ExecutionPolicy::new(&approval, None))
@@ -1844,6 +1850,9 @@ done
             .contains(&"rlm_process_sessions"));
         assert!(nested
             .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_process_status"));
+        assert!(nested
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
             .contains(&"rlm_process_events"));
         assert!(nested
             .names_for_policy(&ExecutionPolicy::new(&approval, None))
@@ -1917,6 +1926,9 @@ done
         assert!(!at_limit
             .names_for_policy(&ExecutionPolicy::new(&approval, None))
             .contains(&"rlm_process_sessions"));
+        assert!(!at_limit
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_process_status"));
         assert!(!at_limit
             .names_for_policy(&ExecutionPolicy::new(&approval, None))
             .contains(&"rlm_process_events"));

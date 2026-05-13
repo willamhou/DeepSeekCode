@@ -47,9 +47,9 @@ use crate::tools::revert_turn::RevertTurnTool;
 use crate::tools::review::{PrReviewCommentPlanTool, ReviewTool};
 use crate::tools::rlm::{
     RlmBatchTool, RlmChunkPlanTool, RlmLiveCancelTool, RlmLiveDrainTool, RlmLiveEventsTool,
-    RlmLiveRecoverTool, RlmLiveRunNextTool, RlmLiveStopTool, RlmLiveWaitTool, RlmMapReducePlanTool,
-    RlmModelSessionsTool, RlmPythonSessionTool, RlmPythonSessionsTool, RlmPythonTool,
-    RlmRecursivePlanTool, RlmTool,
+    RlmLiveRecoverTool, RlmLiveRunNextTool, RlmLiveStatusTool, RlmLiveStopTool, RlmLiveWaitTool,
+    RlmMapReducePlanTool, RlmModelSessionsTool, RlmPythonSessionTool, RlmPythonSessionsTool,
+    RlmPythonTool, RlmRecursivePlanTool, RlmTool,
 };
 use crate::tools::run_shell::{is_safe_shell_command, RunShellTool};
 use crate::tools::run_tests::{render_run_tests_command, RunTestsTool};
@@ -815,6 +815,10 @@ fn execute_mcp_tool(
         }
         .execute(input)?,
         "rlm_process_sessions" => RlmModelSessionsTool {
+            config: state.config.clone(),
+        }
+        .execute(input)?,
+        "rlm_process_status" => RlmLiveStatusTool {
             config: state.config.clone(),
         }
         .execute(input)?,
@@ -3511,6 +3515,17 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
             ),
         ),
         mcp_tool_definition(
+            "rlm_process_status",
+            "Summarize live RLM daemon lifecycle status, owner liveness, queue counts, and recommended next actions without running a model.",
+            mcp_schema(
+                vec![
+                    ("session_id", string_property("Optional live RLM session id to inspect. Omit to summarize all live sessions.")),
+                    ("limit", number_property("Maximum live sessions to list.")),
+                ],
+                &[],
+            ),
+        ),
+        mcp_tool_definition(
             "rlm_process_events",
             "Replay live RLM daemon event-log records from .dscode/rlm-daemon without running a model.",
             mcp_schema(
@@ -5916,6 +5931,7 @@ fn acp_tool_kind(name: &str) -> &'static str {
         | "load_skill"
         | "exec_shell_replay"
         | "rlm_process_sessions"
+        | "rlm_process_status"
         | "rlm_process_events"
         | "rlm_process_wait"
         | "image_ocr" => "read",
@@ -8409,6 +8425,7 @@ mod tests {
         assert!(rendered.contains(r#""name":"rlm_python""#));
         assert!(rendered.contains(r#""name":"rlm_python_sessions""#));
         assert!(rendered.contains(r#""name":"rlm_process_sessions""#));
+        assert!(rendered.contains(r#""name":"rlm_process_status""#));
         assert!(rendered.contains(r#""name":"rlm_process_events""#));
         assert!(rendered.contains(r#""name":"rlm_process_wait""#));
         assert!(rendered.contains(r#""name":"diagnostics""#));
@@ -10363,6 +10380,7 @@ shell_allowlist = ["cargo test"]
         assert!(rendered.contains(r#""name":"rlm_python""#));
         assert!(rendered.contains(r#""name":"rlm_python_sessions""#));
         assert!(rendered.contains(r#""name":"rlm_process_sessions""#));
+        assert!(rendered.contains(r#""name":"rlm_process_status""#));
         assert!(rendered.contains(r#""name":"rlm_process_events""#));
         assert!(rendered.contains(r#""name":"rlm_process_wait""#));
         assert!(!rendered.contains(r#""name":"run_shell""#));

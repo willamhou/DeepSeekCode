@@ -1141,6 +1141,10 @@ pub struct RlmModelSessionsTool {
     pub config: AppConfig,
 }
 
+pub struct RlmLiveStatusTool {
+    pub config: AppConfig,
+}
+
 pub struct RlmLiveEventsTool {
     pub config: AppConfig,
 }
@@ -1455,6 +1459,75 @@ impl Tool for RlmModelSessionsTool {
             )
         };
         Ok(ToolOutput { summary })
+    }
+}
+
+impl Tool for RlmLiveStatusTool {
+    fn name(&self) -> &str {
+        "rlm_process_status"
+    }
+
+    fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
+        let limit = parse_rlm_model_sessions_limit(input.get("limit"))?;
+        if let Some(session_id) = input
+            .get("session_id")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            validate_rlm_model_session_id(session_id)?;
+            let path = rlm_live_session_manifest_path(&self.config, session_id);
+            if !path.exists() {
+                return Ok(ToolOutput {
+                    summary: json_value_to_string(&JsonValue::Object(BTreeMap::from([
+                        (
+                            "session_id".to_string(),
+                            JsonValue::String(session_id.to_string()),
+                        ),
+                        ("exists".to_string(), JsonValue::Bool(false)),
+                        ("live".to_string(), JsonValue::Bool(false)),
+                        (
+                            "path".to_string(),
+                            JsonValue::String(path.display().to_string()),
+                        ),
+                    ]))),
+                });
+            }
+            let manifest = read_rlm_live_session_manifest(&path, session_id)?;
+            let status = rlm_live_status_json(&self.config, session_id, &path, &manifest)?;
+            return Ok(ToolOutput {
+                summary: json_value_to_string(&status),
+            });
+        }
+
+        let mut sessions = Vec::new();
+        let mut errors = Vec::new();
+        for (session_id, path) in list_rlm_live_session_manifest_entries(&self.config)?
+            .into_iter()
+            .take(limit)
+        {
+            match read_rlm_live_session_manifest(&path, &session_id).and_then(|manifest| {
+                rlm_live_status_json(&self.config, &session_id, &path, &manifest)
+            }) {
+                Ok(status) => sessions.push(status),
+                Err(error) => errors.push(JsonValue::Object(BTreeMap::from([
+                    ("session_id".to_string(), JsonValue::String(session_id)),
+                    (
+                        "path".to_string(),
+                        JsonValue::String(path.display().to_string()),
+                    ),
+                    ("error".to_string(), JsonValue::String(error.to_string())),
+                ]))),
+            }
+        }
+        let totals = rlm_live_status_totals_json(&sessions);
+        Ok(ToolOutput {
+            summary: json_value_to_string(&JsonValue::Object(BTreeMap::from([
+                ("sessions".to_string(), JsonValue::Array(sessions)),
+                ("totals".to_string(), totals),
+                ("errors".to_string(), JsonValue::Array(errors)),
+                ("limit".to_string(), JsonValue::Number(limit.to_string())),
+            ]))),
+        })
     }
 }
 
@@ -3584,6 +3657,309 @@ fn render_rlm_live_session_list_entry(
     Ok(rendered)
 }
 
+fn rlm_live_status_json(
+    config: &AppConfig,
+    session_id: &str,
+    path: &Path,
+    manifest: &JsonValue,
+) -> AppResult<JsonValue> {
+    let JsonValue::Object(root) = manifest else {
+        return Err(tool_failure(
+            "rlm live session manifest must be a JSON object",
+        ));
+    };
+    let store = rlm_runtime_store(config);
+    let runtime_thread_id = rlm_live_manifest_string_field(manifest, "runtime_thread_id");
+    let active_turn_id = rlm_live_manifest_string_field(manifest, "active_turn_id");
+    let daemon = rlm_live_daemon_owner_status(root);
+    let status =
+        rlm_live_manifest_string_field(manifest, "status").unwrap_or_else(|| "unknown".to_string());
+
+    let mut runtime_task_counts = BTreeMap::new();
+    let mut pending_tasks = Vec::new();
+    let mut active_runtime_status = None;
+    if let Some(thread_id) = runtime_thread_id.as_deref() {
+        for task in store.list_tasks(None, Some(thread_id), MAX_RLM_LIVE_TASK_LIST)? {
+            if task.kind == "rlm_process" {
+                increment_rlm_status_count(&mut runtime_task_counts, &task.status);
+                if task.status == "pending" {
+                    pending_tasks.push(task);
+                }
+            }
+        }
+        pending_tasks.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        if let Some(active_id) = active_turn_id.as_deref() {
+            active_runtime_status = store.load_task(active_id).ok().map(|task| task.status);
+        }
+    }
+
+    let mut turn_counts = BTreeMap::new();
+    let mut turn_payload_errors = 0usize;
+    for task_id in list_rlm_live_turn_payload_ids(config, session_id)? {
+        match read_rlm_live_session_turn_payload(config, session_id, &task_id) {
+            Ok(payload) => increment_rlm_status_count(&mut turn_counts, &payload.status),
+            Err(_) => turn_payload_errors += 1,
+        }
+    }
+
+    let queued_turns_runtime = pending_tasks.len() as u64;
+    let next_pending_turn_id = pending_tasks.first().map(|task| task.id.clone());
+    let recommended_actions = rlm_live_status_recommended_actions(
+        session_id,
+        &status,
+        &daemon,
+        active_turn_id.as_deref(),
+        queued_turns_runtime,
+        &runtime_task_counts,
+        &turn_counts,
+    );
+    Ok(JsonValue::Object(BTreeMap::from([
+        (
+            "kind".to_string(),
+            JsonValue::String("deepseek.rlm.live_status.v1".to_string()),
+        ),
+        ("exists".to_string(), JsonValue::Bool(true)),
+        ("live".to_string(), JsonValue::Bool(true)),
+        (
+            "session_id".to_string(),
+            JsonValue::String(session_id.to_string()),
+        ),
+        (
+            "path".to_string(),
+            JsonValue::String(path.display().to_string()),
+        ),
+        ("status".to_string(), JsonValue::String(status)),
+        (
+            "runtime_thread_id".to_string(),
+            runtime_thread_id
+                .map(JsonValue::String)
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "runtime_session_id".to_string(),
+            rlm_live_manifest_string_field(manifest, "runtime_session_id")
+                .map(JsonValue::String)
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "active_turn_id".to_string(),
+            active_turn_id
+                .map(JsonValue::String)
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "active_runtime_status".to_string(),
+            active_runtime_status
+                .map(JsonValue::String)
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "queued_turns_manifest".to_string(),
+            rlm_live_manifest_u64_field(manifest, "queued_turns")
+                .map(|count| JsonValue::Number(count.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "queued_turns_runtime".to_string(),
+            JsonValue::Number(queued_turns_runtime.to_string()),
+        ),
+        (
+            "next_pending_turn_id".to_string(),
+            next_pending_turn_id
+                .map(JsonValue::String)
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "daemon_pid".to_string(),
+            daemon
+                .pid
+                .map(|pid| JsonValue::Number(pid.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "daemon_epoch".to_string(),
+            rlm_live_manifest_string_field(manifest, "daemon_epoch")
+                .map(JsonValue::String)
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "daemon_alive".to_string(),
+            daemon.alive.map(JsonValue::Bool).unwrap_or(JsonValue::Null),
+        ),
+        ("daemon_stale".to_string(), JsonValue::Bool(daemon.stale)),
+        (
+            "daemon_owner".to_string(),
+            JsonValue::String(daemon.owner.to_string()),
+        ),
+        (
+            "turn_counts".to_string(),
+            rlm_status_counts_json(&turn_counts),
+        ),
+        (
+            "runtime_task_counts".to_string(),
+            rlm_status_counts_json(&runtime_task_counts),
+        ),
+        (
+            "turn_payload_errors".to_string(),
+            JsonValue::Number(turn_payload_errors.to_string()),
+        ),
+        (
+            "recommended_actions".to_string(),
+            JsonValue::Array(
+                recommended_actions
+                    .into_iter()
+                    .map(JsonValue::String)
+                    .collect(),
+            ),
+        ),
+        (
+            "updated_at".to_string(),
+            rlm_live_manifest_string_field(manifest, "updated_at")
+                .map(JsonValue::String)
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "last_error".to_string(),
+            root.get("last_error").cloned().unwrap_or(JsonValue::Null),
+        ),
+    ])))
+}
+
+fn rlm_live_status_recommended_actions(
+    session_id: &str,
+    status: &str,
+    daemon: &RlmLiveDaemonOwner,
+    active_turn_id: Option<&str>,
+    queued_turns_runtime: u64,
+    runtime_task_counts: &BTreeMap<String, usize>,
+    turn_counts: &BTreeMap<String, usize>,
+) -> Vec<String> {
+    let mut actions = Vec::new();
+    if status == "stopped" {
+        actions.push(format!(
+            "rlm_process live=true session_id={session_id} reset=true to restart"
+        ));
+        return actions;
+    }
+    if daemon.stale
+        || status_count(runtime_task_counts, "running") > 0 && daemon.alive == Some(false)
+        || status_count(turn_counts, "running") > 0 && daemon.alive == Some(false)
+    {
+        actions.push(format!("rlm_process_recover session_id={session_id}"));
+    }
+    if active_turn_id.is_some() && daemon.alive == Some(true) {
+        actions.push(format!("rlm_process_wait session_id={session_id}"));
+    }
+    if queued_turns_runtime > 0 {
+        actions.push(format!("rlm_process_run_next session_id={session_id}"));
+        actions.push("deepseek agents daemon".to_string());
+    }
+    if queued_turns_runtime > 1 {
+        actions.push(format!("rlm_process_drain session_id={session_id}"));
+    }
+    if active_turn_id.is_none() && queued_turns_runtime == 0 && status != "failed" {
+        actions.push(format!(
+            "rlm_process live=true session_id={session_id} to enqueue a turn"
+        ));
+    }
+    actions
+}
+
+fn rlm_live_status_totals_json(sessions: &[JsonValue]) -> JsonValue {
+    let mut live_sessions = 0u64;
+    let mut running_sessions = 0u64;
+    let mut stopped_sessions = 0u64;
+    let mut stale_daemon_sessions = 0u64;
+    let mut queued_turns = 0u64;
+    let mut running_turns = 0u64;
+    for session in sessions {
+        let JsonValue::Object(root) = session else {
+            continue;
+        };
+        live_sessions += 1;
+        if root
+            .get("status")
+            .and_then(json_as_string)
+            .is_some_and(|value| value == "running")
+        {
+            running_sessions += 1;
+        }
+        if root
+            .get("status")
+            .and_then(json_as_string)
+            .is_some_and(|value| value == "stopped")
+        {
+            stopped_sessions += 1;
+        }
+        if matches!(root.get("daemon_stale"), Some(JsonValue::Bool(true))) {
+            stale_daemon_sessions += 1;
+        }
+        queued_turns += root
+            .get("queued_turns_runtime")
+            .and_then(json_as_u64)
+            .unwrap_or(0);
+        running_turns += root
+            .get("runtime_task_counts")
+            .and_then(|value| rlm_count_from_json(value, "running"))
+            .unwrap_or(0);
+    }
+    JsonValue::Object(BTreeMap::from([
+        (
+            "live_sessions".to_string(),
+            JsonValue::Number(live_sessions.to_string()),
+        ),
+        (
+            "running_sessions".to_string(),
+            JsonValue::Number(running_sessions.to_string()),
+        ),
+        (
+            "stopped_sessions".to_string(),
+            JsonValue::Number(stopped_sessions.to_string()),
+        ),
+        (
+            "stale_daemon_sessions".to_string(),
+            JsonValue::Number(stale_daemon_sessions.to_string()),
+        ),
+        (
+            "queued_turns".to_string(),
+            JsonValue::Number(queued_turns.to_string()),
+        ),
+        (
+            "running_turns".to_string(),
+            JsonValue::Number(running_turns.to_string()),
+        ),
+    ]))
+}
+
+fn increment_rlm_status_count(counts: &mut BTreeMap<String, usize>, status: &str) {
+    *counts.entry(status.to_string()).or_insert(0) += 1;
+}
+
+fn rlm_status_counts_json(counts: &BTreeMap<String, usize>) -> JsonValue {
+    let mut root = BTreeMap::new();
+    let total = counts.values().sum::<usize>();
+    root.insert("total".to_string(), JsonValue::Number(total.to_string()));
+    for (status, count) in counts {
+        root.insert(status.clone(), JsonValue::Number(count.to_string()));
+    }
+    JsonValue::Object(root)
+}
+
+fn status_count(counts: &BTreeMap<String, usize>, status: &str) -> usize {
+    counts.get(status).copied().unwrap_or(0)
+}
+
+fn rlm_count_from_json(value: &JsonValue, status: &str) -> Option<u64> {
+    let JsonValue::Object(root) = value else {
+        return None;
+    };
+    root.get(status).and_then(json_as_u64)
+}
+
 fn render_rlm_live_turn_entries(
     config: &AppConfig,
     session_id: &str,
@@ -5450,6 +5826,113 @@ mod tests {
         assert!(listed.summary.contains(r#""daemon_alive":false"#));
         assert!(listed.summary.contains(r#""daemon_stale":true"#));
         assert!(listed.summary.contains(r#""daemon_owner":"stale""#));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rlm_process_status_summarizes_live_queue_and_stale_owner() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = cwd.join("target").join(format!(
+            "dscode-rlm-live-status-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut config = AppConfig::default();
+        config.workspace.config_dir = root.join(".dscode").display().to_string();
+        let rlm = RlmTool {
+            tool_name: "rlm_process",
+            config: config.clone(),
+            parent_depth: 0,
+        };
+        let first = rlm
+            .execute(
+                ToolInput::new()
+                    .with_arg("task", "first status turn")
+                    .with_arg("content", "alpha status payload")
+                    .with_arg("session_id", "status.1")
+                    .with_arg("live", "true")
+                    .with_arg("cwd", root.display().to_string()),
+            )
+            .unwrap();
+        let first_turn = meta_value(&first.summary, "meta.rlm_turn_id").unwrap();
+        rlm.execute(
+            ToolInput::new()
+                .with_arg("task", "second status turn")
+                .with_arg("content", "beta status payload")
+                .with_arg("session_id", "status.1")
+                .with_arg("live", "true"),
+        )
+        .unwrap();
+
+        let status_tool = RlmLiveStatusTool {
+            config: config.clone(),
+        };
+        let queued = status_tool
+            .execute(ToolInput::new().with_arg("session_id", "status.1"))
+            .unwrap();
+        assert!(queued
+            .summary
+            .contains(r#""kind":"deepseek.rlm.live_status.v1""#));
+        assert!(queued.summary.contains(r#""queued_turns_runtime":2"#));
+        assert!(queued.summary.contains(r#""pending":2"#));
+        assert!(queued
+            .summary
+            .contains(&format!(r#""next_pending_turn_id":"{}""#, first_turn)));
+        assert!(queued
+            .summary
+            .contains("rlm_process_run_next session_id=status.1"));
+
+        let manifest_path = rlm_live_session_manifest_path(&config, "status.1");
+        let manifest = read_rlm_live_session_manifest(&manifest_path, "status.1").unwrap();
+        let runtime_thread_id =
+            rlm_live_manifest_string_field(&manifest, "runtime_thread_id").unwrap();
+        let runtime_session_id = rlm_live_manifest_string_field(&manifest, "runtime_session_id");
+        let store = rlm_runtime_store(&config);
+        store
+            .claim_task(&first_turn, "status-test".to_string())
+            .unwrap();
+        update_rlm_live_session_turn_payload_status(
+            &config,
+            "status.1",
+            &first_turn,
+            "running",
+            Vec::new(),
+        )
+        .unwrap();
+        let payload = read_rlm_live_session_turn_payload(&config, "status.1", &first_turn).unwrap();
+        write_rlm_live_session_manifest_with_daemon(
+            &config,
+            "status.1",
+            "running",
+            &runtime_thread_id,
+            runtime_session_id.as_deref(),
+            Some(&first_turn),
+            1,
+            &payload.model,
+            &payload.workspace,
+            rlm_live_manifest_string_field(&manifest, "created_at").as_deref(),
+            Some(i32::MAX as u64 + 1),
+            Some("epoch+stale"),
+        )
+        .unwrap();
+
+        let stale = status_tool
+            .execute(ToolInput::new().with_arg("session_id", "status.1"))
+            .unwrap();
+        assert!(stale.summary.contains(r#""daemon_stale":true"#));
+        assert!(stale.summary.contains(r#""daemon_owner":"stale""#));
+        assert!(stale.summary.contains(r#""running":1"#));
+        assert!(stale
+            .summary
+            .contains("rlm_process_recover session_id=status.1"));
+
+        let listed = status_tool.execute(ToolInput::new()).unwrap();
+        assert!(listed.summary.contains(r#""live_sessions":1"#));
+        assert!(listed.summary.contains(r#""stale_daemon_sessions":1"#));
+        assert!(listed.summary.contains(r#""queued_turns":1"#));
         let _ = fs::remove_dir_all(root);
     }
 

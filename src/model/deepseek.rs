@@ -3471,6 +3471,12 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
         required_json: r#"[]"#,
     },
     StaticToolSpec {
+        name: "rlm_process_status",
+        description: "Summarize live RLM daemon lifecycle status without running a model. Reports owner liveness/stale state, queue counts, active turn status, and recommended next commands for one session or all live sessions.",
+        properties_json: r#"{"session_id":{"type":"string","description":"Optional live RLM session id to inspect. Omit to summarize all live sessions."},"limit":{"type":"string","description":"Optional list limit for all-session status, clamped to 1-100 and defaulting to 20."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
         name: "rlm_process_events",
         description: "Replay live RLM daemon event-log records from .dscode/rlm-daemon without running a model. Use cursor to continue from the last seen event seq.",
         properties_json: r#"{"session_id":{"type":"string","description":"Live RLM session id."},"cursor":{"type":"string","description":"Return events with seq greater than this cursor. Defaults to 0."},"after_seq":{"type":"string","description":"Alias for cursor."},"limit":{"type":"string","description":"Optional event limit, clamped to 1-500 and defaulting to 50."}}"#,
@@ -5188,6 +5194,7 @@ mod tests {
             "rlm_python_session".to_string(),
             "rlm_python_sessions".to_string(),
             "rlm_process_sessions".to_string(),
+            "rlm_process_status".to_string(),
             "rlm_process_events".to_string(),
             "rlm_process_wait".to_string(),
             "rlm_process_cancel".to_string(),
@@ -5210,6 +5217,7 @@ mod tests {
         assert!(openai.contains("\"name\":\"rlm_python_session\""));
         assert!(openai.contains("\"name\":\"rlm_python_sessions\""));
         assert!(openai.contains("\"name\":\"rlm_process_sessions\""));
+        assert!(openai.contains("\"name\":\"rlm_process_status\""));
         assert!(openai.contains("\"name\":\"rlm_process_events\""));
         assert!(openai.contains("\"name\":\"rlm_process_wait\""));
         assert!(openai.contains("\"name\":\"rlm_process_cancel\""));
@@ -5260,6 +5268,7 @@ mod tests {
             "rlm_python_session".to_string(),
             "rlm_python_sessions".to_string(),
             "rlm_process_sessions".to_string(),
+            "rlm_process_status".to_string(),
             "rlm_process_events".to_string(),
             "rlm_process_wait".to_string(),
             "rlm_process_cancel".to_string(),
@@ -5282,6 +5291,7 @@ mod tests {
         assert!(anthropic.contains("\"name\":\"rlm_python_session\""));
         assert!(anthropic.contains("\"name\":\"rlm_python_sessions\""));
         assert!(anthropic.contains("\"name\":\"rlm_process_sessions\""));
+        assert!(anthropic.contains("\"name\":\"rlm_process_status\""));
         assert!(anthropic.contains("\"name\":\"rlm_process_events\""));
         assert!(anthropic.contains("\"name\":\"rlm_process_wait\""));
         assert!(anthropic.contains("\"name\":\"rlm_process_cancel\""));
