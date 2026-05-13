@@ -1305,6 +1305,44 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "cancel",
     "help",
 ];
+const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
+    "/memory",
+    "/memory show",
+    "/memory path",
+    "/memory clear",
+    "/memory edit",
+    "/memory help",
+    "/stash",
+    "/stash list",
+    "/stash pop",
+    "/stash clear",
+    "/network",
+    "/network allow ",
+    "/network deny ",
+    "/network remove ",
+    "/network default ",
+    "/status",
+    "/tokens",
+    "/cost",
+    "/cache",
+    "/cache inspect",
+    "/cache warmup",
+    "/model",
+    "/model auto",
+    "/model deepseek-v4-flash",
+    "/model deepseek-v4-pro",
+    "/models",
+    "/provider",
+    "/provider list",
+    "/provider deepseek",
+    "/provider nvidia-nim",
+    "/provider openrouter",
+    "/provider ollama",
+    "/skills",
+    "/skill ",
+    "/rename ",
+    "/init",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReasoningReplayPreferences {
@@ -3643,6 +3681,9 @@ impl TuiApp {
             KeyCode::End => {
                 self.composer_cursor = self.composer.len();
             }
+            KeyCode::Tab => {
+                self.complete_composer_slash_command();
+            }
             KeyCode::Char(ch) => {
                 insert_char_at_cursor(&mut self.composer, &mut self.composer_cursor, ch);
             }
@@ -3789,6 +3830,42 @@ impl TuiApp {
             .collect::<Vec<_>>()
             .join(", ");
         self.status = format!("{} command completion(s): {}", matches.len(), preview);
+    }
+
+    fn complete_composer_slash_command(&mut self) {
+        let cursor = clamp_char_boundary(&self.composer, self.composer_cursor);
+        let prefix = &self.composer[..cursor];
+        if !prefix.starts_with('/') {
+            self.status = "composer slash completion starts with /".to_string();
+            return;
+        }
+        let matches = composer_slash_completion_matches(prefix);
+        if matches.is_empty() {
+            self.status = format!("no slash completion for `{}`", clip_line(prefix.trim(), 60));
+            return;
+        }
+        let completed = longest_common_prefix(&matches);
+        if completed.len() > prefix.len() {
+            let suffix = self.composer[cursor..].to_string();
+            let new_cursor = completed.len();
+            let mut next_composer = completed;
+            next_composer.push_str(&suffix);
+            self.composer = next_composer;
+            self.composer_cursor = new_cursor;
+            self.status = if matches.len() == 1 {
+                "slash command completed".to_string()
+            } else {
+                format!("slash prefix completed ({} matches)", matches.len())
+            };
+            return;
+        }
+        let preview = matches
+            .iter()
+            .take(5)
+            .map(|value| value.trim_end())
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.status = format!("{} slash completion(s): {}", matches.len(), preview);
     }
 
     fn execute_palette_command(&mut self, command: &str) {
@@ -7474,6 +7551,48 @@ fn handle_text_control_key(value: &mut String, cursor: &mut usize, code: KeyCode
     }
 }
 
+fn composer_slash_completion_matches(prefix: &str) -> Vec<&'static str> {
+    if !prefix.starts_with('/') {
+        return Vec::new();
+    }
+    TUI_COMPOSER_SLASH_COMPLETIONS
+        .iter()
+        .copied()
+        .filter(|command| command.starts_with(prefix))
+        .collect()
+}
+
+fn composer_slash_hint_line(app: &TuiApp) -> Option<String> {
+    if !app.composer_focused {
+        return None;
+    }
+    let cursor = clamp_char_boundary(&app.composer, app.composer_cursor);
+    let prefix = &app.composer[..cursor];
+    if !prefix.starts_with('/') {
+        return None;
+    }
+    let matches = composer_slash_completion_matches(prefix);
+    if matches.is_empty() {
+        return Some(format!(
+            "Slash: no built-in matches for {}",
+            clip_line(prefix.trim(), 40)
+        ));
+    }
+    let preview = matches
+        .iter()
+        .take(6)
+        .map(|value| value.trim_end())
+        .collect::<Vec<_>>()
+        .join("  ");
+    let more = matches.len().saturating_sub(6);
+    let suffix = if more == 0 {
+        String::new()
+    } else {
+        format!("  +{more}")
+    };
+    Some(format!("Slash: {preview}{suffix}"))
+}
+
 fn longest_common_prefix(values: &[&str]) -> String {
     let Some(first) = values.first() else {
         return String::new();
@@ -7882,7 +8001,7 @@ fn draw_sidebar(frame: &mut Frame, app: &TuiApp, area: Rect) {
 fn draw_transcript(frame: &mut Frame, app: &TuiApp, area: Rect) {
     let composer_marker = if app.composer_focused { "*" } else { "" };
     let composer = display_with_cursor(&app.composer, app.composer_cursor, app.composer_focused);
-    let lines = app
+    let mut lines = app
         .transcript
         .iter()
         .map(|line| Line::from(line.as_str()))
@@ -7894,6 +8013,12 @@ fn draw_transcript(frame: &mut Frame, app: &TuiApp, area: Rect) {
             clip_line(&composer, 100)
         ))))
         .collect::<Vec<_>>();
+    if let Some(hint) = composer_slash_hint_line(app) {
+        lines.push(Line::from(vec![Span::styled(
+            clip_line(&hint, 120),
+            Style::default().fg(Color::Gray),
+        )]));
+    }
     let visible_lines = usize::from(area.height.saturating_sub(2)).max(1);
     let max_top = lines.len().saturating_sub(visible_lines);
     let scroll = app.transcript_scroll.min(max_top);
@@ -11179,6 +11304,29 @@ mod tests {
 
         assert_eq!(app.composer, ">hell");
         assert_eq!(app.composer_cursor, app.composer.len());
+    }
+
+    #[test]
+    fn composer_slash_tab_completes_and_renders_hints() {
+        let mut app = TuiApp::new(Vec::new());
+
+        assert!(app.handle_key(KeyCode::Char('i')));
+        for ch in "/pro".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+
+        let output = render_once(&app, 120, 36).unwrap();
+        assert!(output.contains("Slash: /provider"));
+
+        assert!(app.handle_key(KeyCode::Tab));
+        assert_eq!(app.composer, "/provider");
+        assert_eq!(app.composer_cursor, "/provider".len());
+        assert!(app.status.contains("slash prefix completed"));
+
+        assert!(app.handle_key(KeyCode::Char(' ')));
+        assert!(app.handle_key(KeyCode::Char('n')));
+        assert!(app.handle_key(KeyCode::Tab));
+        assert_eq!(app.composer, "/provider nvidia-nim");
     }
 
     #[test]

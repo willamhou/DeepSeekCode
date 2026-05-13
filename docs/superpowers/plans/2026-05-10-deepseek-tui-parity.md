@@ -372,6 +372,9 @@ Landed first slice:
   custom markdown slash commands from `.dscode/commands/*.md` and the
   configured user commands dir, reusing REPL argument expansion semantics and
   submitting the rendered prompt to the active durable thread
+- local file-backed TUI composer now shows DeepSeek-TUI-style slash-command
+  hints while typing `/...` and uses `Tab` to complete built-in local slash
+  commands before submission
 - local file-backed TUI composer now supports DeepSeek-TUI-style draft stash:
   `Ctrl+S` parks the current composer text in `.dscode/tui/composer-stash.json`,
   and `stash list|pop|clear` plus `/stash list|pop|clear` list, restore, or
