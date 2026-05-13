@@ -41,11 +41,29 @@ durable `cancel_requested` event, and the run marks its turn/item/task
 between SSE frames. The command palette can also compact the active durable
 thread through the same non-destructive runtime compaction path as
 `POST /v1/threads/{id}/compact`, create pending active-thread runtime tasks, and
-trigger current-thread automations into pending runtime tasks. It is not yet a
-complete runtime client: HTTP-runtime TUI sessions now use per-thread SSE
-follow streams for foreground refresh, but fully interrupting a blocked model
-socket read, richer progress controls, and general external command execution
-remain future work.
+trigger current-thread automations into pending runtime tasks. Local
+file-backed TUI sessions also expose a full-width MCP manager screen through
+`mcp` / `mcp manager`, project-level MCP manager commands (`mcp init`,
+`mcp add stdio|http|sse`, `mcp enable|disable|remove`, and `mcp validate`)
+that operate on `.dscode/mcp.json`, plus
+`mcp manager tools|prompts|resources|resource-templates [server]` detail views
+that render configured MCP discovery output in the full-width manager screen.
+The manager renders overview/tools/prompts/resources/templates/health tabs,
+supports `mcp manager tab <tab>` switching, and filters visible manager lines
+with `mcp manager filter <query>`.
+The shorter `mcp tools|prompts|resources|resource-templates [server]` commands
+keep the scrollable right-side panel for quick lookup.
+`Esc` or `mcp close` returns the panel to the main workbench. Unscoped
+TUI MCP mutation commands target project config; `mcp user ...` targets the
+user MCP config for add/enable/disable/remove. `mcp validate` reports per-server
+tools/prompts/resources/resource-template health in the same scrollable
+right-side panel.
+HTTP-runtime TUI sessions report that MCP manager commands require local
+file-backed TUI. It is not yet a complete runtime client: HTTP-runtime TUI
+sessions now use the aggregate runtime SSE stream for foreground refresh across
+known and newly created threads, but fully interrupting a blocked model socket
+read, richer progress controls, and general external command execution remain
+future work.
 
 ## HTTP Runtime
 
@@ -64,8 +82,8 @@ deepseek tui --runtime-url http://127.0.0.1:13000
 
 In HTTP mode, `deepseek tui` builds snapshots from the runtime endpoints,
 writes composer/approval/cancel/task/automation/compaction actions back over
-HTTP, and follows known thread event streams with `follow=1` for lower-latency
-foreground refresh.
+HTTP, and follows `/v1/events/stream?follow=1` for lower-latency foreground
+refresh across known and newly created threads.
 
 Use `--addr HOST:PORT` to override the bind address and `--once` for one
 request in tests:
@@ -95,6 +113,7 @@ Endpoints:
 | `/v1/tasks/{id}/cancel` | `POST` | Cancel a task and append a durable cancellation event |
 | `/v1/tasks/{id}/pause` | `POST` | Pause a pending task before it is claimed |
 | `/v1/tasks/{id}/resume` | `POST` | Resume a paused task back to pending |
+| `/v1/events/stream` | `GET`, `HEAD` | Aggregate SSE replay, bounded wait, or follow-mode streaming across runtime threads |
 | `/v1/threads` | `GET`, `POST` | File-backed durable thread records |
 | `/v1/threads/{id}` | `GET`, `HEAD` | Thread detail with recorded turns and items |
 | `/v1/threads/{id}/automations` | `GET`, `POST` | Automation records for one thread |
@@ -187,6 +206,7 @@ flags:
     "/v1/tasks/{id}/cancel",
     "/v1/tasks/{id}/pause",
     "/v1/tasks/{id}/resume",
+    "/v1/events/stream",
     "/v1/threads",
     "/v1/threads/{id}",
     "/v1/threads/{id}/automations",
@@ -215,11 +235,13 @@ flags:
     "events_write": true,
     "cancellation_events": true,
     "events_sse": true,
+    "events_sse_wait": true,
+    "events_sse_follow": true,
+    "events_global_sse": true,
+    "events_global_sse_follow": true,
     "diagnostics": true,
     "diagnostics_changed": true,
     "diagnostics_broker": true,
-    "events_sse_wait": true,
-    "events_sse_follow": true,
     "tasks": true,
     "task_claim": true,
     "task_cancel": true,
@@ -233,6 +255,197 @@ flags:
   }
 }
 ```
+
+## MCP Stdio Server
+
+`deepseek serve --mcp` exposes a local MCP stdio server for clients that want
+DeepSeekCode's workspace and runtime inspection tools without screen-scraping
+the TUI. It stays read-only by default.
+
+Quick registration:
+
+```bash
+deepseek mcp add-self
+deepseek mcp add-self --name deepseek-code --workspace /path/to/workspace
+```
+
+`mcp add-self` resolves the current binary path and writes a stdio server entry
+that launches `deepseek serve --mcp`. By default it writes the user MCP config;
+use `--project` to write the current workspace config instead.
+
+The default surface is intentionally read-only. It supports:
+
+- `initialize`
+- `notifications/initialized`
+- `tools/list`
+- `tools/call`
+- `prompts/list`
+- `prompts/get`
+- `resources/list`
+- `resources/templates/list`
+- `resources/read`
+
+Exposed tools:
+
+| Tool | Purpose |
+|---|---|
+| `list_files` | List workspace files with depth and result limits |
+| `list_dir` | DeepSeek-TUI-compatible alias for listing workspace files and directories |
+| `read_file` | Read a UTF-8 file with line numbers |
+| `retrieve_tool_result` | Retrieve spilled large tool outputs by ref with summary/head/tail/lines/query modes |
+| `search_text` | Literal text search in the workspace |
+| `grep_files` | DeepSeek-TUI-compatible literal text search alias |
+| `file_search` | Find workspace files by filename or path with optional extension filters |
+| `web_run` | DeepSeek-TUI-style aggregate web wrapper for search/image/open/click/find/finance/PDF screenshot |
+| `web_search` | Search the web and return ranked URLs/snippets |
+| `fetch_url` | Fetch a known HTTP/HTTPS URL and return decoded text or raw content |
+| `finance` | Fetch a live stock, ETF, index, or crypto quote |
+| `pandoc_convert` | Convert workspace documents via local `pandoc` |
+| `image_ocr` | Extract text from workspace images via local `tesseract` |
+| `image_analyze` | Analyze workspace images through an OpenAI-compatible vision model |
+| `git_status` | Show concise git status for the workspace |
+| `git_diff` | Show working-tree or staged diff, optionally scoped by path/context |
+| `project_map` | Render a high-level tree, summary, and key files |
+| `validate_data` | Validate JSON or TOML from inline content or a file |
+| `git_log` | Read recent git history |
+| `git_show` | Show one commit/ref with patch |
+| `git_blame` | Read blame for a file and line range |
+| `load_skill` | Load a configured TOML skill by name with policy, references, suggested steps, and system prompt context |
+| `notify` | Fire a single terminal attention signal for long-running task completion or user attention |
+| `github_issue_context` | Read GitHub issue metadata, body, labels, assignees, and optional comments through `gh` |
+| `github_pr_context` | Read GitHub PR metadata, comments, reviews, checks, files, and optional patch diff through `gh` |
+| `diagnostics` | Run workspace or path-scoped diagnostics |
+| `run_tests` | Hidden by default; exposed with trusted `DSCODE_MCP_ENABLE_SIDE_EFFECTS=1` or durable runtime approvals, and runs supported test commands through the existing shell approval path |
+| `run_shell` | Hidden by default; exposed with trusted `DSCODE_MCP_ENABLE_SIDE_EFFECTS=1` or durable runtime approvals, and still limited by the existing safe-command allowlist |
+| `apply_patch` | Hidden by default; exposed only with durable runtime approvals and applies unified diffs through the existing patch validator |
+| `write_file` | Agent-visible write tool; hidden in MCP/ACP by default and exposed there only with durable runtime approvals; writes UTF-8 text to safe relative paths |
+| `edit_file` | Agent-visible write tool for exact search/replace in one UTF-8 file under the workspace |
+| `fim_edit` | Agent-visible DeepSeek-TUI-compatible Fill-in-the-Middle file edit tool using prefix/suffix anchors |
+| `delete_file` | Hidden by default; exposed only with durable runtime approvals and deletes one regular file at a safe relative path under the MCP workspace |
+| `copy_file` | Hidden by default; exposed only with durable runtime approvals and copies one regular file between safe relative paths under the MCP workspace |
+| `move_file` | Hidden by default; exposed only with durable runtime approvals and moves one regular file between safe relative paths under the MCP workspace |
+| `revert_turn` | Hidden by default; exposed only with durable runtime approvals and restores files from rollback snapshots |
+| `github_comment` | Hidden by default; exposed only with durable runtime approvals and posts evidence-backed GitHub issue/PR comments through `gh` |
+| `github_close_issue` | Hidden by default; exposed only with durable runtime approvals and closes completed GitHub issues through `gh` after structured evidence |
+| `runtime_health` | Return MCP server health metadata |
+| `runtime_list_sessions` | List durable runtime sessions |
+| `runtime_list_threads` | List durable runtime threads |
+| `runtime_read_thread` | Read one durable thread with turns and items |
+| `runtime_list_tasks` | List durable runtime tasks |
+| `runtime_read_task` | Read one durable runtime task |
+
+Exposed MCP prompts:
+
+| Prompt | Purpose |
+|---|---|
+| `review_code` | Review a file or code area for bugs, regressions, maintainability, and test gaps |
+| `explain_code` | Explain how a file, module, or symbol works |
+| `plan_task` | Create an implementation plan for a coding task in the current workspace |
+
+Exposed MCP resources:
+
+| Resource URI | Purpose |
+|---|---|
+| `file://<workspace>` | Workspace root metadata |
+| `deepseekcode://runtime/sessions/<id>` | Durable runtime session JSON |
+| `deepseekcode://runtime/threads/<id>` | Durable runtime thread with turns and items |
+| `deepseekcode://runtime/tasks/<id>` | Durable runtime task JSON |
+
+Exposed MCP resource templates:
+
+| Resource URI template | Purpose |
+|---|---|
+| `deepseekcode://runtime/sessions/{id}` | Durable runtime session JSON by id |
+| `deepseekcode://runtime/threads/{id}` | Durable runtime thread JSON by id |
+| `deepseekcode://runtime/tasks/{id}` | Durable runtime task JSON by id |
+
+`run_shell`, `apply_patch`, `write_file`, `edit_file`, `delete_file`, `copy_file`, and `move_file` are hidden from
+`tools/list` and rejected by `tools/call` unless the MCP server process opts in.
+`DSCODE_MCP_ENABLE_SIDE_EFFECTS=1` keeps the trusted direct execution path for
+allowlisted `run_shell` only. `DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1` creates a
+runtime approval thread for that server and routes `run_shell`, `apply_patch`,
+`write_file`, `edit_file`, `delete_file`, `copy_file`, and `move_file` calls through durable `permission_request` /
+`permission_response` events, so the existing TUI approval modal or HTTP
+runtime can approve or deny the call. Operators can also bind an existing
+runtime thread with `DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id>`. All modes reuse
+the existing safe-command allowlist, patch scope validation, and workspace path
+checks; they do not expose arbitrary shell, unrestricted file writes, task
+mutation, or MCP prompt/resource mutation.
+
+DeepSeekCode also acts as an MCP client for configured stdio / HTTP / SSE
+servers. In addition to `tools/list`, `tools/call`, `prompts/list`, and
+`prompts/get`, the client now supports `resources/list`, `resources/read`,
+and `resources/templates/list` for parameterized resource URI templates.
+
+```bash
+deepseek mcp resources [server-name]
+deepseek mcp resource-templates [server-name]
+deepseek mcp resource <server-name> <resource-uri>
+```
+
+When a project or user MCP config exists, agent runs expose read-only bridge
+tools `mcp_list_prompts`, `mcp_get_prompt`, `mcp_list_resources`,
+`mcp_read_resource`, and `mcp_list_resource_templates` alongside
+`mcp_list_tools` and `mcp_call`.
+
+## ACP Stdio Adapter
+
+`deepseek serve --acp` exposes a conservative Agent Client Protocol stdio
+adapter for editors and local clients that speak newline-delimited JSON-RPC.
+
+The first slice supports:
+
+- `initialize`
+- `session/new`
+- `session/list`
+- `session/load`
+- `session/checkpoints`
+- `session/checkpoint/read`
+- `session/checkpoint/restore`
+- `session/tools/list`
+- `session/tools/call`
+- `session/prompt`
+- `session/cancel`
+- `shutdown`
+
+Prompt requests are sent through the configured DeepSeek model client with no
+tool surface exposed. The adapter emits a `session/update` agent message chunk
+and then returns `{"stopReason":"end_turn"}` for `session/prompt`.
+`session/list` returns durable runtime sessions from the configured workspace,
+and `session/load` maps a runtime `sessionId` plus optional `threadId` into an
+in-process ACP session using that session/thread workspace. When a loaded ACP
+session is prompted, DeepSeekCode records user and assistant turns/items back to
+that runtime thread; token usage is recorded with source `acp` when the model
+provider returns usage metadata. `initialize` advertises checkpoint
+read/restore/apply support through `sessionCapabilities.checkpoints`;
+`session/checkpoints` lists rollback checkpoints, and when called with a loaded
+`sessionId` it filters to checkpoints bound to that runtime thread.
+`session/checkpoint/read` returns the checkpoint manifest and can include the
+unified diff with `includePatch=true`. `session/checkpoint/restore` returns a
+structured restore plan; it is dry-run by default and only mutates the git
+worktree when the client passes `apply=true`. When `sessionId` or `threadId` is
+provided, restore is scoped to checkpoints bound to that runtime thread.
+`session/tools/list` and `session/tools/call` expose the same workspace/runtime
+tool bridge as the MCP stdio server, scoped to the ACP session workspace.
+Read-only tools are available for any ACP session. `run_shell`, `apply_patch`,
+`write_file`, `edit_file`, `delete_file`, `copy_file`, and `move_file` are available only when the ACP session is
+loaded from a runtime thread, and they reuse that thread's durable permission
+events before mutating the workspace. Loaded-session tool calls also create an
+assistant turn with `tool_call` and `tool_result` runtime items; side-effect
+permission requests are linked to that same turn for auditability. ACP
+`session/tools/call` now emits `session/update` notifications for
+`tool_call_update` and `tool_result_update` before the final JSON-RPC result;
+loaded-session updates include the runtime turn/item ids so clients can align
+incremental UI state with the durable audit trail.
+
+```bash
+deepseek serve --acp
+deepseek serve --acp --workspace /path/to/workspace
+```
+
+Full ACP standard tool streaming remains future work. Use `serve --http` for
+the durable runtime API and `serve --mcp` when another client needs
+DeepSeekCode's tools as MCP tools.
 
 ## Durable Runtime v1
 
@@ -412,13 +625,14 @@ request is rejected if it leaves no turns to summarize. The response uses schema
 given sequence number. Current event kinds are `thread_created`,
 `turn_recorded`, `turn_updated`, `item_recorded`, `item_updated`,
 `usage_recorded`, `task_recorded`, `automation_recorded`,
-`thread_compacted`, `permission_request`, `permission_response`, and
-`cancel_requested`.
+`thread_compacted`, `permission_request`, `permission_response`,
+`user_input_request`, `user_input_response`, and `cancel_requested`.
 
 `POST /v1/threads/{id}/events` currently accepts `permission_request`,
-`permission_response`, and `cancel_requested` events. `permission_request` uses
-the same core payload fields as `exec --json` permission notifications and is
-consumed by `deepseek tui`:
+`permission_response`, `user_input_request`, `user_input_response`, and
+`cancel_requested` events. `permission_request` uses the same core payload
+fields as `exec --json` permission notifications and is consumed by
+`deepseek tui`:
 
 ```json
 {
@@ -444,6 +658,37 @@ consumed by `deepseek tui`:
 ```
 
 Allowed decisions are `approved` and `denied`.
+
+`user_input_request` records structured clarification questions for the TUI:
+
+```json
+{
+  "type": "user_input_request",
+  "questions": [
+    {
+      "header": "Mode",
+      "id": "mode",
+      "question": "Which execution mode should be used?",
+      "options": [
+        {"label": "Plan", "description": "Draft a plan first."},
+        {"label": "Apply", "description": "Implement directly."}
+      ]
+    }
+  ]
+}
+```
+
+`user_input_response` records selected option labels by question id:
+
+```json
+{
+  "type": "user_input_response",
+  "request_id": "event-...",
+  "answers": {
+    "mode": "Plan"
+  }
+}
+```
 
 `cancel_requested` records a durable cancellation request for a thread, turn,
 or task. `deepseek tui` emits it for the active running assistant turn when `c`
@@ -495,6 +740,14 @@ events without a `Content-Length`; clients should resume from the last seen SSE
 `id` after reconnecting. The HTTP listener handles connections concurrently, so
 a waiting or following stream can observe events written by another request
 without blocking that writer behind the stream request.
+
+`GET /v1/events/stream` is the aggregate form for foreground clients that need
+cross-thread push. It accepts the same `wait_ms`, `poll_ms`, `follow`,
+`max_events`, and `max_ms` options. A `since=thread-1:4,thread-2:9` cursor
+resumes each known thread independently, while `since_seq=N` applies one default
+cursor to threads not listed in `since`. Aggregate frames use `thread_id:seq` as
+the SSE `id`, so a connected TUI can receive newly created thread events without
+first discovering and subscribing to that thread.
 
 `GET /v1/tasks?session_id={id}&thread_id={id}&limit=50`,
 `GET /v1/sessions/{id}/tasks`, and `GET /v1/threads/{id}/tasks` return schema
@@ -716,6 +969,182 @@ with an empty todo list in memory and upgrades on the next save.
 
 Allowed transcript roles are `user`, `assistant`, and `tool`. Tool status is
 `ok` or `failed`. Todo status is `pending`, `in_progress`, or `completed`.
+Agent-visible todo tools include `todo_write`, `todo_add`, `todo_update`, and
+`todo_list`; DeepSeek-TUI-compatible `update_plan` maps structured
+`{explanation, plan:[{step,status}]}` updates onto the same in-memory list, and
+checklist aliases `checklist_write`, `checklist_add`, `checklist_update`, and
+`checklist_list` operate on it as well.
+Agent-visible durable work tools include DeepSeek-TUI-compatible `task_create`,
+`task_list`, `task_read`, `task_cancel`, `task_gate_run`, `automation_create`,
+`automation_list`, `automation_read`, `automation_update`, `automation_pause`,
+`automation_resume`, `automation_delete`, and `automation_run`, backed by
+`.dscode/runtime`. Task creation/cancellation and automation
+creation/update/pause/resume/delete/run use write approval, `task_gate_run` uses
+shell approval, and task/automation reads are approval-free. `automation_create`
+accepts DeepSeek-TUI-style `name`/`prompt`/`rrule` inputs and stores the
+recurrence in the local runtime `schedule` field; `schedule` remains accepted as
+a local alias. `automation_update` accepts `name`, `prompt`, `rrule`/`schedule`,
+`status`, `paused`, and `next_run_at`.
+DeepSeek-TUI-compatible sub-agent lifecycle tools are also exposed on the
+agent-visible surface: `agent_spawn`, `agent_result`, `agent_list`,
+`agent_cancel`, `close_agent`, `resume_agent`, and `send_input`. DeepSeekCode
+maps these to durable runtime tasks: `agent_spawn` creates a runtime thread and
+pending `subagent` task, `agent_result`/`agent_list` read task/thread snapshots,
+`agent_cancel`/`close_agent` cancel pending or running sub-agent tasks,
+`resume_agent` requeues work, and `send_input` appends a user message to the
+sub-agent thread while queuing a follow-up `subagent_input` task. Mutation tools
+use the same write-approval policy as other runtime state changes.
+PR attempt evidence tools include DeepSeek-TUI-compatible
+`pr_attempt_record`, `pr_attempt_list`, `pr_attempt_read`, and
+`pr_attempt_preflight`. They store attempt metadata and captured patch
+artifacts under `.dscode/runtime/pr_attempts`; preflight runs
+`git apply --check` against the recorded patch and reports `would_apply`
+without mutating the worktree.
+Agent-visible user clarification includes DeepSeek-TUI-compatible
+`request_user_input`. It validates 1-3 structured questions with 2-3 labeled
+options each. Plain non-runtime CLI runs return a non-mutating
+`meta.user_input_required=true` summary so the model can stop and ask the user
+for the requested selections. Runtime-backed TUI and daemon task runs append a
+durable `user_input_request`, wait for the matching `user_input_response`, and
+return the selected answers to the next model step as `answers_json`.
+Runtime threads also support appending both event kinds through
+`POST /v1/threads/{id}/events`; local and remote TUI snapshots render
+unresolved requests in a user-input modal. Number keys select labeled options,
+and `o` opens a short free-form Other answer that is submitted into the same
+structured response event.
+DeepSeek-TUI-compatible `recall_archive` searches durable runtime threads,
+turns, items, and compaction summaries for older context that may have fallen
+out of the current prompt. It accepts `query`, optional `thread_id`, and
+`max_results`/`limit`; the DeepSeek-TUI `cycle` argument is accepted at the
+schema layer for compatibility, while local recall is backed by `.dscode/runtime`
+instead of numbered cycle JSONL files.
+Agent-visible deferred discovery includes DeepSeek-TUI-compatible
+`tool_search_tool_regex` and `tool_search_tool_bm25`. They search the static
+DeepSeekCode tool schema catalog by name, description, and parameter schema, and
+return `tool_search_tool_search_result` payloads with `tool_reference` items.
+Agent-visible local code review includes DeepSeek-TUI-compatible `review`.
+This first slice supports safe relative files and git diffs, returns structured
+`summary` / `issues` / `suggestions` / `overall_assessment` JSON, and reports
+deterministic markers such as conflict markers, panic-prone Rust calls, debug
+prints, and broad `unsafe` usage. It also reports local behavioral signals for
+source diffs without test changes, public API changes, dependency/configuration
+changes, and public API files without local test markers. Set `semantic=true`
+to run an additional read-only child-agent semantic review over the same source
+and deterministic evidence; optional `steps`, `agent`, and `skill` tune that
+review pass. Remote PR review first gathers context with
+`github_pr_context include_diff=true`, then passes that output into
+`review target=github_pr_context github_context=<context>` so the same structured
+review pipeline can inspect the PR diff without fetching GitHub data itself.
+Agent-visible skill tooling includes DeepSeek-TUI-compatible `load_skill`.
+DeepSeekCode maps that tool onto its existing TOML skill registry: repo skills
+and the configured `workspace.user_skills_dir` are searched with user skills
+overriding repo skills, and the tool returns the selected skill's context,
+references, suggested steps, initial todos, and policy.
+Agent-visible persistent notes include DeepSeek-TUI-compatible `note`, which
+appends durable maintainer/agent context to `memory.notes_path`. User memory is
+opt-in with `memory.enabled = true` or `DSCODE_MEMORY=on`; when enabled,
+DeepSeekCode loads `memory.memory_path` into the system prompt and exposes
+DeepSeek-TUI-compatible `remember` for timestamped single-sentence memory
+bullets. Local file-backed TUI sessions also mirror DeepSeek-TUI's fast memory
+workflow: composer lines beginning with a single `#` append to user memory
+without starting a model turn, and `/memory show|path|clear|edit|help` plus
+command-palette `memory ...` inspect or manage the same file.
+Agent-visible notifications include DeepSeek-TUI-compatible `notify`. It
+requires a short `title`, accepts an optional `body`, emits a terminal bell by
+default, and is silent when `DSCODE_NOTIFY=off`.
+
+Agent-visible web tools include DeepSeek-TUI-compatible `web_run`,
+`web_search`, and `fetch_url`. `web_run` is an aggregate compatibility wrapper
+for `search_query`, `image_query`, stored-ref or direct-URL `open`, numbered
+link `click`, stored-ref or URL-scoped `find`, `finance`, and cached-PDF
+`screenshot` arrays. Search results are stored as `searchN` and
+`turnNsearchN`; opened pages are cached as `openN` and `turnNopenN`; clicked
+pages are cached as `clickN` and `turnNclickN`. Static HTML links are extracted
+without executing JavaScript or preserving browser cookies. `open` and `click`
+honor `lineno` and top-level `response_length` by returning line-numbered page
+windows (`short` 40 lines, `medium` 80, `long` 160) while keeping the full page
+in cache for `find` and later navigation. Opened PDF responses cache page text
+through local `pdftotext` / Poppler, and `screenshot` returns a requested cached
+PDF `pageno`; browser/DOM bitmap screenshots are still out of scope.
+`web_search` accepts `query`, `q`, or a JSON
+`search_query` compatibility array and currently uses DuckDuckGo HTML search
+unless `DSCODE_WEB_SEARCH_URL_TEMPLATE` is set. `image_query` uses DuckDuckGo
+Images unless `DSCODE_IMAGE_SEARCH_URL_TEMPLATE` is set. `fetch_url` supports
+`format=text`, `markdown`, or `raw`. DeepSeek-TUI-compatible `finance` accepts
+`ticker` or `symbol`, maps common `type=crypto` bare tickers to `-USD`, and uses
+a Yahoo Finance-compatible quote endpoint unless `DSCODE_FINANCE_URL_TEMPLATE`
+is set. These tools are read-only network tools and block localhost/private
+hosts by default; set `DSCODE_ALLOW_LOCAL_FETCH=1` only for trusted local
+testing. They also honor a DeepSeek-TUI-style host policy from
+`.dscode/config.toml` or environment overrides:
+
+```toml
+network.default = "allow" # allow | deny | prompt
+network.allow = ["api.deepseek.com", ".example.com"]
+network.deny = ["tracking.example.com"]
+network.audit = true
+network.audit_path = "~/.config/dscode/network-audit.log"
+```
+
+`network.deny` wins over `network.allow`. A leading dot matches subdomains but
+not the apex domain, so `.example.com` matches `docs.example.com` but not
+`example.com`. When `network.default = "prompt"`, AgentLoop/runtime/TUI
+execution emits a `permission_request` with `kind = "network"` for the host list
+and, after approval, marks that single tool invocation as network-approved.
+Direct tool execution without the registry approval path still fails closed with
+a clear approval-required error; set `DSCODE_AUTO_APPROVE_NETWORK=1` only in
+trusted non-interactive runs. When `network.audit = true`, each attempted web
+fetch appends a best-effort plaintext audit line with timestamp, host, tool
+name, and decision; audit write failures never block the network tool. The same
+settings can be overridden with comma-separated `DSCODE_NETWORK_ALLOW` /
+`DSCODE_NETWORK_DENY`, `DSCODE_NETWORK_DEFAULT`, `DSCODE_NETWORK_AUDIT`, and
+`DSCODE_NETWORK_AUDIT_PATH`.
+
+Agent-visible document tools include DeepSeek-TUI-compatible `pandoc_convert`
+and `image_ocr`. `pandoc_convert` converts a workspace `source_path` to a
+whitelisted `target_format` through local `pandoc`; text formats can return
+inline output, while `docx`, `odt`, and `epub` require `output_path`.
+`image_ocr` runs local `tesseract <image> -` and returns extracted text inline.
+Both tools report clear missing-binary errors if the corresponding local
+dependency is not installed.
+
+`image_analyze` reads a workspace-relative `image_path`, base64-encodes PNG,
+JPEG, GIF, WebP, or BMP content, and sends it to the configured
+OpenAI-compatible vision `/chat/completions` endpoint. Configure
+`vision.base_url`, `vision.model`, and `vision.api_key_env` in
+`.dscode/config.toml`, or override them per call with `base_url`, `model`, and
+`api_key_env`.
+
+Agent-visible GitHub context tools include DeepSeek-TUI-compatible
+`github_issue_context` and `github_pr_context`. They call the GitHub CLI
+through argv, accept optional `repo` / `repository` scoping, and keep output
+bounded with `max_chars`; PR context can include a bounded `gh pr diff --patch`
+excerpt with `include_diff=true`.
+GitHub mutation tools `github_comment` and `github_close_issue` require write
+approval. Comments require a non-empty evidence JSON object; issue closure also
+requires acceptance criteria plus `files_changed`, `tests_run`, and
+`final_status` evidence, and refuses dirty worktrees unless `allow_dirty=true`.
+
+Agent runs also expose DeepSeek-TUI-compatible `revert_turn`. It restores
+workspace files from rollback snapshots by `snapshot_id`, `checkpoint_id`,
+`turn_id`, or recent `turn_offset`, and it supports `dry_run=true` /
+`apply=false` previews. Restores mutate files but do not rewrite conversation
+history, so the tool follows the existing write confirmation path.
+
+Large successful tool outputs above 100 KiB are spilled to
+`~/.deepseek/tool_outputs/` and replaced inline with a bounded head plus a
+`retrieve_tool_result ref=<id>` hint. The `retrieve_tool_result` tool supports
+`summary`, `head`, `tail`, `lines`, and `query` modes, with bounded byte,
+match, and context-line limits so later turns can fetch only the relevant slice.
+
+Agent runs also expose DeepSeek-TUI-compatible shell tool names:
+`exec_shell`, `task_shell_start`, `task_shell_wait`, `exec_shell_wait`,
+`exec_wait`, `exec_shell_interact`, `exec_interact`, and `exec_shell_cancel`.
+Foreground `exec_shell` reuses the existing safe `run_shell` execution path.
+`exec_shell background=true` and `task_shell_start` create in-process background
+jobs, return a `task_id`, and can be polled by `task_shell_wait` or
+`exec_shell_wait`, sent stdin, or cancelled by the companion tools. These
+background jobs are not yet durable across process exits.
 
 ### Exec Snapshot TOML
 
@@ -731,6 +1160,54 @@ This format is not a complete transcript and should not be extended for TUI or
 supervisor integrations.
 
 ## Subagent Thread Artifacts
+
+Agent runs expose `dispatch_subagent` and `dispatch_subagents` for bounded child
+analysis. They also expose `rlm` / `rlm_query` / `llm_query`, RLM-lite tools
+that wrap either `context` + `question` inputs or DeepSeek-TUI-style
+`task` + `file_path` / `content` long-input requests into the same bounded
+child-agent execution path. `file_path` is workspace-relative only, `content`
+is capped at 200k chars, and `max_depth` is accepted as a compatibility alias
+for the child step budget. `rlm_process` is also exposed as the explicit
+DeepSeek-TUI-compatible long-input process entrypoint; it currently uses the
+same bounded child-agent adapter, not a full long-lived REPL loop.
+`rlm_batch` / `rlm_query_batched` /
+`llm_query_batched` map shared context plus up to 16 questions onto parallel
+child analyses.
+`rlm_chunk_plan` provides a read-only chunk planning helper for DeepSeek-TUI-style
+map-reduce setup without needing Python. It accepts the same `file_path` or
+`content` long-input shape, returns chunk start/end offsets, coverage metadata,
+and chunk text by default, and supports `include_text=false` for offset-only
+planning. `max_chars` defaults to 20000, `overlap` must be smaller than
+`max_chars`, and the input remains capped at 200k chars.
+`rlm_map_reduce_plan` adds the next read-only planning layer: given a `task`
+plus `file_path` or `content`, it returns the same chunks, ready-to-dispatch map
+task JSON for the first `map_limit` chunks, an omitted-map count, and a reduce
+prompt for combining map outputs. It does not run child agents by itself.
+The `rlm_python` helper adds a restricted Python execution slice for pure
+calculation, text splitting, counting, and aggregation over optional `context`
+(`ctx` alias) and `question` variables; it rejects import/file/network/subprocess-style
+tokens, clamps timeout, and returns stdout plus JSON-serializable variables.
+It also exposes DeepSeek-TUI-style `chunk_context(max_chars, overlap)` and
+`chunk_coverage(chunks)` helpers for coverage-aware map-reduce setup, plus
+REPL-compatible `SHOW_VARS()`, `repl_get()`, `repl_set()`, `FINAL()`, and
+`FINAL_VAR()` helper names for prompt/code portability.
+`rlm_python_session` adds an explicit `session_id` and persisted JSON `state`
+dictionary under `.dscode/rlm-python/`. Safe identifier-shaped state keys are
+also preloaded as locals on the next call, and JSON-serializable user locals are
+saved back into state after each call, so simple REPL-style snippets such as
+`count += 1` work across repeated calls without explicit `repl_set`. `reset=true`
+clears that session before running. When `persistent=true` is set,
+`rlm_python_session` also keeps a long-lived restricted Python REPL process for
+the same `session_id` inside the current DeepSeekCode process; subsequent
+persistent calls reuse the same Python PID while still writing the JSON state
+file, and `reset=true` closes and rebuilds that cached process. `rlm_python_sessions`
+lists those persisted helper sessions or inspects a specific `session_id`
+without running Python, returning the JSON object state, file metadata, and
+`process.active` / `process.pid` when a persistent REPL is alive in the current
+DeepSeekCode process.
+This gives the model DeepSeek-TUI-style Recursive Language Model entrypoints for
+synthesis/classification tasks with both file-backed and optional process-backed
+Python helper state.
 
 Parallel subagent dispatch writes markdown artifacts under
 `.dscode/agent-threads/<thread-id>.md` and stores the active thread marker in
@@ -876,6 +1353,11 @@ revert turn <snapshot-id-or-runtime-turn-id|last> [--apply]
 are intentionally local-only because rollback applies to the client's git
 worktree; `deepseek tui --runtime-url ...` reports rollback as unsupported
 instead of mutating a remote host implicitly.
+
+ACP clients can use `session/checkpoints`, `session/checkpoint/read`, and
+`session/checkpoint/restore` against the stdio adapter. Restore is dry-run unless
+`apply=true` is passed, and loaded-session restore requests are constrained to
+the runtime thread bound to that ACP session.
 
 Current boundaries are explicit:
 

@@ -11,7 +11,8 @@ use crate::core::agents::{load_agent_file, load_default_agents, AgentLoadResult,
 use crate::core::context::TaskContext;
 use crate::core::loop_runtime::{
     AgentApprovalDecision, AgentApprovalRequest, AgentApprovalResolver, AgentLoop,
-    AgentLoopOptions, RunResult, SharedAgentApprovalResolver, ToolEvent,
+    AgentLoopOptions, AgentUserInputRequest, AgentUserInputResolver, AgentUserInputResponse,
+    RunResult, SharedAgentApprovalResolver, SharedAgentUserInputResolver, ToolEvent,
 };
 use crate::core::rollback::RollbackStore;
 use crate::core::runtime::{
@@ -22,7 +23,7 @@ use crate::model::protocol::ObservationStatus;
 use crate::tools::dispatch_subagent::{
     active_agent_thread_path, agent_threads_dir, thread_file_path, validate_thread_id,
 };
-use crate::util::json::{json_as_object, json_as_string};
+use crate::util::json::{json_as_object, json_as_string, parse_json_value};
 use crate::util::json::{json_value_to_string, JsonValue};
 
 pub fn run(action: AgentsAction) -> AppResult<()> {
@@ -761,11 +762,19 @@ fn run_runtime_task_loop(
             poll_interval: Duration::from_millis(250),
             max_polls: None,
         }));
+    let user_input_resolver: SharedAgentUserInputResolver =
+        Rc::new(RefCell::new(RuntimeTaskUserInputResolver {
+            store: store.clone(),
+            thread_id: thread.id.clone(),
+            poll_interval: Duration::from_millis(250),
+            max_polls: None,
+        }));
     let options = AgentLoopOptions {
         steps: budget.unwrap_or_else(|| AgentLoopOptions::default().steps),
         emit_progress: !json,
         persist_session: false,
         approval_resolver: Some(approval_resolver),
+        user_input_resolver: Some(user_input_resolver),
         ..AgentLoopOptions::default()
     };
     agent.run_with(TaskContext::new(task.summary.clone(), None), options)
@@ -804,6 +813,67 @@ impl AgentApprovalResolver for RuntimeTaskApprovalResolver {
             }
             std::thread::sleep(self.poll_interval);
         }
+    }
+}
+
+struct RuntimeTaskUserInputResolver {
+    store: RuntimeStore,
+    thread_id: String,
+    poll_interval: Duration,
+    max_polls: Option<usize>,
+}
+
+impl AgentUserInputResolver for RuntimeTaskUserInputResolver {
+    fn resolve(&mut self, request: &AgentUserInputRequest) -> AppResult<AgentUserInputResponse> {
+        let raw_questions = request
+            .input
+            .get("questions")
+            .ok_or_else(|| app_error("request_user_input requires `questions`"))?;
+        let questions = parse_json_value(raw_questions.trim())
+            .map_err(|error| app_error(format!("Invalid request_user_input payload: {error}")))?;
+        let user_input = self
+            .store
+            .append_user_input_request(&self.thread_id, None, questions)?;
+        let mut polls = 0_usize;
+        loop {
+            for event in self.store.read_events(&self.thread_id, user_input.seq)? {
+                if let Some(answers) = user_input_response_answers(&event, &user_input.id) {
+                    return Ok(AgentUserInputResponse { answers });
+                }
+            }
+            polls = polls.saturating_add(1);
+            if self.max_polls.is_some_and(|max_polls| polls >= max_polls) {
+                return Err(app_error(format!(
+                    "timed out waiting for user input response {}",
+                    user_input.id
+                )));
+            }
+            std::thread::sleep(self.poll_interval);
+        }
+    }
+}
+
+fn user_input_response_answers(
+    event: &crate::core::runtime::RuntimeEvent,
+    request_id: &str,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    if event.kind != "user_input_response" {
+        return None;
+    }
+    let payload = json_as_object(&event.payload)?;
+    let response_request_id = payload.get("request_id").and_then(json_as_string)?;
+    if response_request_id != request_id {
+        return None;
+    }
+    let answers = payload.get("answers").and_then(json_as_object)?;
+    let answers = answers
+        .iter()
+        .filter_map(|(key, value)| Some((key.clone(), json_as_string(value)?.to_string())))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if answers.is_empty() {
+        None
+    } else {
+        Some(answers)
     }
 }
 
@@ -1402,6 +1472,80 @@ mod tests {
     }
 
     #[test]
+    fn runtime_task_user_input_resolver_waits_for_durable_response() {
+        let store = RuntimeStore::new(temp_root("runtime-user-input"));
+        let session = store
+            .create_session("Runtime user input".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Clarify work".to_string(),
+                ".".to_string(),
+                "deepseek-v4-flash".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let responder_store = store.clone();
+        let responder_thread_id = thread.id.clone();
+        let responder = std::thread::spawn(move || {
+            for _ in 0..50 {
+                let events = responder_store
+                    .read_events(&responder_thread_id, 0)
+                    .expect("events should read");
+                if let Some(request) = events
+                    .iter()
+                    .find(|event| event.kind == "user_input_request")
+                {
+                    responder_store
+                        .append_user_input_response(
+                            &responder_thread_id,
+                            None,
+                            request.id.clone(),
+                            std::collections::BTreeMap::from([(
+                                "mode".to_string(),
+                                "Plan".to_string(),
+                            )]),
+                        )
+                        .expect("response should append");
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            panic!("user input request was not written");
+        });
+
+        let mut resolver = RuntimeTaskUserInputResolver {
+            store: store.clone(),
+            thread_id: thread.id.clone(),
+            poll_interval: Duration::from_millis(5),
+            max_polls: Some(200),
+        };
+        let questions = r#"[{"header":"Mode","id":"mode","question":"Which mode?","options":[{"label":"Plan","description":"Plan first."},{"label":"Apply","description":"Implement directly."}]}]"#;
+        let response = resolver
+            .resolve(&AgentUserInputRequest {
+                input: std::collections::BTreeMap::from([(
+                    "questions".to_string(),
+                    questions.to_string(),
+                )]),
+            })
+            .unwrap();
+        responder.join().unwrap();
+
+        assert_eq!(
+            response.answers.get("mode").map(String::as_str),
+            Some("Plan")
+        );
+        let events = store.read_events(&thread.id, 0).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "user_input_request"));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "user_input_response"));
+    }
+
+    #[test]
     fn record_runtime_task_result_writes_turns_items_usage_and_task_status() {
         let store = RuntimeStore::new(temp_root("runtime-task-result"));
         let session = store
@@ -1536,11 +1680,18 @@ mod tests {
                 "inspect repository layout".to_string(),
             )
             .unwrap();
-        let original_dir = std::env::current_dir().unwrap();
+        let original_dir = {
+            let _cwd_lock = crate::util::cwd::lock_cwd().unwrap();
+            std::env::current_dir().unwrap()
+        };
 
         run_runtime_task(config, &task.id, Some(1), true).unwrap();
 
-        assert_eq!(std::env::current_dir().unwrap(), original_dir);
+        let restored_dir = {
+            let _cwd_lock = crate::util::cwd::lock_cwd().unwrap();
+            std::env::current_dir().unwrap()
+        };
+        assert_eq!(restored_dir, original_dir);
         let updated = store.load_task(&task.id).unwrap();
         assert_eq!(updated.status, "completed");
         let turns = store.list_turns(&thread.id).unwrap();

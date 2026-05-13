@@ -78,6 +78,62 @@ node npm/scripts/verify-platform-package.js --platform linux-x64
 
 For the runtime contract, start `./target/release/deepseek serve --http` and
 capture `/health` plus `/runtime` from the release binary before publishing.
+Also smoke the MCP stdio server with `initialize` and `tools/list`:
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"prompts/list","params":{}}' \
+  '{"jsonrpc":"2.0","id":4,"method":"prompts/get","params":{"name":"review_code","arguments":{"path":"README.md"}}}' \
+  '{"jsonrpc":"2.0","id":5,"method":"resources/list","params":{}}' \
+  '{"jsonrpc":"2.0","id":6,"method":"resources/templates/list","params":{}}' \
+  | ./target/release/deepseek serve --mcp
+```
+
+For the side-effect MCP surface, smoke the trusted direct path in a temporary
+workspace:
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"run_shell","arguments":{"command":"pwd"}}}' \
+  | DSCODE_MCP_ENABLE_SIDE_EFFECTS=1 ./target/release/deepseek serve --mcp
+```
+
+The durable approval path for `run_shell` and `apply_patch` is covered by
+`cargo test mcp`; release notes should call out
+`DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1` and
+`DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id>` when documenting MCP clients.
+
+Smoke the ACP stdio adapter with `initialize` and `session/list`:
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"session/list","params":{"limit":5}}' \
+  | ./target/release/deepseek serve --acp
+```
+
+Smoke MCP self-registration in a temporary workspace so it does not touch your
+user MCP config:
+
+```bash
+tmp="$(mktemp -d)"
+(cd "$tmp" && "$OLDPWD/target/release/deepseek" mcp add-self --project --name release-deepseek)
+(cd "$tmp" && "$OLDPWD/target/release/deepseek" mcp add release-http --project --url http://127.0.0.1:3999/mcp --disabled)
+(cd "$tmp" && "$OLDPWD/target/release/deepseek" mcp get release-http)
+(cd "$tmp" && "$OLDPWD/target/release/deepseek" mcp resources)
+(cd "$tmp" && "$OLDPWD/target/release/deepseek" mcp resource-templates)
+(cd "$tmp" && "$OLDPWD/target/release/deepseek" mcp remove release-http --project)
+```
+
+The TUI full-width MCP manager screen and scrollable right-side discovery detail panel are covered by the
+focused unit filter:
+
+```bash
+cargo test mcp
+```
 
 For the Docker artifact:
 
@@ -168,6 +224,16 @@ Release notes should include:
 - `deepseek version` output
 - `deepseek doctor --json` output
 - `deepseek serve --http` `/health` and `/runtime` output
+- `deepseek serve --mcp` `initialize`, `tools/list`, `prompts/list`,
+  `prompts/get`, `resources/list`, and `resources/templates/list` output; plus
+  trusted `DSCODE_MCP_ENABLE_SIDE_EFFECTS=1` `run_shell` smoke in a temp workspace
+  and unit coverage for the durable approval path, including MCP `apply_patch`
+- `deepseek serve --acp` `initialize` and `session/list` output
+- `deepseek mcp add-self --project` and `mcp add/get/remove --project`
+  temp-workspace smoke output
+- `cargo test mcp` output covering TUI MCP manager command parsing, full-width
+  manager rendering, local project/user config mutation, right-side MCP detail rendering/scrolling, and MCP
+  prompt/resource/template client bridges
 - `release.json` from `deepseek update package`
 - `SERVICES.md` and generated service-template smoke output
 - `npm test` output from `npm/`

@@ -12,14 +12,21 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::cli::app::TuiArgs;
+use crate::cli::app::{McpConfigScope, TuiArgs};
+use crate::cli::commands::mcp::{
+    add_mcp_server_at, init_mcp_config_at, list_remote_prompts_summary,
+    list_remote_resource_templates_summary, list_remote_resources_summary,
+    list_remote_tools_summary, list_servers_summary, mcp_status_summary, remove_mcp_server_at,
+    set_mcp_server_enabled_at, validate_servers_summary, McpServerConfigSpec,
+};
 use crate::config::load::load_or_default;
 use crate::config::types::AppConfig;
 use crate::core::context::TaskContext;
 use crate::core::loop_runtime::{
     AgentApprovalDecision, AgentApprovalRequest, AgentApprovalResolver, AgentCancelCheck,
-    AgentLoop, AgentLoopOptions, RunResult, SharedAgentApprovalResolver, SharedAgentCancelCheck,
-    ToolEvent,
+    AgentLoop, AgentLoopOptions, AgentUserInputRequest, AgentUserInputResolver,
+    AgentUserInputResponse, RunResult, SharedAgentApprovalResolver, SharedAgentCancelCheck,
+    SharedAgentUserInputResolver, ToolEvent,
 };
 use crate::core::rollback::RollbackStore;
 use crate::core::runtime::{
@@ -28,10 +35,16 @@ use crate::core::runtime::{
     RuntimeStore,
 };
 use crate::error::{app_error, AppResult};
+use crate::tools::exec_shell::{
+    run_trusted_background_shell, ExecShellCancelTool, ExecShellInteractTool, ExecShellListTool,
+    ExecShellShowTool, ExecShellTool, ExecShellWaitTool,
+};
+use crate::tools::types::{Tool, ToolInput};
 use crate::tui::{
     render_once, run_interactive, run_interactive_with_refresh_actions_and_live, TuiAction, TuiApp,
-    TuiApprovalRequest, TuiAutomationRecord, TuiItem, TuiLiveEvent, TuiSession, TuiTaskRecord,
-    TuiThread, TuiUsageSummary,
+    TuiApprovalRequest, TuiAutomationRecord, TuiItem, TuiLiveEvent, TuiMcpConfigScope,
+    TuiMcpDetailKind, TuiMemoryCommand, TuiSession, TuiTaskRecord, TuiThread, TuiUsageSummary,
+    TuiUserInputRequest,
 };
 use crate::ui::stream::StreamEvents;
 use crate::util::json::{
@@ -97,6 +110,7 @@ struct RuntimeSnapshot {
     automations: Vec<TuiAutomationRecord>,
     usage_summaries: Vec<TuiUsageSummary>,
     approvals: Vec<TuiApprovalRequest>,
+    user_inputs: Vec<TuiUserInputRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +122,7 @@ struct RuntimeSnapshotSignature {
     automations: Vec<(String, String, Option<String>, Option<String>)>,
     usage_summaries: Vec<(String, usize, u64, u64)>,
     approvals: Vec<(String, String)>,
+    user_inputs: Vec<(String, String)>,
 }
 
 struct RuntimeLiveWatcher {
@@ -293,7 +308,7 @@ fn run_http_runtime_tui(runtime_url: &str, once: bool) -> AppResult<()> {
 }
 
 fn app_from_snapshot(snapshot: RuntimeSnapshot) -> TuiApp {
-    TuiApp::with_runtime_usage_tasks_automations_and_approvals(
+    TuiApp::with_runtime_usage_tasks_automations_approvals_and_user_inputs(
         snapshot.sessions,
         snapshot.threads,
         snapshot.items,
@@ -301,6 +316,7 @@ fn app_from_snapshot(snapshot: RuntimeSnapshot) -> TuiApp {
         snapshot.automations,
         snapshot.usage_summaries,
         snapshot.approvals,
+        snapshot.user_inputs,
     )
 }
 
@@ -327,37 +343,29 @@ fn start_runtime_http_live_watcher(
     follow_max_ms: u64,
 ) -> RuntimeHttpLiveWatcher {
     let stop = Arc::new(AtomicBool::new(false));
-    let mut handles = Vec::new();
-    for subscription in subscriptions {
-        let worker_client = client.clone();
-        let worker_tx = tx.clone();
-        let worker_stop = stop.clone();
-        let handle = thread::spawn(move || {
-            follow_runtime_thread_events(
-                worker_client,
-                subscription,
-                worker_tx,
-                worker_stop,
-                follow_max_ms,
-            )
-        });
-        handles.push(handle);
+    let worker_stop = stop.clone();
+    let handle = thread::spawn(move || {
+        follow_runtime_global_events(client, subscriptions, tx, worker_stop, follow_max_ms)
+    });
+    RuntimeHttpLiveWatcher {
+        stop,
+        handles: vec![handle],
     }
-    RuntimeHttpLiveWatcher { stop, handles }
 }
 
-fn follow_runtime_thread_events(
+fn follow_runtime_global_events(
     client: RuntimeHttpClient,
-    mut subscription: RuntimeHttpSubscription,
+    subscriptions: Vec<RuntimeHttpSubscription>,
     tx: Sender<TuiLiveEvent>,
     stop: Arc<AtomicBool>,
     follow_max_ms: u64,
 ) {
+    let mut cursor = subscriptions
+        .into_iter()
+        .map(|subscription| (subscription.thread_id, subscription.since_seq))
+        .collect::<BTreeMap<_, _>>();
     while !stop.load(Ordering::Relaxed) {
-        let path = format!(
-            "/v1/threads/{}/events/stream?since_seq={}&follow=1&poll_ms=100&max_ms={}",
-            subscription.thread_id, subscription.since_seq, follow_max_ms
-        );
+        let path = runtime_global_sse_path(&cursor, follow_max_ms);
         match client.open_sse(&path) {
             Ok(mut reader) => loop {
                 if stop.load(Ordering::Relaxed) {
@@ -366,7 +374,7 @@ fn follow_runtime_thread_events(
                 match sse::read_frame(&mut reader) {
                     Ok(Some(frame)) => {
                         if let Ok(event) = runtime_event_from_sse_frame(&frame) {
-                            subscription.since_seq = event.seq;
+                            cursor.insert(event.thread_id.clone(), event.seq);
                             match runtime_http_snapshot(&client) {
                                 Ok(snapshot) => {
                                     if tx.send(snapshot_live_event(snapshot)).is_err() {
@@ -415,6 +423,21 @@ fn follow_runtime_thread_events(
     }
 }
 
+fn runtime_global_sse_path(cursor: &BTreeMap<String, u64>, follow_max_ms: u64) -> String {
+    let mut path =
+        format!("/v1/events/stream?follow=1&poll_ms=100&max_events=1&max_ms={follow_max_ms}");
+    if !cursor.is_empty() {
+        let since = cursor
+            .iter()
+            .map(|(thread_id, seq)| format!("{thread_id}:{seq}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        path.push_str("&since=");
+        path.push_str(&since);
+    }
+    path
+}
+
 fn runtime_event_from_sse_frame(frame: &sse::SseFrame) -> AppResult<RuntimeEvent> {
     let value = parse_json_value(&frame.data)?;
     let root = json_object_value(value, "runtime event SSE frame")?;
@@ -430,6 +453,7 @@ fn runtime_http_snapshot(client: &RuntimeHttpClient) -> AppResult<RuntimeSnapsho
     let mut automations = Vec::new();
     let mut usage_summaries = Vec::new();
     let mut approvals = Vec::new();
+    let mut user_inputs = Vec::new();
 
     for session in &session_records {
         let session_root = json_object_value(
@@ -488,12 +512,24 @@ fn runtime_http_snapshot(client: &RuntimeHttpClient) -> AppResult<RuntimeSnapsho
                 .iter()
                 .filter_map(TuiApprovalRequest::response_request_id)
                 .collect::<BTreeSet<_>>();
+            let resolved_user_input_ids = events
+                .iter()
+                .filter_map(TuiUserInputRequest::response_request_id)
+                .collect::<BTreeSet<_>>();
             approvals.extend(events.iter().filter_map(|event| {
                 let approval = TuiApprovalRequest::from_runtime_event(event)?;
                 if resolved_approval_ids.contains(&approval.id) {
                     None
                 } else {
                     Some(approval)
+                }
+            }));
+            user_inputs.extend(events.iter().filter_map(|event| {
+                let request = TuiUserInputRequest::from_runtime_event(event)?;
+                if resolved_user_input_ids.contains(&request.id) {
+                    None
+                } else {
+                    Some(request)
                 }
             }));
 
@@ -509,6 +545,7 @@ fn runtime_http_snapshot(client: &RuntimeHttpClient) -> AppResult<RuntimeSnapsho
         automations,
         usage_summaries,
         approvals,
+        user_inputs,
     })
 }
 
@@ -557,6 +594,39 @@ fn handle_tui_http_action(
                 "recorded remote approval response: {request_id} {decision}"
             ));
         }
+        TuiAction::RespondUserInput {
+            thread_id,
+            turn_id,
+            request_id,
+            answers,
+        } => {
+            let mut body = BTreeMap::new();
+            body.insert(
+                "type".to_string(),
+                JsonValue::String("user_input_response".to_string()),
+            );
+            body.insert(
+                "request_id".to_string(),
+                JsonValue::String(request_id.clone()),
+            );
+            body.insert(
+                "answers".to_string(),
+                JsonValue::Object(
+                    answers
+                        .into_iter()
+                        .map(|(key, value)| (key, JsonValue::String(value)))
+                        .collect(),
+                ),
+            );
+            if let Some(turn_id) = turn_id {
+                body.insert("turn_id".to_string(), JsonValue::String(turn_id));
+            }
+            client.post_json(
+                &format!("/v1/threads/{thread_id}/events"),
+                JsonValue::Object(body),
+            )?;
+            app.set_status(format!("recorded remote user input response: {request_id}"));
+        }
         TuiAction::CancelRun { thread_id, turn_id } => {
             let mut body = BTreeMap::new();
             body.insert(
@@ -601,8 +671,42 @@ fn handle_tui_http_action(
             )?;
             app.set_status(format!("resumed remote task {task_id}"));
         }
+        TuiAction::CancelTask { task_id } => {
+            client.post_json(
+                &format!("/v1/tasks/{task_id}/cancel"),
+                json_object([(
+                    "reason",
+                    JsonValue::String("cancelled from TUI task panel".to_string()),
+                )]),
+            )?;
+            app.set_status(format!("cancelled remote task {task_id}"));
+        }
         TuiAction::RunDiagnostics { changed, paths } => {
             run_remote_tui_diagnostics(client, app, changed, paths);
+        }
+        TuiAction::RunShell { .. }
+        | TuiAction::RunApprovedShell { .. }
+        | TuiAction::ListShell
+        | TuiAction::ShowShell { .. }
+        | TuiAction::SendShellStdin { .. }
+        | TuiAction::WaitShell { .. }
+        | TuiAction::CancelShell { .. } => {
+            app.set_status("shell commands require local file-backed TUI".to_string());
+        }
+        TuiAction::AppendMemory { .. } | TuiAction::Memory { .. } => {
+            app.set_status("memory commands require local file-backed TUI".to_string());
+        }
+        TuiAction::McpManager
+        | TuiAction::McpList
+        | TuiAction::McpInit { .. }
+        | TuiAction::McpAddStdio { .. }
+        | TuiAction::McpAddRemote { .. }
+        | TuiAction::McpRemove { .. }
+        | TuiAction::McpSetEnabled { .. }
+        | TuiAction::McpDetails { .. }
+        | TuiAction::McpManagerDetails { .. }
+        | TuiAction::McpValidate => {
+            app.set_status("mcp commands require local file-backed TUI".to_string());
         }
         TuiAction::CreateRollbackSnapshot { .. }
         | TuiAction::ListRollbackSnapshots { .. }
@@ -707,12 +811,17 @@ fn runtime_snapshot(store: &RuntimeStore) -> AppResult<RuntimeSnapshot> {
     let mut automations = Vec::new();
     let mut usage_summaries = Vec::new();
     let mut approvals = Vec::new();
+    let mut user_inputs = Vec::new();
     for session in &session_records {
         for thread in store.list_session_threads(&session.id, 50)? {
             let events = store.read_events(&thread.id, 0)?;
             let resolved_approval_ids = events
                 .iter()
                 .filter_map(TuiApprovalRequest::response_request_id)
+                .collect::<BTreeSet<_>>();
+            let resolved_user_input_ids = events
+                .iter()
+                .filter_map(TuiUserInputRequest::response_request_id)
                 .collect::<BTreeSet<_>>();
             items.extend(
                 store
@@ -744,6 +853,14 @@ fn runtime_snapshot(store: &RuntimeStore) -> AppResult<RuntimeSnapshot> {
                     Some(approval)
                 }
             }));
+            user_inputs.extend(events.iter().filter_map(|event| {
+                let request = TuiUserInputRequest::from_runtime_event(event)?;
+                if resolved_user_input_ids.contains(&request.id) {
+                    None
+                } else {
+                    Some(request)
+                }
+            }));
             threads.push(TuiThread::from(thread));
         }
     }
@@ -759,6 +876,7 @@ fn runtime_snapshot(store: &RuntimeStore) -> AppResult<RuntimeSnapshot> {
         automations,
         usage_summaries,
         approvals,
+        user_inputs,
     })
 }
 
@@ -840,6 +958,13 @@ fn runtime_snapshot_signature(snapshot: &RuntimeSnapshot) -> RuntimeSnapshotSign
         .collect::<Vec<_>>();
     approvals.sort();
 
+    let mut user_inputs = snapshot
+        .user_inputs
+        .iter()
+        .map(|request| (request.id.clone(), request.status.clone()))
+        .collect::<Vec<_>>();
+    user_inputs.sort();
+
     RuntimeSnapshotSignature {
         sessions,
         threads,
@@ -848,6 +973,7 @@ fn runtime_snapshot_signature(snapshot: &RuntimeSnapshot) -> RuntimeSnapshotSign
         automations,
         usage_summaries,
         approvals,
+        user_inputs,
     }
 }
 
@@ -860,6 +986,7 @@ fn snapshot_live_event(snapshot: RuntimeSnapshot) -> TuiLiveEvent {
         automations: snapshot.automations,
         usage_summaries: snapshot.usage_summaries,
         approvals: snapshot.approvals,
+        user_inputs: snapshot.user_inputs,
     }
 }
 
@@ -911,20 +1038,23 @@ fn start_runtime_live_watcher(
 
 fn app_from_store(store: &RuntimeStore) -> AppResult<TuiApp> {
     let snapshot = runtime_snapshot(store)?;
-    Ok(TuiApp::with_runtime_usage_tasks_automations_and_approvals(
-        snapshot.sessions,
-        snapshot.threads,
-        snapshot.items,
-        snapshot.tasks,
-        snapshot.automations,
-        snapshot.usage_summaries,
-        snapshot.approvals,
-    ))
+    Ok(
+        TuiApp::with_runtime_usage_tasks_automations_approvals_and_user_inputs(
+            snapshot.sessions,
+            snapshot.threads,
+            snapshot.items,
+            snapshot.tasks,
+            snapshot.automations,
+            snapshot.usage_summaries,
+            snapshot.approvals,
+            snapshot.user_inputs,
+        ),
+    )
 }
 
 fn refresh_app_from_store(store: &RuntimeStore, app: &mut TuiApp) -> AppResult<()> {
     let snapshot = runtime_snapshot(store)?;
-    app.replace_runtime_with_usage_tasks_automations_and_approvals(
+    app.replace_runtime_with_usage_tasks_automations_approvals_and_user_inputs(
         snapshot.sessions,
         snapshot.threads,
         snapshot.items,
@@ -932,6 +1062,7 @@ fn refresh_app_from_store(store: &RuntimeStore, app: &mut TuiApp) -> AppResult<(
         snapshot.automations,
         snapshot.usage_summaries,
         snapshot.approvals,
+        snapshot.user_inputs,
     );
     Ok(())
 }
@@ -951,6 +1082,53 @@ fn handle_tui_action(
     action: TuiAction,
 ) -> AppResult<()> {
     handle_tui_action_with_live(store, config, app, action, None)
+}
+
+fn mcp_detail_summary(
+    config: &AppConfig,
+    kind: &TuiMcpDetailKind,
+    server: Option<&str>,
+) -> AppResult<String> {
+    match kind {
+        TuiMcpDetailKind::Manager => mcp_manager_summary(config),
+        TuiMcpDetailKind::Tools => list_remote_tools_summary(config, server),
+        TuiMcpDetailKind::Prompts => list_remote_prompts_summary(config, server),
+        TuiMcpDetailKind::Resources => list_remote_resources_summary(config, server),
+        TuiMcpDetailKind::ResourceTemplates => {
+            list_remote_resource_templates_summary(config, server)
+        }
+        TuiMcpDetailKind::Health => validate_servers_summary(config),
+        TuiMcpDetailKind::Shell => Err(app_error("shell details are not MCP details")),
+        TuiMcpDetailKind::Memory => Err(app_error("memory details are not MCP details")),
+    }
+}
+
+fn mcp_manager_summary(config: &AppConfig) -> AppResult<String> {
+    let mut output = String::new();
+    output.push_str("MCP Manager\n");
+    output.push_str(&mcp_status_summary(config)?);
+    output.push_str("\n\n");
+    output.push_str(&list_servers_summary(config)?);
+    output.push_str("\nAvailable actions:\n");
+    output.push_str("- mcp init [--force]\n");
+    output.push_str("- mcp add stdio <name> <command> [args...]\n");
+    output.push_str("- mcp add http|sse <name> <url>\n");
+    output.push_str("- mcp enable|disable|remove <name>\n");
+    output.push_str("- mcp user add|enable|disable|remove ...\n");
+    output.push_str("- mcp tools|prompts|resources|resource-templates [server]\n");
+    output.push_str("- mcp validate\n");
+    output.push_str("- mcp close\n");
+    output.push_str(
+        "\nManager keys: n/p select server, e enable, d disable, x remove (confirm), t tools, r reload\n",
+    );
+    Ok(output)
+}
+
+fn tui_mcp_config_scope(scope: TuiMcpConfigScope) -> McpConfigScope {
+    match scope {
+        TuiMcpConfigScope::Project => McpConfigScope::Project,
+        TuiMcpConfigScope::User => McpConfigScope::User,
+    }
 }
 
 fn handle_tui_action_with_live(
@@ -1000,6 +1178,20 @@ fn handle_tui_action_with_live(
                 "recorded approval response: {request_id} {decision}"
             ));
         }
+        TuiAction::RespondUserInput {
+            thread_id,
+            turn_id,
+            request_id,
+            answers,
+        } => {
+            store.append_user_input_response(
+                &thread_id,
+                turn_id.as_deref(),
+                request_id.clone(),
+                answers,
+            )?;
+            app.set_status(format!("recorded user input response: {request_id}"));
+        }
         TuiAction::CancelRun { thread_id, turn_id } => {
             store.append_cancel_request(
                 &thread_id,
@@ -1037,9 +1229,213 @@ fn handle_tui_action_with_live(
                 app.set_status(format!("task resume failed for {task_id}: {error}"));
             }
         },
+        TuiAction::CancelTask { task_id } => {
+            match store.cancel_task(&task_id, "cancelled from TUI task panel".to_string()) {
+                Ok((task, _)) => {
+                    app.set_status(format!("cancelled task {}", task.id));
+                }
+                Err(error) => {
+                    app.set_status(format!("task cancel failed for {task_id}: {error}"));
+                }
+            }
+        }
         TuiAction::RunDiagnostics { changed, paths } => {
             run_tui_diagnostics_from_current_dir(app, changed, paths);
         }
+        TuiAction::RunShell { command } => {
+            run_tui_shell_command(app, &command);
+        }
+        TuiAction::RunApprovedShell { command } => {
+            run_tui_approved_shell_command(app, &command);
+        }
+        TuiAction::ListShell => {
+            run_tui_shell_list(app);
+        }
+        TuiAction::ShowShell { task_id } => {
+            run_tui_shell_show(app, &task_id);
+        }
+        TuiAction::SendShellStdin {
+            task_id,
+            input,
+            close,
+        } => {
+            run_tui_shell_stdin(app, &task_id, &input, close);
+        }
+        TuiAction::WaitShell {
+            task_id,
+            wait,
+            timeout_ms,
+        } => {
+            run_tui_shell_wait(app, &task_id, wait, timeout_ms);
+        }
+        TuiAction::CancelShell { task_id, all } => {
+            run_tui_shell_cancel(app, task_id.as_deref(), all);
+        }
+        TuiAction::AppendMemory { note } => {
+            run_tui_memory_append(app, config, &note);
+        }
+        TuiAction::Memory { command } => {
+            run_tui_memory_command(app, config, command);
+        }
+        TuiAction::McpManager => match config {
+            Some(config) => match mcp_manager_summary(config) {
+                Ok(summary) => {
+                    app.set_status(mcp_status_summary(config)?);
+                    app.set_mcp_manager(summary);
+                }
+                Err(error) => app.set_status(format!("mcp manager failed: {error}")),
+            },
+            None => app.set_status("mcp commands require local config".to_string()),
+        },
+        TuiAction::McpList => match config {
+            Some(config) => match mcp_status_summary(config) {
+                Ok(summary) => app.set_status(summary),
+                Err(error) => app.set_status(format!("mcp list failed: {error}")),
+            },
+            None => app.set_status("mcp commands require local config".to_string()),
+        },
+        TuiAction::McpDetails { kind, server } => match config {
+            Some(config) => match mcp_detail_summary(config, &kind, server.as_deref()) {
+                Ok(summary) => {
+                    app.set_status(last_nonempty_line(&summary, "mcp detail: ok"));
+                    app.set_mcp_detail(kind, summary);
+                }
+                Err(error) => {
+                    app.set_status(format!("mcp {} failed: {error}", kind.command_name()))
+                }
+            },
+            None => app.set_status("mcp commands require local config".to_string()),
+        },
+        TuiAction::McpManagerDetails { kind, server } => match config {
+            Some(config) => match mcp_detail_summary(config, &kind, server.as_deref()) {
+                Ok(summary) => {
+                    app.set_status(last_nonempty_line(&summary, "mcp detail: ok"));
+                    app.set_mcp_manager_detail(kind, summary);
+                }
+                Err(error) => {
+                    app.set_status(format!("mcp {} failed: {error}", kind.command_name()))
+                }
+            },
+            None => app.set_status("mcp commands require local config".to_string()),
+        },
+        TuiAction::McpInit { force } => {
+            let Some(config) = config else {
+                app.set_status("mcp commands require local config".to_string());
+                return Ok(());
+            };
+            match std::env::current_dir()
+                .map_err(|error| app_error(format!("failed to read current directory: {error}")))
+                .and_then(|root| init_mcp_config_at(&root, config, force))
+            {
+                Ok(path) => app.set_status(format!(
+                    "mcp project config initialized: {}",
+                    path.display()
+                )),
+                Err(error) => app.set_status(format!("mcp init failed: {error}")),
+            }
+        }
+        TuiAction::McpAddStdio {
+            scope,
+            name,
+            command,
+            args,
+        } => {
+            let Some(config) = config else {
+                app.set_status("mcp commands require local config".to_string());
+                return Ok(());
+            };
+            let config_scope = tui_mcp_config_scope(scope);
+            let spec = McpServerConfigSpec::stdio(name.clone(), command, args, false);
+            match std::env::current_dir()
+                .map_err(|error| app_error(format!("failed to read current directory: {error}")))
+                .and_then(|root| add_mcp_server_at(&root, config, config_scope, spec))
+            {
+                Ok(path) => app.set_status(format!(
+                    "mcp {} stdio server added: {name} ({})",
+                    scope.label(),
+                    path.display()
+                )),
+                Err(error) => app.set_status(format!("mcp add failed for {name}: {error}")),
+            }
+        }
+        TuiAction::McpAddRemote {
+            scope,
+            name,
+            transport,
+            url,
+        } => {
+            let Some(config) = config else {
+                app.set_status("mcp commands require local config".to_string());
+                return Ok(());
+            };
+            let config_scope = tui_mcp_config_scope(scope);
+            let spec = McpServerConfigSpec::remote(name.clone(), transport.clone(), url, false);
+            match std::env::current_dir()
+                .map_err(|error| app_error(format!("failed to read current directory: {error}")))
+                .and_then(|root| add_mcp_server_at(&root, config, config_scope, spec))
+            {
+                Ok(path) => app.set_status(format!(
+                    "mcp {} {transport} server added: {name} ({})",
+                    scope.label(),
+                    path.display()
+                )),
+                Err(error) => app.set_status(format!("mcp add failed for {name}: {error}")),
+            }
+        }
+        TuiAction::McpRemove { scope, name } => {
+            let Some(config) = config else {
+                app.set_status("mcp commands require local config".to_string());
+                return Ok(());
+            };
+            let config_scope = tui_mcp_config_scope(scope);
+            match std::env::current_dir()
+                .map_err(|error| app_error(format!("failed to read current directory: {error}")))
+                .and_then(|root| remove_mcp_server_at(&root, config, config_scope, &name))
+            {
+                Ok(path) => app.set_status(format!(
+                    "mcp {} server removed: {name} ({})",
+                    scope.label(),
+                    path.display()
+                )),
+                Err(error) => app.set_status(format!("mcp remove failed for {name}: {error}")),
+            }
+        }
+        TuiAction::McpSetEnabled {
+            scope,
+            name,
+            enabled,
+        } => {
+            let Some(config) = config else {
+                app.set_status("mcp commands require local config".to_string());
+                return Ok(());
+            };
+            let config_scope = tui_mcp_config_scope(scope);
+            match std::env::current_dir()
+                .map_err(|error| app_error(format!("failed to read current directory: {error}")))
+                .and_then(|root| {
+                    set_mcp_server_enabled_at(&root, config, config_scope, &name, enabled)
+                }) {
+                Ok(path) => {
+                    let action = if enabled { "enabled" } else { "disabled" };
+                    app.set_status(format!(
+                        "mcp {} server {action}: {name} ({})",
+                        scope.label(),
+                        path.display()
+                    ))
+                }
+                Err(error) => app.set_status(format!("mcp update failed for {name}: {error}")),
+            }
+        }
+        TuiAction::McpValidate => match config {
+            Some(config) => match validate_servers_summary(config) {
+                Ok(summary) => {
+                    app.set_status(last_nonempty_line(&summary, "mcp validate: ok"));
+                    app.set_mcp_detail(TuiMcpDetailKind::Health, summary);
+                }
+                Err(error) => app.set_status(format!("mcp validate failed: {error}")),
+            },
+            None => app.set_status("mcp commands require local config".to_string()),
+        },
         TuiAction::CreateRollbackSnapshot { label } => {
             let Some(rollback_store) = rollback_store_for_config(config, app) else {
                 return Ok(());
@@ -1165,6 +1561,116 @@ fn handle_tui_action_with_live(
     Ok(())
 }
 
+fn run_tui_memory_append(app: &mut TuiApp, config: Option<&AppConfig>, note: &str) {
+    let Some(config) = config else {
+        app.set_status("memory commands require local config".to_string());
+        return;
+    };
+    if !config.memory.enabled {
+        app.set_status("memory disabled; set memory.enabled=true or DSCODE_MEMORY=on".to_string());
+        return;
+    }
+    let path = config.memory.memory_path();
+    match crate::core::memory::append_user_memory(&path, note) {
+        Ok(remembered) => {
+            app.set_status(format!("remembered: {remembered} ({})", path.display()));
+        }
+        Err(error) => {
+            app.set_status(format!("memory append failed: {error}"));
+        }
+    }
+}
+
+fn run_tui_memory_command(app: &mut TuiApp, config: Option<&AppConfig>, command: TuiMemoryCommand) {
+    let Some(config) = config else {
+        app.set_status("memory commands require local config".to_string());
+        return;
+    };
+    let path = config.memory.memory_path();
+    match command {
+        TuiMemoryCommand::Show => {
+            let body = match std::fs::read_to_string(&path) {
+                Ok(content) if content.trim().is_empty() => "(empty)\n".to_string(),
+                Ok(content) => content,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    "(empty)\n".to_string()
+                }
+                Err(error) => {
+                    app.set_status(format!("memory show failed: {error}"));
+                    return;
+                }
+            };
+            let enabled = if config.memory.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            app.set_status(format!("memory {enabled}: {}", path.display()));
+            app.set_mcp_detail(
+                TuiMcpDetailKind::Memory,
+                format!(
+                    "User memory: {enabled}\nPath: {}\n\n{}",
+                    path.display(),
+                    body
+                ),
+            );
+        }
+        TuiMemoryCommand::Path => {
+            let enabled = if config.memory.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            app.set_status(format!("memory path ({enabled}): {}", path.display()));
+        }
+        TuiMemoryCommand::Clear => {
+            if !config.memory.enabled {
+                app.set_status(
+                    "memory disabled; enable it before clearing the memory file".to_string(),
+                );
+                return;
+            }
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    if let Err(error) = std::fs::create_dir_all(parent) {
+                        app.set_status(format!("memory clear failed: {error}"));
+                        return;
+                    }
+                }
+            }
+            match std::fs::write(&path, "") {
+                Ok(_) => app.set_status(format!("memory cleared: {}", path.display())),
+                Err(error) => app.set_status(format!("memory clear failed: {error}")),
+            }
+        }
+        TuiMemoryCommand::Edit => {
+            let editor = std::env::var("VISUAL")
+                .or_else(|_| std::env::var("EDITOR"))
+                .unwrap_or_else(|_| "vi".to_string());
+            app.set_status(format!("memory edit command: {editor} {}", path.display()));
+            app.set_mcp_detail(
+                TuiMcpDetailKind::Memory,
+                format!(
+                    "Memory edit command:\n{} {}\n\nDeepSeekCode prints the editor command instead of spawning it inside the TUI.",
+                    editor,
+                    path.display()
+                ),
+            );
+        }
+        TuiMemoryCommand::Help => {
+            app.set_status("memory commands: show|path|clear|edit|help".to_string());
+            app.set_mcp_detail(
+                TuiMcpDetailKind::Memory,
+                format!(
+                    "Memory commands:\n- # <note> in the composer appends a durable memory note without starting a model turn.\n- /memory shows the memory file.\n- /memory path prints the configured path.\n- /memory clear empties the file when memory is enabled.\n- /memory edit prints the editor command.\n\nPath: {}\nEnabled: {}",
+                    path.display(),
+                    config.memory.enabled
+                ),
+            );
+        }
+    }
+}
+
 fn run_tui_diagnostics_from_current_dir(app: &mut TuiApp, changed: bool, paths: Vec<String>) {
     match std::env::current_dir() {
         Ok(cwd) => run_tui_diagnostics_in(app, &cwd, changed, paths),
@@ -1214,6 +1720,164 @@ fn run_tui_diagnostics_in(app: &mut TuiApp, cwd: &Path, changed: bool, paths: Ve
         status.push_str(&runtime_summary(note));
     }
     app.set_status(status);
+}
+
+fn run_tui_shell_command(app: &mut TuiApp, command: &str) {
+    let input = ToolInput::new()
+        .with_arg("command", command.to_string())
+        .with_arg("background", "true");
+    match ExecShellTool.execute(input) {
+        Ok(output) => {
+            let task_id = shell_task_id_from_summary(&output.summary);
+            app.set_status(match task_id {
+                Some(task_id) => format!("shell job started: {task_id}"),
+                None => "shell job started".to_string(),
+            });
+            app.set_mcp_detail(
+                TuiMcpDetailKind::Shell,
+                format_shell_detail("Shell job started", &output.summary),
+            );
+        }
+        Err(error) => {
+            app.set_status(format!("shell job failed to start: {error}"));
+        }
+    }
+}
+
+fn run_tui_approved_shell_command(app: &mut TuiApp, command: &str) {
+    match run_trusted_background_shell(command, ".") {
+        Ok(output) => {
+            let task_id = shell_task_id_from_summary(&output.summary);
+            app.set_status(match task_id {
+                Some(task_id) => format!("approved shell job started: {task_id}"),
+                None => "approved shell job started".to_string(),
+            });
+            app.set_mcp_detail(
+                TuiMcpDetailKind::Shell,
+                format_shell_detail("Approved shell job started", &output.summary),
+            );
+        }
+        Err(error) => {
+            app.set_status(format!("approved shell job failed to start: {error}"));
+        }
+    }
+}
+
+fn run_tui_shell_list(app: &mut TuiApp) {
+    match ExecShellListTool.execute(ToolInput::new()) {
+        Ok(output) => {
+            app.set_status(last_nonempty_line(&output.summary, "shell jobs listed"));
+            app.set_mcp_detail(
+                TuiMcpDetailKind::Shell,
+                format_shell_detail("Shell jobs", &output.summary),
+            );
+        }
+        Err(error) => {
+            app.set_status(format!("shell list failed: {error}"));
+        }
+    }
+}
+
+fn run_tui_shell_show(app: &mut TuiApp, task_id: &str) {
+    let input = ToolInput::new().with_arg("task_id", task_id.to_string());
+    match ExecShellShowTool.execute(input) {
+        Ok(output) => {
+            app.set_status(last_nonempty_line(&output.summary, "shell job shown"));
+            app.set_mcp_detail(
+                TuiMcpDetailKind::Shell,
+                format_shell_detail(&format!("Shell job {task_id}"), &output.summary),
+            );
+        }
+        Err(error) => {
+            app.set_status(format!("shell show failed for {task_id}: {error}"));
+        }
+    }
+}
+
+fn run_tui_shell_stdin(app: &mut TuiApp, task_id: &str, input: &str, close: bool) {
+    let tool_input = ToolInput::new()
+        .with_arg("task_id", task_id.to_string())
+        .with_arg("input", input.to_string())
+        .with_arg("close_stdin", if close { "true" } else { "false" })
+        .with_arg("timeout_ms", "1000");
+    match (ExecShellInteractTool {
+        tool_name: "exec_shell_interact",
+    })
+    .execute(tool_input)
+    {
+        Ok(output) => {
+            app.set_status(if close {
+                format!("shell stdin closed: {task_id}")
+            } else {
+                format!("shell stdin sent: {task_id}")
+            });
+            app.set_mcp_detail(
+                TuiMcpDetailKind::Shell,
+                format_shell_detail(&format!("Shell job {task_id}"), &output.summary),
+            );
+        }
+        Err(error) => {
+            app.set_status(format!("shell stdin failed for {task_id}: {error}"));
+        }
+    }
+}
+
+fn run_tui_shell_wait(app: &mut TuiApp, task_id: &str, wait: bool, timeout_ms: u64) {
+    let input = ToolInput::new()
+        .with_arg("task_id", task_id.to_string())
+        .with_arg("wait", if wait { "true" } else { "false" })
+        .with_arg("timeout_ms", timeout_ms.to_string());
+    match (ExecShellWaitTool {
+        tool_name: "exec_shell_wait",
+    })
+    .execute(input)
+    {
+        Ok(output) => {
+            app.set_status(last_nonempty_line(&output.summary, "shell wait completed"));
+            app.set_mcp_detail(
+                TuiMcpDetailKind::Shell,
+                format_shell_detail(&format!("Shell job {task_id}"), &output.summary),
+            );
+        }
+        Err(error) => {
+            app.set_status(format!("shell wait failed for {task_id}: {error}"));
+        }
+    }
+}
+
+fn run_tui_shell_cancel(app: &mut TuiApp, task_id: Option<&str>, all: bool) {
+    let mut input = ToolInput::new();
+    if all {
+        input = input.with_arg("all", "true");
+    } else if let Some(task_id) = task_id {
+        input = input.with_arg("task_id", task_id.to_string());
+    }
+    match ExecShellCancelTool.execute(input) {
+        Ok(output) => {
+            app.set_status(last_nonempty_line(
+                &output.summary,
+                "shell cancel completed",
+            ));
+            app.set_mcp_detail(
+                TuiMcpDetailKind::Shell,
+                format_shell_detail("Shell cancel", &output.summary),
+            );
+        }
+        Err(error) => {
+            let target = task_id.unwrap_or("all");
+            app.set_status(format!("shell cancel failed for {target}: {error}"));
+        }
+    }
+}
+
+fn shell_task_id_from_summary(summary: &str) -> Option<&str> {
+    summary
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("task_id: "))
+}
+
+fn format_shell_detail(title: &str, summary: &str) -> String {
+    format!("{title}\n\n{summary}")
 }
 
 fn run_remote_tui_diagnostics(
@@ -1359,6 +2023,15 @@ fn run_tui_agent_turn(
         cancel_since_seq,
         poll_interval: Duration::from_millis(250),
     }));
+    let user_input_resolver: SharedAgentUserInputResolver =
+        Rc::new(RefCell::new(RuntimeUserInputResolver {
+            store: store.clone(),
+            thread_id: thread_id.clone(),
+            turn_id: Some(assistant.id.clone()),
+            cancel_since_seq: Some(cancel_since_seq),
+            poll_interval: Duration::from_millis(250),
+            max_polls: None,
+        }));
     let cancel_check: SharedAgentCancelCheck = Rc::new(RefCell::new(RuntimeCancelCheck {
         store: store.clone(),
         thread_id: thread_id.clone(),
@@ -1380,6 +2053,7 @@ fn run_tui_agent_turn(
             persist_session: false,
             stream_events: Some(Box::new(stream_events)),
             approval_resolver: Some(resolver),
+            user_input_resolver: Some(user_input_resolver),
             cancel_check: Some(cancel_check),
             ..AgentLoopOptions::default()
         },
@@ -1570,6 +2244,54 @@ impl AgentApprovalResolver for RuntimeApprovalResolver {
     }
 }
 
+struct RuntimeUserInputResolver {
+    store: RuntimeStore,
+    thread_id: String,
+    turn_id: Option<String>,
+    cancel_since_seq: Option<u64>,
+    poll_interval: Duration,
+    max_polls: Option<usize>,
+}
+
+impl AgentUserInputResolver for RuntimeUserInputResolver {
+    fn resolve(&mut self, request: &AgentUserInputRequest) -> AppResult<AgentUserInputResponse> {
+        let raw_questions = request
+            .input
+            .get("questions")
+            .ok_or_else(|| app_error("request_user_input requires `questions`"))?;
+        let questions = parse_json_value(raw_questions.trim())
+            .map_err(|error| app_error(format!("Invalid request_user_input payload: {error}")))?;
+        let user_input = self.store.append_user_input_request(
+            &self.thread_id,
+            self.turn_id.as_deref(),
+            questions,
+        )?;
+        let mut polls = 0_usize;
+        loop {
+            if let (Some(turn_id), Some(since_seq)) =
+                (self.turn_id.as_deref(), self.cancel_since_seq)
+            {
+                if runtime_cancel_requested(&self.store, &self.thread_id, turn_id, since_seq)? {
+                    return Err(app_error("agent run cancelled"));
+                }
+            }
+            for event in self.store.read_events(&self.thread_id, user_input.seq)? {
+                if let Some(answers) = user_input_response_answers(&event, &user_input.id) {
+                    return Ok(AgentUserInputResponse { answers });
+                }
+            }
+            polls = polls.saturating_add(1);
+            if self.max_polls.is_some_and(|max_polls| polls >= max_polls) {
+                return Err(app_error(format!(
+                    "timed out waiting for user input response {}",
+                    user_input.id
+                )));
+            }
+            thread::sleep(self.poll_interval);
+        }
+    }
+}
+
 struct RuntimeCancelCheck {
     store: RuntimeStore,
     thread_id: String,
@@ -1593,6 +2315,30 @@ fn runtime_cancel_requested(
         .read_events(thread_id, since_seq)?
         .iter()
         .any(|event| event.kind == "cancel_requested" && event.turn_id.as_deref() == Some(turn_id)))
+}
+
+fn user_input_response_answers(
+    event: &RuntimeEvent,
+    request_id: &str,
+) -> Option<BTreeMap<String, String>> {
+    if event.kind != "user_input_response" {
+        return None;
+    }
+    let payload = json_as_object(&event.payload)?;
+    let response_request_id = payload.get("request_id").and_then(json_as_string)?;
+    if response_request_id != request_id {
+        return None;
+    }
+    let answers = payload.get("answers").and_then(json_as_object)?;
+    let answers = answers
+        .iter()
+        .filter_map(|(key, value)| Some((key.clone(), json_as_string(value)?.to_string())))
+        .collect::<BTreeMap<_, _>>();
+    if answers.is_empty() {
+        None
+    } else {
+        Some(answers)
+    }
 }
 
 fn approval_response_decision(
@@ -1807,6 +2553,21 @@ fn runtime_summary(value: &str) -> String {
     } else {
         summary
     }
+}
+
+fn last_nonempty_line(value: &str, fallback: &str) -> String {
+    value
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn is_cancelled_error(error: &str) -> bool {
@@ -2091,6 +2852,60 @@ mod tests {
     }
 
     #[test]
+    fn runtime_http_live_watcher_detects_new_remote_threads_from_global_sse() {
+        let store = temp_store("http-global-sse");
+        let session = store
+            .create_session("Remote live".to_string(), ".".to_string())
+            .unwrap();
+        store
+            .create_thread_for_session(
+                &session.id,
+                "Known remote thread".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let initial_snapshot = runtime_snapshot(&store).unwrap();
+        let (client, handle) = runtime_http_client(&store, 13);
+        let (tx, rx) = mpsc::channel();
+        let watcher = start_runtime_http_live_watcher(
+            client,
+            runtime_http_subscriptions(&initial_snapshot),
+            tx,
+            1_000,
+        );
+        thread::sleep(Duration::from_millis(50));
+
+        let created = store
+            .create_thread_for_session(
+                &session.id,
+                "Created after TUI start".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+
+        let mut matched = false;
+        for _ in 0..10 {
+            let event = rx.recv_timeout(Duration::from_millis(200)).unwrap();
+            if let TuiLiveEvent::ReplaceRuntime { threads, .. } = event {
+                matched = threads.iter().any(|thread| {
+                    thread.id == created.id && thread.title == "Created after TUI start"
+                });
+                if matched {
+                    break;
+                }
+            }
+        }
+        drop(watcher);
+        handle.join().unwrap();
+
+        assert!(matched);
+    }
+
+    #[test]
     fn handle_tui_http_action_submits_remote_user_turn() {
         let store = temp_store("http-action");
         let session = store
@@ -2127,6 +2942,79 @@ mod tests {
         assert!(turns
             .iter()
             .any(|turn| turn.role == "user" && turn.content == "hello remote runtime"));
+    }
+
+    #[test]
+    fn handle_tui_http_action_rejects_shell_commands_as_local_only() {
+        let client = RuntimeHttpClient::from_url("http://127.0.0.1:9").unwrap();
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_http_action(
+            &client,
+            &mut app,
+            TuiAction::RunShell {
+                command: "echo remote".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert!(render_once(&app, 120, 36)
+            .unwrap()
+            .contains("shell commands require local file-backed TUI"));
+    }
+
+    #[test]
+    fn handle_tui_http_action_cancels_remote_task() {
+        let store = temp_store("http-task-cancel-action");
+        let session = store
+            .create_session("Remote action".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Remote action thread".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let task = store
+            .create_task(
+                Some(&session.id),
+                Some(&thread.id),
+                None,
+                "agent".to_string(),
+                "running".to_string(),
+                "remote task".to_string(),
+            )
+            .unwrap();
+        let (client, handle) = runtime_http_client(&store, 1);
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession::from(session)],
+            vec![TuiThread::from(thread.clone())],
+            Vec::new(),
+        );
+
+        handle_tui_http_action(
+            &client,
+            &mut app,
+            TuiAction::CancelTask {
+                task_id: task.id.clone(),
+            },
+        )
+        .unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(store.load_task(&task.id).unwrap().status, "cancelled");
+        let events = store.read_events(&thread.id, 0).unwrap();
+        assert!(events.iter().any(|event| event.kind == "cancel_requested"
+            && json_as_object(&event.payload)
+                .and_then(|payload| payload.get("task_id"))
+                .and_then(json_as_string)
+                .is_some_and(|task_id| task_id == task.id)));
+        assert!(render_once(&app, 160, 48)
+            .unwrap()
+            .contains("cancelled remote task"));
     }
 
     #[test]
@@ -2201,7 +3089,9 @@ mod tests {
         let output = render_once(&app, 160, 48).unwrap();
 
         assert!(output.contains("Runtime tasks: 1"));
-        assert!(output.contains("Task agent [running]"));
+        assert!(output.contains("Task states: running=1"));
+        assert!(output.contains("[running]"));
+        assert!(output.contains("updated"));
     }
 
     #[test]
@@ -2353,6 +3243,61 @@ mod tests {
     }
 
     #[test]
+    fn app_from_store_hides_answered_user_input_events() {
+        let store = temp_store("user-input-answered");
+        let session = store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Runtime input".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let request = store
+            .append_user_input_request(
+                &thread.id,
+                None,
+                JsonValue::Array(vec![json_object([
+                    ("header", JsonValue::String("Mode".to_string())),
+                    ("id", JsonValue::String("mode".to_string())),
+                    ("question", JsonValue::String("Which mode?".to_string())),
+                    (
+                        "options",
+                        JsonValue::Array(vec![
+                            json_object([
+                                ("label", JsonValue::String("Plan".to_string())),
+                                ("description", JsonValue::String("Plan first.".to_string())),
+                            ]),
+                            json_object([
+                                ("label", JsonValue::String("Apply".to_string())),
+                                ("description", JsonValue::String("Apply now.".to_string())),
+                            ]),
+                        ]),
+                    ),
+                ])]),
+            )
+            .unwrap();
+        store
+            .append_user_input_response(
+                &thread.id,
+                None,
+                request.id,
+                BTreeMap::from([("mode".to_string(), "Plan".to_string())]),
+            )
+            .unwrap();
+
+        let app = app_from_store(&store).unwrap();
+        let output = render_once(&app, 120, 36).unwrap();
+
+        assert!(!output.contains("User Input Modal"));
+        assert!(!output.contains("Which mode?"));
+    }
+
+    #[test]
     fn handle_tui_action_records_composer_message() {
         let store = temp_store("composer");
         let session = store
@@ -2435,6 +3380,74 @@ mod tests {
         let output = render_once(&app, 120, 36).unwrap();
         assert!(!output.contains("Approval Modal"));
         assert!(!output.contains("cargo test"));
+    }
+
+    #[test]
+    fn handle_tui_action_records_user_input_response() {
+        let store = temp_store("user-input-response");
+        let session = store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Runtime input".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let request = store
+            .append_user_input_request(
+                &thread.id,
+                None,
+                JsonValue::Array(vec![json_object([
+                    ("header", JsonValue::String("Mode".to_string())),
+                    ("id", JsonValue::String("mode".to_string())),
+                    (
+                        "question",
+                        JsonValue::String("Which mode should be used?".to_string()),
+                    ),
+                    (
+                        "options",
+                        JsonValue::Array(vec![
+                            json_object([
+                                ("label", JsonValue::String("Plan".to_string())),
+                                ("description", JsonValue::String("Plan first.".to_string())),
+                            ]),
+                            json_object([
+                                ("label", JsonValue::String("Apply".to_string())),
+                                (
+                                    "description",
+                                    JsonValue::String("Implement directly.".to_string()),
+                                ),
+                            ]),
+                        ]),
+                    ),
+                ])]),
+            )
+            .unwrap();
+        let mut app = app_from_store(&store).unwrap();
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::RespondUserInput {
+                thread_id: thread.id.clone(),
+                turn_id: None,
+                request_id: request.id.clone(),
+                answers: BTreeMap::from([("mode".to_string(), "Plan".to_string())]),
+            },
+        )
+        .unwrap();
+        refresh_app_from_store(&store, &mut app).unwrap();
+
+        let events = store.read_events(&thread.id, 0).unwrap();
+        assert_eq!(events.last().unwrap().kind, "user_input_response");
+        let output = render_once(&app, 120, 36).unwrap();
+        assert!(!output.contains("User Input Modal"));
+        assert!(!output.contains("Which mode should be used?"));
     }
 
     #[test]
@@ -2574,6 +3587,204 @@ mod tests {
     }
 
     #[test]
+    fn handle_tui_action_cancels_runtime_task() {
+        let store = temp_store("cancel-task-action");
+        let session = store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Runtime tasks".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let task = store
+            .create_task(
+                Some(&session.id),
+                Some(&thread.id),
+                None,
+                "agent".to_string(),
+                "running".to_string(),
+                "inspect flaky test".to_string(),
+            )
+            .unwrap();
+        let mut app = app_from_store(&store).unwrap();
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::CancelTask {
+                task_id: task.id.clone(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(store.load_task(&task.id).unwrap().status, "cancelled");
+        let events = store.read_events(&thread.id, 0).unwrap();
+        assert!(events.iter().any(|event| event.kind == "cancel_requested"
+            && json_as_object(&event.payload)
+                .and_then(|payload| payload.get("task_id"))
+                .and_then(json_as_string)
+                .is_some_and(|task_id| task_id == task.id)));
+        assert!(render_once(&app, 160, 48)
+            .unwrap()
+            .contains("cancelled task"));
+    }
+
+    #[test]
+    fn handle_tui_action_manages_project_mcp_config() {
+        let root = temp_root("mcp-manager-action");
+        fs::create_dir_all(&root).unwrap();
+
+        let mut config = temp_config(&root);
+        let store = RuntimeStore::new(root.join(".dscode/runtime"));
+        let mut app = TuiApp::new(Vec::new());
+        let mcp_path = root.join(".dscode/mcp.json");
+        let user_mcp_path = root.join("user-mcp.json");
+        config.mcp.project_file = mcp_path.display().to_string();
+        config.mcp.user_file = user_mcp_path.display().to_string();
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::McpInit { force: false },
+        )
+        .unwrap();
+        assert!(mcp_path.exists());
+        assert!(render_once(&app, 160, 48)
+            .unwrap()
+            .contains("mcp project config initialized"));
+
+        handle_tui_action(&store, Some(&config), &mut app, TuiAction::McpList).unwrap();
+        assert!(render_once(&app, 160, 48).unwrap().contains("mcp servers="));
+
+        handle_tui_action(&store, Some(&config), &mut app, TuiAction::McpManager).unwrap();
+        let output = render_once(&app, 160, 48).unwrap();
+        assert!(output.contains("MCP Manager"));
+        assert!(output.contains("example-filesystem"));
+        assert!(output.contains("Available actions"));
+        assert!(!output.contains("Transcript"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::McpDetails {
+                kind: TuiMcpDetailKind::Tools,
+                server: None,
+            },
+        )
+        .unwrap();
+        let output = render_once(&app, 160, 48).unwrap();
+        assert!(output.contains("MCP Tools"));
+        assert!(output.contains("No enabled MCP servers configured"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::McpManagerDetails {
+                kind: TuiMcpDetailKind::Tools,
+                server: None,
+            },
+        )
+        .unwrap();
+        let output = render_once(&app, 160, 48).unwrap();
+        assert!(output.contains("MCP Tools"));
+        assert!(output.contains("No enabled MCP servers configured"));
+        assert!(!output.contains("Transcript"));
+
+        handle_tui_action(&store, Some(&config), &mut app, TuiAction::McpValidate).unwrap();
+        let output = render_once(&app, 160, 48).unwrap();
+        assert!(output.contains("MCP Health"));
+        assert!(output.contains("mcp validate: ok"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::McpAddRemote {
+                scope: TuiMcpConfigScope::Project,
+                name: "remote".to_string(),
+                transport: "http".to_string(),
+                url: "http://127.0.0.1:3999/mcp".to_string(),
+            },
+        )
+        .unwrap();
+        let content = fs::read_to_string(&mcp_path).unwrap();
+        assert!(content.contains("\"remote\""));
+        assert!(content.contains("http://127.0.0.1:3999/mcp"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::McpSetEnabled {
+                scope: TuiMcpConfigScope::Project,
+                name: "remote".to_string(),
+                enabled: false,
+            },
+        )
+        .unwrap();
+        assert!(fs::read_to_string(&mcp_path)
+            .unwrap()
+            .contains("\"enabled\":false"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::McpSetEnabled {
+                scope: TuiMcpConfigScope::Project,
+                name: "remote".to_string(),
+                enabled: true,
+            },
+        )
+        .unwrap();
+        assert!(fs::read_to_string(&mcp_path)
+            .unwrap()
+            .contains("\"enabled\":true"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::McpRemove {
+                scope: TuiMcpConfigScope::Project,
+                name: "remote".to_string(),
+            },
+        )
+        .unwrap();
+        assert!(!fs::read_to_string(&mcp_path)
+            .unwrap()
+            .contains("\"remote\""));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::McpAddRemote {
+                scope: TuiMcpConfigScope::User,
+                name: "shared".to_string(),
+                transport: "http".to_string(),
+                url: "http://127.0.0.1:4000/mcp".to_string(),
+            },
+        )
+        .unwrap();
+        assert!(fs::read_to_string(&user_mcp_path)
+            .unwrap()
+            .contains("\"shared\""));
+        assert!(!fs::read_to_string(&mcp_path)
+            .unwrap()
+            .contains("\"shared\""));
+    }
+
+    #[test]
     fn handle_tui_action_lists_shows_and_restores_rollback_snapshot() {
         let repo = temp_root("rollback-action");
         fs::create_dir_all(&repo).unwrap();
@@ -2667,6 +3878,197 @@ mod tests {
         run_tui_diagnostics_in(&mut app, &root, false, vec!["README.md".to_string()]);
 
         assert!(render_once(&app, 160, 48).unwrap().contains("diagnostics"));
+    }
+
+    #[test]
+    fn handle_tui_action_manages_memory_file() {
+        let root = temp_root("memory-action");
+        fs::create_dir_all(&root).unwrap();
+        let store = RuntimeStore::new(root.join(".dscode/runtime"));
+        let mut config = temp_config(&root);
+        config.memory.enabled = true;
+        config.memory.memory_path = root.join("memory.md").display().to_string();
+        let memory_path = config.memory.memory_path();
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::AppendMemory {
+                note: "# prefer cargo fmt".to_string(),
+            },
+        )
+        .unwrap();
+        assert!(fs::read_to_string(&memory_path)
+            .unwrap()
+            .contains("prefer cargo fmt"));
+        assert!(render_once(&app, 160, 48).unwrap().contains("remembered"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::Memory {
+                command: TuiMemoryCommand::Show,
+            },
+        )
+        .unwrap();
+        let output = render_once(&app, 160, 48).unwrap();
+        assert!(output.contains("Memory"));
+        assert!(output.contains("memory enabled"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::Memory {
+                command: TuiMemoryCommand::Clear,
+            },
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(&memory_path).unwrap(), "");
+        assert!(render_once(&app, 160, 48)
+            .unwrap()
+            .contains("memory cleared"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handle_tui_action_runs_and_polls_shell_job() {
+        let store = temp_store("shell-action");
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::RunShell {
+                command: "echo shell-start".to_string(),
+            },
+        )
+        .unwrap();
+        let output = render_once(&app, 160, 48).unwrap();
+        assert!(output.contains("Shell Jobs"));
+        assert!(output.contains("task_id"), "{output}");
+        assert!(output.contains("echo shell-start"), "{output}");
+
+        handle_tui_action(&store, None, &mut app, TuiAction::ListShell).unwrap();
+        let output = render_once(&app, 160, 48).unwrap();
+        assert!(output.contains("Shell jobs"), "{output}");
+        assert!(output.contains("echo shell-start"), "{output}");
+
+        let started = ExecShellTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("command", "echo shell-wait")
+                    .with_arg("background", "true"),
+            )
+            .unwrap();
+        let task_id = shell_task_id_from_summary(&started.summary)
+            .expect("started shell task id")
+            .to_string();
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::WaitShell {
+                task_id: task_id.clone(),
+                wait: true,
+                timeout_ms: 1_000,
+            },
+        )
+        .unwrap();
+        let output = render_once(&app, 160, 48).unwrap();
+        assert!(output.contains("Shell Jobs"));
+        assert!(output.contains("stdout_delta:"));
+        assert!(output.contains("shell-wait"));
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::ShowShell {
+                task_id: task_id.clone(),
+            },
+        )
+        .unwrap();
+        let output = render_once(&app, 160, 48).unwrap();
+        assert!(output.contains("stdout:"));
+        assert!(output.contains("shell-wait"));
+
+        let cat = ExecShellTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("command", "cat -")
+                    .with_arg("background", "true"),
+            )
+            .unwrap();
+        let cat_id = shell_task_id_from_summary(&cat.summary)
+            .expect("cat shell task id")
+            .to_string();
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::SendShellStdin {
+                task_id: cat_id,
+                input: "shell-stdin\n".to_string(),
+                close: true,
+            },
+        )
+        .unwrap();
+        let output = render_once(&app, 160, 48).unwrap();
+        assert!(output.contains("shell stdin closed"));
+        assert!(output.contains("shell-stdin"));
+
+        let cancellable = ExecShellTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("command", "tail -f /dev/null")
+                    .with_arg("background", "true"),
+            )
+            .unwrap();
+        let cancel_id = shell_task_id_from_summary(&cancellable.summary)
+            .expect("cancellable shell task id")
+            .to_string();
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::CancelShell {
+                task_id: Some(cancel_id),
+                all: false,
+            },
+        )
+        .unwrap();
+        assert!(render_once(&app, 160, 48)
+            .unwrap()
+            .contains("background shell job"));
+    }
+
+    #[test]
+    fn handle_tui_action_runs_approved_shell_job() {
+        let store = temp_store("approved-shell-action");
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::RunApprovedShell {
+                command: "printf approved-shell".to_string(),
+            },
+        )
+        .unwrap();
+
+        let output = render_once(&app, 160, 48).unwrap();
+        assert!(output.contains("Approved shell job started"), "{output}");
+        assert!(output.contains("trusted_foreground_approval"), "{output}");
+        assert!(output.contains("true"), "{output}");
+        assert!(output.contains("printf approved-shell"), "{output}");
     }
 
     #[test]
@@ -3100,5 +4502,82 @@ mod tests {
                 .find_map(|event| approval_response_decision(event, "event-other")),
             None
         );
+    }
+
+    #[test]
+    fn runtime_user_input_resolver_waits_for_response_event() {
+        let store = temp_store("user-input-resolver");
+        let session = store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+        let runtime_thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Runtime user input".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let turn = store
+            .append_turn(
+                &runtime_thread.id,
+                "assistant".to_string(),
+                "(assistant response running)".to_string(),
+            )
+            .unwrap();
+        let responder_store = store.clone();
+        let responder_thread_id = runtime_thread.id.clone();
+        let responder_turn_id = turn.id.clone();
+        let responder = thread::spawn(move || {
+            for _ in 0..500 {
+                let events = responder_store
+                    .read_events(&responder_thread_id, 0)
+                    .unwrap();
+                if let Some(request) = events
+                    .iter()
+                    .find(|event| event.kind == "user_input_request")
+                {
+                    responder_store
+                        .append_user_input_response(
+                            &responder_thread_id,
+                            Some(&responder_turn_id),
+                            request.id.clone(),
+                            BTreeMap::from([("mode".to_string(), "Plan".to_string())]),
+                        )
+                        .unwrap();
+                    return;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            panic!("timed out waiting for user_input_request");
+        });
+        let mut resolver = RuntimeUserInputResolver {
+            store: store.clone(),
+            thread_id: runtime_thread.id.clone(),
+            turn_id: Some(turn.id.clone()),
+            cancel_since_seq: Some(0),
+            poll_interval: Duration::from_millis(1),
+            max_polls: Some(500),
+        };
+        let questions = r#"[{"header":"Mode","id":"mode","question":"Which mode?","options":[{"label":"Plan","description":"Plan first."},{"label":"Apply","description":"Implement directly."}]}]"#;
+        let response = resolver
+            .resolve(&AgentUserInputRequest {
+                input: BTreeMap::from([("questions".to_string(), questions.to_string())]),
+            })
+            .unwrap();
+        responder.join().unwrap();
+
+        assert_eq!(
+            response.answers.get("mode").map(String::as_str),
+            Some("Plan")
+        );
+        let events = store.read_events(&runtime_thread.id, 0).unwrap();
+        assert!(events.iter().any(|event| event.kind == "user_input_request"
+            && event.turn_id.as_deref() == Some(turn.id.as_str())));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "user_input_response"
+                && event.turn_id.as_deref() == Some(turn.id.as_str())));
     }
 }

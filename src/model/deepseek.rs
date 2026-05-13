@@ -2338,6 +2338,13 @@ fn tool_spec(name: &str) -> Option<ToolSpec> {
         .or_else(|| dynamic_mcp_tool_spec(name))
 }
 
+pub(crate) fn static_tool_search_catalog() -> Vec<(&'static str, &'static str, &'static str)> {
+    TOOL_SPECS
+        .iter()
+        .map(|spec| (spec.name, spec.description, spec.properties_json))
+        .collect()
+}
+
 struct StaticToolSpec {
     name: &'static str,
     description: &'static str,
@@ -2402,16 +2409,124 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
         required_json: r#"["root","max_depth","limit"]"#,
     },
     StaticToolSpec {
+        name: "list_dir",
+        description: "DeepSeek-TUI-compatible alias for listing repository files and directories under a path.",
+        properties_json: r#"{"path":{"type":"string","description":"Directory to list from, usually `.`. Mapped to list_files root."},"max_depth":{"type":"string","description":"Maximum directory depth to traverse, encoded as a string integer."},"limit":{"type":"string","description":"Maximum number of entries to return, encoded as a string integer."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
         name: "read_file",
         description: "Read a text file and return a numbered excerpt.",
         properties_json: r#"{"path":{"type":"string","description":"Path to the file."},"max_lines":{"type":"string","description":"Maximum number of lines to return, encoded as a string integer."}}"#,
         required_json: r#"["path","max_lines"]"#,
     },
     StaticToolSpec {
+        name: "write_file",
+        description: "Write UTF-8 content to a safe relative path under the workspace. Creates parent directories and requires write approval.",
+        properties_json: r#"{"path":{"type":"string","description":"Relative workspace path to create or overwrite."},"content":{"type":"string","description":"Complete UTF-8 file content to write."},"cwd":{"type":"string","description":"Optional workspace directory. Defaults to current directory."}}"#,
+        required_json: r#"["path","content"]"#,
+    },
+    StaticToolSpec {
+        name: "edit_file",
+        description: "Replace exact text in one UTF-8 file under the workspace. Use apply_patch for multi-hunk or multi-file edits. Requires write approval.",
+        properties_json: r#"{"path":{"type":"string","description":"Relative workspace file path to edit."},"search":{"type":"string","description":"Exact text to find."},"replace":{"type":"string","description":"Replacement text. May be empty."},"cwd":{"type":"string","description":"Optional workspace directory. Defaults to current directory."}}"#,
+        required_json: r#"["path","search","replace"]"#,
+    },
+    StaticToolSpec {
+        name: "fim_edit",
+        description: "DeepSeek-TUI-compatible Fill-in-the-Middle edit tool. Finds prefix_anchor and suffix_anchor in a workspace file, generates replacement middle content through DeepSeek /beta completions, and writes the result.",
+        properties_json: r#"{"path":{"type":"string","description":"Relative workspace file path to edit."},"prefix_anchor":{"type":"string","description":"Text anchor marking the end of the preserved prefix."},"suffix_anchor":{"type":"string","description":"Text anchor marking the start of the preserved suffix."},"max_tokens":{"type":"string","description":"Maximum tokens to generate through the FIM endpoint, default 1024."},"generated_text":{"type":"string","description":"Optional offline/test override for generated middle text; omit during normal model-driven use."},"cwd":{"type":"string","description":"Optional workspace directory. Defaults to current directory."}}"#,
+        required_json: r#"["path","prefix_anchor","suffix_anchor"]"#,
+    },
+    StaticToolSpec {
+        name: "retrieve_tool_result",
+        description: "Retrieve a spilled large tool result by id, filename, or spillover path using summary, head, tail, lines, or query modes.",
+        properties_json: r#"{"ref":{"type":"string","description":"Tool output ref, tool_result:<id>, spillover filename, or spillover path."},"mode":{"type":"string","description":"Retrieval mode: summary, head, tail, lines, or query. Defaults to summary."},"query":{"type":"string","description":"Case-insensitive substring to search for when mode=query."},"lines":{"type":"string","description":"Line selector for mode=lines, for example 10 or 10-40."},"start_line":{"type":"string","description":"1-based start line for mode=lines."},"end_line":{"type":"string","description":"1-based end line for mode=lines."},"line_count":{"type":"string","description":"Number of lines for head/tail modes."},"max_bytes":{"type":"string","description":"Maximum excerpt bytes to return."},"max_matches":{"type":"string","description":"Maximum query matches or signal lines."},"context_lines":{"type":"string","description":"Extra lines around each query match."}}"#,
+        required_json: r#"["ref"]"#,
+    },
+    StaticToolSpec {
         name: "search_text",
         description: "Search for plain text occurrences in repository files.",
         properties_json: r#"{"root":{"type":"string","description":"Root directory to search from."},"query":{"type":"string","description":"Plain text query to find."},"limit":{"type":"string","description":"Maximum number of matches to return, encoded as a string integer."}}"#,
         required_json: r#"["root","query","limit"]"#,
+    },
+    StaticToolSpec {
+        name: "grep_files",
+        description: "DeepSeek-TUI-compatible alias for searching literal text in repository files.",
+        properties_json: r#"{"pattern":{"type":"string","description":"Literal text pattern to find."},"path":{"type":"string","description":"Root directory to search from, usually `.`."},"max_results":{"type":"string","description":"Maximum number of matches to return, encoded as a string integer."},"limit":{"type":"string","description":"Alternative maximum number of matches to return, encoded as a string integer."}}"#,
+        required_json: r#"["pattern"]"#,
+    },
+    StaticToolSpec {
+        name: "file_search",
+        description: "Find repository files by filename or path using simple fuzzy matching.",
+        properties_json: r#"{"query":{"type":"string","description":"Filename or path query to match."},"path":{"type":"string","description":"Root directory to search from, usually `.`."},"extensions":{"type":"string","description":"Optional comma-, semicolon-, or whitespace-separated extension filter, for example `rs,md`."},"limit":{"type":"string","description":"Maximum number of file matches to return, encoded as a string integer."},"max_results":{"type":"string","description":"Alternative maximum number of file matches to return, encoded as a string integer."}}"#,
+        required_json: r#"["query"]"#,
+    },
+    StaticToolSpec {
+        name: "web_run",
+        description: "DeepSeek-TUI-compatible aggregate web tool. Supports search_query, image_query, stored-ref/direct-URL open, link click, stored-ref/direct-URL find, finance, and PDF-page screenshot extraction while reporting unsupported browser-only actions.",
+        properties_json: r#"{"search_query":{"type":"array","description":"Search requests such as [{\"q\":\"latest Rust release\",\"max_results\":5}]. Results are stored as searchN and turnNsearchN refs.","items":{"type":"object"}},"image_query":{"type":"array","description":"Image search requests such as [{\"q\":\"architecture diagram\",\"max_results\":5,\"domains\":[\"example.com\"]}].","items":{"type":"object"}},"open":{"type":"array","description":"Open requests such as [{\"ref_id\":\"search0\",\"lineno\":1}] or [{\"ref_id\":\"https://example.com\",\"format\":\"markdown\"}]. Opened pages return line-windowed content, expose numbered links, and are cached as openN/turnNopenN; opened PDFs cache page text when local pdftotext is available.","items":{"type":"object"}},"click":{"type":"array","description":"Click a numbered link from a cached page, for example [{\"ref_id\":\"open0\",\"id\":1,\"lineno\":1}]. Clicked pages return line-windowed content and are cached as clickN/turnNclickN.","items":{"type":"object"}},"find":{"type":"array","description":"Find requests such as [{\"ref_id\":\"open0\",\"pattern\":\"needle\"}] or direct URL variants.","items":{"type":"object"}},"finance":{"type":"array","description":"Finance quote requests such as [{\"ticker\":\"AAPL\",\"type\":\"equity\"}].","items":{"type":"object"}},"screenshot":{"type":"array","description":"Return text for a cached PDF page, for example [{\"ref_id\":\"open0\",\"pageno\":0}]. Browser/DOM screenshots are not supported.","items":{"type":"object"}},"response_length":{"type":"string","description":"Controls open/click page-window size: short=40 lines, medium=80 lines, long=160 lines."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "web_search",
+        description: "Search the web and return ranked results with URLs, snippets, and ref_ids. Use fetch_url for a known canonical URL.",
+        properties_json: r#"{"query":{"type":"string","description":"Search query."},"q":{"type":"string","description":"Search query alias."},"search_query":{"type":"string","description":"JSON array compatibility form, for example [{\"q\":\"latest Rust release\",\"max_results\":5}]."},"max_results":{"type":"string","description":"Maximum number of results, default 5 and max 10."},"timeout_ms":{"type":"string","description":"Request timeout in milliseconds, default 15000 and max 60000."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "fetch_url",
+        description: "Fetch a known HTTP/HTTPS URL directly and return decoded text or raw content.",
+        properties_json: r#"{"url":{"type":"string","description":"Absolute HTTP/HTTPS URL to fetch."},"format":{"type":"string","description":"text, markdown, or raw. Defaults to markdown/text extraction."},"max_bytes":{"type":"string","description":"Maximum response bytes to return, default 1000000."},"timeout_ms":{"type":"string","description":"Request timeout in milliseconds, default 15000 and max 60000."}}"#,
+        required_json: r#"["url"]"#,
+    },
+    StaticToolSpec {
+        name: "finance",
+        description: "Fetch a live market quote for a stock, ETF, index, or crypto ticker using a Yahoo Finance-compatible endpoint.",
+        properties_json: r#"{"ticker":{"type":"string","description":"Ticker symbol to look up, for example AAPL, SPY, ^GSPC, or BTC."},"symbol":{"type":"string","description":"Alias for ticker."},"type":{"type":"string","description":"Optional asset type hint such as equity, fund, crypto, or index."},"market":{"type":"string","description":"Optional market hint retained for compatibility with finance-style tool calls."},"timeout_ms":{"type":"string","description":"Request timeout in milliseconds, default 10000 and max 60000."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "pandoc_convert",
+        description: "DeepSeek-TUI-compatible document conversion wrapper around local pandoc. Converts source_path to a whitelisted target_format and returns text inline or writes output_path.",
+        properties_json: r#"{"source_path":{"type":"string","description":"Relative workspace source document path."},"target_format":{"type":"string","description":"One of markdown, gfm, commonmark, html, rst, latex, docx, odt, epub, plain, asciidoc."},"output_path":{"type":"string","description":"Optional relative output path. Required for binary target formats docx, odt, and epub."},"cwd":{"type":"string","description":"Optional workspace directory. Defaults to current directory."}}"#,
+        required_json: r#"["source_path","target_format"]"#,
+    },
+    StaticToolSpec {
+        name: "image_ocr",
+        description: "DeepSeek-TUI-compatible local OCR wrapper around tesseract. Extracts text from a workspace image and returns it inline.",
+        properties_json: r#"{"path":{"type":"string","description":"Relative workspace image path, for example PNG, JPEG, or TIFF."},"cwd":{"type":"string","description":"Optional workspace directory. Defaults to current directory."}}"#,
+        required_json: r#"["path"]"#,
+    },
+    StaticToolSpec {
+        name: "image_analyze",
+        description: "DeepSeek-TUI-compatible vision analysis tool. Sends a workspace image to the configured OpenAI-compatible vision chat/completions endpoint and returns analysis JSON.",
+        properties_json: r#"{"image_path":{"type":"string","description":"Relative workspace image path. Supports PNG, JPEG, GIF, WebP, and BMP."},"prompt":{"type":"string","description":"Optional prompt to guide the image analysis."},"cwd":{"type":"string","description":"Optional workspace directory. Defaults to current directory."},"model":{"type":"string","description":"Optional per-call vision model override."},"base_url":{"type":"string","description":"Optional per-call OpenAI-compatible API base URL override."},"api_key_env":{"type":"string","description":"Optional environment variable name containing the vision API key."}}"#,
+        required_json: r#"["image_path"]"#,
+    },
+    StaticToolSpec {
+        name: "review",
+        description: "Run a structured local code review over a safe relative file or git diff and return issue/suggestion JSON, including marker checks plus behavioral signals for missing tests, public API changes, and dependency/configuration changes. Set semantic=true to run a read-only child-agent semantic review over the same evidence.",
+        properties_json: r#"{"target":{"type":"string","description":"File path, literal diff/staged for git diff review, or github_pr_context when passing GitHub PR context."},"kind":{"type":"string","description":"Optional target type: file or diff."},"base":{"type":"string","description":"Optional git base ref when reviewing a diff."},"staged":{"type":"string","description":"Set true to review staged changes."},"cwd":{"type":"string","description":"Workspace or git working directory. Defaults to current directory."},"github_context":{"type":"string","description":"Output from github_pr_context, preferably with include_diff=true, for remote PR review without fetching inside review."},"pr_context":{"type":"string","description":"Alias for github_context."},"max_chars":{"type":"string","description":"Maximum source characters to review, default 200000 and max 1000000."},"semantic":{"type":"string","description":"Set true/1/yes/on to run an additional child-agent semantic review. Default false."},"steps":{"type":"string","description":"Optional semantic child-agent step budget. Default 6 and maximum follows subagent limits."},"agent":{"type":"string","description":"Optional configured agent name for semantic review."},"skill":{"type":"string","description":"Optional skill name for semantic review."}}"#,
+        required_json: r#"["target"]"#,
+    },
+    StaticToolSpec {
+        name: "request_user_input",
+        description: "Ask the user 1-3 short structured questions with 2-3 labeled options each, then wait for their answer before continuing.",
+        properties_json: r#"{"questions":{"type":"array","description":"One to three short questions for the user.","items":{"type":"object","properties":{"header":{"type":"string","description":"Short UI header for this question."},"id":{"type":"string","description":"Stable answer identifier."},"question":{"type":"string","description":"Question to show the user."},"options":{"type":"array","description":"Two or three mutually exclusive options.","items":{"type":"object","properties":{"label":{"type":"string","description":"Short user-facing option label."},"description":{"type":"string","description":"One sentence explaining the option."}},"required":["label","description"]},"minItems":2,"maxItems":3}},"required":["header","id","question","options"]},"minItems":1,"maxItems":3}}"#,
+        required_json: r#"["questions"]"#,
+    },
+    StaticToolSpec {
+        name: "tool_search_tool_regex",
+        description: "Search available tool definitions using a regex-style query and return matching tool references.",
+        properties_json: r#"{"query":{"type":"string","description":"Regex-style pattern to search tool names, descriptions, and schemas."},"limit":{"type":"string","description":"Maximum tool references to return, default 5 and max 20."}}"#,
+        required_json: r#"["query"]"#,
+    },
+    StaticToolSpec {
+        name: "tool_search_tool_bm25",
+        description: "Search available tool definitions using natural-language matching and return ranked tool references.",
+        properties_json: r#"{"query":{"type":"string","description":"Natural-language query for tool discovery."},"limit":{"type":"string","description":"Maximum tool references to return, default 5 and max 20."}}"#,
+        required_json: r#"["query"]"#,
     },
     StaticToolSpec {
         name: "apply_patch",
@@ -2426,9 +2541,81 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
         required_json: r#"["cwd","command"]"#,
     },
     StaticToolSpec {
+        name: "exec_shell",
+        description: "DeepSeek-TUI-compatible shell execution tool. Use background=true for long-running commands, then poll with exec_shell_wait.",
+        properties_json: r#"{"command":{"type":"string","description":"Safe shell command to execute."},"timeout_ms":{"type":"string","description":"Compatibility timeout in milliseconds for foreground commands."},"background":{"type":"string","description":"Set true to run in the background and return task_id."},"stdin":{"type":"string","description":"Optional stdin data sent to a background command at start."},"input":{"type":"string","description":"Alias for stdin."},"data":{"type":"string","description":"Alias for stdin."},"cwd":{"type":"string","description":"Working directory for the command."}}"#,
+        required_json: r#"["command"]"#,
+    },
+    StaticToolSpec {
+        name: "task_shell_start",
+        description: "DeepSeek-TUI-compatible background shell starter for long-running commands. Returns a task_id to poll with task_shell_wait.",
+        properties_json: r#"{"command":{"type":"string","description":"Safe shell command to start in the background."},"cwd":{"type":"string","description":"Optional working directory."},"timeout_ms":{"type":"string","description":"Compatibility timeout in milliseconds."},"stdin":{"type":"string","description":"Optional stdin data sent at start."},"tty":{"type":"string","description":"Compatibility flag accepted for DeepSeek-TUI tool calls."}}"#,
+        required_json: r#"["command"]"#,
+    },
+    StaticToolSpec {
+        name: "task_shell_wait",
+        description: "DeepSeek-TUI-compatible poll/wait helper for background shell tasks started by task_shell_start or exec_shell background=true.",
+        properties_json: r#"{"task_id":{"type":"string","description":"Background shell task id returned by task_shell_start or exec_shell."},"id":{"type":"string","description":"Alias for task_id."},"wait":{"type":"string","description":"Set false to poll once without waiting."},"timeout_ms":{"type":"string","description":"Maximum wait milliseconds, default 5000."},"gate":{"type":"string","description":"Optional gate label for compatibility metadata."},"command":{"type":"string","description":"Optional original command for compatibility metadata."}}"#,
+        required_json: r#"["task_id"]"#,
+    },
+    StaticToolSpec {
+        name: "exec_shell_wait",
+        description: "Wait for or poll a background exec_shell task and return incremental output.",
+        properties_json: r#"{"task_id":{"type":"string","description":"Task id returned by exec_shell background=true."},"id":{"type":"string","description":"Alias for task_id."},"timeout_ms":{"type":"string","description":"Maximum wait milliseconds, default 5000."},"wait":{"type":"string","description":"Set false to poll once without waiting."}}"#,
+        required_json: r#"["task_id"]"#,
+    },
+    StaticToolSpec {
+        name: "exec_wait",
+        description: "Alias for exec_shell_wait.",
+        properties_json: r#"{"task_id":{"type":"string","description":"Task id returned by exec_shell background=true."},"id":{"type":"string","description":"Alias for task_id."},"timeout_ms":{"type":"string","description":"Maximum wait milliseconds, default 5000."},"wait":{"type":"string","description":"Set false to poll once without waiting."}}"#,
+        required_json: r#"["task_id"]"#,
+    },
+    StaticToolSpec {
+        name: "exec_shell_interact",
+        description: "Send stdin to a background exec_shell task and return incremental output.",
+        properties_json: r#"{"task_id":{"type":"string","description":"Task id returned by exec_shell background=true."},"id":{"type":"string","description":"Alias for task_id."},"input":{"type":"string","description":"Input to send to stdin."},"stdin":{"type":"string","description":"Alias for input."},"data":{"type":"string","description":"Alias for input."},"timeout_ms":{"type":"string","description":"Wait milliseconds after sending input, default 1000."},"close_stdin":{"type":"string","description":"Set true to close stdin after sending input."}}"#,
+        required_json: r#"["task_id"]"#,
+    },
+    StaticToolSpec {
+        name: "exec_interact",
+        description: "Alias for exec_shell_interact.",
+        properties_json: r#"{"task_id":{"type":"string","description":"Task id returned by exec_shell background=true."},"id":{"type":"string","description":"Alias for task_id."},"input":{"type":"string","description":"Input to send to stdin."},"stdin":{"type":"string","description":"Alias for input."},"data":{"type":"string","description":"Alias for input."},"timeout_ms":{"type":"string","description":"Wait milliseconds after sending input, default 1000."},"close_stdin":{"type":"string","description":"Set true to close stdin after sending input."}}"#,
+        required_json: r#"["task_id"]"#,
+    },
+    StaticToolSpec {
+        name: "exec_shell_cancel",
+        description: "Cancel a running background exec_shell task by task_id, or all running tasks with all=true.",
+        properties_json: r#"{"task_id":{"type":"string","description":"Task id returned by exec_shell background=true."},"id":{"type":"string","description":"Alias for task_id."},"all":{"type":"string","description":"Set true to cancel all running background shell tasks."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "run_tests",
+        description: "Run a supported test command in the repository. Infers cargo/go/node/python test commands from project files when command is omitted.",
+        properties_json: r#"{"cwd":{"type":"string","description":"Working directory for the test command. Defaults to `.`."},"command":{"type":"string","description":"Optional supported test command such as `cargo test`, `go test ./...`, `pytest`, `npm test`, or `pnpm test`."},"args":{"type":"string","description":"Optional safe extra arguments appended to the test command."},"all_features":{"type":"string","description":"Set true to add `--all-features` for inferred `cargo test`."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "revert_turn",
+        description: "Restore workspace files to a rollback snapshot from a recent agent turn. Use only when the user explicitly asks to undo, revert, or roll back edits.",
+        properties_json: r#"{"turn_offset":{"type":"string","description":"1-based recent runtime turn snapshot offset. Defaults to 1."},"offset":{"type":"string","description":"Alias for turn_offset."},"turn_id":{"type":"string","description":"Runtime assistant turn id to restore from."},"thread_id":{"type":"string","description":"Optional runtime thread id used with turn_offset."},"snapshot_id":{"type":"string","description":"Rollback snapshot id to restore."},"checkpoint_id":{"type":"string","description":"Alias for snapshot_id."},"id":{"type":"string","description":"Alias for snapshot_id or turn id."},"dry_run":{"type":"string","description":"Set true to preview without mutating files."},"apply":{"type":"string","description":"Set false to preview without mutating files; defaults to true."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "git_status",
+        description: "Show concise git status for the workspace, optionally scoped to a path.",
+        properties_json: r#"{"cwd":{"type":"string","description":"Git working directory, default `.`."},"path":{"type":"string","description":"Optional repository path to scope status to."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
         name: "git_diff",
-        description: "Show the current git diff for the workspace.",
-        properties_json: r#"{}"#,
+        description: "Show the current git diff for the workspace, optionally scoped to a path or staged changes.",
+        properties_json: r#"{"cwd":{"type":"string","description":"Git working directory, default `.`."},"path":{"type":"string","description":"Optional repository path to scope diff to."},"cached":{"type":"string","description":"Set true to show staged changes with --cached."},"unified":{"type":"string","description":"Context lines to include, 0-50. Defaults to 3."},"max_chars":{"type":"string","description":"Maximum output characters to return."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "project_map",
+        description: "Render a high-level project tree, summary counts, and key files.",
+        properties_json: r#"{"path":{"type":"string","description":"Project root to map, usually `.`."},"max_depth":{"type":"string","description":"Maximum tree depth to traverse, encoded as a string integer."},"limit":{"type":"string","description":"Maximum tree entries to return, encoded as a string integer."}}"#,
         required_json: r#"[]"#,
     },
     StaticToolSpec {
@@ -2436,6 +2623,18 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
         description: "Run local language diagnostics for the workspace or a set of edited files. Uses stdio LSP publishDiagnostics for opened files when available, then falls back to compiler/type-check commands.",
         properties_json: r#"{"cwd":{"type":"string","description":"Working directory to run diagnostics in. Defaults to `.`."},"paths":{"type":"string","description":"Optional comma-, semicolon-, or newline-separated list of edited paths to scope diagnostics."}}"#,
         required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "validate_data",
+        description: "Validate JSON or TOML data from inline content or a file path and report parser errors without modifying files.",
+        properties_json: r#"{"path":{"type":"string","description":"Optional file path to validate. Mutually exclusive with content."},"content":{"type":"string","description":"Optional inline content to validate. Mutually exclusive with path."},"format":{"type":"string","description":"Validation format: auto, json, or toml. Defaults to auto."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "recall_archive",
+        description: "DeepSeek-TUI-compatible archive recall tool. Searches durable runtime threads, turns, items, and compaction summaries for older context that may be missing from the current prompt.",
+        properties_json: r#"{"query":{"type":"string","description":"Search query, tokenized and scored against durable runtime transcript/archive content."},"thread_id":{"type":"string","description":"Optional runtime thread id to search. Omit to search recent runtime threads."},"cycle":{"type":"string","description":"Accepted for DeepSeek-TUI compatibility; local runtime recall searches durable thread content rather than numbered cycle archive files."},"max_results":{"type":"string","description":"Maximum hits to return, default 3 and max 10."},"limit":{"type":"string","description":"Alias for max_results."}}"#,
+        required_json: r#"["query"]"#,
     },
     StaticToolSpec {
         name: "git_log",
@@ -2456,10 +2655,250 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
         required_json: r#"["path"]"#,
     },
     StaticToolSpec {
+        name: "load_skill",
+        description: "Load a configured DeepSeekCode TOML skill by name and return its self-contained context, references, policy, and suggested steps.",
+        properties_json: r#"{"name":{"type":"string","description":"Skill name from the configured skills registry."}}"#,
+        required_json: r#"["name"]"#,
+    },
+    StaticToolSpec {
+        name: "note",
+        description: "Append a persistent maintainer or agent note to the configured notes file. Use for durable decisions, blockers, or architectural context, not transient scratch.",
+        properties_json: r#"{"content":{"type":"string","description":"Note content to append."},"note":{"type":"string","description":"Alias for content."}}"#,
+        required_json: r#"["content"]"#,
+    },
+    StaticToolSpec {
+        name: "remember",
+        description: "Append a durable single-sentence memory note to the configured user memory file. Use only for stable user preferences, conventions, or facts; do not store secrets or transient task state.",
+        properties_json: r#"{"note":{"type":"string","description":"Single-sentence durable note to remember."},"content":{"type":"string","description":"Alias for note."}}"#,
+        required_json: r#"["note"]"#,
+    },
+    StaticToolSpec {
+        name: "notify",
+        description: "Fire a single terminal attention signal for long-running task completion or when the user needs to return. Use sparingly.",
+        properties_json: r#"{"title":{"type":"string","description":"Short notification title, truncated to 80 characters."},"body":{"type":"string","description":"Optional notification body, truncated to 200 characters."}}"#,
+        required_json: r#"["title"]"#,
+    },
+    StaticToolSpec {
+        name: "github_issue_context",
+        description: "Read GitHub issue context using the gh CLI. Read-only.",
+        properties_json: r#"{"number":{"type":"string","description":"Issue number or reference."},"issue":{"type":"string","description":"Alias for number."},"ref":{"type":"string","description":"Alias for number."},"repo":{"type":"string","description":"Optional owner/repo for gh -R."},"repository":{"type":"string","description":"Alias for repo."},"include_comments":{"type":"string","description":"Set false to omit comments. Defaults to true."},"max_chars":{"type":"string","description":"Maximum JSON characters to include."}}"#,
+        required_json: r#"["number"]"#,
+    },
+    StaticToolSpec {
+        name: "github_pr_context",
+        description: "Read GitHub pull request context using the gh CLI, optionally including a bounded patch diff. Read-only.",
+        properties_json: r#"{"number":{"type":"string","description":"PR number or reference."},"pr":{"type":"string","description":"Alias for number."},"ref":{"type":"string","description":"Alias for number."},"repo":{"type":"string","description":"Optional owner/repo for gh -R."},"repository":{"type":"string","description":"Alias for repo."},"include_diff":{"type":"string","description":"Set true to include gh pr diff --patch output."},"max_chars":{"type":"string","description":"Maximum JSON characters to include."},"diff_max_chars":{"type":"string","description":"Maximum diff characters to include."}}"#,
+        required_json: r#"["number"]"#,
+    },
+    StaticToolSpec {
+        name: "github_comment",
+        description: "Post an evidence-backed GitHub issue or PR comment using the gh CLI. Requires write approval.",
+        properties_json: r#"{"target":{"type":"string","description":"Comment target: issue or pr."},"number":{"type":"string","description":"Issue or PR number."},"body":{"type":"string","description":"Comment body to post."},"evidence":{"type":"string","description":"JSON object with supporting evidence for the comment."},"repo":{"type":"string","description":"Optional owner/repo for gh -R."},"repository":{"type":"string","description":"Alias for repo."},"dry_run":{"type":"string","description":"Set true to validate without posting."}}"#,
+        required_json: r#"["target","number","body","evidence"]"#,
+    },
+    StaticToolSpec {
+        name: "github_close_issue",
+        description: "Close a GitHub issue as completed using the gh CLI after structured acceptance evidence. Requires write approval.",
+        properties_json: r#"{"number":{"type":"string","description":"Issue number."},"acceptance_criteria":{"type":"string","description":"JSON array of acceptance criteria satisfied."},"evidence":{"type":"string","description":"JSON object with files_changed, tests_run, and final_status."},"comment":{"type":"string","description":"Optional closing comment to post before closing."},"allow_dirty":{"type":"string","description":"Set true to allow closing while the local worktree is dirty."},"cwd":{"type":"string","description":"Workspace directory for git status dirty check."},"repo":{"type":"string","description":"Optional owner/repo for gh -R."},"repository":{"type":"string","description":"Alias for repo."},"dry_run":{"type":"string","description":"Set true to validate without closing."}}"#,
+        required_json: r#"["number","acceptance_criteria","evidence"]"#,
+    },
+    StaticToolSpec {
+        name: "task_create",
+        description: "Create/enqueue a durable runtime task. Requires write approval because it mutates runtime work state.",
+        properties_json: r#"{"prompt":{"type":"string","description":"Work prompt or summary for the durable task."},"summary":{"type":"string","description":"Alias for prompt."},"session_id":{"type":"string","description":"Optional runtime session id."},"thread_id":{"type":"string","description":"Optional runtime thread id."},"parent_task_id":{"type":"string","description":"Optional parent runtime task id."},"kind":{"type":"string","description":"Task kind. Defaults to agent."},"status":{"type":"string","description":"Initial task status. Defaults to pending."}}"#,
+        required_json: r#"["prompt"]"#,
+    },
+    StaticToolSpec {
+        name: "task_list",
+        description: "List recent durable runtime tasks with optional session/thread filters.",
+        properties_json: r#"{"session_id":{"type":"string","description":"Optional runtime session id filter."},"thread_id":{"type":"string","description":"Optional runtime thread id filter."},"limit":{"type":"string","description":"Maximum tasks to return, default 20 and max 100."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "task_read",
+        description: "Read one durable runtime task.",
+        properties_json: r#"{"task_id":{"type":"string","description":"Runtime task id."},"id":{"type":"string","description":"Alias for task_id."}}"#,
+        required_json: r#"["task_id"]"#,
+    },
+    StaticToolSpec {
+        name: "task_cancel",
+        description: "Cancel a pending or running durable runtime task. Requires write approval because it mutates runtime work state.",
+        properties_json: r#"{"task_id":{"type":"string","description":"Runtime task id."},"id":{"type":"string","description":"Alias for task_id."},"reason":{"type":"string","description":"Optional cancellation reason."}}"#,
+        required_json: r#"["task_id"]"#,
+    },
+    StaticToolSpec {
+        name: "task_gate_run",
+        description: "Run a verification gate command through the existing safe shell path. Requires shell approval.",
+        properties_json: r#"{"gate":{"type":"string","description":"Gate category: fmt, check, clippy, test, or custom."},"command":{"type":"string","description":"Safe shell command to run."},"cwd":{"type":"string","description":"Optional working directory."},"timeout_ms":{"type":"string","description":"Compatibility timeout field; execution still uses the existing cancellable shell path."}}"#,
+        required_json: r#"["gate","command"]"#,
+    },
+    StaticToolSpec {
+        name: "agent_spawn",
+        description: "DeepSeek-TUI-compatible durable sub-agent spawn tool. Creates a runtime thread plus pending sub-agent task and returns agent_id immediately; run the runtime daemon or TUI runner to execute it.",
+        properties_json: r#"{"prompt":{"type":"string","description":"Task description for the sub-agent."},"message":{"type":"string","description":"Alias for prompt."},"objective":{"type":"string","description":"Alias for prompt."},"task":{"type":"string","description":"Alias for prompt."},"type":{"type":"string","description":"Compatibility sub-agent type hint."},"agent_type":{"type":"string","description":"Alias for type."},"role":{"type":"string","description":"Compatibility role hint."},"model":{"type":"string","description":"Optional model for the new runtime thread."},"cwd":{"type":"string","description":"Workspace directory for the new runtime thread."},"workspace":{"type":"string","description":"Alias for cwd."},"thread_id":{"type":"string","description":"Optional existing runtime thread to attach the sub-agent task to."},"parent_task_id":{"type":"string","description":"Optional parent runtime task id."},"title":{"type":"string","description":"Optional title for a newly-created runtime thread."},"fork_context":{"type":"boolean","description":"Accepted for DeepSeek-TUI compatibility; local runtime-backed spawn records a fresh durable task."}}"#,
+        required_json: r#"["prompt"]"#,
+    },
+    StaticToolSpec {
+        name: "agent_result",
+        description: "Read the latest status/result snapshot for a runtime-backed sub-agent.",
+        properties_json: r#"{"agent_id":{"type":"string","description":"Agent id returned by agent_spawn."},"id":{"type":"string","description":"Alias for agent_id."},"block":{"type":"boolean","description":"Accepted for compatibility; local tool returns current durable status immediately."},"timeout_ms":{"type":"string","description":"Accepted for compatibility."}}"#,
+        required_json: r#"["agent_id"]"#,
+    },
+    StaticToolSpec {
+        name: "agent_list",
+        description: "List runtime-backed sub-agents created through agent_spawn or send_input.",
+        properties_json: r#"{"limit":{"type":"string","description":"Maximum agents to return, default 20 and max 100."},"include_archived":{"type":"boolean","description":"Accepted for compatibility; local runtime lists recent sub-agent tasks."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "agent_cancel",
+        description: "Cancel a pending or running runtime-backed sub-agent. Requires write approval.",
+        properties_json: r#"{"agent_id":{"type":"string","description":"Agent id returned by agent_spawn."},"id":{"type":"string","description":"Alias for agent_id."}}"#,
+        required_json: r#"["agent_id"]"#,
+    },
+    StaticToolSpec {
+        name: "close_agent",
+        description: "DeepSeek-TUI-compatible alias for closing/cancelling a runtime-backed sub-agent. Requires write approval.",
+        properties_json: r#"{"agent_id":{"type":"string","description":"Agent id returned by agent_spawn."},"id":{"type":"string","description":"Alias for agent_id."}}"#,
+        required_json: r#"["agent_id"]"#,
+    },
+    StaticToolSpec {
+        name: "resume_agent",
+        description: "Resume a paused sub-agent or enqueue a new child sub-agent task from a previous sub-agent assignment. Requires write approval.",
+        properties_json: r#"{"agent_id":{"type":"string","description":"Agent id returned by agent_spawn."},"id":{"type":"string","description":"Alias for agent_id."},"prompt":{"type":"string","description":"Optional replacement prompt for the resumed task."},"message":{"type":"string","description":"Alias for prompt."}}"#,
+        required_json: r#"["agent_id"]"#,
+    },
+    StaticToolSpec {
+        name: "send_input",
+        description: "Send follow-up input to a runtime-backed sub-agent by appending a user message to its thread and queuing a child sub-agent task. Requires write approval.",
+        properties_json: r#"{"agent_id":{"type":"string","description":"Agent id returned by agent_spawn."},"id":{"type":"string","description":"Alias for agent_id."},"message":{"type":"string","description":"Input message to send."},"input":{"type":"string","description":"Alias for message."},"prompt":{"type":"string","description":"Alias for message."}}"#,
+        required_json: r#"["agent_id","message"]"#,
+    },
+    StaticToolSpec {
+        name: "pr_attempt_record",
+        description: "Capture the current git working-tree diff as a durable PR attempt with patch artifact, changed files, and verification notes.",
+        properties_json: r#"{"summary":{"type":"string","description":"Short summary of this PR attempt."},"task_id":{"type":"string","description":"Optional durable runtime task id to attach the attempt to."},"attempt_group_id":{"type":"string","description":"Optional attempt group id for comparing multiple attempts."},"attempt_index":{"type":"string","description":"1-based attempt index."},"attempt_count":{"type":"string","description":"Total attempts in the group."},"verification":{"type":"string","description":"Verification notes as a JSON string array, newline list, or semicolon-separated list."},"cwd":{"type":"string","description":"Git working directory. Defaults to current directory."}}"#,
+        required_json: r#"["summary"]"#,
+    },
+    StaticToolSpec {
+        name: "pr_attempt_list",
+        description: "List recent recorded PR attempts, optionally filtered by durable runtime task id.",
+        properties_json: r#"{"task_id":{"type":"string","description":"Optional durable runtime task id filter."},"limit":{"type":"string","description":"Maximum attempts to return, default 20 and max 100."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "pr_attempt_read",
+        description: "Read one recorded PR attempt and its patch artifact reference.",
+        properties_json: r#"{"attempt_id":{"type":"string","description":"Recorded PR attempt id."},"id":{"type":"string","description":"Alias for attempt_id."},"task_id":{"type":"string","description":"Optional task id assertion."}}"#,
+        required_json: r#"["attempt_id"]"#,
+    },
+    StaticToolSpec {
+        name: "pr_attempt_preflight",
+        description: "Run git apply --check for a recorded PR attempt patch without mutating the worktree.",
+        properties_json: r#"{"attempt_id":{"type":"string","description":"Recorded PR attempt id."},"id":{"type":"string","description":"Alias for attempt_id."},"task_id":{"type":"string","description":"Optional task id assertion."}}"#,
+        required_json: r#"["attempt_id"]"#,
+    },
+    StaticToolSpec {
+        name: "automation_create",
+        description: "Create a durable scheduled automation. DeepSeek-TUI-compatible creation requires name, prompt, and rrule, then stores it in the local runtime automation store.",
+        properties_json: r#"{"name":{"type":"string","description":"Automation name."},"prompt":{"type":"string","description":"Prompt used when the automation runs."},"rrule":{"type":"string","description":"DeepSeek-TUI-compatible recurrence rule, such as FREQ=HOURLY;INTERVAL=N or FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=30."},"schedule":{"type":"string","description":"Alias for rrule accepted by the local runtime."},"cwds":{"type":"array","items":{"type":"string"},"description":"DeepSeek-TUI-compatible working directories metadata; the local runtime currently stores schedule, prompt, session, and thread metadata."},"paused":{"type":"boolean","description":"Create the automation paused instead of active."},"status":{"type":"string","enum":["active","paused"],"description":"Explicit local runtime automation status."},"session_id":{"type":"string","description":"Optional runtime session id to attach."},"thread_id":{"type":"string","description":"Optional runtime thread id to attach."},"last_run_at":{"type":"string","description":"Optional existing last-run timestamp label."},"next_run_at":{"type":"string","description":"Optional next-run timestamp label."}}"#,
+        required_json: r#"["name","prompt","rrule"]"#,
+    },
+    StaticToolSpec {
+        name: "automation_list",
+        description: "List durable runtime automations with optional session/thread filters.",
+        properties_json: r#"{"session_id":{"type":"string","description":"Optional runtime session id filter."},"thread_id":{"type":"string","description":"Optional runtime thread id filter."},"limit":{"type":"string","description":"Maximum automations to return, default 50 and max 100."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "automation_read",
+        description: "Read one durable runtime automation.",
+        properties_json: r#"{"automation_id":{"type":"string","description":"Runtime automation id."},"id":{"type":"string","description":"Alias for automation_id."}}"#,
+        required_json: r#"["automation_id"]"#,
+    },
+    StaticToolSpec {
+        name: "automation_update",
+        description: "Update a durable automation. DeepSeek-TUI-compatible fields include name, prompt, rrule, cwds, and status; local schedule is accepted as an rrule alias.",
+        properties_json: r#"{"automation_id":{"type":"string","description":"Runtime automation id."},"id":{"type":"string","description":"Alias for automation_id."},"name":{"type":"string","description":"Optional replacement automation name."},"prompt":{"type":"string","description":"Optional replacement prompt used when the automation runs."},"rrule":{"type":"string","description":"Optional replacement DeepSeek-TUI-compatible recurrence rule."},"schedule":{"type":"string","description":"Alias for rrule accepted by the local runtime."},"cwds":{"type":"array","items":{"type":"string"},"description":"DeepSeek-TUI-compatible working directories metadata; currently accepted for schema compatibility but not persisted by the local runtime store."},"status":{"type":"string","enum":["active","paused"],"description":"Optional replacement automation status."},"paused":{"type":"boolean","description":"Compatibility alias that maps true to paused and false to active."},"next_run_at":{"type":"string","description":"Optional replacement next-run timestamp label."}}"#,
+        required_json: r#"["automation_id"]"#,
+    },
+    StaticToolSpec {
+        name: "automation_pause",
+        description: "Pause a durable automation. Requires write approval.",
+        properties_json: r#"{"automation_id":{"type":"string","description":"Runtime automation id."},"id":{"type":"string","description":"Alias for automation_id."}}"#,
+        required_json: r#"["automation_id"]"#,
+    },
+    StaticToolSpec {
+        name: "automation_resume",
+        description: "Resume a paused durable automation. Requires write approval.",
+        properties_json: r#"{"automation_id":{"type":"string","description":"Runtime automation id."},"id":{"type":"string","description":"Alias for automation_id."}}"#,
+        required_json: r#"["automation_id"]"#,
+    },
+    StaticToolSpec {
+        name: "automation_delete",
+        description: "Delete a durable automation from the local runtime automation store. Requires write approval.",
+        properties_json: r#"{"automation_id":{"type":"string","description":"Runtime automation id."},"id":{"type":"string","description":"Alias for automation_id."}}"#,
+        required_json: r#"["automation_id"]"#,
+    },
+    StaticToolSpec {
+        name: "automation_run",
+        description: "Run an automation now by enqueuing a normal durable automation task. Requires write approval.",
+        properties_json: r#"{"automation_id":{"type":"string","description":"Runtime automation id."},"id":{"type":"string","description":"Alias for automation_id."},"prompt":{"type":"string","description":"Optional prompt override for this run."},"prompt_override":{"type":"string","description":"Alias for prompt."}}"#,
+        required_json: r#"["automation_id"]"#,
+    },
+    StaticToolSpec {
         name: "todo_write",
         description: "Replace the entire todo list with a new set of items. Use proactively for tasks with 3+ steps; mark exactly one item as in_progress at a time.",
         properties_json: r#"{"items":{"type":"string","description":"JSON array of objects with fields {content: string, activeForm: string, status: \"pending\"|\"in_progress\"|\"completed\"}. content is imperative form (e.g. \"Run tests\"); activeForm is present continuous (e.g. \"Running tests\")."}}"#,
         required_json: r#"["items"]"#,
+    },
+    StaticToolSpec {
+        name: "update_plan",
+        description: "DeepSeek-TUI-compatible structured plan update tool. Use this to track multi-step implementation progress; keep exactly one step in_progress.",
+        properties_json: r#"{"explanation":{"type":"string","description":"Optional high-level explanation of the plan or approach."},"plan":{"type":"array","description":"List of plan steps.","items":{"type":"object","properties":{"step":{"type":"string","description":"Description of the step."},"status":{"type":"string","enum":["pending","in_progress","completed"],"description":"Step status."}},"required":["step","status"]}}}"#,
+        required_json: r#"["plan"]"#,
+    },
+    StaticToolSpec {
+        name: "checklist_write",
+        description: "DeepSeek-TUI-compatible alias for todo_write; replace the whole checklist/todo list.",
+        properties_json: r#"{"items":{"type":"string","description":"JSON array of objects with fields {content: string, activeForm: string, status: \"pending\"|\"in_progress\"|\"completed\"}."}}"#,
+        required_json: r#"["items"]"#,
+    },
+    StaticToolSpec {
+        name: "todo_add",
+        description: "Add one todo/checklist item to the current plan.",
+        properties_json: r#"{"content":{"type":"string","description":"Todo item text."},"activeForm":{"type":"string","description":"Optional active/progressive form shown when item is in_progress."},"status":{"type":"string","description":"Optional status: pending, in_progress, or completed. Defaults to pending."}}"#,
+        required_json: r#"["content"]"#,
+    },
+    StaticToolSpec {
+        name: "checklist_add",
+        description: "DeepSeek-TUI-compatible alias for todo_add; add one checklist item.",
+        properties_json: r#"{"content":{"type":"string","description":"Checklist item text."},"activeForm":{"type":"string","description":"Optional active/progressive form shown when item is in_progress."},"status":{"type":"string","description":"Optional status: pending, in_progress, or completed. Defaults to pending."}}"#,
+        required_json: r#"["content"]"#,
+    },
+    StaticToolSpec {
+        name: "todo_update",
+        description: "Update one todo/checklist item by 1-based id.",
+        properties_json: r#"{"id":{"type":"string","description":"1-based todo item id."},"status":{"type":"string","description":"New status: pending, in_progress, or completed."}}"#,
+        required_json: r#"["id","status"]"#,
+    },
+    StaticToolSpec {
+        name: "checklist_update",
+        description: "DeepSeek-TUI-compatible alias for todo_update; update one checklist item by 1-based id.",
+        properties_json: r#"{"id":{"type":"string","description":"1-based checklist item id."},"status":{"type":"string","description":"New status: pending, in_progress, or completed."}}"#,
+        required_json: r#"["id","status"]"#,
+    },
+    StaticToolSpec {
+        name: "todo_list",
+        description: "List the current todo/checklist progress.",
+        properties_json: r#"{}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "checklist_list",
+        description: "DeepSeek-TUI-compatible alias for todo_list; list current checklist progress.",
+        properties_json: r#"{}"#,
+        required_json: r#"[]"#,
     },
     StaticToolSpec {
         name: "dispatch_subagent",
@@ -2474,6 +2913,78 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
         required_json: r#"["tasks"]"#,
     },
     StaticToolSpec {
+        name: "rlm",
+        description: "Run bounded RLM-style analysis. Supports context+question for lightweight synthesis, or DeepSeek-TUI-style task plus file_path/content for long-input processing.",
+        properties_json: r#"{"context":{"type":"string","description":"The long text, extracted data, or notes for lightweight child analysis."},"question":{"type":"string","description":"Specific question the child analysis should answer when using context mode."},"task":{"type":"string","description":"DeepSeek-TUI-style objective for long-input RLM processing."},"file_path":{"type":"string","description":"Workspace-relative file to load as long input for task mode. Mutually exclusive with content."},"content":{"type":"string","description":"Inline long input for task mode, capped at 200k chars. Mutually exclusive with file_path."},"strategy":{"type":"string","description":"Optional strategy label such as synthesize, classify, compare, critique, or extract."},"steps":{"type":"string","description":"Optional child step budget as a positive integer up to 12."},"max_depth":{"type":"string","description":"Compatibility field for DeepSeek-TUI RLM; used as child step budget when steps is omitted."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "rlm_query",
+        description: "DeepSeek-TUI-compatible alias for rlm: run context+question analysis or task plus file_path/content long-input processing.",
+        properties_json: r#"{"context":{"type":"string","description":"The long text, extracted data, or notes for lightweight child analysis."},"question":{"type":"string","description":"Specific question the child analysis should answer when using context mode."},"task":{"type":"string","description":"DeepSeek-TUI-style objective for long-input RLM processing."},"file_path":{"type":"string","description":"Workspace-relative file to load as long input for task mode. Mutually exclusive with content."},"content":{"type":"string","description":"Inline long input for task mode, capped at 200k chars. Mutually exclusive with file_path."},"strategy":{"type":"string","description":"Optional strategy label such as synthesize, classify, compare, critique, or extract."},"steps":{"type":"string","description":"Optional child step budget as a positive integer up to 12."},"max_depth":{"type":"string","description":"Compatibility field for DeepSeek-TUI RLM; used as child step budget when steps is omitted."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "llm_query",
+        description: "DeepSeek-TUI-compatible alias for rlm: run one bounded child analysis or task plus file_path/content long-input pass.",
+        properties_json: r#"{"context":{"type":"string","description":"The long text, extracted data, or notes for lightweight child analysis."},"question":{"type":"string","description":"Specific question the child analysis should answer when using context mode."},"task":{"type":"string","description":"DeepSeek-TUI-style objective for long-input RLM processing."},"file_path":{"type":"string","description":"Workspace-relative file to load as long input for task mode. Mutually exclusive with content."},"content":{"type":"string","description":"Inline long input for task mode, capped at 200k chars. Mutually exclusive with file_path."},"strategy":{"type":"string","description":"Optional strategy label such as synthesize, classify, compare, critique, or extract."},"steps":{"type":"string","description":"Optional child step budget as a positive integer up to 12."},"max_depth":{"type":"string","description":"Compatibility field for DeepSeek-TUI RLM; used as child step budget when steps is omitted."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "rlm_process",
+        description: "DeepSeek-TUI-compatible RLM process entrypoint for long-input work. Provide task plus file_path or content; currently runs through the bounded child-agent RLM adapter rather than a full long-lived REPL loop.",
+        properties_json: r#"{"task":{"type":"string","description":"Objective for long-input RLM processing."},"file_path":{"type":"string","description":"Workspace-relative file to load as long input. Mutually exclusive with content."},"content":{"type":"string","description":"Inline long input, capped at 200k chars. Mutually exclusive with file_path."},"steps":{"type":"string","description":"Optional child step budget as a positive integer up to 12."},"max_depth":{"type":"string","description":"DeepSeek-TUI compatibility field; used as child step budget when steps is omitted."}}"#,
+        required_json: r#"["task"]"#,
+    },
+    StaticToolSpec {
+        name: "rlm_chunk_plan",
+        description: "Plan DeepSeek-TUI-style RLM chunks for a workspace file or inline content without running Python or a child model. Returns chunk start/end offsets, coverage metadata, and optionally chunk text for map-reduce setup.",
+        properties_json: r#"{"file_path":{"type":"string","description":"Workspace-relative file to chunk. Mutually exclusive with content."},"content":{"type":"string","description":"Inline long input to chunk, capped at 200k chars. Mutually exclusive with file_path."},"max_chars":{"type":"string","description":"Maximum characters per chunk. Defaults to 20000 and clamps to 1-50000."},"overlap":{"type":"string","description":"Characters to overlap between adjacent chunks. Must be smaller than max_chars."},"include_text":{"type":"string","description":"Set false/0/no/off to omit chunk text and return offsets only. Defaults to true."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "rlm_map_reduce_plan",
+        description: "Plan a DeepSeek-TUI-style RLM map-reduce workflow for a workspace file or inline content without immediately running child agents. Returns chunks, ready-to-dispatch map task JSON, omitted map count when map_limit is exceeded, and a reduce prompt.",
+        properties_json: r#"{"task":{"type":"string","description":"Overall objective or question for the map-reduce workflow."},"question":{"type":"string","description":"Alias for task."},"file_path":{"type":"string","description":"Workspace-relative file to chunk. Mutually exclusive with content."},"content":{"type":"string","description":"Inline long input to chunk, capped at 200k chars. Mutually exclusive with file_path."},"max_chars":{"type":"string","description":"Maximum characters per chunk. Defaults to 20000 and clamps to 1-50000."},"overlap":{"type":"string","description":"Characters to overlap between adjacent chunks. Must be smaller than max_chars."},"include_text":{"type":"string","description":"Set false/0/no/off to omit chunk text from chunks and map tasks. Defaults to true."},"map_limit":{"type":"string","description":"Maximum map tasks to emit in this plan, clamped to 1-16. Defaults to 16."},"steps":{"type":"string","description":"Suggested child-agent step budget for each map task. Defaults to 4."}}"#,
+        required_json: r#"["task"]"#,
+    },
+    StaticToolSpec {
+        name: "rlm_python",
+        description: "Run a short restricted Python helper script for RLM-style pure computation, text splitting, counting, classification setup, or aggregation. Includes chunk_context, chunk_coverage, SHOW_VARS, repl_get/repl_set, FINAL, and FINAL_VAR helpers. No imports, file, network, subprocess, or OS access.",
+        properties_json: r#"{"code":{"type":"string","description":"Short Python code to execute in the restricted helper. It can read context (alias ctx) and question variables, print, and assign JSON-serializable variables."},"context":{"type":"string","description":"Optional text or extracted data exposed to Python as context and ctx."},"question":{"type":"string","description":"Optional question exposed to Python as question."},"timeout_ms":{"type":"string","description":"Optional timeout in milliseconds, clamped to 100-5000."}}"#,
+        required_json: r#"["code"]"#,
+    },
+    StaticToolSpec {
+        name: "rlm_python_session",
+        description: "Run a short restricted Python helper script with REPL-like persisted JSON locals keyed by session_id. Safe JSON state keys are preloaded as locals and JSON-serializable locals are saved back after each call. Set persistent=true to reuse a long-lived Python process for the same session_id within this DeepSeekCode process; reset=true clears state and rebuilds that process. Includes chunk_context, chunk_coverage, SHOW_VARS, repl_get/repl_set, FINAL, and FINAL_VAR helpers for incremental RLM-style counting, chunk indexes, classification caches, and aggregation across calls.",
+        properties_json: r#"{"session_id":{"type":"string","description":"Safe state session id using letters, numbers, underscore, dash, or dot."},"code":{"type":"string","description":"Short Python code to execute in the restricted helper. It can read/write the state dict and read context/ctx/question."},"context":{"type":"string","description":"Optional text or extracted data exposed to Python as context and ctx."},"question":{"type":"string","description":"Optional question exposed to Python as question."},"timeout_ms":{"type":"string","description":"Optional timeout in milliseconds, clamped to 100-5000."},"reset":{"type":"string","description":"Set to true/1/yes/on to clear this session state before running code. With persistent=true, also closes and rebuilds the cached Python process."},"persistent":{"type":"string","description":"Set to true/1/yes/on to keep and reuse a Python REPL process for this session_id while DeepSeekCode is running."}}"#,
+        required_json: r#"["session_id","code"]"#,
+    },
+    StaticToolSpec {
+        name: "rlm_python_sessions",
+        description: "List or inspect persisted rlm_python_session JSON state files without running Python. Use to discover existing RLM helper sessions, inspect caches, verify whether a session exists, and see whether a persistent Python process is currently active for that session.",
+        properties_json: r#"{"session_id":{"type":"string","description":"Optional safe state session id to inspect. Omit to list sessions."},"limit":{"type":"string","description":"Optional list limit, clamped to 1-100 and defaulting to 20."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "rlm_batch",
+        description: "Run batched bounded RLM-style child analyses over shared context. Use for several independent classification, extraction, comparison, or critique questions.",
+        properties_json: r#"{"context":{"type":"string","description":"Shared long text, extracted data, or notes for all child analyses."},"questions":{"type":"string","description":"JSON array of up to 16 question strings, or objects with question plus optional context and strategy."},"strategy":{"type":"string","description":"Optional default strategy label such as synthesize, classify, compare, critique, or extract."},"steps":{"type":"string","description":"Optional child step budget per question as a positive integer up to 12."}}"#,
+        required_json: r#"["context","questions"]"#,
+    },
+    StaticToolSpec {
+        name: "rlm_query_batched",
+        description: "DeepSeek-TUI-compatible alias for rlm_batch: run batched bounded RLM-style child analyses over shared context.",
+        properties_json: r#"{"context":{"type":"string","description":"Shared long text, extracted data, or notes for all child analyses."},"questions":{"type":"string","description":"JSON array of up to 16 question strings, or objects with question plus optional context and strategy."},"strategy":{"type":"string","description":"Optional default strategy label such as synthesize, classify, compare, critique, or extract."},"steps":{"type":"string","description":"Optional child step budget per question as a positive integer up to 12."}}"#,
+        required_json: r#"["context","questions"]"#,
+    },
+    StaticToolSpec {
+        name: "llm_query_batched",
+        description: "DeepSeek-TUI-compatible alias for rlm_batch: run up to 16 bounded child analyses over shared context.",
+        properties_json: r#"{"context":{"type":"string","description":"Shared long text, extracted data, or notes for all child analyses."},"questions":{"type":"string","description":"JSON array of up to 16 question strings, or objects with question plus optional context and strategy."},"strategy":{"type":"string","description":"Optional default strategy label such as synthesize, classify, compare, critique, or extract."},"steps":{"type":"string","description":"Optional child step budget per question as a positive integer up to 12."}}"#,
+        required_json: r#"["context","questions"]"#,
+    },
+    StaticToolSpec {
         name: "mcp_list_tools",
         description: "List tools exposed by configured stdio, HTTP, or SSE MCP servers. Use before mcp_call or dynamic mcp__server__tool calls when you need the remote tool schema.",
         properties_json: r#"{"server":{"type":"string","description":"Optional MCP server name. Omit to list enabled stdio, HTTP, or SSE MCP servers."}}"#,
@@ -2484,6 +2995,36 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
         description: "Call a configured stdio, HTTP, or SSE MCP server tool with JSON object arguments.",
         properties_json: r#"{"server":{"type":"string","description":"MCP server name from the project or user MCP config."},"tool":{"type":"string","description":"Remote MCP tool name to call."},"arguments":{"type":"string","description":"JSON object string containing tool arguments, for example {\"path\":\"README.md\"}."}}"#,
         required_json: r#"["server","tool"]"#,
+    },
+    StaticToolSpec {
+        name: "mcp_list_prompts",
+        description: "List prompts exposed by configured stdio, HTTP, or SSE MCP servers.",
+        properties_json: r#"{"server":{"type":"string","description":"Optional MCP server name. Omit to list enabled stdio, HTTP, or SSE MCP servers."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "mcp_get_prompt",
+        description: "Get a prompt from a configured stdio, HTTP, or SSE MCP server with optional JSON object arguments.",
+        properties_json: r#"{"server":{"type":"string","description":"MCP server name from the project or user MCP config."},"prompt":{"type":"string","description":"Prompt name returned by mcp_list_prompts."},"arguments":{"type":"string","description":"Optional JSON object string containing prompt arguments, for example {\"number\":42}."}}"#,
+        required_json: r#"["server","prompt"]"#,
+    },
+    StaticToolSpec {
+        name: "mcp_list_resources",
+        description: "List read-only resources exposed by configured stdio, HTTP, or SSE MCP servers.",
+        properties_json: r#"{"server":{"type":"string","description":"Optional MCP server name. Omit to list enabled stdio, HTTP, or SSE MCP servers."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "mcp_read_resource",
+        description: "Read a resource from a configured stdio, HTTP, or SSE MCP server by URI.",
+        properties_json: r#"{"server":{"type":"string","description":"MCP server name from the project or user MCP config."},"uri":{"type":"string","description":"Resource URI returned by mcp_list_resources."}}"#,
+        required_json: r#"["server","uri"]"#,
+    },
+    StaticToolSpec {
+        name: "mcp_list_resource_templates",
+        description: "List resource templates exposed by configured stdio, HTTP, or SSE MCP servers.",
+        properties_json: r#"{"server":{"type":"string","description":"Optional MCP server name. Omit to list enabled stdio, HTTP, or SSE MCP servers."}}"#,
+        required_json: r#"[]"#,
     },
 ];
 
@@ -3516,6 +4057,8 @@ mod tests {
         ]);
         assert!(tools.contains("\"name\":\"read_file\""));
         assert!(tools.contains("\"name\":\"git_diff\""));
+        assert!(tools.contains("\"cached\""));
+        assert!(tools.contains("\"unified\""));
         assert!(tools.contains("\"name\":\"git_log\""));
         assert!(tools.contains("\"name\":\"git_show\""));
         assert!(tools.contains("\"name\":\"git_blame\""));
@@ -3538,17 +4081,55 @@ mod tests {
     }
 
     #[test]
-    fn build_openai_tools_includes_todo_write() {
-        let tools = build_openai_tools(&["todo_write".to_string()]);
+    fn build_openai_tools_includes_todo_checklist_tools() {
+        let tools = build_openai_tools(&[
+            "todo_write".to_string(),
+            "update_plan".to_string(),
+            "checklist_write".to_string(),
+            "todo_add".to_string(),
+            "checklist_add".to_string(),
+            "todo_update".to_string(),
+            "checklist_update".to_string(),
+            "todo_list".to_string(),
+            "checklist_list".to_string(),
+        ]);
         assert!(tools.contains("\"name\":\"todo_write\""));
+        assert!(tools.contains("\"name\":\"update_plan\""));
+        assert!(tools.contains("\"name\":\"checklist_write\""));
+        assert!(tools.contains("\"name\":\"todo_add\""));
+        assert!(tools.contains("\"name\":\"checklist_add\""));
+        assert!(tools.contains("\"name\":\"todo_update\""));
+        assert!(tools.contains("\"name\":\"checklist_update\""));
+        assert!(tools.contains("\"name\":\"todo_list\""));
+        assert!(tools.contains("\"name\":\"checklist_list\""));
         assert!(tools.contains("\"items\""));
+        assert!(tools.contains("\"plan\""));
     }
 
     #[test]
-    fn build_anthropic_tools_includes_todo_write() {
-        let tools = build_anthropic_tools(&["todo_write".to_string()]);
+    fn build_anthropic_tools_includes_todo_checklist_tools() {
+        let tools = build_anthropic_tools(&[
+            "todo_write".to_string(),
+            "update_plan".to_string(),
+            "checklist_write".to_string(),
+            "todo_add".to_string(),
+            "checklist_add".to_string(),
+            "todo_update".to_string(),
+            "checklist_update".to_string(),
+            "todo_list".to_string(),
+            "checklist_list".to_string(),
+        ]);
         assert!(tools.contains("\"name\":\"todo_write\""));
+        assert!(tools.contains("\"name\":\"update_plan\""));
+        assert!(tools.contains("\"name\":\"checklist_write\""));
+        assert!(tools.contains("\"name\":\"todo_add\""));
+        assert!(tools.contains("\"name\":\"checklist_add\""));
+        assert!(tools.contains("\"name\":\"todo_update\""));
+        assert!(tools.contains("\"name\":\"checklist_update\""));
+        assert!(tools.contains("\"name\":\"todo_list\""));
+        assert!(tools.contains("\"name\":\"checklist_list\""));
         assert!(tools.contains("\"items\""));
+        assert!(tools.contains("\"plan\""));
     }
 
     #[test]
@@ -3568,6 +4149,511 @@ mod tests {
     }
 
     #[test]
+    fn build_tool_specs_include_readonly_search_aliases() {
+        let openai = build_openai_tools(&[
+            "list_dir".to_string(),
+            "grep_files".to_string(),
+            "file_search".to_string(),
+        ]);
+        assert!(openai.contains("\"name\":\"list_dir\""));
+        assert!(openai.contains("\"name\":\"grep_files\""));
+        assert!(openai.contains("\"name\":\"file_search\""));
+        assert!(openai.contains("\"pattern\""));
+        assert!(openai.contains("\"extensions\""));
+
+        let anthropic = build_anthropic_tools(&[
+            "list_dir".to_string(),
+            "grep_files".to_string(),
+            "file_search".to_string(),
+        ]);
+        assert!(anthropic.contains("\"name\":\"list_dir\""));
+        assert!(anthropic.contains("\"name\":\"grep_files\""));
+        assert!(anthropic.contains("\"name\":\"file_search\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_file_write_tools() {
+        let openai = build_openai_tools(&[
+            "write_file".to_string(),
+            "edit_file".to_string(),
+            "fim_edit".to_string(),
+        ]);
+        assert!(openai.contains("\"name\":\"write_file\""));
+        assert!(openai.contains("\"name\":\"edit_file\""));
+        assert!(openai.contains("\"name\":\"fim_edit\""));
+        assert!(openai.contains("\"content\""));
+        assert!(openai.contains("\"search\""));
+        assert!(openai.contains("\"replace\""));
+        assert!(openai.contains("\"prefix_anchor\""));
+        assert!(openai.contains("\"suffix_anchor\""));
+
+        let anthropic = build_anthropic_tools(&[
+            "write_file".to_string(),
+            "edit_file".to_string(),
+            "fim_edit".to_string(),
+        ]);
+        assert!(anthropic.contains("\"name\":\"write_file\""));
+        assert!(anthropic.contains("\"name\":\"edit_file\""));
+        assert!(anthropic.contains("\"name\":\"fim_edit\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_retrieve_tool_result() {
+        let openai = build_openai_tools(&["retrieve_tool_result".to_string()]);
+        assert!(openai.contains("\"name\":\"retrieve_tool_result\""));
+        assert!(openai.contains("\"mode\""));
+        assert!(openai.contains("\"query\""));
+
+        let anthropic = build_anthropic_tools(&["retrieve_tool_result".to_string()]);
+        assert!(anthropic.contains("\"name\":\"retrieve_tool_result\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_web_search_and_fetch_url() {
+        let openai = build_openai_tools(&[
+            "web_run".to_string(),
+            "web_search".to_string(),
+            "fetch_url".to_string(),
+        ]);
+        assert!(openai.contains("\"name\":\"web_run\""));
+        assert!(openai.contains("\"search_query\""));
+        assert!(openai.contains("\"image_query\""));
+        assert!(openai.contains("\"open\""));
+        assert!(openai.contains("\"click\""));
+        assert!(openai.contains("\"find\""));
+        assert!(openai.contains("\"screenshot\""));
+        assert!(openai.contains("\"name\":\"web_search\""));
+        assert!(openai.contains("\"name\":\"fetch_url\""));
+        assert!(openai.contains("\"search_query\""));
+        assert!(openai.contains("\"max_bytes\""));
+
+        let anthropic = build_anthropic_tools(&[
+            "web_run".to_string(),
+            "web_search".to_string(),
+            "fetch_url".to_string(),
+        ]);
+        assert!(anthropic.contains("\"name\":\"web_run\""));
+        assert!(anthropic.contains("\"name\":\"web_search\""));
+        assert!(anthropic.contains("\"name\":\"fetch_url\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_finance() {
+        let openai = build_openai_tools(&["finance".to_string()]);
+        assert!(openai.contains("\"name\":\"finance\""));
+        assert!(openai.contains("\"ticker\""));
+        assert!(openai.contains("\"symbol\""));
+
+        let anthropic = build_anthropic_tools(&["finance".to_string()]);
+        assert!(anthropic.contains("\"name\":\"finance\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_document_tools() {
+        let openai = build_openai_tools(&[
+            "pandoc_convert".to_string(),
+            "image_ocr".to_string(),
+            "image_analyze".to_string(),
+        ]);
+        assert!(openai.contains("\"name\":\"pandoc_convert\""));
+        assert!(openai.contains("\"source_path\""));
+        assert!(openai.contains("\"target_format\""));
+        assert!(openai.contains("\"name\":\"image_ocr\""));
+        assert!(openai.contains("\"path\""));
+        assert!(openai.contains("\"name\":\"image_analyze\""));
+        assert!(openai.contains("\"image_path\""));
+
+        let anthropic = build_anthropic_tools(&[
+            "pandoc_convert".to_string(),
+            "image_ocr".to_string(),
+            "image_analyze".to_string(),
+        ]);
+        assert!(anthropic.contains("\"name\":\"pandoc_convert\""));
+        assert!(anthropic.contains("\"name\":\"image_ocr\""));
+        assert!(anthropic.contains("\"name\":\"image_analyze\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_review() {
+        let openai = build_openai_tools(&["review".to_string()]);
+        assert!(openai.contains("\"name\":\"review\""));
+        assert!(openai.contains("\"target\""));
+        assert!(openai.contains("\"staged\""));
+        assert!(openai.contains("\"github_context\""));
+        assert!(openai.contains("\"pr_context\""));
+        assert!(openai.contains("\"semantic\""));
+        assert!(openai.contains("\"steps\""));
+
+        let anthropic = build_anthropic_tools(&["review".to_string()]);
+        assert!(anthropic.contains("\"name\":\"review\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_request_user_input() {
+        let openai = build_openai_tools(&["request_user_input".to_string()]);
+        assert!(openai.contains("\"name\":\"request_user_input\""));
+        assert!(openai.contains("\"questions\""));
+        assert!(openai.contains("\"options\""));
+        assert!(openai.contains("\"minItems\":1"));
+        assert!(openai.contains("\"maxItems\":3"));
+
+        let anthropic = build_anthropic_tools(&["request_user_input".to_string()]);
+        assert!(anthropic.contains("\"name\":\"request_user_input\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_tool_search_tools() {
+        let names = [
+            "tool_search_tool_regex".to_string(),
+            "tool_search_tool_bm25".to_string(),
+        ];
+        let openai = build_openai_tools(&names);
+        assert!(openai.contains("\"name\":\"tool_search_tool_regex\""));
+        assert!(openai.contains("\"name\":\"tool_search_tool_bm25\""));
+        assert!(openai.contains("\"query\""));
+        assert!(openai.contains("\"limit\""));
+
+        let anthropic = build_anthropic_tools(&names);
+        assert!(anthropic.contains("\"name\":\"tool_search_tool_regex\""));
+        assert!(anthropic.contains("\"name\":\"tool_search_tool_bm25\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_git_status_and_project_map() {
+        let openai = build_openai_tools(&["git_status".to_string(), "project_map".to_string()]);
+        assert!(openai.contains("\"name\":\"git_status\""));
+        assert!(openai.contains("\"name\":\"project_map\""));
+        assert!(openai.contains("\"max_depth\""));
+        assert!(openai.contains("\"path\""));
+
+        let anthropic =
+            build_anthropic_tools(&["git_status".to_string(), "project_map".to_string()]);
+        assert!(anthropic.contains("\"name\":\"git_status\""));
+        assert!(anthropic.contains("\"name\":\"project_map\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_validate_data() {
+        let openai = build_openai_tools(&["validate_data".to_string()]);
+        assert!(openai.contains("\"name\":\"validate_data\""));
+        assert!(openai.contains("\"content\""));
+        assert!(openai.contains("\"format\""));
+
+        let anthropic = build_anthropic_tools(&["validate_data".to_string()]);
+        assert!(anthropic.contains("\"name\":\"validate_data\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_recall_archive() {
+        let openai = build_openai_tools(&["recall_archive".to_string()]);
+        assert!(openai.contains("\"name\":\"recall_archive\""));
+        assert!(openai.contains("\"query\""));
+        assert!(openai.contains("\"max_results\""));
+
+        let anthropic = build_anthropic_tools(&["recall_archive".to_string()]);
+        assert!(anthropic.contains("\"name\":\"recall_archive\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_github_context_tools() {
+        let openai = build_openai_tools(&[
+            "github_issue_context".to_string(),
+            "github_pr_context".to_string(),
+        ]);
+        assert!(openai.contains("\"name\":\"github_issue_context\""));
+        assert!(openai.contains("\"name\":\"github_pr_context\""));
+        assert!(openai.contains("\"include_comments\""));
+        assert!(openai.contains("\"include_diff\""));
+
+        let anthropic = build_anthropic_tools(&[
+            "github_issue_context".to_string(),
+            "github_pr_context".to_string(),
+        ]);
+        assert!(anthropic.contains("\"name\":\"github_issue_context\""));
+        assert!(anthropic.contains("\"name\":\"github_pr_context\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_load_skill() {
+        let openai = build_openai_tools(&["load_skill".to_string()]);
+        assert!(openai.contains("\"name\":\"load_skill\""));
+        assert!(openai.contains("\"name\""));
+
+        let anthropic = build_anthropic_tools(&["load_skill".to_string()]);
+        assert!(anthropic.contains("\"name\":\"load_skill\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_note_and_remember() {
+        let openai = build_openai_tools(&["note".to_string(), "remember".to_string()]);
+        assert!(openai.contains("\"name\":\"note\""));
+        assert!(openai.contains("\"name\":\"remember\""));
+        assert!(openai.contains("\"content\""));
+        assert!(openai.contains("\"note\""));
+
+        let anthropic = build_anthropic_tools(&["note".to_string(), "remember".to_string()]);
+        assert!(anthropic.contains("\"name\":\"note\""));
+        assert!(anthropic.contains("\"name\":\"remember\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_notify() {
+        let openai = build_openai_tools(&["notify".to_string()]);
+        assert!(openai.contains("\"name\":\"notify\""));
+        assert!(openai.contains("\"title\""));
+        assert!(openai.contains("\"body\""));
+
+        let anthropic = build_anthropic_tools(&["notify".to_string()]);
+        assert!(anthropic.contains("\"name\":\"notify\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_github_write_tools() {
+        let openai = build_openai_tools(&[
+            "github_comment".to_string(),
+            "github_close_issue".to_string(),
+        ]);
+        assert!(openai.contains("\"name\":\"github_comment\""));
+        assert!(openai.contains("\"name\":\"github_close_issue\""));
+        assert!(openai.contains("\"evidence\""));
+        assert!(openai.contains("\"acceptance_criteria\""));
+
+        let anthropic = build_anthropic_tools(&[
+            "github_comment".to_string(),
+            "github_close_issue".to_string(),
+        ]);
+        assert!(anthropic.contains("\"name\":\"github_comment\""));
+        assert!(anthropic.contains("\"name\":\"github_close_issue\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_runtime_task_and_automation_tools() {
+        let names = [
+            "task_create".to_string(),
+            "task_list".to_string(),
+            "task_read".to_string(),
+            "task_cancel".to_string(),
+            "task_gate_run".to_string(),
+            "pr_attempt_record".to_string(),
+            "pr_attempt_list".to_string(),
+            "pr_attempt_read".to_string(),
+            "pr_attempt_preflight".to_string(),
+            "automation_create".to_string(),
+            "automation_list".to_string(),
+            "automation_read".to_string(),
+            "automation_update".to_string(),
+            "automation_pause".to_string(),
+            "automation_resume".to_string(),
+            "automation_delete".to_string(),
+            "automation_run".to_string(),
+        ];
+        let openai = build_openai_tools(&names);
+        for name in [
+            "task_create",
+            "task_list",
+            "task_read",
+            "task_cancel",
+            "task_gate_run",
+            "pr_attempt_record",
+            "pr_attempt_list",
+            "pr_attempt_read",
+            "pr_attempt_preflight",
+            "automation_create",
+            "automation_list",
+            "automation_read",
+            "automation_update",
+            "automation_pause",
+            "automation_resume",
+            "automation_delete",
+            "automation_run",
+        ] {
+            assert!(openai.contains(&format!("\"name\":\"{name}\"")));
+        }
+        assert!(openai.contains("\"prompt\""));
+        assert!(openai.contains("\"task_id\""));
+        assert!(openai.contains("\"gate\""));
+        assert!(openai.contains("\"attempt_id\""));
+        assert!(openai.contains("\"verification\""));
+        assert!(openai.contains("\"automation_id\""));
+        assert!(openai.contains("\"rrule\""));
+
+        let anthropic = build_anthropic_tools(&names);
+        assert!(anthropic.contains("\"name\":\"task_create\""));
+        assert!(anthropic.contains("\"name\":\"pr_attempt_preflight\""));
+        assert!(anthropic.contains("\"name\":\"automation_read\""));
+        assert!(anthropic.contains("\"name\":\"automation_update\""));
+        assert!(anthropic.contains("\"name\":\"automation_run\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_agent_lifecycle_tools() {
+        let names = [
+            "agent_spawn".to_string(),
+            "agent_result".to_string(),
+            "agent_list".to_string(),
+            "agent_cancel".to_string(),
+            "close_agent".to_string(),
+            "resume_agent".to_string(),
+            "send_input".to_string(),
+        ];
+        let openai = build_openai_tools(&names);
+        for name in [
+            "agent_spawn",
+            "agent_result",
+            "agent_list",
+            "agent_cancel",
+            "close_agent",
+            "resume_agent",
+            "send_input",
+        ] {
+            assert!(openai.contains(&format!("\"name\":\"{name}\"")));
+        }
+        assert!(openai.contains("\"agent_id\""));
+        assert!(openai.contains("\"fork_context\""));
+
+        let anthropic = build_anthropic_tools(&names);
+        assert!(anthropic.contains("\"name\":\"agent_spawn\""));
+        assert!(anthropic.contains("\"name\":\"send_input\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_run_tests() {
+        let openai = build_openai_tools(&["run_tests".to_string()]);
+        assert!(openai.contains("\"name\":\"run_tests\""));
+        assert!(openai.contains("\"all_features\""));
+        assert!(openai.contains("\"command\""));
+
+        let anthropic = build_anthropic_tools(&["run_tests".to_string()]);
+        assert!(anthropic.contains("\"name\":\"run_tests\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_revert_turn() {
+        let openai = build_openai_tools(&["revert_turn".to_string()]);
+        assert!(openai.contains("\"name\":\"revert_turn\""));
+        assert!(openai.contains("\"turn_offset\""));
+        assert!(openai.contains("\"snapshot_id\""));
+
+        let anthropic = build_anthropic_tools(&["revert_turn".to_string()]);
+        assert!(anthropic.contains("\"name\":\"revert_turn\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_exec_shell_background_tools() {
+        let openai = build_openai_tools(&[
+            "exec_shell".to_string(),
+            "task_shell_start".to_string(),
+            "task_shell_wait".to_string(),
+            "exec_shell_wait".to_string(),
+            "exec_shell_interact".to_string(),
+            "exec_shell_cancel".to_string(),
+            "exec_wait".to_string(),
+            "exec_interact".to_string(),
+        ]);
+        assert!(openai.contains("\"name\":\"exec_shell\""));
+        assert!(openai.contains("\"background\""));
+        assert!(openai.contains("\"name\":\"task_shell_start\""));
+        assert!(openai.contains("\"name\":\"task_shell_wait\""));
+        assert!(openai.contains("\"gate\""));
+        assert!(openai.contains("\"name\":\"exec_shell_wait\""));
+        assert!(openai.contains("\"name\":\"exec_shell_interact\""));
+        assert!(openai.contains("\"name\":\"exec_shell_cancel\""));
+
+        let anthropic = build_anthropic_tools(&["exec_shell".to_string()]);
+        assert!(anthropic.contains("\"name\":\"exec_shell\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn build_tool_specs_include_rlm() {
+        let openai = build_openai_tools(&[
+            "rlm".to_string(),
+            "rlm_query".to_string(),
+            "llm_query".to_string(),
+            "rlm_process".to_string(),
+            "rlm_chunk_plan".to_string(),
+            "rlm_map_reduce_plan".to_string(),
+            "rlm_python".to_string(),
+            "rlm_python_session".to_string(),
+            "rlm_python_sessions".to_string(),
+            "rlm_batch".to_string(),
+            "rlm_query_batched".to_string(),
+            "llm_query_batched".to_string(),
+        ]);
+        assert!(openai.contains("\"name\":\"rlm\""));
+        assert!(openai.contains("\"name\":\"rlm_query\""));
+        assert!(openai.contains("\"name\":\"llm_query\""));
+        assert!(openai.contains("\"name\":\"rlm_process\""));
+        assert!(openai.contains("\"name\":\"rlm_chunk_plan\""));
+        assert!(openai.contains("\"name\":\"rlm_map_reduce_plan\""));
+        assert!(openai.contains("\"name\":\"rlm_python\""));
+        assert!(openai.contains("\"name\":\"rlm_python_session\""));
+        assert!(openai.contains("\"name\":\"rlm_python_sessions\""));
+        assert!(openai.contains("\"name\":\"rlm_batch\""));
+        assert!(openai.contains("\"name\":\"rlm_query_batched\""));
+        assert!(openai.contains("\"name\":\"llm_query_batched\""));
+        assert!(openai.contains("up to 16"));
+        assert!(openai.contains("restricted Python"));
+        assert!(openai.contains("\"context\""));
+        assert!(openai.contains("\"question\""));
+        assert!(openai.contains("\"file_path\""));
+        assert!(openai.contains("\"max_depth\""));
+        assert!(openai.contains("\"overlap\""));
+        assert!(openai.contains("\"include_text\""));
+        assert!(openai.contains("\"map_limit\""));
+        assert!(openai.contains("\"questions\""));
+
+        let anthropic = build_anthropic_tools(&[
+            "rlm".to_string(),
+            "rlm_query".to_string(),
+            "llm_query".to_string(),
+            "rlm_process".to_string(),
+            "rlm_chunk_plan".to_string(),
+            "rlm_map_reduce_plan".to_string(),
+            "rlm_python".to_string(),
+            "rlm_python_session".to_string(),
+            "rlm_python_sessions".to_string(),
+            "rlm_batch".to_string(),
+            "rlm_query_batched".to_string(),
+            "llm_query_batched".to_string(),
+        ]);
+        assert!(anthropic.contains("\"name\":\"rlm\""));
+        assert!(anthropic.contains("\"name\":\"rlm_query\""));
+        assert!(anthropic.contains("\"name\":\"llm_query\""));
+        assert!(anthropic.contains("\"name\":\"rlm_process\""));
+        assert!(anthropic.contains("\"name\":\"rlm_chunk_plan\""));
+        assert!(anthropic.contains("\"name\":\"rlm_map_reduce_plan\""));
+        assert!(anthropic.contains("\"name\":\"rlm_python\""));
+        assert!(anthropic.contains("\"name\":\"rlm_python_session\""));
+        assert!(anthropic.contains("\"name\":\"rlm_python_sessions\""));
+        assert!(anthropic.contains("\"name\":\"rlm_batch\""));
+        assert!(anthropic.contains("\"name\":\"rlm_query_batched\""));
+        assert!(anthropic.contains("\"name\":\"llm_query_batched\""));
+        assert!(anthropic.contains("\"input_schema\""));
+    }
+
+    #[test]
     fn build_tools_include_dispatch_subagents() {
         let openai = build_openai_tools(&["dispatch_subagents".to_string()]);
         assert!(openai.contains("\"name\":\"dispatch_subagents\""));
@@ -3581,17 +4667,44 @@ mod tests {
 
     #[test]
     fn build_tool_specs_include_mcp_bridge_tools() {
-        let openai = build_openai_tools(&["mcp_list_tools".to_string(), "mcp_call".to_string()]);
+        let openai = build_openai_tools(&[
+            "mcp_list_tools".to_string(),
+            "mcp_call".to_string(),
+            "mcp_list_prompts".to_string(),
+            "mcp_get_prompt".to_string(),
+            "mcp_list_resources".to_string(),
+            "mcp_read_resource".to_string(),
+            "mcp_list_resource_templates".to_string(),
+        ]);
         assert!(openai.contains("\"name\":\"mcp_list_tools\""));
         assert!(openai.contains("\"name\":\"mcp_call\""));
+        assert!(openai.contains("\"name\":\"mcp_list_prompts\""));
+        assert!(openai.contains("\"name\":\"mcp_get_prompt\""));
+        assert!(openai.contains("\"name\":\"mcp_list_resources\""));
+        assert!(openai.contains("\"name\":\"mcp_read_resource\""));
+        assert!(openai.contains("\"name\":\"mcp_list_resource_templates\""));
         assert!(openai.contains("\"server\""));
         assert!(openai.contains("\"arguments\""));
+        assert!(openai.contains("\"prompt\""));
+        assert!(openai.contains("\"uri\""));
         assert!(openai.contains("stdio, HTTP, or SSE MCP servers"));
 
-        let anthropic =
-            build_anthropic_tools(&["mcp_list_tools".to_string(), "mcp_call".to_string()]);
+        let anthropic = build_anthropic_tools(&[
+            "mcp_list_tools".to_string(),
+            "mcp_call".to_string(),
+            "mcp_list_prompts".to_string(),
+            "mcp_get_prompt".to_string(),
+            "mcp_list_resources".to_string(),
+            "mcp_read_resource".to_string(),
+            "mcp_list_resource_templates".to_string(),
+        ]);
         assert!(anthropic.contains("\"name\":\"mcp_list_tools\""));
         assert!(anthropic.contains("\"name\":\"mcp_call\""));
+        assert!(anthropic.contains("\"name\":\"mcp_list_prompts\""));
+        assert!(anthropic.contains("\"name\":\"mcp_get_prompt\""));
+        assert!(anthropic.contains("\"name\":\"mcp_list_resources\""));
+        assert!(anthropic.contains("\"name\":\"mcp_read_resource\""));
+        assert!(anthropic.contains("\"name\":\"mcp_list_resource_templates\""));
         assert!(anthropic.contains("\"input_schema\""));
         assert!(anthropic.contains("stdio, HTTP, or SSE MCP server tool"));
     }

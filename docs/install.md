@@ -21,6 +21,14 @@ cargo build --release
 ./target/release/deepseek update verify-install --bin ./target/release/deepseek
 ```
 
+## 可选本地工具
+
+部分 DeepSeek-TUI 兼容工具会调用本机可执行文件：
+
+- `web_run.screenshot` 打开 PDF 后用 `pdftotext` / Poppler 提取页文本。
+- `pandoc_convert` 需要 `pandoc`。
+- `image_ocr` 需要 `tesseract`。
+
 ## 发布前检查
 
 本仓库的最小 release gate 是：
@@ -224,9 +232,15 @@ DEEPSEEK_API_KEY=...
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=auto # auto | deepseek-v4-flash | deepseek-v4-pro | deepseek-chat
 DEEPSEEK_REASONING_EFFORT=off # off | high | max | auto
+DSCODE_VISION_API_KEY_ENV=OPENAI_API_KEY # optional image_analyze vision tool
+DSCODE_VISION_BASE_URL=https://api.openai.com/v1
+DSCODE_VISION_MODEL=gpt-4.1
 ```
 
 如果 `.env` 或 shell 环境里设置了 `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` / `DEEPSEEK_REASONING_EFFORT`，它们会覆盖 `.dscode/config.toml` 里的 `model.base_url` / `model.model` / `model.reasoning_effort`。
+`DSCODE_VISION_BASE_URL` / `DSCODE_VISION_MODEL` / `DSCODE_VISION_API_KEY_ENV`
+会覆盖 `image_analyze` 使用的 `vision.base_url` / `vision.model` /
+`vision.api_key_env`。
 `model.model = "auto"` 会按任务复杂度路由：简单/探测任务走 `deepseek-v4-flash`，规划、审查、架构、安全、迁移和多轮恢复类任务走 `deepseek-v4-pro`；Runtime usage 会记录实际使用的模型名，而不是只记录 `auto`。
 `model.reasoning_effort = "off"` 会显式发送 DeepSeek V4 `thinking.disabled`；
 `"high"` / `"max"` 会发送官方 thinking mode 和 reasoning effort 参数；`"auto"` 会随模型路由在 `off` / `high` / `max` 间切换。
@@ -251,12 +265,23 @@ MCP server 配置可放在项目级 `.dscode/mcp.json` 或用户级 `~/.config/d
 
 ```bash
 deepseek mcp init
+deepseek mcp add-self [--name deepseek] [--workspace /path/to/workspace]
+deepseek mcp add <server-name> --command <cmd> [--arg <arg>]...
+deepseek mcp add <server-name> --url http://localhost:3000/mcp
+deepseek mcp get <server-name>
+deepseek mcp enable <server-name>
+deepseek mcp disable <server-name>
+deepseek mcp remove <server-name>
+deepseek mcp validate
 deepseek mcp list
 deepseek mcp doctor
 deepseek mcp tools [server-name]
 deepseek mcp call <server-name> <tool-name> '{"arg":"value"}'
 deepseek mcp prompts [server-name]
 deepseek mcp prompt <server-name> <prompt-name> '{"arg":"value"}'
+deepseek mcp resources [server-name]
+deepseek mcp resource-templates [server-name]
+deepseek mcp resource <server-name> <resource-uri>
 ```
 
 配置格式兼容常见 `mcpServers` 对象，例如：
@@ -274,15 +299,55 @@ deepseek mcp prompt <server-name> <prompt-name> '{"arg":"value"}'
 }
 ```
 
+`deepseek mcp add-self` 会把当前 `deepseek` binary 注册成一个 stdio MCP
+server。默认写入用户级 `~/.config/dscode/mcp.json`，server 名为
+`deepseek`；加 `--project` 可写入当前项目级 `.dscode/mcp.json`，加
+`--workspace <PATH>` 会让生成的 server entry 以该目录运行
+`deepseek serve --mcp --workspace <PATH>`。`serve --mcp` 暴露只读 workspace /
+runtime tools、runtime resources，以及 `review_code`、`explain_code`、
+`plan_task` 这几个内置 prompt templates。需要 trusted MCP client 直通调用
+`run_shell` 时，可在 MCP server 环境里设置
+`DSCODE_MCP_ENABLE_SIDE_EFFECTS=1`；需要把 `run_shell` 接入 durable approval
+flow 时，可设置 `DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1`，或用
+`DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id>` 绑定已有 runtime thread。trusted
+direct 模式只暴露现有 `run_shell` allowlist 允许的命令；durable approval 模式
+还会暴露 `apply_patch`，但每次写入都会先记录 `permission_request kind=write`
+并等待 approval，且继续复用 patch scope validation，不开放任意 shell 或不受限
+文件写入。
+
+`deepseek mcp add` 默认也写入用户级 config；加 `--project` 可写项目级
+config。stdio server 使用 `--command` 和重复 `--arg`，HTTP/SSE server 使用
+`--url` 和可选 `--transport http|sse`。`--env KEY=VALUE` 和
+`--header KEY=VALUE` 可重复；`--disabled` 会创建但不启用该 server。
+
 `deepseek mcp tools` 会按 MCP lifecycle 对 stdio server、HTTP MCP endpoint 或旧式 SSE server 执行 `initialize` / `notifications/initialized` / `tools/list`，并展示返回的 tool name、description 和 input schema。
 `deepseek mcp call` 会显式执行 `tools/call`，参数必须是 JSON object；返回会显示 text content、structuredContent 和 tool-level error flag。HTTP transport 通过 JSON-RPC POST 调用，并会续传服务端返回的 `Mcp-Session-Id`；SSE transport 会先读取 `endpoint` 事件，再向 endpoint POST JSON-RPC 并从 SSE stream 匹配 response。
 `deepseek mcp prompts` / `deepseek mcp prompt` 对同一批 transport 执行 `prompts/list` / `prompts/get`；在 REPL 中也可以用 `/mcp/<server>/<prompt> [json]` 或 Claude 风格 `/mcp__server__prompt [json]` 把 MCP prompt 作为下一轮用户输入提交。
+`deepseek mcp resources` / `deepseek mcp resource` 对 stdio / HTTP / SSE MCP
+server 执行 `resources/list` / `resources/read`，用于读取远端 server 暴露的
+只读资源内容。`deepseek mcp resource-templates` 执行
+`resources/templates/list`，用于查看可参数化的 resource URI 模板。
+在本地 file-backed `deepseek tui` 中，命令面板的 `mcp` / `mcp manager`
+会打开 full-width MCP manager screen，展示 merged inventory、config
+sources 和常用操作；`mcp manager tools|prompts|resources|resource-templates [server-name]`
+会把发现结果渲染到 full-width manager screen；短命令
+`mcp tools|prompts|resources|resource-templates [server-name]` 继续使用可滚动的
+右侧详情面板；`Esc` 或 `mcp close` 可回到主 workbench。
+TUI 中未带 scope 的 `mcp add/enable/disable/remove` 写项目级 config；
+`mcp user add/enable/disable/remove ...` 写用户级 config。
+`deepseek mcp validate` 和 TUI `mcp validate` 会对 enabled servers 做
+tools 硬验证，并汇总 prompts/resources/resource-templates 的可用性和数量。
 
-当 project/user MCP config 文件存在时，agent 运行时会暴露两个通用 bridge tools：`mcp_list_tools` 和 `mcp_call`。这使模型可以先枚举 MCP server tools，再用 JSON object arguments 调用 stdio / HTTP / SSE MCP tools。
+当 project/user MCP config 文件存在时，agent 运行时会暴露通用 bridge tools：
+`mcp_list_tools`、`mcp_call`、`mcp_list_prompts`、`mcp_get_prompt`、
+`mcp_list_resources`、`mcp_read_resource` 和
+`mcp_list_resource_templates`。这使模型可以先枚举 MCP server
+tools/prompts/resources/templates，再用 JSON object arguments 调用 stdio /
+HTTP / SSE MCP tools、读取只读 resources，或获取远端 prompt messages。
 
 如果你信任配置里的 MCP servers，可设置 `mcp.expose_remote_tools = true`。开启后，agent 启动时会发现 enabled MCP server tools，并以 `mcp__server__tool` 形式注入为独立 agent tool；能安全表示的远端 `inputSchema` 会注入为一等参数，无法表示时才回退到 `arguments` JSON object string。
 
-agent 侧的 `mcp_call` 和动态 MCP tools 默认受 `approval.require_mcp_confirmation = true` 保护；非交互运行可用 `DSCODE_AUTO_APPROVE_MCP=1` 放行。确认提示会显示 server/tool 和参数摘要。还可以用 `approval.mcp_call_allowlist = ["server/tool", "server/*", "*/tool"]` 限制 agent 能调用的远端 MCP tool；空数组表示不限制。`mcp_list_tools` 只是只读发现，不要求确认；用户显式执行的 `deepseek mcp call ...` 也不会再次弹出 agent 审批。
+agent 侧的 `mcp_call` 和动态 MCP tools 默认受 `approval.require_mcp_confirmation = true` 保护；非交互运行可用 `DSCODE_AUTO_APPROVE_MCP=1` 放行。确认提示会显示 server/tool 和参数摘要。还可以用 `approval.mcp_call_allowlist = ["server/tool", "server/*", "*/tool"]` 限制 agent 能调用的远端 MCP tool；空数组表示不限制。`mcp_list_tools`、`mcp_list_prompts`、`mcp_get_prompt`、`mcp_list_resources`、`mcp_read_resource` 和 `mcp_list_resource_templates` 是只读发现/读取，不要求确认；用户显式执行的 `deepseek mcp call ...` 也不会再次弹出 agent 审批。
 
 如果要做一次最小 live 请求验证：
 
@@ -314,7 +379,7 @@ curl http://127.0.0.1:8765/runtime
 
 - `deepseek`：直接进入交互模式
 - `deepseek "task"` 或 `deepseek run "task"`：执行单次任务
-- `deepseek tui [--demo]`：启动 ratatui/crossterm 全屏 workbench shell；`--once` 可输出 CI 快照
+- `deepseek tui [--demo]`：启动 ratatui/crossterm 全屏 workbench shell；`--once` 可输出 CI 快照；command palette 支持 `mcp` full-width manager screen 和项目级 `mcp init/add/enable/disable/remove/validate`
 - `deepseek benchmark`：跑本地 benchmark 基线
 - `deepseek dogfood ...`：记录或回放真实任务
 - `deepseek update`：打印 source checkout 安装命令和 release package/verify 提示
@@ -326,7 +391,7 @@ curl http://127.0.0.1:8765/runtime
 - `deepseek diagnostics [--changed] [paths...]` / `deepseek diagnostics --watch ...`：运行本地语言诊断；watch 模式会在同一进程内复用 warmed stdio LSP session，失败时回退到 compiler/type-check checker；`deepseek agents service` 可为 `diagnostics --watch --changed` 生成常驻 worker 模板
 - `deepseek restore snapshot [label]` / `list` / `show <id>` / `revert-turn <id> [--apply]`：管理 rollback snapshots（tracked diff + untracked regular files）
 - `deepseek serve --http`：启动本地 runtime skeleton，提供 `/health` 与 `/runtime`
-- `deepseek mcp list|doctor|tools|prompts|call|prompt`：查看、校验、枚举或手动调用 MCP server tools/prompts
+- `deepseek mcp init|add|add-self|get|remove|enable|disable|validate|list|doctor|tools|prompts|resources|resource-templates|call|prompt|resource`：管理、校验、枚举或手动调用 MCP server tools/prompts/resources
 - `deepseek completion bash|zsh|fish`：生成 shell completion 脚本
 
 ## Shell Completion

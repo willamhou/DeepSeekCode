@@ -66,3 +66,19 @@ impl super::types::McpConfig {
         crate::skills::tilde::expand_tilde(&self.user_file)
     }
 }
+
+impl super::types::MemoryConfig {
+    pub fn notes_path(&self) -> PathBuf {
+        crate::skills::tilde::expand_tilde(&self.notes_path)
+    }
+
+    pub fn memory_path(&self) -> PathBuf {
+        crate::skills::tilde::expand_tilde(&self.memory_path)
+    }
+}
+
+impl super::types::NetworkConfig {
+    pub fn audit_path(&self) -> PathBuf {
+        crate::skills::tilde::expand_tilde(&self.audit_path)
+    }
+}

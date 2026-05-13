@@ -1,8 +1,8 @@
 # DeepSeek-TUI Parity Plan
 
 **Status:** active
-**Source comparison:** `Hmbown/DeepSeek-TUI` cloned to `/tmp/deepseek-tui-compare-20260510`, HEAD `506343f`.
-**Current repo:** `willamhou/DeepseekCode` (`PRIVATE` at audit time), release command `deepseek`, compatibility alias `dscode`.
+**Source comparison:** `Hmbown/DeepSeek-TUI` cloned to `/tmp/deepseek-tui-compare-20260512`, HEAD `3382242`.
+**Current repo:** `willamhou/DeepSeekCode` (`PUBLIC` after 2026-05-12 repo publication), release command `deepseek`, compatibility alias `dscode`.
 
 ## Objective
 
@@ -109,20 +109,111 @@ Landed first slice:
 - `GET /v1/threads/{id}/events?since_seq=N`
 - `GET /v1/threads/{id}/events/stream?since_seq=N&wait_ms=M` for SSE replay plus bounded live wait frames
 - `GET /v1/threads/{id}/events/stream?since_seq=N&follow=1` for long-lived SSE follow streams that emit multiple runtime events on one connection until disconnect
+- `GET /v1/events/stream?since=thread:N&follow=1` for aggregate cross-thread SSE replay/follow streams that include newly created threads without a per-thread subscription first
 - non-`--once` HTTP runtime accepts connections concurrently, so bounded/following SSE streams do not block concurrent runtime writes
 - `POST /v1/threads/{id}/events` for appending durable `permission_request` and `permission_response` events consumed by the TUI approval modal
 - `GET /v1/threads/{id}/usage`, `GET /v1/usage?thread_id={id}`
 - `GET /v1/threads/{id}/usage/summary`, `GET /v1/usage/summary?thread_id={id}` for aggregate token accounting, cache telemetry, recognized DeepSeek V4 cost estimates, and 1M-context policy
 - Successful `deepseek exec` runs now append durable sessions, linked user/assistant turns, matching message items, completed task records, and token/cache/cost usage records
-- `/runtime` now advertises `sessions`, `threads`, `turns`, `items`, `events`, `events_write`, `events_sse`, `events_sse_wait`, `events_sse_follow`, `tasks`, `automations`, `usage`, and `usage_summary` as available; `deepseek tui --runtime-url http://HOST:PORT` can build snapshots from the HTTP runtime, write foreground actions back over HTTP, and subscribe to known thread event streams with `follow=1`
+- `/runtime` now advertises `sessions`, `threads`, `turns`, `items`, `events`, `events_write`, `events_sse`, `events_sse_wait`, `events_sse_follow`, `events_global_sse`, `events_global_sse_follow`, `tasks`, `automations`, `usage`, and `usage_summary` as available; `deepseek tui --runtime-url http://HOST:PORT` can build snapshots from the HTTP runtime, write foreground actions back over HTTP, and subscribe to the aggregate runtime event stream with `follow=1`
 
 ### Phase C: Tool Surface
 
 - Background shell manager
-- Web search/fetch
-- Git history (`git_log`, `git_show`, `git_blame` landed as read-only tools)
-- Large-output retrieval
-- Test/validate/project-map tools
+- Web aggregate/search/fetch (`web_run`, `web_search`, and `fetch_url` landed as
+  agent/MCP/ACP-visible read-only network tools); DeepSeek-TUI-compatible
+  `finance` landed as a read-only quote lookup tool; `web_run.image_query`
+  landed with DuckDuckGo Images/default and configurable test gateway support;
+  `web_run.click` landed for static cached-page link navigation;
+  `web_run.screenshot` landed for DeepSeek-TUI-compatible cached PDF page text
+  extraction through local `pdftotext`; `web_run.open` and `web_run.click`
+  now honor `lineno` plus `response_length` with line-windowed page views; a
+  DeepSeek-TUI-style `network.default` / `network.allow` / `network.deny` host
+  policy now gates shared web fetches with deny-wins precedence and best-effort
+  local network audit logging; `network.default = "prompt"` now flows through
+  AgentLoop/runtime/TUI `kind = "network"` permission requests, with direct
+  non-registry tool execution still fail-closed
+- DeepSeek-TUI optional document/image helpers (`pandoc_convert` and
+  `image_ocr`) landed as local dependency wrappers with clear missing-binary
+  errors
+- DeepSeek-TUI `image_analyze` landed as an agent-visible OpenAI-compatible
+  vision tool using workspace-relative image paths and configurable
+  `vision.*` settings
+- Git status/history (`git_status`, `git_log`, `git_show`, `git_blame`
+  landed as read-only tools)
+- GitHub read-only context (`github_issue_context` and `github_pr_context`)
+  landed as agent/MCP/ACP-visible `gh`-backed tools
+- GitHub guarded mutations (`github_comment` and `github_close_issue`) landed
+  as evidence-gated tools and as MCP/ACP write tools only under durable
+  approvals
+- `git_diff` now accepts DeepSeek-TUI-style `path`, `cached`, `unified`, and
+  `max_chars` controls
+- DeepSeek-TUI read-only search aliases (`list_dir`, `grep_files`, and
+  `file_search`) landed as agent/MCP/ACP-visible tools
+- DeepSeek-TUI file mutation tools (`write_file`, `edit_file`, and `fim_edit`)
+  landed as agent-visible approval-gated tools; `edit_file` is also
+  MCP/ACP-visible under durable approvals alongside existing MCP `write_file`
+- DeepSeek-TUI `load_skill` landed as a read-only agent tool backed by the
+  existing DeepSeekCode TOML skill registry and user-skill override rules
+- DeepSeek-TUI `notify` landed as a read-only agent tool backed by a bounded
+  terminal-bell implementation
+- DeepSeek-TUI `note` landed as an agent-visible persistent notes append tool;
+  opt-in user memory now loads the configured memory file into the system prompt
+  and exposes DeepSeek-TUI-compatible `remember`
+- Project structure mapping (`project_map`) landed as an agent/MCP/ACP-visible
+  read-only tool
+- Structured data validation (`validate_data`) landed for JSON/TOML content or
+  files as an agent/MCP/ACP-visible read-only tool
+- Test runner entrypoint (`run_tests`) landed as an agent-visible tool and as a
+  gated MCP/ACP side-effect tool that reuses shell approval semantics
+- Turn rollback (`revert_turn`) landed as an agent-visible write tool and as a
+  gated MCP/ACP durable-approval write tool backed by rollback snapshots
+- Todo/plan/checklist compatibility tools (`update_plan`, `todo_add`,
+  `todo_update`, `todo_list`, `checklist_write`, `checklist_add`,
+  `checklist_update`, `checklist_list`) landed on the agent-visible in-memory
+  todo list
+- DeepSeek-TUI-compatible durable work aliases (`task_create`, `task_list`,
+  `task_read`, `task_cancel`, `task_gate_run`, `automation_create`,
+  `automation_list`, `automation_read`, `automation_update`, `automation_pause`,
+  `automation_resume`, `automation_delete`, `automation_run`) landed on the
+  agent-visible tool surface, backed by `.dscode/runtime` and the existing safe
+  shell runner for gates
+- DeepSeek-TUI-compatible sub-agent lifecycle aliases (`agent_spawn`,
+  `agent_result`, `agent_list`, `agent_cancel`, `close_agent`, `resume_agent`,
+  `send_input`) landed as runtime-backed durable sub-agent task tools; spawn and
+  follow-up input enqueue pending tasks that TUI/daemon runners can execute
+- DeepSeek-TUI-compatible PR-attempt tools (`pr_attempt_record`,
+  `pr_attempt_list`, `pr_attempt_read`, `pr_attempt_preflight`) landed as
+  agent-visible evidence tools backed by `.dscode/runtime/pr_attempts` patch
+  artifacts and non-mutating `git apply --check` preflight
+- DeepSeek-TUI-compatible `request_user_input` landed as an agent-visible
+  structured clarification tool with 1-3 question validation and non-mutating
+  `meta.user_input_required=true` prompt output for plain non-runtime runs;
+  durable `user_input_request` / `user_input_response` runtime events, a TUI
+  modal for unresolved option selections, short free-form Other answers, and
+  blocking runtime-backed TUI/daemon agent-loop resume with `answers_json`
+  landed
+- DeepSeek-TUI-compatible `recall_archive` landed as an agent-visible read-only
+  recall tool over `.dscode/runtime` threads, turns, items, and compaction
+  summaries, with `query`, `thread_id`, and `max_results` inputs
+- DeepSeek-TUI-compatible `tool_search_tool_regex` and
+  `tool_search_tool_bm25` landed as agent-visible local tool catalog discovery
+  helpers returning `tool_reference` payloads
+- DeepSeek-TUI-compatible `review` landed as an agent-visible local structured
+  review tool for safe relative files and git diffs, returning deterministic
+  issue/suggestion JSON plus local behavioral signals for missing test changes,
+  public API changes, and dependency/configuration changes; `semantic=true`
+  now runs an optional read-only child-agent semantic review over the same
+  source and deterministic baseline; `github_context` / `pr_context` can now
+  review `github_pr_context include_diff=true` output through the same pipeline
+- DeepSeek-TUI-style large output spillover and `retrieve_tool_result` landed
+  for bounded summary/head/tail/lines/query retrieval of oversized successful
+  tool outputs
+- DeepSeek-TUI-compatible shell names (`exec_shell`, `exec_shell_wait`,
+  `exec_wait`, `exec_shell_interact`, `exec_interact`, `exec_shell_cancel`,
+  `task_shell_start`, `task_shell_wait`) landed with in-process background job
+  polling, stdin, and cancellation
+- richer structured data validation
 
 ### Phase D: TUI
 
@@ -152,23 +243,88 @@ Landed first slice:
 - background TUI agent runs create a running assistant message item, stream assistant deltas into it through durable item updates, and then write final assistant messages, tool result items, usage records, and completed/failed task records back into runtime
 - TUI-started agent runs also send assistant/reasoning item updates through an in-process live event channel drained before each draw, so visible token streaming is no longer tied to the 1s durable refresh interval
 - interactive TUI starts a local runtime watcher that detects external durable runtime writes and sends full snapshot live events into the draw loop for faster item/task/approval/usage visibility
+- HTTP-runtime TUI now follows `/v1/events/stream?follow=1` with a per-thread cursor map, so cross-process writes and newly created remote threads can push a foreground snapshot refresh without waiting for the slower fallback refresh
 - TUI-started agent runs use a runtime-backed approval resolver: permissioned write/shell/MCP tool calls append durable `permission_request` events, wait for the modal's `permission_response`, and then continue approved calls or record denied tool observations
 - `deepseek agents run-task` and daemon-executed tasks also append durable permission requests and wait for matching thread `permission_response` events, so external TUI/HTTP clients can approve background tasks
 - TUI-started agent runs now create a running runtime task, expose `c` / `cancel` for the active running assistant turn, write a durable `cancel_requested` event, and mark the turn/item/task `cancelled` at cooperative checkpoints
-- TUI task panel now loads active-thread runtime task records and shows kind/status/summary progress for recent background work
+- TUI task panel now loads active-thread runtime task records and shows status counts, short task ids, updated timestamps, and kind/status/summary progress for recent background work
 - TUI command palette can create pending active-thread `agent` tasks with `task <summary>` / `task create <summary>`, so daemon or external runners can pick up new work from the workbench
+- TUI command palette can select active-thread durable tasks with `task next`, `task prev`, `task select <id>`, and task-panel mouse clicks; selected compatible tasks become the default target for `task pause`, `task resume`, and `task cancel`
+- TUI command palette can cancel active-thread durable tasks with `task cancel [id]`, falling back to the first running, pending, or paused task in the task panel when no compatible selected task exists, and routing through the same durable task-cancel event path as HTTP/external runners
 - TUI task panel now loads active-thread automations, and the command palette can trigger current-thread automations into pending runtime tasks with optional prompt overrides
 - task panel now surfaces active thread usage totals, cache-hit rate, cache chart, estimated cost, input/output cost split, cost chart, and 1M-context policy from durable usage records
 - command palette executes local UI commands for mode switching, session picker, thread navigator, thread next/prev/id switching, and approval modal, plus runtime mutations for active-thread `task <summary>`, `compact [tail]`, `automation trigger [id]`, cancel, approval response, and composer submit
-- AgentLoop cancellation now propagates into cancel-aware model/tool execution; `run_shell` starts commands in a process group and kills that group when a durable cancel event is observed, while remote model streams stop between SSE frames
+- local file-backed TUI command palette now includes a full-width MCP manager
+  screen through `mcp` / `mcp manager` and project-level MCP manager commands:
+  `mcp list/status/reload`, `mcp init [--force]`,
+  `mcp add stdio|http|sse`, `mcp enable|disable|remove`, and `mcp validate`
+- local file-backed TUI command palette can target user-level MCP config for
+  mutation commands with `mcp user add|enable|disable|remove ...`; unscoped MCP
+  mutations remain project-level
+- local file-backed TUI command palette now includes MCP discovery detail
+  commands: `mcp tools|prompts|resources|resource-templates [server]`, rendered
+  in the scrollable right-side panel with `Esc` / `mcp close` to return to
+  tasks
+- full-width MCP manager can also render discovery detail with
+  `mcp manager tools|prompts|resources|resource-templates [server]`, so the
+  manager screen is no longer inventory-only
+- full-width MCP manager now renders overview/tools/prompts/resources/templates/
+  health tabs and supports `mcp manager tab <tab>` plus
+  `mcp manager filter <query>` line filtering
+- TUI input now preserves key modifiers through `KeyEvent`, so the composer and
+  command palette support Ctrl+A/E/U/K/W plus Ctrl+Left/Ctrl+Right word motion,
+  and Ctrl-modified global letters no longer accidentally trigger plain
+  one-key commands
+- TUI command palette now keeps a bounded command history and uses Up/Down to
+  recall prior commands or restore the in-progress draft
+- TUI command palette now supports Tab prefix completion for built-in workbench
+  commands, including common-prefix expansion and candidate hints
+- TUI session picker and thread navigator now support PageUp/PageDown plus
+  Home/End for faster keyboard selection across longer runtime lists
+- TUI session picker and thread navigator now support command-palette filters
+  (`session filter <query>` and `thread filter <query>`) that narrow visible
+  durable runtime lists while keeping keyboard navigation bounded to matches
+- TUI now enables terminal mouse capture for first-line workbench navigation:
+  click Plan/Agent/YOLO tabs to switch mode, click visible session/thread
+  picker rows to select them, scroll the wheel through the active
+  scroll/navigation target, and click the transcript panel to focus composer
+- full-width TUI MCP manager now supports mouse tab switching, server-row
+  selection, and action-strip clicks for enable, disable, remove, tools, and
+  reload over the same keyboard/config mutation paths
+- full-width TUI MCP manager now supports server multi-select with `Space`,
+  `A`, `U`, `E`, and `D`, plus Ctrl+click row toggling; bulk enable/disable
+  selected servers reuses the existing per-server MCP config mutation actions
+- full-width TUI MCP manager now supports drag-select across visible server
+  rows, selecting the visible server-row range for the existing bulk
+  enable/disable action path while preserving normal click-to-select behavior
+- task panel now summarizes active-thread runtime item state/type counts and
+  the latest item content, making streamed background agent run progress and
+  tool activity visible alongside durable task records
+- task panel now supports cross-surface multi-select with Ctrl+click,
+  drag-select, `task select all`, and `task select clear`; selected compatible
+  tasks can be paused, resumed, or cancelled in bulk through the existing task
+  action flow and `task bulk pause|resume|cancel` aliases
+- local file-backed TUI command palette can start allowlisted background shell
+  jobs through `shell <command>` / `shell run <command>` / `! <command>`, then
+  list, inspect, feed, close stdin for, or stop them with
+  `shell list|show|poll|wait|stdin|close-stdin|cancel` and DeepSeek-TUI-style
+  `jobs list|show|poll|wait|stdin|close-stdin|cancel` aliases over the existing
+  `exec_shell` job manager
+- local file-backed TUI command palette now routes unallowlisted foreground
+  shell commands through an explicit modal approval; approved commands run once
+  through a trusted TUI-only background shell path without adding an allowlist
+  bypass to model-registered shell tools
+- local file-backed TUI composer now intercepts single-`#` memory notes and
+  `/memory show|path|clear|edit|help` commands without starting model turns;
+  the command palette also exposes `memory show|path|clear|edit|help` over the
+  same opt-in `memory.memory_path` used by the `remember` tool
+- AgentLoop cancellation now propagates into cancel-aware model/tool execution; `run_shell` starts commands in a process group and kills that group when a durable cancel event is observed, while remote model streams and blocked model process-pipe reads stop through cancel-aware polling
 - deterministic `--once` snapshot path for CI/release smoke tests
 
 Remaining:
 
-- true cross-process push/SSE subscription into the foreground TUI beyond the local runtime watcher
-- fully interrupting blocked model socket reads, plus richer progress controls for background TUI agent runs
-- command palette actions executing arbitrary external commands
-- scrollback, composer editing, and richer keyboard model
+- review the next DeepSeek-TUI gap cluster after the Phase D TUI interaction
+  slices
 
 ### Phase E: DeepSeek-Native Product UX
 
@@ -231,7 +387,176 @@ Remaining:
 
 - Role-aware child agents
 - Child lifecycle controls
-- Flash fan-out RLM helper
+- RLM-lite tool now exists: `rlm` wraps `context` + `question` into bounded
+  child-agent analysis using the existing subagent depth limit and model schema
+- `rlm` / `rlm_query` / `llm_query` now also accept DeepSeek-TUI-style
+  `task` plus workspace-relative `file_path` or inline `content` input, so
+  long-input processing can be invoked without first reshaping it into
+  `context` + `question`
+- `rlm_process` now exists as an explicit DeepSeek-TUI-compatible long-input
+  entrypoint; this currently reuses the bounded child-agent process adapter
+  while the full long-lived REPL loop remains future work
+- RLM batch helper now exists: `rlm_batch` maps shared `context` plus up to 16
+  `questions` onto parallel bounded child-agent analyses, matching the
+  `llm_query_batched` / `rlm_query_batched` usage pattern without a Python REPL
+- RLM chunk planning now exists: `rlm_chunk_plan` accepts `file_path` or
+  `content` and returns coverage-aware chunk offsets plus optional text, making
+  map-reduce setup available without writing a Python helper first
+- RLM map-reduce planning now exists: `rlm_map_reduce_plan` accepts a `task`
+  plus `file_path` or `content`, returns chunks, ready-to-dispatch map task JSON,
+  omitted-map metadata, and a reduce prompt without directly running child
+  agents
+- DeepSeek-TUI-compatible RLM helper aliases now exist: `rlm_query` mirrors
+  `rlm`, `llm_query` mirrors `rlm`, and `rlm_query_batched` /
+  `llm_query_batched` mirror `rlm_batch`; all aliases use the same model
+  schemas and subagent depth gate as the original tools
+- RLM Python helper slice now exists: `rlm_python` runs short restricted Python
+  scripts over optional `context` / `ctx` / `question` variables for pure computation,
+  counting, text splitting, and aggregation; it blocks import/file/network/
+  subprocess-style tokens, clamps timeout, returns stdout plus
+  JSON-serializable variables, and exposes DeepSeek-TUI-style
+  `chunk_context` / `chunk_coverage` helpers for coverage-aware chunking plus
+  `SHOW_VARS`, `repl_get`, `repl_set`, `FINAL`, and `FINAL_VAR` helper names
+- RLM stateful Python helper slice now exists: `rlm_python_session` persists an
+  explicit JSON `state` dictionary by `session_id` under `.dscode/rlm-python/`,
+  preloads safe state keys as Python locals on later calls, and writes
+  JSON-serializable locals back into state after each call, allowing repeated
+  helper calls to build chunk indexes, counters, and aggregation caches with
+  `reset=true` for clearing state
+- RLM persistent Python process slice now exists: `rlm_python_session` accepts
+  `persistent=true` to reuse a restricted long-lived Python REPL process for the
+  same `session_id` while still syncing JSON state to disk; `reset=true` clears
+  state and rebuilds that cached process
+- RLM Python session inventory now exists: `rlm_python_sessions` can list or
+  inspect persisted session state without running Python, making helper caches
+  discoverable before choosing whether to continue, reset, or create a session;
+  it now also reports `process.active` / `process.pid` for persistent Python
+  REPLs alive in the current DeepSeekCode process
+- Remaining: richer recursive helper API and stronger end-to-end semantic
+  review fixtures / remote PR review loops
+
+### Phase G2: MCP Server Mode
+
+Status: `started`
+
+Landed first slice:
+
+- `deepseek serve --mcp` now runs a line-delimited JSON-RPC MCP stdio server
+- `initialize`, `notifications/initialized`, `tools/list`, `tools/call`,
+  `prompts/list`, `prompts/get`, `resources/list`, `resources/templates/list`,
+  and `resources/read`
+- read-only workspace tools exposed through MCP: `list_files`, `list_dir`,
+  `read_file`, `retrieve_tool_result`, `search_text`, `grep_files`,
+  `file_search`, `web_run`, `web_search`, `fetch_url`, `git_status`, `git_diff`,
+  `project_map`, `validate_data`, `git_log`, `git_show`, `git_blame`,
+  `diagnostics`
+- code-executing MCP side-effect tools exposed only with trusted side effects or
+  durable approvals: `run_tests`, `run_shell`
+- read-only runtime tools exposed through MCP: `runtime_health`,
+  `runtime_list_sessions`, `runtime_list_threads`, `runtime_read_thread`,
+  `runtime_list_tasks`, `runtime_read_task`
+- read-only MCP prompt templates exposed through `prompts/list` / `prompts/get`:
+  `review_code`, `explain_code`, and `plan_task`
+- read-only MCP resources exposed through `resources/list` / `resources/read`:
+  workspace root, runtime sessions, runtime threads, and runtime tasks
+- read-only MCP resource templates exposed through `resources/templates/list`:
+  runtime session/thread/task URI templates
+- opt-in side-effect MCP tool exposure: `run_shell` is hidden by default and
+  only appears in `tools/list` when the server environment sets
+  `DSCODE_MCP_ENABLE_SIDE_EFFECTS=1`; it still reuses the existing
+  safe-command allowlist
+- durable approval MCP side-effect bridge: `DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1`
+  creates an approval thread and routes `tools/call run_shell` through
+  runtime `permission_request` / `permission_response`; alternatively
+  `DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id>` binds an existing runtime thread
+- MCP `apply_patch` is now exposed only in durable approval mode and routes
+  write requests through `permission_request kind=write` before reusing the
+  existing unified-patch validator
+- MCP `write_file` is now exposed only in durable approval mode, writes UTF-8
+  content to safe relative paths under the MCP workspace, rejects path escapes
+  and symlink targets, and records the approval decision before mutating files
+- MCP `delete_file` is now exposed only in durable approval mode, deletes one
+  regular file at a safe relative path under the MCP workspace, rejects path
+  escapes/directories/symlink targets, and records the approval decision before
+  mutating files
+- MCP `copy_file` is now exposed only in durable approval mode, copies one
+  regular file between safe relative paths under the MCP workspace, rejects path
+  escapes/directories/symlink sources and existing destinations, and records the
+  approval decision before mutating files
+- MCP `move_file` is now exposed only in durable approval mode, moves one
+  regular file between safe relative paths under the MCP workspace, rejects path
+  escapes/directories/symlink sources and existing destinations, and records the
+  approval decision before mutating files
+- focused unit tests cover initialize, tool listing, `read_file`, and runtime
+  session listing; resource tests cover listing and reading runtime thread JSON;
+  stdio smoke validates real `deepseek serve --mcp` output
+- `deepseek mcp add-self` resolves the current binary and writes a stdio server
+  entry (`serve --mcp`, optional `--workspace`) to user or project MCP config
+- `deepseek serve --mcp --workspace <path>` runs the MCP server from an explicit
+  workspace
+- `deepseek serve --acp` now runs a minimal Agent Client Protocol stdio adapter:
+  `initialize`, `session/new`, `session/list`, `session/load`,
+  `session/prompt`, `session/cancel`, and `shutdown`
+- ACP `session/list` exposes durable runtime sessions and `session/load` maps
+  a runtime session/thread workspace into an in-process ACP session
+- Loaded ACP `session/prompt` records user/assistant durable turns and message
+  items back to the bound runtime thread; token usage is recorded as source
+  `acp` when available
+- ACP now advertises checkpoint replay/restore/apply support and handles
+  `session/checkpoints`, `session/checkpoint/read`, and
+  `session/checkpoint/restore`; loaded-session checkpoint listing and restore
+  requests filter rollback snapshots to the bound runtime thread, read can
+  include the unified patch, and restore is dry-run unless `apply=true` is
+  passed
+- ACP now exposes a session-scoped tool bridge through `session/tools/list` and
+  `session/tools/call`; read-only tools run from the ACP session workspace, and
+  side-effect tools appear only for loaded runtime-thread sessions where they
+  reuse durable `permission_request` / `permission_response` approval events
+- ACP loaded-session tool calls now create an assistant runtime turn with
+  `tool_call` and `tool_result` items, and side-effect permission requests are
+  linked to that same turn for auditability
+- ACP `session/tools/call` now emits `session/update` notifications for
+  `tool_call_update` and `tool_result_update` before the final JSON-RPC result;
+  loaded-session updates include runtime turn/item ids to align ACP clients with
+  durable runtime audit records
+- `deepseek serve --acp --workspace <path>` starts ACP from an explicit
+  workspace
+- `deepseek mcp add/get/remove/enable/disable/validate` covers common MCP
+  config CRUD and validation without hand-editing JSON
+- `deepseek tui` command palette now covers the same first-line MCP manager
+  flow for project-level config, matching DeepSeek-TUI's `/mcp add/list/status`
+  style command surface; `mcp` / `mcp manager` opens a full-width inventory
+  screen, it can also target user config with `mcp user ...`, and it renders
+  tools/prompts/resources/templates discovery summaries in either the
+  full-width manager or scrollable right-side panel
+- the full-width TUI MCP manager now supports keyboard-native `Tab` /
+  `Shift+Tab` tab cycling and `r` reload/list refresh, reducing dependence on
+  command strings once the manager is open
+- the full-width TUI MCP manager now renders a selected-server action strip and
+  supports `n`/`p` selection plus selected-server `e` enable, `d` disable,
+  `x` remove confirmation, and `t` tools actions over the existing config
+  mutation path
+- selected-server `x` in the full-width TUI MCP manager now opens a remove
+  confirmation modal; `y`/`Enter` queues the config removal and `n`/`Esc`
+  cancels without mutating config
+- `mcp validate` now reports per-server tools/prompts/resources/resource-template
+  health in the TUI detail panel instead of only reusing raw tools discovery
+  output
+- `deepseek mcp resources [server]` and `deepseek mcp resource <server> <uri>`
+  now cover stdio / HTTP / SSE `resources/list` and `resources/read`
+- `deepseek mcp resource-templates [server]` now covers stdio / HTTP / SSE
+  `resources/templates/list`
+- agent runs expose read-only `mcp_list_prompts`, `mcp_get_prompt`,
+  `mcp_list_resources`, `mcp_read_resource`, and `mcp_list_resource_templates`
+  bridge tools whenever project/user MCP config exists
+
+Remaining:
+
+- broader side-effect MCP server surface beyond `run_shell`, `apply_patch`,
+  `write_file`, `delete_file`, `copy_file`, and `move_file`, still guarded by
+  durable approval and safe-command/file-write policies
+- full ACP standard tool streaming beyond started/result notifications
+- richer MCP manager affordances such as drag selection
 
 ### Phase H: Packaging
 

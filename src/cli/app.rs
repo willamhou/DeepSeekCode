@@ -66,6 +66,12 @@ pub enum McpAction {
     Prompts {
         server: Option<String>,
     },
+    Resources {
+        server: Option<String>,
+    },
+    ResourceTemplates {
+        server: Option<String>,
+    },
     Call {
         server: String,
         tool: String,
@@ -76,9 +82,51 @@ pub enum McpAction {
         prompt: String,
         arguments_json: Option<String>,
     },
+    Resource {
+        server: String,
+        uri: String,
+    },
+    Add {
+        name: String,
+        command: Option<String>,
+        args: Vec<String>,
+        url: Option<String>,
+        transport: Option<String>,
+        env: Vec<(String, String)>,
+        headers: Vec<(String, String)>,
+        disabled: bool,
+        scope: McpConfigScope,
+    },
+    Get {
+        name: String,
+    },
+    Remove {
+        name: String,
+        scope: McpConfigScope,
+    },
+    Enable {
+        name: String,
+        scope: McpConfigScope,
+    },
+    Disable {
+        name: String,
+        scope: McpConfigScope,
+    },
+    Validate,
     Init {
         force: bool,
     },
+    AddSelf {
+        name: String,
+        workspace: Option<String>,
+        scope: McpConfigScope,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpConfigScope {
+    User,
+    Project,
 }
 
 #[derive(Debug)]
@@ -460,8 +508,8 @@ pub struct ServeArgs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServeAction {
     Http(ServeHttpArgs),
-    Mcp,
-    Acp,
+    Mcp(ServeMcpArgs),
+    Acp(ServeAcpArgs),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -475,6 +523,16 @@ pub struct TuiArgs {
 pub struct ServeHttpArgs {
     pub addr: String,
     pub once: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServeMcpArgs {
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServeAcpArgs {
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -628,6 +686,22 @@ fn parse_mcp_subcommand(args: Vec<String>) -> Result<McpAction, String> {
                 server: args.get(1).cloned(),
             })
         }
+        "resources" => {
+            if args.len() > 2 {
+                return Err("mcp resources accepts at most one server name".to_string());
+            }
+            Ok(McpAction::Resources {
+                server: args.get(1).cloned(),
+            })
+        }
+        "resource-templates" | "templates" => {
+            if args.len() > 2 {
+                return Err("mcp resource-templates accepts at most one server name".to_string());
+            }
+            Ok(McpAction::ResourceTemplates {
+                server: args.get(1).cloned(),
+            })
+        }
         "call" => {
             if args.len() < 3 {
                 return Err("mcp call requires <server> <tool> [json-args]".to_string());
@@ -654,6 +728,39 @@ fn parse_mcp_subcommand(args: Vec<String>) -> Result<McpAction, String> {
                 arguments_json: args.get(3).cloned(),
             })
         }
+        "resource" => {
+            if args.len() != 3 {
+                return Err("mcp resource requires <server> <uri>".to_string());
+            }
+            Ok(McpAction::Resource {
+                server: args[1].clone(),
+                uri: args[2].clone(),
+            })
+        }
+        "add" => parse_mcp_add_args(&args[1..]),
+        "get" => {
+            if args.len() != 2 {
+                return Err("mcp get requires exactly one server name".to_string());
+            }
+            Ok(McpAction::Get {
+                name: args[1].clone(),
+            })
+        }
+        "remove" => parse_mcp_scoped_name_action(&args[1..], "remove").map(|(name, scope)| {
+            McpAction::Remove { name, scope }
+        }),
+        "enable" => parse_mcp_scoped_name_action(&args[1..], "enable").map(|(name, scope)| {
+            McpAction::Enable { name, scope }
+        }),
+        "disable" => parse_mcp_scoped_name_action(&args[1..], "disable").map(|(name, scope)| {
+            McpAction::Disable { name, scope }
+        }),
+        "validate" => {
+            if args.len() > 1 {
+                return Err("mcp validate accepts no arguments".to_string());
+            }
+            Ok(McpAction::Validate)
+        }
         "init" => {
             let mut force = false;
             for flag in args.iter().skip(1) {
@@ -664,10 +771,186 @@ fn parse_mcp_subcommand(args: Vec<String>) -> Result<McpAction, String> {
             }
             Ok(McpAction::Init { force })
         }
+        "add-self" => {
+            let mut name = "deepseek".to_string();
+            let mut workspace = None;
+            let mut scope = McpConfigScope::User;
+            let mut index = 1;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--name" => {
+                        let Some(value) = args.get(index + 1) else {
+                            return Err("mcp add-self --name requires a value".to_string());
+                        };
+                        name = value.clone();
+                        index += 2;
+                    }
+                    "--workspace" => {
+                        let Some(value) = args.get(index + 1) else {
+                            return Err("mcp add-self --workspace requires a value".to_string());
+                        };
+                        workspace = Some(value.clone());
+                        index += 2;
+                    }
+                    "--user" => {
+                        scope = McpConfigScope::User;
+                        index += 1;
+                    }
+                    "--project" => {
+                        scope = McpConfigScope::Project;
+                        index += 1;
+                    }
+                    other => return Err(format!("unknown flag for `mcp add-self`: {other}")),
+                }
+            }
+            if name.trim().is_empty() {
+                return Err("mcp add-self --name must not be empty".to_string());
+            }
+            if workspace
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(str::is_empty)
+            {
+                return Err("mcp add-self --workspace must not be empty".to_string());
+            }
+            Ok(McpAction::AddSelf {
+                name,
+                workspace,
+                scope,
+            })
+        }
         other => Err(format!(
-            "unknown mcp sub-action `{other}`; expected list|doctor|tools|prompts|call|prompt|init"
+            "unknown mcp sub-action `{other}`; expected list|doctor|tools|prompts|call|prompt|add|get|remove|enable|disable|validate|init|add-self"
         )),
     }
+}
+
+fn parse_mcp_add_args(args: &[String]) -> Result<McpAction, String> {
+    let Some(name) = args.first() else {
+        return Err("mcp add requires <name>".to_string());
+    };
+    if name.trim().is_empty() {
+        return Err("mcp add <name> must not be empty".to_string());
+    }
+    let mut command = None;
+    let mut command_args = Vec::new();
+    let mut url = None;
+    let mut transport = None;
+    let mut env = Vec::new();
+    let mut headers = Vec::new();
+    let mut disabled = false;
+    let mut scope = McpConfigScope::User;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--command" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("mcp add --command requires a value".to_string());
+                };
+                command = Some(value.clone());
+                index += 2;
+            }
+            "--arg" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("mcp add --arg requires a value".to_string());
+                };
+                command_args.push(value.clone());
+                index += 2;
+            }
+            "--url" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("mcp add --url requires a value".to_string());
+                };
+                url = Some(value.clone());
+                index += 2;
+            }
+            "--transport" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("mcp add --transport requires a value".to_string());
+                };
+                transport = Some(value.clone());
+                index += 2;
+            }
+            "--env" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("mcp add --env requires KEY=VALUE".to_string());
+                };
+                env.push(parse_key_value_arg(value, "mcp add --env")?);
+                index += 2;
+            }
+            "--header" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("mcp add --header requires KEY=VALUE".to_string());
+                };
+                headers.push(parse_key_value_arg(value, "mcp add --header")?);
+                index += 2;
+            }
+            "--disabled" => {
+                disabled = true;
+                index += 1;
+            }
+            "--user" => {
+                scope = McpConfigScope::User;
+                index += 1;
+            }
+            "--project" => {
+                scope = McpConfigScope::Project;
+                index += 1;
+            }
+            other => return Err(format!("unknown flag for `mcp add`: {other}")),
+        }
+    }
+    if command.is_some() == url.is_some() {
+        return Err("mcp add requires exactly one of --command or --url".to_string());
+    }
+    if command.as_deref().map(str::trim).is_some_and(str::is_empty) {
+        return Err("mcp add --command must not be empty".to_string());
+    }
+    if url.as_deref().map(str::trim).is_some_and(str::is_empty) {
+        return Err("mcp add --url must not be empty".to_string());
+    }
+    Ok(McpAction::Add {
+        name: name.clone(),
+        command,
+        args: command_args,
+        url,
+        transport,
+        env,
+        headers,
+        disabled,
+        scope,
+    })
+}
+
+fn parse_mcp_scoped_name_action(
+    args: &[String],
+    action: &str,
+) -> Result<(String, McpConfigScope), String> {
+    let Some(name) = args.first() else {
+        return Err(format!("mcp {action} requires <name>"));
+    };
+    if name.trim().is_empty() {
+        return Err(format!("mcp {action} <name> must not be empty"));
+    }
+    let mut scope = McpConfigScope::User;
+    for flag in args.iter().skip(1) {
+        match flag.as_str() {
+            "--user" => scope = McpConfigScope::User,
+            "--project" => scope = McpConfigScope::Project,
+            other => return Err(format!("unknown flag for `mcp {action}`: {other}")),
+        }
+    }
+    Ok((name.clone(), scope))
+}
+
+fn parse_key_value_arg(value: &str, label: &str) -> Result<(String, String), String> {
+    let Some((key, value)) = value.split_once('=') else {
+        return Err(format!("{label} requires KEY=VALUE"));
+    };
+    if key.trim().is_empty() {
+        return Err(format!("{label} key must not be empty"));
+    }
+    Ok((key.to_string(), value.to_string()))
 }
 
 fn parse_config_args(args: Vec<String>) -> Result<ConfigArgs, String> {
@@ -753,26 +1036,54 @@ fn parse_serve_args(args: Vec<String>) -> Result<ServeArgs, String> {
         "--http" => Ok(ServeArgs {
             action: ServeAction::Http(parse_serve_http_args(args.into_iter().skip(1).collect())?),
         }),
-        "--mcp" => {
-            if args.len() > 1 {
-                return Err("serve --mcp does not accept flags yet".to_string());
-            }
-            Ok(ServeArgs {
-                action: ServeAction::Mcp,
-            })
-        }
-        "--acp" => {
-            if args.len() > 1 {
-                return Err("serve --acp does not accept flags yet".to_string());
-            }
-            Ok(ServeArgs {
-                action: ServeAction::Acp,
-            })
-        }
+        "--mcp" => Ok(ServeArgs {
+            action: ServeAction::Mcp(parse_serve_mcp_args(args.into_iter().skip(1).collect())?),
+        }),
+        "--acp" => Ok(ServeArgs {
+            action: ServeAction::Acp(parse_serve_acp_args(args.into_iter().skip(1).collect())?),
+        }),
         other => Err(format!(
             "unknown serve mode `{other}`; expected --http|--mcp|--acp"
         )),
     }
+}
+
+fn parse_serve_acp_args(args: Vec<String>) -> Result<ServeAcpArgs, String> {
+    let workspace = parse_optional_workspace_arg(args, "serve --acp")?;
+    Ok(ServeAcpArgs { workspace })
+}
+
+fn parse_serve_mcp_args(args: Vec<String>) -> Result<ServeMcpArgs, String> {
+    let workspace = parse_optional_workspace_arg(args, "serve --mcp")?;
+    Ok(ServeMcpArgs { workspace })
+}
+
+fn parse_optional_workspace_arg(
+    args: Vec<String>,
+    command_name: &str,
+) -> Result<Option<String>, String> {
+    let mut workspace = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--workspace" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(format!("{command_name} --workspace requires a value"));
+                };
+                if value.trim().is_empty() {
+                    return Err(format!("{command_name} --workspace must not be empty"));
+                }
+                workspace = Some(value.clone());
+                index += 2;
+            }
+            other => {
+                return Err(format!(
+                    "unknown {command_name} argument `{other}`; expected --workspace <path>"
+                ));
+            }
+        }
+    }
+    Ok(workspace)
 }
 
 fn parse_serve_http_args(args: Vec<String>) -> Result<ServeHttpArgs, String> {
@@ -2200,6 +2511,32 @@ mod tests {
             })) if name == "github"
         ));
 
+        let resources = Cli::from_argv(vec![
+            "mcp".to_string(),
+            "resources".to_string(),
+            "filesystem".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            resources.command,
+            Some(Command::Mcp(McpAction::Resources {
+                server: Some(ref name)
+            })) if name == "filesystem"
+        ));
+
+        let templates = Cli::from_argv(vec![
+            "mcp".to_string(),
+            "resource-templates".to_string(),
+            "filesystem".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            templates.command,
+            Some(Command::Mcp(McpAction::ResourceTemplates {
+                server: Some(ref name)
+            })) if name == "filesystem"
+        ));
+
         let call = Cli::from_argv(vec![
             "mcp".to_string(),
             "call".to_string(),
@@ -2234,6 +2571,65 @@ mod tests {
             })) if server == "github" && prompt == "review_pr" && args.contains("42")
         ));
 
+        let resource = Cli::from_argv(vec![
+            "mcp".to_string(),
+            "resource".to_string(),
+            "filesystem".to_string(),
+            "file:///tmp/readme.md".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            resource.command,
+            Some(Command::Mcp(McpAction::Resource { server, uri }))
+                if server == "filesystem" && uri == "file:///tmp/readme.md"
+        ));
+
+        let add = Cli::from_argv(vec![
+            "mcp".to_string(),
+            "add".to_string(),
+            "filesystem".to_string(),
+            "--command".to_string(),
+            "npx".to_string(),
+            "--arg".to_string(),
+            "-y".to_string(),
+            "--arg".to_string(),
+            "@modelcontextprotocol/server-filesystem".to_string(),
+            "--env".to_string(),
+            "ROOT=.".to_string(),
+            "--project".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            add.command,
+            Some(Command::Mcp(McpAction::Add {
+                name,
+                command: Some(ref command),
+                args,
+                scope: McpConfigScope::Project,
+                ..
+            })) if name == "filesystem"
+                && command == "npx"
+                && args == vec![
+                    "-y".to_string(),
+                    "@modelcontextprotocol/server-filesystem".to_string()
+                ]
+        ));
+
+        let remove = Cli::from_argv(vec![
+            "mcp".to_string(),
+            "remove".to_string(),
+            "filesystem".to_string(),
+            "--project".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            remove.command,
+            Some(Command::Mcp(McpAction::Remove {
+                name,
+                scope: McpConfigScope::Project,
+            })) if name == "filesystem"
+        ));
+
         let init = Cli::from_argv(vec![
             "mcp".to_string(),
             "init".to_string(),
@@ -2243,6 +2639,25 @@ mod tests {
         assert!(matches!(
             init.command,
             Some(Command::Mcp(McpAction::Init { force: true }))
+        ));
+
+        let add_self = Cli::from_argv(vec![
+            "mcp".to_string(),
+            "add-self".to_string(),
+            "--name".to_string(),
+            "deepseek-code".to_string(),
+            "--workspace".to_string(),
+            "/tmp/workspace".to_string(),
+            "--project".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            add_self.command,
+            Some(Command::Mcp(McpAction::AddSelf {
+                name,
+                workspace: Some(ref path),
+                scope: McpConfigScope::Project,
+            })) if name == "deepseek-code" && path == "/tmp/workspace"
         ));
     }
 
@@ -2885,6 +3300,48 @@ mod tests {
                     assert!(http.once);
                 }
                 other => panic!("expected serve --http, got {other:?}"),
+            },
+            other => panic!("expected Command::Serve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_serve_mcp_workspace() {
+        let cli = Cli::from_argv(vec![
+            "serve".to_string(),
+            "--mcp".to_string(),
+            "--workspace".to_string(),
+            "/tmp/workspace".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Serve(args)) => match args.action {
+                ServeAction::Mcp(mcp) => {
+                    assert_eq!(mcp.workspace.as_deref(), Some("/tmp/workspace"));
+                }
+                other => panic!("expected serve --mcp, got {other:?}"),
+            },
+            other => panic!("expected Command::Serve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_serve_acp_workspace() {
+        let cli = Cli::from_argv(vec![
+            "serve".to_string(),
+            "--acp".to_string(),
+            "--workspace".to_string(),
+            "/tmp/workspace".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Serve(args)) => match args.action {
+                ServeAction::Acp(acp) => {
+                    assert_eq!(acp.workspace.as_deref(), Some("/tmp/workspace"));
+                }
+                other => panic!("expected serve --acp, got {other:?}"),
             },
             other => panic!("expected Command::Serve, got {other:?}"),
         }

@@ -169,6 +169,7 @@ fn run_subagent_request(
                 stream_events: None,
                 run_events: None,
                 approval_resolver: None,
+                user_input_resolver: None,
                 cancel_check: None,
             },
         )

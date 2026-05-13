@@ -1,32 +1,67 @@
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::cli::app::{ServeAction, ServeArgs, ServeHttpArgs};
+use crate::cli::app::{ServeAcpArgs, ServeAction, ServeArgs, ServeHttpArgs, ServeMcpArgs};
 use crate::config::load::load_or_default;
+use crate::config::types::{AppConfig, ApprovalConfig, DiagnosticsConfig};
+use crate::core::rollback::{snapshot_to_json, RestorePlan, RollbackStore};
 use crate::core::runtime::{
     automation_to_json, event_to_json, item_to_json, json_array, json_object, json_string_field,
     parse_json_object_body, session_to_json, task_to_json, thread_compaction_to_json,
     thread_to_json, turn_to_json, usage_to_json, validate_record_id, RuntimeEvent, RuntimeStore,
 };
 use crate::error::{app_error, AppResult};
-use crate::util::json::{
-    json_as_array, json_as_object, json_as_string, json_as_u64, json_value_to_string, JsonValue,
+use crate::model::client::ModelClient;
+use crate::model::deepseek::DeepSeekClient;
+use crate::model::protocol::{ModelRequest, TokenUsage};
+use crate::tools::apply_patch::ApplyPatchTool;
+use crate::tools::diagnostics::DiagnosticsTool;
+use crate::tools::file_search::FileSearchTool;
+use crate::tools::file_write::EditFileTool;
+use crate::tools::git_diff::{GitDiffTool, GitStatusTool};
+use crate::tools::git_history::{GitBlameTool, GitLogTool, GitShowTool};
+use crate::tools::github::{
+    GithubCloseIssueTool, GithubCommentTool, GithubIssueContextTool, GithubPrContextTool,
 };
+use crate::tools::list_files::{ListDirTool, ListFilesTool};
+use crate::tools::project_map::ProjectMapTool;
+use crate::tools::read_file::ReadFileTool;
+use crate::tools::revert_turn::RevertTurnTool;
+use crate::tools::run_shell::{is_safe_shell_command, RunShellTool};
+use crate::tools::run_tests::{render_run_tests_command, RunTestsTool};
+use crate::tools::search_text::{GrepFilesTool, SearchTextTool};
+use crate::tools::tool_output::RetrieveToolResultTool;
+use crate::tools::types::{Tool, ToolInput};
+use crate::tools::validate_data::ValidateDataTool;
+use crate::tools::web::{FetchUrlTool, FinanceTool, WebSearchTool};
+use crate::ui::stream::NoopStreamEvents;
+use crate::util::cwd::CwdGuard;
+use crate::util::json::{
+    json_as_array, json_as_object, json_as_string, json_as_u64, json_value_to_string,
+    parse_root_object, JsonValue,
+};
+
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+const ACP_PROTOCOL_VERSION: u64 = 1;
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    )
+}
 
 pub fn run(args: ServeArgs) -> AppResult<()> {
     match args.action {
         ServeAction::Http(http) => run_http(http),
-        ServeAction::Mcp => Err(app_error(
-            "serve --mcp is not implemented yet; use `deepseek mcp ...` for MCP client operations",
-        )),
-        ServeAction::Acp => Err(app_error(
-            "serve --acp is not implemented yet; the HTTP runtime contract is available with `serve --http`",
-        )),
+        ServeAction::Mcp(mcp) => run_mcp_stdio(mcp),
+        ServeAction::Acp(acp) => run_acp_stdio(acp),
     }
 }
 
@@ -45,6 +80,3180 @@ fn run_http(args: ServeHttpArgs) -> AppResult<()> {
     println!("  runtime: http://{addr}/runtime");
     println!("  threads: http://{addr}/v1/threads");
     serve_http_listener(listener, args.once, &store)
+}
+
+#[derive(Clone)]
+struct McpStdioState {
+    store: RuntimeStore,
+    rollback: RollbackStore,
+    workspace: PathBuf,
+    approval: ApprovalConfig,
+    diagnostics: DiagnosticsConfig,
+    approval_thread_id: Option<String>,
+    approval_turn_id: Option<String>,
+    approval_poll_interval: Duration,
+    approval_max_polls: Option<usize>,
+    allow_side_effect_tools: bool,
+}
+
+fn run_mcp_stdio(args: ServeMcpArgs) -> AppResult<()> {
+    let _cwd_guard = match args.workspace {
+        Some(workspace) => Some(CwdGuard::enter(Path::new(&workspace))?),
+        None => None,
+    };
+    let config = load_or_default()?;
+    let workspace = std::env::current_dir()?;
+    let store = RuntimeStore::new(PathBuf::from(&config.workspace.config_dir).join("runtime"));
+    let rollback = RollbackStore::new(PathBuf::from(&config.workspace.config_dir).join("rollback"));
+    let approval_thread_id = mcp_approval_thread_from_env(&store, &workspace)?;
+    let state = McpStdioState {
+        store,
+        rollback,
+        workspace,
+        approval: config.approval.clone(),
+        diagnostics: config.diagnostics.clone(),
+        approval_thread_id,
+        approval_turn_id: None,
+        approval_poll_interval: Duration::from_millis(250),
+        approval_max_polls: None,
+        allow_side_effect_tools: env_flag("DSCODE_MCP_ENABLE_SIDE_EFFECTS"),
+    };
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+
+    for line in BufReader::new(stdin.lock()).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(response) = mcp_response_for_message(&line, &state) {
+            stdout.write_all(json_value_to_string(&response).as_bytes())?;
+            stdout.write_all(b"\n")?;
+            stdout.flush()?;
+        }
+    }
+
+    Ok(())
+}
+
+fn mcp_approval_thread_from_env(
+    store: &RuntimeStore,
+    workspace: &Path,
+) -> AppResult<Option<String>> {
+    if let Ok(thread_id) = std::env::var("DSCODE_MCP_APPROVAL_THREAD_ID") {
+        let thread_id = thread_id.trim();
+        if !thread_id.is_empty() {
+            store.load_thread(thread_id)?;
+            return Ok(Some(thread_id.to_string()));
+        }
+    }
+
+    if !env_flag("DSCODE_MCP_ENABLE_DURABLE_APPROVALS") {
+        return Ok(None);
+    }
+
+    let workspace = workspace.display().to_string();
+    let session = store.create_session("MCP approvals".to_string(), workspace.clone())?;
+    let thread = store.create_thread_for_session(
+        &session.id,
+        "MCP side-effect approvals".to_string(),
+        workspace,
+        "deepseek-coder".to_string(),
+        "mcp".to_string(),
+    )?;
+    eprintln!(
+        "DeepSeekCode MCP durable approvals enabled on runtime thread {}",
+        thread.id
+    );
+    Ok(Some(thread.id))
+}
+
+fn mcp_response_for_message(message: &str, state: &McpStdioState) -> Option<JsonValue> {
+    let root = match parse_root_object(message) {
+        Ok(root) => root,
+        Err(error) => {
+            return Some(mcp_error_response(
+                JsonValue::Null,
+                -32700,
+                "Parse error",
+                &error.to_string(),
+            ))
+        }
+    };
+    let id = root.get("id").cloned();
+    let Some(method) = root.get("method").and_then(json_as_string) else {
+        return Some(mcp_error_response(
+            id.unwrap_or(JsonValue::Null),
+            -32600,
+            "Invalid Request",
+            "request field `method` must be a string",
+        ));
+    };
+    if id.is_none() && method.starts_with("notifications/") {
+        return None;
+    }
+    let response_id = id.unwrap_or(JsonValue::Null);
+
+    match method {
+        "initialize" => Some(mcp_success_response(response_id, mcp_initialize_result())),
+        "tools/list" => Some(mcp_success_response(
+            response_id,
+            object([("tools", JsonValue::Array(mcp_tool_definitions(state)))]),
+        )),
+        "tools/call" => Some(mcp_tools_call_response(response_id, &root, state)),
+        "prompts/list" => Some(mcp_success_response(
+            response_id,
+            object([
+                ("prompts", JsonValue::Array(mcp_prompt_definitions())),
+                ("nextCursor", JsonValue::Null),
+            ]),
+        )),
+        "prompts/get" => Some(mcp_prompts_get_response(response_id, &root)),
+        "resources/list" => Some(mcp_success_response(
+            response_id,
+            object([
+                (
+                    "resources",
+                    JsonValue::Array(mcp_resource_definitions(state)),
+                ),
+                ("nextCursor", JsonValue::Null),
+            ]),
+        )),
+        "resources/templates/list" => Some(mcp_success_response(
+            response_id,
+            object([
+                (
+                    "resourceTemplates",
+                    JsonValue::Array(mcp_resource_template_definitions()),
+                ),
+                ("nextCursor", JsonValue::Null),
+            ]),
+        )),
+        "resources/read" => Some(mcp_resources_read_response(response_id, &root, state)),
+        "notifications/initialized" => None,
+        other => Some(mcp_error_response(
+            response_id,
+            -32601,
+            "Method not found",
+            &format!("unsupported MCP method `{other}`"),
+        )),
+    }
+}
+
+fn mcp_initialize_result() -> JsonValue {
+    object([
+        (
+            "protocolVersion",
+            JsonValue::String(MCP_PROTOCOL_VERSION.to_string()),
+        ),
+        (
+            "capabilities",
+            object([
+                ("tools", JsonValue::Object(BTreeMap::new())),
+                ("prompts", JsonValue::Object(BTreeMap::new())),
+                ("resources", JsonValue::Object(BTreeMap::new())),
+            ]),
+        ),
+        (
+            "serverInfo",
+            object([
+                ("name", JsonValue::String("DeepSeekCode".to_string())),
+                (
+                    "version",
+                    JsonValue::String(env!("CARGO_PKG_VERSION").to_string()),
+                ),
+            ]),
+        ),
+    ])
+}
+
+fn mcp_tools_call_response(
+    response_id: JsonValue,
+    root: &BTreeMap<String, JsonValue>,
+    state: &McpStdioState,
+) -> JsonValue {
+    let params = match root.get("params").and_then(json_as_object) {
+        Some(params) => params,
+        None => {
+            return mcp_error_response(
+                response_id,
+                -32602,
+                "Invalid params",
+                "tools/call requires object params",
+            )
+        }
+    };
+    let Some(name) = params.get("name").and_then(json_as_string) else {
+        return mcp_error_response(
+            response_id,
+            -32602,
+            "Invalid params",
+            "tools/call requires string params.name",
+        );
+    };
+    let arguments = match params.get("arguments") {
+        Some(value) => match json_as_object(value) {
+            Some(arguments) => arguments,
+            None => {
+                return mcp_error_response(
+                    response_id,
+                    -32602,
+                    "Invalid params",
+                    "tools/call params.arguments must be an object",
+                )
+            }
+        },
+        None => {
+            static EMPTY: std::sync::OnceLock<BTreeMap<String, JsonValue>> =
+                std::sync::OnceLock::new();
+            EMPTY.get_or_init(BTreeMap::new)
+        }
+    };
+
+    let result = execute_mcp_tool(name, arguments, state);
+    match result {
+        Ok(text) => mcp_success_response(response_id, mcp_tool_text_result(text, false)),
+        Err(error) => {
+            mcp_success_response(response_id, mcp_tool_text_result(error.to_string(), true))
+        }
+    }
+}
+
+fn mcp_prompts_get_response(
+    response_id: JsonValue,
+    root: &BTreeMap<String, JsonValue>,
+) -> JsonValue {
+    let params = match root.get("params").and_then(json_as_object) {
+        Some(params) => params,
+        None => {
+            return mcp_error_response(
+                response_id,
+                -32602,
+                "Invalid params",
+                "prompts/get requires object params",
+            )
+        }
+    };
+    let Some(name) = params.get("name").and_then(json_as_string) else {
+        return mcp_error_response(
+            response_id,
+            -32602,
+            "Invalid params",
+            "prompts/get requires string params.name",
+        );
+    };
+    let arguments = match params.get("arguments") {
+        Some(value) => match json_as_object(value) {
+            Some(arguments) => arguments,
+            None => {
+                return mcp_error_response(
+                    response_id,
+                    -32602,
+                    "Invalid params",
+                    "prompts/get params.arguments must be an object",
+                )
+            }
+        },
+        None => {
+            static EMPTY: std::sync::OnceLock<BTreeMap<String, JsonValue>> =
+                std::sync::OnceLock::new();
+            EMPTY.get_or_init(BTreeMap::new)
+        }
+    };
+
+    match mcp_prompt_result(name, arguments) {
+        Ok(result) => mcp_success_response(response_id, result),
+        Err(error) => mcp_error_response(response_id, -32602, "Invalid params", &error.to_string()),
+    }
+}
+
+fn mcp_resources_read_response(
+    response_id: JsonValue,
+    root: &BTreeMap<String, JsonValue>,
+    state: &McpStdioState,
+) -> JsonValue {
+    let params = match root.get("params").and_then(json_as_object) {
+        Some(params) => params,
+        None => {
+            return mcp_error_response(
+                response_id,
+                -32602,
+                "Invalid params",
+                "resources/read requires object params",
+            )
+        }
+    };
+    let Some(uri) = params.get("uri").and_then(json_as_string) else {
+        return mcp_error_response(
+            response_id,
+            -32602,
+            "Invalid params",
+            "resources/read requires string params.uri",
+        );
+    };
+
+    match mcp_read_resource(uri, state) {
+        Ok(content) => mcp_success_response(
+            response_id,
+            object([("contents", JsonValue::Array(vec![content]))]),
+        ),
+        Err(error) => mcp_error_response(response_id, -32602, "Invalid params", &error.to_string()),
+    }
+}
+
+fn mcp_resource_definitions(state: &McpStdioState) -> Vec<JsonValue> {
+    let mut resources = vec![mcp_resource_definition(
+        &workspace_resource_uri(&state.workspace),
+        "workspace",
+        "Workspace root",
+        "inode/directory",
+    )];
+
+    if let Ok(sessions) = state.store.list_sessions(50) {
+        for session in sessions {
+            resources.push(mcp_resource_definition(
+                &format!("deepseekcode://runtime/sessions/{}", session.id),
+                &session.title,
+                &format!(
+                    "{} session, {} thread(s)",
+                    session.status, session.thread_count
+                ),
+                "application/json",
+            ));
+        }
+    }
+    if let Ok(threads) = state.store.list_threads(50) {
+        for thread in threads {
+            resources.push(mcp_resource_definition(
+                &format!("deepseekcode://runtime/threads/{}", thread.id),
+                &thread.title,
+                &format!(
+                    "{} thread, model {}, mode {}",
+                    thread.status, thread.model, thread.mode
+                ),
+                "application/json",
+            ));
+        }
+    }
+    if let Ok(tasks) = state.store.list_tasks(None, None, 50) {
+        for task in tasks {
+            resources.push(mcp_resource_definition(
+                &format!("deepseekcode://runtime/tasks/{}", task.id),
+                &task.summary,
+                &format!("{} {} task", task.status, task.kind),
+                "application/json",
+            ));
+        }
+    }
+
+    resources
+}
+
+fn mcp_prompt_definitions() -> Vec<JsonValue> {
+    vec![
+        mcp_prompt_definition(
+            "review_code",
+            "Review a file or code area for correctness, maintainability, and test gaps.",
+            vec![
+                mcp_prompt_argument("path", "File path or code area to review.", true),
+                mcp_prompt_argument(
+                    "focus",
+                    "Optional review focus, such as bugs, tests, or performance.",
+                    false,
+                ),
+            ],
+        ),
+        mcp_prompt_definition(
+            "explain_code",
+            "Explain how a file, module, or symbol works.",
+            vec![
+                mcp_prompt_argument("path", "File path or module to explain.", true),
+                mcp_prompt_argument(
+                    "symbol",
+                    "Optional symbol, function, or type name to focus on.",
+                    false,
+                ),
+            ],
+        ),
+        mcp_prompt_definition(
+            "plan_task",
+            "Create an implementation plan for a coding task in the current workspace.",
+            vec![
+                mcp_prompt_argument("task", "Task or feature to plan.", true),
+                mcp_prompt_argument(
+                    "constraints",
+                    "Optional constraints, risks, or verification requirements.",
+                    false,
+                ),
+            ],
+        ),
+    ]
+}
+
+fn mcp_prompt_definition(name: &str, description: &str, arguments: Vec<JsonValue>) -> JsonValue {
+    object([
+        ("name", JsonValue::String(name.to_string())),
+        ("description", JsonValue::String(description.to_string())),
+        ("arguments", JsonValue::Array(arguments)),
+    ])
+}
+
+fn mcp_prompt_argument(name: &str, description: &str, required: bool) -> JsonValue {
+    object([
+        ("name", JsonValue::String(name.to_string())),
+        ("description", JsonValue::String(description.to_string())),
+        ("required", JsonValue::Bool(required)),
+    ])
+}
+
+fn mcp_prompt_result(name: &str, arguments: &BTreeMap<String, JsonValue>) -> AppResult<JsonValue> {
+    match name {
+        "review_code" => {
+            let path = prompt_argument(arguments, "path")?;
+            let focus = optional_prompt_argument(arguments, "focus")
+                .map(|value| format!("\nFocus: {value}"))
+                .unwrap_or_default();
+            Ok(mcp_prompt_messages(
+                "Review a file or code area for correctness, maintainability, and test gaps.",
+                format!(
+                    "Review `{path}` in this workspace. Identify concrete bugs, behavioral regressions, missing tests, and maintainability risks. Ground findings in file paths and line references where possible.{focus}"
+                ),
+            ))
+        }
+        "explain_code" => {
+            let path = prompt_argument(arguments, "path")?;
+            let symbol = optional_prompt_argument(arguments, "symbol")
+                .map(|value| format!(" Focus on `{value}`."))
+                .unwrap_or_default();
+            Ok(mcp_prompt_messages(
+                "Explain how a file, module, or symbol works.",
+                format!(
+                    "Explain how `{path}` works in this workspace.{symbol} Cover the main responsibilities, important data flow, and any non-obvious edge cases."
+                ),
+            ))
+        }
+        "plan_task" => {
+            let task = prompt_argument(arguments, "task")?;
+            let constraints = optional_prompt_argument(arguments, "constraints")
+                .map(|value| format!("\nConstraints: {value}"))
+                .unwrap_or_default();
+            Ok(mcp_prompt_messages(
+                "Create an implementation plan for a coding task in the current workspace.",
+                format!(
+                    "Plan this coding task for the current workspace:\n\n{task}\n\nInclude concrete files or modules to inspect, implementation steps, test strategy, and residual risks.{constraints}"
+                ),
+            ))
+        }
+        other => Err(app_error(format!("unknown MCP prompt `{other}`"))),
+    }
+}
+
+fn mcp_prompt_messages(description: &str, text: String) -> JsonValue {
+    object([
+        ("description", JsonValue::String(description.to_string())),
+        (
+            "messages",
+            JsonValue::Array(vec![object([
+                ("role", JsonValue::String("user".to_string())),
+                (
+                    "content",
+                    object([
+                        ("type", JsonValue::String("text".to_string())),
+                        ("text", JsonValue::String(text)),
+                    ]),
+                ),
+            ])]),
+        ),
+    ])
+}
+
+fn prompt_argument<'a>(
+    arguments: &'a BTreeMap<String, JsonValue>,
+    key: &str,
+) -> AppResult<&'a str> {
+    arguments
+        .get(key)
+        .and_then(json_as_string)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| app_error(format!("MCP prompt requires string argument `{key}`")))
+}
+
+fn optional_prompt_argument<'a>(
+    arguments: &'a BTreeMap<String, JsonValue>,
+    key: &str,
+) -> Option<&'a str> {
+    arguments
+        .get(key)
+        .and_then(json_as_string)
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn mcp_resource_definition(uri: &str, name: &str, description: &str, mime_type: &str) -> JsonValue {
+    object([
+        ("uri", JsonValue::String(uri.to_string())),
+        ("name", JsonValue::String(name.to_string())),
+        ("description", JsonValue::String(description.to_string())),
+        ("mimeType", JsonValue::String(mime_type.to_string())),
+    ])
+}
+
+fn mcp_resource_template_definitions() -> Vec<JsonValue> {
+    vec![
+        mcp_resource_template_definition(
+            "deepseekcode://runtime/sessions/{id}",
+            "runtime-session",
+            "Durable runtime session JSON by session id",
+            "application/json",
+        ),
+        mcp_resource_template_definition(
+            "deepseekcode://runtime/threads/{id}",
+            "runtime-thread",
+            "Durable runtime thread JSON with turns and items by thread id",
+            "application/json",
+        ),
+        mcp_resource_template_definition(
+            "deepseekcode://runtime/tasks/{id}",
+            "runtime-task",
+            "Durable runtime task JSON by task id",
+            "application/json",
+        ),
+    ]
+}
+
+fn mcp_resource_template_definition(
+    uri_template: &str,
+    name: &str,
+    description: &str,
+    mime_type: &str,
+) -> JsonValue {
+    object([
+        ("uriTemplate", JsonValue::String(uri_template.to_string())),
+        ("name", JsonValue::String(name.to_string())),
+        ("description", JsonValue::String(description.to_string())),
+        ("mimeType", JsonValue::String(mime_type.to_string())),
+    ])
+}
+
+fn mcp_read_resource(uri: &str, state: &McpStdioState) -> AppResult<JsonValue> {
+    if uri == workspace_resource_uri(&state.workspace) {
+        return Ok(mcp_resource_text_content(
+            uri,
+            "application/json",
+            json_value_to_string(&object([(
+                "workspace",
+                JsonValue::String(state.workspace.display().to_string()),
+            )])),
+        ));
+    }
+    if let Some(id) = uri.strip_prefix("deepseekcode://runtime/sessions/") {
+        let session = state.store.load_session(id)?;
+        return Ok(mcp_resource_text_content(
+            uri,
+            "application/json",
+            json_value_to_string(&session_to_json(&session)),
+        ));
+    }
+    if let Some(id) = uri.strip_prefix("deepseekcode://runtime/threads/") {
+        let thread = state.store.load_thread(id)?;
+        let turns = state
+            .store
+            .list_turns(id)?
+            .iter()
+            .map(turn_to_json)
+            .collect::<Vec<_>>();
+        let items = state
+            .store
+            .list_items(id, None)?
+            .iter()
+            .map(item_to_json)
+            .collect::<Vec<_>>();
+        return Ok(mcp_resource_text_content(
+            uri,
+            "application/json",
+            json_value_to_string(&object([
+                ("thread", thread_to_json(&thread)),
+                ("turns", JsonValue::Array(turns)),
+                ("items", JsonValue::Array(items)),
+            ])),
+        ));
+    }
+    if let Some(id) = uri.strip_prefix("deepseekcode://runtime/tasks/") {
+        let task = state.store.load_task(id)?;
+        return Ok(mcp_resource_text_content(
+            uri,
+            "application/json",
+            json_value_to_string(&task_to_json(&task)),
+        ));
+    }
+    Err(app_error(format!("unknown MCP resource uri: {uri}")))
+}
+
+fn workspace_resource_uri(workspace: &Path) -> String {
+    format!("file://{}", workspace.display())
+}
+
+fn mcp_resource_text_content(uri: &str, mime_type: &str, text: String) -> JsonValue {
+    object([
+        ("uri", JsonValue::String(uri.to_string())),
+        ("mimeType", JsonValue::String(mime_type.to_string())),
+        ("text", JsonValue::String(text)),
+    ])
+}
+
+fn execute_mcp_tool(
+    name: &str,
+    arguments: &BTreeMap<String, JsonValue>,
+    state: &McpStdioState,
+) -> AppResult<String> {
+    let input = mcp_input_with_workspace_defaults(name, tool_input_from_json(arguments), state);
+    let output = match name {
+        "list_files" => ListFilesTool.execute(input)?,
+        "list_dir" => ListDirTool.execute(input)?,
+        "read_file" => ReadFileTool.execute(input)?,
+        "retrieve_tool_result" => RetrieveToolResultTool.execute(input)?,
+        "search_text" => SearchTextTool.execute(input)?,
+        "grep_files" => GrepFilesTool.execute(input)?,
+        "file_search" => FileSearchTool.execute(input)?,
+        "web_search" => WebSearchTool.execute(input)?,
+        "fetch_url" => FetchUrlTool.execute(input)?,
+        "finance" => FinanceTool.execute(input)?,
+        "git_status" => GitStatusTool.execute(input)?,
+        "git_diff" => GitDiffTool.execute(input)?,
+        "project_map" => ProjectMapTool.execute(input)?,
+        "validate_data" => ValidateDataTool.execute(input)?,
+        "git_log" => GitLogTool.execute(input)?,
+        "git_show" => GitShowTool.execute(input)?,
+        "git_blame" => GitBlameTool.execute(input)?,
+        "github_issue_context" => GithubIssueContextTool.execute(input)?,
+        "github_pr_context" => GithubPrContextTool.execute(input)?,
+        "github_comment" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `github_comment` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_github_comment(input, state);
+        }
+        "github_close_issue" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `github_close_issue` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_github_close_issue(input, state);
+        }
+        "diagnostics" => DiagnosticsTool.execute(input)?,
+        "run_tests" => {
+            if !mcp_side_effect_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP side-effect tool `run_tests` is disabled; set DSCODE_MCP_ENABLE_SIDE_EFFECTS=1 for trusted direct execution or DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 to route through runtime approvals",
+                ));
+            }
+            return execute_mcp_run_tests(input, state);
+        }
+        "apply_patch" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `apply_patch` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_apply_patch(input, state);
+        }
+        "write_file" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `write_file` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_write_file(input, state);
+        }
+        "edit_file" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `edit_file` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_edit_file(input, state);
+        }
+        "delete_file" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `delete_file` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_delete_file(input, state);
+        }
+        "copy_file" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `copy_file` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_copy_file(input, state);
+        }
+        "move_file" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `move_file` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_move_file(input, state);
+        }
+        "revert_turn" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `revert_turn` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route rollback restores through runtime approvals",
+                ));
+            }
+            return execute_mcp_revert_turn(input, state);
+        }
+        "run_shell" => {
+            if !mcp_side_effect_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP side-effect tool `run_shell` is disabled; set DSCODE_MCP_ENABLE_SIDE_EFFECTS=1 for trusted direct execution or DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 to route through runtime approvals",
+                ));
+            }
+            return execute_mcp_run_shell(input, state);
+        }
+        "runtime_health" => {
+            return Ok(json_value_to_string(&object([
+                ("status", JsonValue::String("ok".to_string())),
+                ("service", JsonValue::String("DeepSeekCode".to_string())),
+                (
+                    "version",
+                    JsonValue::String(env!("CARGO_PKG_VERSION").to_string()),
+                ),
+                ("runtime", JsonValue::String("mcp".to_string())),
+            ])))
+        }
+        "runtime_list_sessions" => {
+            let limit = mcp_limit(arguments, 20, 100);
+            let sessions = state
+                .store
+                .list_sessions(limit)?
+                .iter()
+                .map(session_to_json)
+                .collect::<Vec<_>>();
+            return Ok(json_value_to_string(&JsonValue::Array(sessions)));
+        }
+        "runtime_list_threads" => {
+            let limit = mcp_limit(arguments, 20, 100);
+            let threads = state
+                .store
+                .list_threads(limit)?
+                .iter()
+                .map(thread_to_json)
+                .collect::<Vec<_>>();
+            return Ok(json_value_to_string(&JsonValue::Array(threads)));
+        }
+        "runtime_read_thread" => {
+            let thread_id = mcp_required_string(arguments, "thread_id")?;
+            let thread = state.store.load_thread(thread_id)?;
+            let turns = state
+                .store
+                .list_turns(thread_id)?
+                .iter()
+                .map(turn_to_json)
+                .collect::<Vec<_>>();
+            let items = state
+                .store
+                .list_items(thread_id, None)?
+                .iter()
+                .map(item_to_json)
+                .collect::<Vec<_>>();
+            return Ok(json_value_to_string(&object([
+                ("thread", thread_to_json(&thread)),
+                ("turns", JsonValue::Array(turns)),
+                ("items", JsonValue::Array(items)),
+            ])));
+        }
+        "runtime_list_tasks" => {
+            let limit = mcp_limit(arguments, 20, 100);
+            let tasks = state
+                .store
+                .list_tasks(None, None, limit)?
+                .iter()
+                .map(task_to_json)
+                .collect::<Vec<_>>();
+            return Ok(json_value_to_string(&JsonValue::Array(tasks)));
+        }
+        "runtime_read_task" => {
+            let task_id = mcp_required_string(arguments, "task_id")?;
+            let task = state.store.load_task(task_id)?;
+            return Ok(json_value_to_string(&task_to_json(&task)));
+        }
+        _ => return Err(app_error(format!("unknown MCP tool: {name}"))),
+    };
+    Ok(output.summary)
+}
+
+fn mcp_input_with_workspace_defaults(
+    name: &str,
+    mut input: ToolInput,
+    state: &McpStdioState,
+) -> ToolInput {
+    input
+        .args
+        .entry("cwd".to_string())
+        .or_insert_with(|| state.workspace.display().to_string());
+    match name {
+        "read_file" => absolutize_mcp_path_arg(&mut input, "path", &state.workspace),
+        "validate_data" => {
+            if input.get("path").is_some() {
+                absolutize_mcp_path_arg(&mut input, "path", &state.workspace);
+            }
+        }
+        "list_files" | "search_text" => {
+            input
+                .args
+                .entry("root".to_string())
+                .or_insert_with(|| state.workspace.display().to_string());
+            absolutize_mcp_path_arg(&mut input, "root", &state.workspace);
+        }
+        "list_dir" | "grep_files" | "file_search" | "project_map" => {
+            input
+                .args
+                .entry("path".to_string())
+                .or_insert_with(|| state.workspace.display().to_string());
+            absolutize_mcp_path_arg(&mut input, "path", &state.workspace);
+        }
+        _ => {}
+    }
+    input
+}
+
+fn absolutize_mcp_path_arg(input: &mut ToolInput, key: &str, workspace: &Path) {
+    let Some(value) = input.args.get(key).cloned() else {
+        return;
+    };
+    let path = Path::new(&value);
+    if path.is_absolute() {
+        return;
+    }
+    input
+        .args
+        .insert(key.to_string(), workspace.join(path).display().to_string());
+}
+
+fn mcp_side_effect_tools_enabled(state: &McpStdioState) -> bool {
+    state.allow_side_effect_tools || state.approval_thread_id.is_some()
+}
+
+fn mcp_write_tools_enabled(state: &McpStdioState) -> bool {
+    state.approval_thread_id.is_some()
+}
+
+fn execute_mcp_apply_patch(mut input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    input
+        .args
+        .entry("cwd".to_string())
+        .or_insert_with(|| state.workspace.display().to_string());
+    let Some(thread_id) = state.approval_thread_id.as_deref() else {
+        return Err(app_error(
+            "MCP write tool `apply_patch` is disabled; durable runtime approvals are required",
+        ));
+    };
+    if state.approval.require_write_confirmation && !env_flag("DSCODE_AUTO_APPROVE_WRITES") {
+        let approval = state.store.append_permission_request(
+            thread_id,
+            state.approval_turn_id.as_deref(),
+            "apply_patch".to_string(),
+            "write".to_string(),
+            mcp_apply_patch_target(&input),
+            input.args.clone(),
+        )?;
+        wait_for_mcp_permission_response(state, thread_id, &approval, "apply_patch")?;
+    }
+    Ok(ApplyPatchTool::new(state.diagnostics.clone())
+        .execute(input)?
+        .summary)
+}
+
+fn mcp_apply_patch_target(input: &ToolInput) -> String {
+    if let Some(path) = input.get("path") {
+        return path.to_string();
+    }
+    if let Some(cwd) = input.get("cwd") {
+        return format!("{cwd} (unified diff)");
+    }
+    "current workspace".to_string()
+}
+
+fn execute_mcp_write_file(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    let Some(path) = input.get("path") else {
+        return Err(app_error("write_file requires a path"));
+    };
+    let Some(content) = input.get("content") else {
+        return Err(app_error("write_file requires content"));
+    };
+    let target = safe_mcp_workspace_path(&state.workspace, path, "write_file")?;
+    let Some(thread_id) = state.approval_thread_id.as_deref() else {
+        return Err(app_error(
+            "MCP write tool `write_file` is disabled; durable runtime approvals are required",
+        ));
+    };
+    if state.approval.require_write_confirmation && !env_flag("DSCODE_AUTO_APPROVE_WRITES") {
+        let approval = state.store.append_permission_request(
+            thread_id,
+            state.approval_turn_id.as_deref(),
+            "write_file".to_string(),
+            "write".to_string(),
+            path.to_string(),
+            input.args.clone(),
+        )?;
+        wait_for_mcp_permission_response(state, thread_id, &approval, "write_file")?;
+    }
+    if let Ok(metadata) = fs::symlink_metadata(&target) {
+        if metadata.file_type().is_symlink() {
+            return Err(app_error(format!(
+                "write_file refuses symlink target: {}",
+                target.display()
+            )));
+        }
+        if metadata.is_dir() {
+            return Err(app_error(format!(
+                "write_file target is a directory: {}",
+                target.display()
+            )));
+        }
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let existed = target.exists();
+    fs::write(&target, content)?;
+    Ok(format!(
+        "Wrote {} bytes to {} ({})",
+        content.len(),
+        path,
+        if existed { "overwritten" } else { "created" }
+    ))
+}
+
+fn execute_mcp_edit_file(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    let Some(path) = input.get("path") else {
+        return Err(app_error("edit_file requires a path"));
+    };
+    let Some(thread_id) = state.approval_thread_id.as_deref() else {
+        return Err(app_error(
+            "MCP write tool `edit_file` is disabled; durable runtime approvals are required",
+        ));
+    };
+    if state.approval.require_write_confirmation && !env_flag("DSCODE_AUTO_APPROVE_WRITES") {
+        let approval = state.store.append_permission_request(
+            thread_id,
+            state.approval_turn_id.as_deref(),
+            "edit_file".to_string(),
+            "write".to_string(),
+            path.to_string(),
+            input.args.clone(),
+        )?;
+        wait_for_mcp_permission_response(state, thread_id, &approval, "edit_file")?;
+    }
+    Ok(EditFileTool.execute(input)?.summary)
+}
+
+fn execute_mcp_delete_file(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    let Some(path) = input.get("path") else {
+        return Err(app_error("delete_file requires a path"));
+    };
+    let target = safe_mcp_workspace_path(&state.workspace, path, "delete_file")?;
+    let Some(thread_id) = state.approval_thread_id.as_deref() else {
+        return Err(app_error(
+            "MCP write tool `delete_file` is disabled; durable runtime approvals are required",
+        ));
+    };
+    if state.approval.require_write_confirmation && !env_flag("DSCODE_AUTO_APPROVE_WRITES") {
+        let approval = state.store.append_permission_request(
+            thread_id,
+            state.approval_turn_id.as_deref(),
+            "delete_file".to_string(),
+            "write".to_string(),
+            path.to_string(),
+            input.args.clone(),
+        )?;
+        wait_for_mcp_permission_response(state, thread_id, &approval, "delete_file")?;
+    }
+    let metadata = fs::symlink_metadata(&target).map_err(|error| {
+        app_error(format!(
+            "delete_file failed to inspect `{}`: {error}",
+            target.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(app_error(format!(
+            "delete_file refuses symlink target: {}",
+            target.display()
+        )));
+    }
+    if metadata.is_dir() {
+        return Err(app_error(format!(
+            "delete_file target is a directory: {}",
+            target.display()
+        )));
+    }
+    fs::remove_file(&target)?;
+    Ok(format!("Deleted file {path}"))
+}
+
+fn execute_mcp_copy_file(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    let Some(source_path) = input.get("source_path") else {
+        return Err(app_error("copy_file requires source_path"));
+    };
+    let Some(destination_path) = input.get("destination_path") else {
+        return Err(app_error("copy_file requires destination_path"));
+    };
+    let source = safe_mcp_workspace_path(&state.workspace, source_path, "copy_file source")?;
+    let destination =
+        safe_mcp_workspace_path(&state.workspace, destination_path, "copy_file destination")?;
+    if source == destination {
+        return Err(app_error("copy_file source and destination are the same"));
+    }
+    let Some(thread_id) = state.approval_thread_id.as_deref() else {
+        return Err(app_error(
+            "MCP write tool `copy_file` is disabled; durable runtime approvals are required",
+        ));
+    };
+    if state.approval.require_write_confirmation && !env_flag("DSCODE_AUTO_APPROVE_WRITES") {
+        let approval = state.store.append_permission_request(
+            thread_id,
+            state.approval_turn_id.as_deref(),
+            "copy_file".to_string(),
+            "write".to_string(),
+            format!("{source_path} -> {destination_path}"),
+            input.args.clone(),
+        )?;
+        wait_for_mcp_permission_response(state, thread_id, &approval, "copy_file")?;
+    }
+    let source_metadata = fs::symlink_metadata(&source).map_err(|error| {
+        app_error(format!(
+            "copy_file failed to inspect source `{}`: {error}",
+            source.display()
+        ))
+    })?;
+    if source_metadata.file_type().is_symlink() {
+        return Err(app_error(format!(
+            "copy_file refuses symlink source: {}",
+            source.display()
+        )));
+    }
+    if source_metadata.is_dir() {
+        return Err(app_error(format!(
+            "copy_file source is a directory: {}",
+            source.display()
+        )));
+    }
+    if let Ok(destination_metadata) = fs::symlink_metadata(&destination) {
+        if destination_metadata.file_type().is_symlink() {
+            return Err(app_error(format!(
+                "copy_file refuses symlink destination: {}",
+                destination.display()
+            )));
+        }
+        return Err(app_error(format!(
+            "copy_file destination already exists: {}",
+            destination.display()
+        )));
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&source, &destination)?;
+    Ok(format!("Copied file {source_path} to {destination_path}"))
+}
+
+fn execute_mcp_move_file(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    let Some(source_path) = input.get("source_path") else {
+        return Err(app_error("move_file requires source_path"));
+    };
+    let Some(destination_path) = input.get("destination_path") else {
+        return Err(app_error("move_file requires destination_path"));
+    };
+    let source = safe_mcp_workspace_path(&state.workspace, source_path, "move_file source")?;
+    let destination =
+        safe_mcp_workspace_path(&state.workspace, destination_path, "move_file destination")?;
+    if source == destination {
+        return Err(app_error("move_file source and destination are the same"));
+    }
+    let Some(thread_id) = state.approval_thread_id.as_deref() else {
+        return Err(app_error(
+            "MCP write tool `move_file` is disabled; durable runtime approvals are required",
+        ));
+    };
+    if state.approval.require_write_confirmation && !env_flag("DSCODE_AUTO_APPROVE_WRITES") {
+        let approval = state.store.append_permission_request(
+            thread_id,
+            state.approval_turn_id.as_deref(),
+            "move_file".to_string(),
+            "write".to_string(),
+            format!("{source_path} -> {destination_path}"),
+            input.args.clone(),
+        )?;
+        wait_for_mcp_permission_response(state, thread_id, &approval, "move_file")?;
+    }
+    let source_metadata = fs::symlink_metadata(&source).map_err(|error| {
+        app_error(format!(
+            "move_file failed to inspect source `{}`: {error}",
+            source.display()
+        ))
+    })?;
+    if source_metadata.file_type().is_symlink() {
+        return Err(app_error(format!(
+            "move_file refuses symlink source: {}",
+            source.display()
+        )));
+    }
+    if source_metadata.is_dir() {
+        return Err(app_error(format!(
+            "move_file source is a directory: {}",
+            source.display()
+        )));
+    }
+    if let Ok(destination_metadata) = fs::symlink_metadata(&destination) {
+        if destination_metadata.file_type().is_symlink() {
+            return Err(app_error(format!(
+                "move_file refuses symlink destination: {}",
+                destination.display()
+            )));
+        }
+        return Err(app_error(format!(
+            "move_file destination already exists: {}",
+            destination.display()
+        )));
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(&source, &destination)?;
+    Ok(format!("Moved file {source_path} to {destination_path}"))
+}
+
+fn execute_mcp_revert_turn(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    let Some(thread_id) = state.approval_thread_id.as_deref() else {
+        return Err(app_error(
+            "MCP write tool `revert_turn` is disabled; durable runtime approvals are required",
+        ));
+    };
+    if state.approval.require_write_confirmation && !env_flag("DSCODE_AUTO_APPROVE_WRITES") {
+        let approval = state.store.append_permission_request(
+            thread_id,
+            state.approval_turn_id.as_deref(),
+            "revert_turn".to_string(),
+            "write".to_string(),
+            mcp_revert_turn_target(&input),
+            input.args.clone(),
+        )?;
+        wait_for_mcp_permission_response(state, thread_id, &approval, "revert_turn")?;
+    }
+    Ok(RevertTurnTool::from_store(state.rollback.clone())
+        .execute(input)?
+        .summary)
+}
+
+fn execute_mcp_github_comment(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    let Some(thread_id) = state.approval_thread_id.as_deref() else {
+        return Err(app_error(
+            "MCP write tool `github_comment` is disabled; durable runtime approvals are required",
+        ));
+    };
+    if state.approval.require_write_confirmation && !env_flag("DSCODE_AUTO_APPROVE_WRITES") {
+        let approval = state.store.append_permission_request(
+            thread_id,
+            state.approval_turn_id.as_deref(),
+            "github_comment".to_string(),
+            "write".to_string(),
+            mcp_github_comment_target(&input),
+            input.args.clone(),
+        )?;
+        wait_for_mcp_permission_response(state, thread_id, &approval, "github_comment")?;
+    }
+    Ok(GithubCommentTool.execute(input)?.summary)
+}
+
+fn execute_mcp_github_close_issue(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    let Some(thread_id) = state.approval_thread_id.as_deref() else {
+        return Err(app_error(
+            "MCP write tool `github_close_issue` is disabled; durable runtime approvals are required",
+        ));
+    };
+    if state.approval.require_write_confirmation && !env_flag("DSCODE_AUTO_APPROVE_WRITES") {
+        let approval = state.store.append_permission_request(
+            thread_id,
+            state.approval_turn_id.as_deref(),
+            "github_close_issue".to_string(),
+            "write".to_string(),
+            mcp_github_close_issue_target(&input),
+            input.args.clone(),
+        )?;
+        wait_for_mcp_permission_response(state, thread_id, &approval, "github_close_issue")?;
+    }
+    Ok(GithubCloseIssueTool.execute(input)?.summary)
+}
+
+fn mcp_revert_turn_target(input: &ToolInput) -> String {
+    if let Some(id) = input
+        .get("snapshot_id")
+        .or_else(|| input.get("checkpoint_id"))
+        .or_else(|| input.get("id"))
+    {
+        return format!("snapshot {id}");
+    }
+    if let Some(turn_id) = input.get("turn_id") {
+        return format!("turn {turn_id}");
+    }
+    format!(
+        "turn_offset {}",
+        input
+            .get("turn_offset")
+            .or_else(|| input.get("offset"))
+            .unwrap_or("1")
+    )
+}
+
+fn mcp_github_comment_target(input: &ToolInput) -> String {
+    let number = input
+        .get("number")
+        .or_else(|| input.get("issue"))
+        .or_else(|| input.get("pr"))
+        .or_else(|| input.get("ref"))
+        .unwrap_or("?");
+    let target = input.get("target").unwrap_or("issue/pr");
+    let repo = input
+        .get("repo")
+        .or_else(|| input.get("repository"))
+        .map(|value| format!(" in {value}"))
+        .unwrap_or_default();
+    format!("github {target} #{number} comment{repo}")
+}
+
+fn mcp_github_close_issue_target(input: &ToolInput) -> String {
+    let number = input
+        .get("number")
+        .or_else(|| input.get("issue"))
+        .or_else(|| input.get("ref"))
+        .unwrap_or("?");
+    let repo = input
+        .get("repo")
+        .or_else(|| input.get("repository"))
+        .map(|value| format!(" in {value}"))
+        .unwrap_or_default();
+    format!("github issue #{number} close{repo}")
+}
+
+fn safe_mcp_workspace_path(
+    workspace: &Path,
+    raw_path: &str,
+    tool_name: &str,
+) -> AppResult<PathBuf> {
+    let raw = Path::new(raw_path);
+    if raw.as_os_str().is_empty() || raw.is_absolute() {
+        return Err(app_error(format!("unsafe {tool_name} path `{raw_path}`")));
+    }
+    let mut relative = PathBuf::new();
+    for component in raw.components() {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            Component::CurDir => {}
+            _ => return Err(app_error(format!("unsafe {tool_name} path `{raw_path}`"))),
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(app_error(format!("unsafe {tool_name} path `{raw_path}`")));
+    }
+    let target = workspace.join(relative);
+    ensure_mcp_path_parent_within_workspace(workspace, &target, tool_name)?;
+    Ok(target)
+}
+
+fn ensure_mcp_path_parent_within_workspace(
+    workspace: &Path,
+    target: &Path,
+    tool_name: &str,
+) -> AppResult<()> {
+    let workspace_root = fs::canonicalize(workspace).map_err(|error| {
+        app_error(format!(
+            "could not resolve MCP workspace `{}`: {error}",
+            workspace.display()
+        ))
+    })?;
+    let mut ancestor = target.parent();
+    while let Some(path) = ancestor {
+        if path.exists() {
+            let parent = fs::canonicalize(path).map_err(|error| {
+                app_error(format!(
+                    "could not resolve {tool_name} parent `{}`: {error}",
+                    path.display()
+                ))
+            })?;
+            if parent.starts_with(&workspace_root) {
+                return Ok(());
+            }
+            return Err(app_error(format!(
+                "{tool_name} parent escapes MCP workspace: {}",
+                path.display()
+            )));
+        }
+        ancestor = path.parent();
+    }
+    Err(app_error(format!(
+        "{tool_name} target has no existing workspace ancestor: {}",
+        target.display()
+    )))
+}
+
+fn execute_mcp_run_shell(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    let Some(command) = input.get("command") else {
+        return Err(app_error("run_shell requires a command"));
+    };
+    if !is_safe_shell_command(command) {
+        return Err(app_error(format!("command not allowed: {command}")));
+    }
+
+    if let Some(thread_id) = state.approval_thread_id.as_deref() {
+        if state.approval.require_shell_confirmation && !env_flag("DSCODE_AUTO_APPROVE_SHELL") {
+            let approval = state.store.append_permission_request(
+                thread_id,
+                state.approval_turn_id.as_deref(),
+                "run_shell".to_string(),
+                "shell".to_string(),
+                command.to_string(),
+                input.args.clone(),
+            )?;
+            wait_for_mcp_permission_response(state, thread_id, &approval, "run_shell")?;
+        }
+    } else if !state.allow_side_effect_tools {
+        return Err(app_error(
+            "MCP side-effect tool `run_shell` is disabled; set DSCODE_MCP_ENABLE_SIDE_EFFECTS=1 for trusted direct execution or DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 to route through runtime approvals",
+        ));
+    }
+
+    Ok(RunShellTool.execute(input)?.summary)
+}
+
+fn execute_mcp_run_tests(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    let command = render_run_tests_command(&input)?;
+    if let Some(thread_id) = state.approval_thread_id.as_deref() {
+        if state.approval.require_shell_confirmation && !env_flag("DSCODE_AUTO_APPROVE_SHELL") {
+            let approval = state.store.append_permission_request(
+                thread_id,
+                state.approval_turn_id.as_deref(),
+                "run_tests".to_string(),
+                "shell".to_string(),
+                command,
+                input.args.clone(),
+            )?;
+            wait_for_mcp_permission_response(state, thread_id, &approval, "run_tests")?;
+        }
+    } else if !state.allow_side_effect_tools {
+        return Err(app_error(
+            "MCP side-effect tool `run_tests` is disabled; set DSCODE_MCP_ENABLE_SIDE_EFFECTS=1 for trusted direct execution or DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 to route through runtime approvals",
+        ));
+    }
+
+    Ok(RunTestsTool.execute(input)?.summary)
+}
+
+fn wait_for_mcp_permission_response(
+    state: &McpStdioState,
+    thread_id: &str,
+    approval: &RuntimeEvent,
+    tool_name: &str,
+) -> AppResult<()> {
+    let mut polls = 0_usize;
+    loop {
+        for event in state.store.read_events(thread_id, approval.seq)? {
+            if let Some(approved) = mcp_approval_response_decision(&event, &approval.id) {
+                if approved {
+                    return Ok(());
+                }
+                return Err(app_error(format!(
+                    "MCP {tool_name} denied by runtime approval {}",
+                    approval.id
+                )));
+            }
+        }
+        polls = polls.saturating_add(1);
+        if state
+            .approval_max_polls
+            .is_some_and(|max_polls| polls >= max_polls)
+        {
+            return Err(app_error(format!(
+                "timed out waiting for MCP permission response {}",
+                approval.id
+            )));
+        }
+        thread::sleep(state.approval_poll_interval);
+    }
+}
+
+fn mcp_approval_response_decision(event: &RuntimeEvent, request_id: &str) -> Option<bool> {
+    if event.kind != "permission_response" {
+        return None;
+    }
+    let payload = json_as_object(&event.payload)?;
+    let response_request_id = payload.get("request_id").and_then(json_as_string)?;
+    if response_request_id != request_id {
+        return None;
+    }
+    match payload.get("decision").and_then(json_as_string)? {
+        "approved" => Some(true),
+        "denied" => Some(false),
+        _ => None,
+    }
+}
+
+fn tool_input_from_json(arguments: &BTreeMap<String, JsonValue>) -> ToolInput {
+    let mut input = ToolInput::new();
+    for (key, value) in arguments {
+        if matches!(value, JsonValue::Null) {
+            continue;
+        }
+        input = input.with_arg(key, mcp_argument_to_string(value));
+    }
+    input
+}
+
+fn mcp_argument_to_string(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(value) => value.clone(),
+        JsonValue::Number(value) => value.clone(),
+        JsonValue::Bool(value) => value.to_string(),
+        JsonValue::Null => String::new(),
+        JsonValue::Array(_) | JsonValue::Object(_) => json_value_to_string(value),
+    }
+}
+
+fn mcp_limit(arguments: &BTreeMap<String, JsonValue>, default: usize, max: usize) -> usize {
+    arguments
+        .get("limit")
+        .and_then(|value| match value {
+            JsonValue::Number(value) => value.parse::<usize>().ok(),
+            JsonValue::String(value) => value.parse::<usize>().ok(),
+            _ => None,
+        })
+        .unwrap_or(default)
+        .clamp(1, max)
+}
+
+fn mcp_required_string<'a>(
+    arguments: &'a BTreeMap<String, JsonValue>,
+    key: &str,
+) -> AppResult<&'a str> {
+    arguments
+        .get(key)
+        .and_then(json_as_string)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| app_error(format!("MCP tool requires string argument `{key}`")))
+}
+
+fn mcp_success_response(id: JsonValue, result: JsonValue) -> JsonValue {
+    object([
+        ("jsonrpc", JsonValue::String("2.0".to_string())),
+        ("id", id),
+        ("result", result),
+    ])
+}
+
+fn mcp_error_response(id: JsonValue, code: i64, message: &str, data: &str) -> JsonValue {
+    object([
+        ("jsonrpc", JsonValue::String("2.0".to_string())),
+        ("id", id),
+        (
+            "error",
+            object([
+                ("code", JsonValue::Number(code.to_string())),
+                ("message", JsonValue::String(message.to_string())),
+                ("data", JsonValue::String(data.to_string())),
+            ]),
+        ),
+    ])
+}
+
+fn mcp_tool_text_result(text: String, is_error: bool) -> JsonValue {
+    object([
+        (
+            "content",
+            JsonValue::Array(vec![object([
+                ("type", JsonValue::String("text".to_string())),
+                ("text", JsonValue::String(text)),
+            ])]),
+        ),
+        ("isError", JsonValue::Bool(is_error)),
+    ])
+}
+
+fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
+    let mut tools = vec![
+        mcp_tool_definition(
+            "list_files",
+            "List workspace files with depth and result limits.",
+            mcp_schema(
+                vec![
+                    ("root", string_property("Directory to list, default `.`.")),
+                    (
+                        "max_depth",
+                        number_property("Maximum directory depth, default 3."),
+                    ),
+                    ("limit", number_property("Maximum entries, default 40.")),
+                ],
+                &[],
+            ),
+        ),
+        mcp_tool_definition(
+            "list_dir",
+            "DeepSeek-TUI-compatible alias for listing workspace files and directories.",
+            mcp_schema(
+                vec![
+                    ("path", string_property("Directory to list, default `.`.")),
+                    (
+                        "max_depth",
+                        number_property("Maximum directory depth, default 3."),
+                    ),
+                    ("limit", number_property("Maximum entries, default 40.")),
+                ],
+                &[],
+            ),
+        ),
+        mcp_tool_definition(
+            "read_file",
+            "Read a UTF-8 file with line numbers.",
+            mcp_schema(
+                vec![
+                    ("path", string_property("Path to read.")),
+                    ("max_lines", number_property("Maximum lines, default 80.")),
+                ],
+                &["path"],
+            ),
+        ),
+        mcp_tool_definition(
+            "retrieve_tool_result",
+            "Retrieve a spilled large tool result by id, filename, or spillover path.",
+            mcp_schema(
+                vec![
+                    ("ref", string_property("Tool output ref or spillover path.")),
+                    (
+                        "mode",
+                        string_property("summary, head, tail, lines, or query."),
+                    ),
+                    ("query", string_property("Substring for query mode.")),
+                    ("lines", string_property("Line selector such as 10-40.")),
+                    ("start_line", number_property("1-based start line.")),
+                    ("end_line", number_property("1-based end line.")),
+                    ("line_count", number_property("Head/tail line count.")),
+                    ("max_bytes", number_property("Maximum excerpt bytes.")),
+                    ("max_matches", number_property("Maximum matches.")),
+                    ("context_lines", number_property("Query context lines.")),
+                ],
+                &["ref"],
+            ),
+        ),
+        mcp_tool_definition(
+            "search_text",
+            "Search workspace text for a literal query.",
+            mcp_schema(
+                vec![
+                    ("query", string_property("Literal query to search for.")),
+                    ("root", string_property("Search root, default `.`.")),
+                    ("limit", number_property("Maximum matches, default 20.")),
+                ],
+                &["query"],
+            ),
+        ),
+        mcp_tool_definition(
+            "grep_files",
+            "DeepSeek-TUI-compatible literal text search over workspace files.",
+            mcp_schema(
+                vec![
+                    ("pattern", string_property("Literal pattern to search for.")),
+                    ("path", string_property("Search root, default `.`.")),
+                    (
+                        "max_results",
+                        number_property("Maximum matches, default 20."),
+                    ),
+                    ("limit", number_property("Maximum matches, default 20.")),
+                ],
+                &["pattern"],
+            ),
+        ),
+        mcp_tool_definition(
+            "file_search",
+            "Find workspace files by filename or path.",
+            mcp_schema(
+                vec![
+                    ("query", string_property("Filename or path query.")),
+                    ("path", string_property("Search root, default `.`.")),
+                    (
+                        "extensions",
+                        string_property("Optional comma-separated extensions."),
+                    ),
+                    ("limit", number_property("Maximum matches, default 20.")),
+                    (
+                        "max_results",
+                        number_property("Maximum matches, default 20."),
+                    ),
+                ],
+                &["query"],
+            ),
+        ),
+        mcp_tool_definition(
+            "web_search",
+            "Search the web and return ranked results with URLs and snippets.",
+            mcp_schema(
+                vec![
+                    ("query", string_property("Search query.")),
+                    ("q", string_property("Search query alias.")),
+                    (
+                        "search_query",
+                        string_property("JSON array compatibility form with q/max_results."),
+                    ),
+                    (
+                        "max_results",
+                        number_property("Maximum results, default 5 and max 10."),
+                    ),
+                    (
+                        "timeout_ms",
+                        number_property("Timeout milliseconds, default 15000."),
+                    ),
+                ],
+                &[],
+            ),
+        ),
+        mcp_tool_definition(
+            "fetch_url",
+            "Fetch a known HTTP/HTTPS URL and return decoded text or raw content.",
+            mcp_schema(
+                vec![
+                    ("url", string_property("Absolute HTTP/HTTPS URL.")),
+                    ("format", string_property("text, markdown, or raw.")),
+                    (
+                        "max_bytes",
+                        number_property("Maximum response bytes, default 1000000."),
+                    ),
+                    (
+                        "timeout_ms",
+                        number_property("Timeout milliseconds, default 15000."),
+                    ),
+                ],
+                &["url"],
+            ),
+        ),
+        mcp_tool_definition(
+            "finance",
+            "Fetch a live market quote through a Yahoo Finance-compatible endpoint.",
+            mcp_schema(
+                vec![
+                    ("ticker", string_property("Ticker symbol to look up.")),
+                    ("symbol", string_property("Alias for ticker.")),
+                    (
+                        "type",
+                        string_property("Optional asset type hint such as equity or crypto."),
+                    ),
+                    ("market", string_property("Optional market hint.")),
+                    (
+                        "timeout_ms",
+                        number_property("Timeout milliseconds, default 10000."),
+                    ),
+                ],
+                &[],
+            ),
+        ),
+        mcp_tool_definition(
+            "git_status",
+            "Show concise git status for the workspace.",
+            mcp_schema(
+                vec![
+                    (
+                        "cwd",
+                        string_property("Git working directory, default workspace root."),
+                    ),
+                    (
+                        "path",
+                        string_property("Optional pathspec to scope status."),
+                    ),
+                ],
+                &[],
+            ),
+        ),
+        mcp_tool_definition(
+            "git_diff",
+            "Show the current git working-tree diff.",
+            mcp_schema(
+                vec![
+                    (
+                        "cwd",
+                        string_property("Git working directory, default workspace root."),
+                    ),
+                    ("path", string_property("Optional pathspec to scope diff.")),
+                    (
+                        "cached",
+                        string_property("Set true to show staged changes."),
+                    ),
+                    (
+                        "unified",
+                        number_property("Context lines to include, default 3."),
+                    ),
+                    ("max_chars", number_property("Maximum output characters.")),
+                ],
+                &[],
+            ),
+        ),
+        mcp_tool_definition(
+            "project_map",
+            "Render a high-level project tree, summary, and key files.",
+            mcp_schema(
+                vec![
+                    (
+                        "path",
+                        string_property("Project root, default workspace root."),
+                    ),
+                    (
+                        "max_depth",
+                        number_property("Maximum tree depth, default 3."),
+                    ),
+                    (
+                        "limit",
+                        number_property("Maximum tree entries, default 120."),
+                    ),
+                ],
+                &[],
+            ),
+        ),
+        mcp_tool_definition(
+            "validate_data",
+            "Validate JSON or TOML content from inline input or a workspace file.",
+            mcp_schema(
+                vec![
+                    ("path", string_property("Optional file path to validate.")),
+                    (
+                        "content",
+                        string_property("Optional inline content to validate."),
+                    ),
+                    (
+                        "format",
+                        string_property("Validation format: auto, json, or toml."),
+                    ),
+                ],
+                &[],
+            ),
+        ),
+        mcp_tool_definition(
+            "git_log",
+            "Read recent git history.",
+            mcp_schema(
+                vec![
+                    (
+                        "cwd",
+                        string_property("Git working directory, default `.`."),
+                    ),
+                    ("ref", string_property("Optional git ref.")),
+                    ("path", string_property("Optional path filter.")),
+                    ("limit", number_property("Maximum commits, default 20.")),
+                    ("max_chars", number_property("Maximum output characters.")),
+                ],
+                &[],
+            ),
+        ),
+        mcp_tool_definition(
+            "git_show",
+            "Show one git commit or ref with patch.",
+            mcp_schema(
+                vec![
+                    (
+                        "cwd",
+                        string_property("Git working directory, default `.`."),
+                    ),
+                    ("ref", string_property("Git ref, default HEAD.")),
+                    ("path", string_property("Optional path filter.")),
+                    ("max_chars", number_property("Maximum output characters.")),
+                ],
+                &[],
+            ),
+        ),
+        mcp_tool_definition(
+            "git_blame",
+            "Read git blame for a file and line range.",
+            mcp_schema(
+                vec![
+                    (
+                        "cwd",
+                        string_property("Git working directory, default `.`."),
+                    ),
+                    ("path", string_property("File to blame.")),
+                    ("ref", string_property("Git ref, default HEAD.")),
+                    ("line_start", number_property("Start line, default 1.")),
+                    ("line_end", number_property("Optional end line.")),
+                    (
+                        "limit",
+                        number_property("Line count if line_end is omitted."),
+                    ),
+                    ("max_chars", number_property("Maximum output characters.")),
+                ],
+                &["path"],
+            ),
+        ),
+        mcp_tool_definition(
+            "github_issue_context",
+            "Read GitHub issue context through the gh CLI.",
+            mcp_schema(
+                vec![
+                    ("number", string_property("Issue number or reference.")),
+                    ("issue", string_property("Alias for number.")),
+                    ("ref", string_property("Alias for number.")),
+                    ("repo", string_property("Optional owner/repo for gh -R.")),
+                    ("repository", string_property("Alias for repo.")),
+                    (
+                        "include_comments",
+                        string_property("Set false to omit comments, default true."),
+                    ),
+                    ("max_chars", number_property("Maximum JSON characters.")),
+                ],
+                &["number"],
+            ),
+        ),
+        mcp_tool_definition(
+            "github_pr_context",
+            "Read GitHub pull request context through the gh CLI.",
+            mcp_schema(
+                vec![
+                    ("number", string_property("PR number or reference.")),
+                    ("pr", string_property("Alias for number.")),
+                    ("ref", string_property("Alias for number.")),
+                    ("repo", string_property("Optional owner/repo for gh -R.")),
+                    ("repository", string_property("Alias for repo.")),
+                    (
+                        "include_diff",
+                        string_property("Set true to include a bounded patch diff."),
+                    ),
+                    ("max_chars", number_property("Maximum JSON characters.")),
+                    (
+                        "diff_max_chars",
+                        number_property("Maximum diff characters."),
+                    ),
+                ],
+                &["number"],
+            ),
+        ),
+        mcp_tool_definition(
+            "diagnostics",
+            "Run workspace or path-scoped diagnostics.",
+            mcp_schema(
+                vec![
+                    ("cwd", string_property("Workspace directory, default `.`.")),
+                    (
+                        "paths",
+                        string_property("Comma, semicolon, or newline separated paths."),
+                    ),
+                ],
+                &[],
+            ),
+        ),
+    ];
+    if mcp_side_effect_tools_enabled(state) {
+        tools.push(mcp_tool_definition(
+            "run_tests",
+            "Run a supported test command in the workspace. Requires trusted DSCODE_MCP_ENABLE_SIDE_EFFECTS=1 or durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("cwd", string_property("Working directory, default workspace root.")),
+                    ("command", string_property("Optional supported test command.")),
+                    ("args", string_property("Optional safe extra arguments.")),
+                    (
+                        "all_features",
+                        string_property("Set true to add --all-features for cargo test."),
+                    ),
+                ],
+                &[],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "run_shell",
+            "Run an allowlisted shell command in the workspace. Requires trusted DSCODE_MCP_ENABLE_SIDE_EFFECTS=1 or durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("command", string_property("Allowlisted shell command to run.")),
+                    ("cwd", string_property("Working directory, default `.`.")),
+                ],
+                &["command"],
+            ),
+        ));
+    }
+    if mcp_write_tools_enabled(state) {
+        tools.push(mcp_tool_definition(
+            "apply_patch",
+            "Apply a unified diff in the workspace. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("patch", string_property("Unified diff content to apply.")),
+                    (
+                        "cwd",
+                        string_property("Workspace directory, default MCP workspace."),
+                    ),
+                ],
+                &["patch"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "write_file",
+            "Write UTF-8 text to a relative path under the MCP workspace. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    (
+                        "path",
+                        string_property("Relative workspace path to create or overwrite."),
+                    ),
+                    ("content", string_property("Complete UTF-8 file content.")),
+                ],
+                &["path", "content"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "edit_file",
+            "Replace exact text in one UTF-8 file under the MCP workspace. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    (
+                        "path",
+                        string_property("Relative workspace file path to edit."),
+                    ),
+                    ("search", string_property("Exact text to find.")),
+                    ("replace", string_property("Replacement text.")),
+                ],
+                &["path", "search", "replace"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "delete_file",
+            "Delete one regular file at a relative path under the MCP workspace. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![(
+                    "path",
+                    string_property("Relative workspace file path to delete."),
+                )],
+                &["path"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "copy_file",
+            "Copy one regular file between relative paths under the MCP workspace. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    (
+                        "source_path",
+                        string_property("Relative workspace file path to copy."),
+                    ),
+                    (
+                        "destination_path",
+                        string_property("Relative workspace destination path."),
+                    ),
+                ],
+                &["source_path", "destination_path"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "move_file",
+            "Move one regular file between relative paths under the MCP workspace. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    (
+                        "source_path",
+                        string_property("Relative workspace file path to move."),
+                    ),
+                    (
+                        "destination_path",
+                        string_property("Relative workspace destination path."),
+                    ),
+                ],
+                &["source_path", "destination_path"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "revert_turn",
+            "Restore workspace files to a rollback snapshot or recent runtime turn. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    (
+                        "turn_offset",
+                        number_property("1-based recent runtime turn snapshot offset."),
+                    ),
+                    ("offset", number_property("Alias for turn_offset.")),
+                    ("turn_id", string_property("Runtime assistant turn id.")),
+                    (
+                        "thread_id",
+                        string_property("Optional runtime thread id used with turn_offset."),
+                    ),
+                    ("snapshot_id", string_property("Rollback snapshot id.")),
+                    ("checkpoint_id", string_property("Alias for snapshot_id.")),
+                    ("id", string_property("Alias for snapshot_id or turn id.")),
+                    ("dry_run", string_property("Set true to preview only.")),
+                    ("apply", string_property("Set false to preview only.")),
+                ],
+                &[],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "github_comment",
+            "Post an evidence-backed GitHub issue or PR comment through the gh CLI. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("target", string_property("Comment target: issue or pr.")),
+                    ("number", string_property("Issue or PR number.")),
+                    ("body", string_property("Comment body to post.")),
+                    (
+                        "evidence",
+                        string_property("JSON object with supporting evidence."),
+                    ),
+                    ("repo", string_property("Optional owner/repo for gh -R.")),
+                    ("repository", string_property("Alias for repo.")),
+                    ("dry_run", string_property("Set true to validate only.")),
+                ],
+                &["target", "number", "body", "evidence"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "github_close_issue",
+            "Close a GitHub issue as completed through the gh CLI after structured evidence. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("number", string_property("Issue number.")),
+                    (
+                        "acceptance_criteria",
+                        string_property("JSON array of satisfied acceptance criteria."),
+                    ),
+                    (
+                        "evidence",
+                        string_property("JSON object with files_changed, tests_run, and final_status."),
+                    ),
+                    ("comment", string_property("Optional closing comment.")),
+                    (
+                        "allow_dirty",
+                        string_property("Set true to allow a dirty local worktree."),
+                    ),
+                    ("cwd", string_property("Workspace directory for git status.")),
+                    ("repo", string_property("Optional owner/repo for gh -R.")),
+                    ("repository", string_property("Alias for repo.")),
+                    ("dry_run", string_property("Set true to validate only.")),
+                ],
+                &["number", "acceptance_criteria", "evidence"],
+            ),
+        ));
+    }
+    tools.extend([
+        mcp_tool_definition(
+            "runtime_health",
+            "Return DeepSeekCode MCP server health metadata.",
+            mcp_schema(Vec::new(), &[]),
+        ),
+        mcp_tool_definition(
+            "runtime_list_sessions",
+            "List durable runtime sessions.",
+            mcp_schema(vec![("limit", number_property("Maximum sessions."))], &[]),
+        ),
+        mcp_tool_definition(
+            "runtime_list_threads",
+            "List durable runtime threads.",
+            mcp_schema(vec![("limit", number_property("Maximum threads."))], &[]),
+        ),
+        mcp_tool_definition(
+            "runtime_read_thread",
+            "Read one durable runtime thread with turns and items.",
+            mcp_schema(
+                vec![("thread_id", string_property("Runtime thread id."))],
+                &["thread_id"],
+            ),
+        ),
+        mcp_tool_definition(
+            "runtime_list_tasks",
+            "List durable runtime tasks.",
+            mcp_schema(vec![("limit", number_property("Maximum tasks."))], &[]),
+        ),
+        mcp_tool_definition(
+            "runtime_read_task",
+            "Read one durable runtime task.",
+            mcp_schema(
+                vec![("task_id", string_property("Runtime task id."))],
+                &["task_id"],
+            ),
+        ),
+    ]);
+    tools
+}
+
+fn mcp_tool_definition(name: &str, description: &str, input_schema: JsonValue) -> JsonValue {
+    object([
+        ("name", JsonValue::String(name.to_string())),
+        ("description", JsonValue::String(description.to_string())),
+        ("inputSchema", input_schema),
+    ])
+}
+
+fn mcp_schema(properties: Vec<(&str, JsonValue)>, required: &[&str]) -> JsonValue {
+    let mut property_map = BTreeMap::new();
+    for (name, property) in properties {
+        property_map.insert(name.to_string(), property);
+    }
+    object([
+        ("type", JsonValue::String("object".to_string())),
+        ("properties", JsonValue::Object(property_map)),
+        (
+            "required",
+            JsonValue::Array(
+                required
+                    .iter()
+                    .map(|field| JsonValue::String((*field).to_string()))
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
+fn string_property(description: &str) -> JsonValue {
+    object([
+        ("type", JsonValue::String("string".to_string())),
+        ("description", JsonValue::String(description.to_string())),
+    ])
+}
+
+fn number_property(description: &str) -> JsonValue {
+    object([
+        ("type", JsonValue::String("number".to_string())),
+        ("description", JsonValue::String(description.to_string())),
+    ])
+}
+
+struct AcpStdioState {
+    config: AppConfig,
+    store: RuntimeStore,
+    rollback: RollbackStore,
+    default_cwd: PathBuf,
+    approval_poll_interval: Duration,
+    approval_max_polls: Option<usize>,
+    sessions: BTreeMap<String, AcpSession>,
+    next_session: u64,
+}
+
+struct AcpSession {
+    cwd: PathBuf,
+    runtime_session_id: Option<String>,
+    runtime_thread_id: Option<String>,
+}
+
+struct AcpToolCallOutcome {
+    result: JsonValue,
+    text: String,
+    is_error: bool,
+    turn_id: Option<String>,
+    call_item_id: Option<String>,
+    result_item_id: Option<String>,
+}
+
+enum AcpDispatch {
+    Responses(Vec<JsonValue>),
+    Shutdown(Vec<JsonValue>),
+}
+
+fn run_acp_stdio(args: ServeAcpArgs) -> AppResult<()> {
+    let workspace = args
+        .workspace
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
+    let config = {
+        let cwd_guard = CwdGuard::enter(&workspace)?;
+        let config = load_or_default()?;
+        cwd_guard.restore()?;
+        config
+    };
+    let mut state = AcpStdioState {
+        store: RuntimeStore::new(PathBuf::from(&config.workspace.config_dir).join("runtime")),
+        rollback: RollbackStore::new(PathBuf::from(&config.workspace.config_dir).join("rollback")),
+        config,
+        default_cwd: workspace,
+        approval_poll_interval: Duration::from_millis(250),
+        approval_max_polls: None,
+        sessions: BTreeMap::new(),
+        next_session: 0,
+    };
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+
+    for line in BufReader::new(stdin.lock()).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match acp_dispatch_for_message(&line, &mut state) {
+            AcpDispatch::Responses(responses) => {
+                write_json_responses(&mut stdout, responses)?;
+            }
+            AcpDispatch::Shutdown(responses) => {
+                write_json_responses(&mut stdout, responses)?;
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn write_json_responses<W: Write>(writer: &mut W, responses: Vec<JsonValue>) -> AppResult<()> {
+    for response in responses {
+        writer.write_all(json_value_to_string(&response).as_bytes())?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+    }
+    Ok(())
+}
+
+fn acp_dispatch_for_message(message: &str, state: &mut AcpStdioState) -> AcpDispatch {
+    let root = match parse_root_object(message) {
+        Ok(root) => root,
+        Err(error) => {
+            return AcpDispatch::Responses(vec![jsonrpc_error_response(
+                JsonValue::Null,
+                -32700,
+                &format!("invalid json: {error}"),
+            )]);
+        }
+    };
+    if root.get("jsonrpc").and_then(json_as_string) != Some("2.0") {
+        let id = root.get("id").cloned().unwrap_or(JsonValue::Null);
+        return AcpDispatch::Responses(vec![jsonrpc_error_response(
+            id,
+            -32600,
+            "jsonrpc version must be 2.0",
+        )]);
+    }
+    let id = root.get("id").cloned();
+    let Some(method) = root.get("method").and_then(json_as_string) else {
+        return AcpDispatch::Responses(vec![jsonrpc_error_response(
+            id.unwrap_or(JsonValue::Null),
+            -32600,
+            "missing method",
+        )]);
+    };
+    let params = root
+        .get("params")
+        .and_then(json_as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    let Some(response_id) = id else {
+        return AcpDispatch::Responses(Vec::new());
+    };
+    match acp_handle_request(method, &params, state) {
+        Ok(AcpDispatch::Responses(mut responses)) => {
+            for response in &mut responses {
+                if acp_response_needs_id(response) {
+                    add_jsonrpc_id(response, response_id.clone());
+                }
+            }
+            AcpDispatch::Responses(responses)
+        }
+        Ok(AcpDispatch::Shutdown(mut responses)) => {
+            for response in &mut responses {
+                if acp_response_needs_id(response) {
+                    add_jsonrpc_id(response, response_id.clone());
+                }
+            }
+            AcpDispatch::Shutdown(responses)
+        }
+        Err(error) => {
+            AcpDispatch::Responses(vec![jsonrpc_error_response(response_id, error.0, &error.1)])
+        }
+    }
+}
+
+fn acp_handle_request(
+    method: &str,
+    params: &BTreeMap<String, JsonValue>,
+    state: &mut AcpStdioState,
+) -> Result<AcpDispatch, (i64, String)> {
+    match method {
+        "initialize" => Ok(AcpDispatch::Responses(vec![
+            jsonrpc_success_response_without_id(acp_initialize_result(
+                params.get("protocolVersion").and_then(json_as_u64),
+            )),
+        ])),
+        "session/new" => Ok(AcpDispatch::Responses(vec![
+            jsonrpc_success_response_without_id(acp_new_session(params, state)?),
+        ])),
+        "session/list" => Ok(AcpDispatch::Responses(vec![
+            jsonrpc_success_response_without_id(acp_list_sessions(params, state)?),
+        ])),
+        "session/load" => Ok(AcpDispatch::Responses(vec![
+            jsonrpc_success_response_without_id(acp_load_session(params, state)?),
+        ])),
+        "session/checkpoints" => Ok(AcpDispatch::Responses(vec![
+            jsonrpc_success_response_without_id(acp_list_checkpoints(params, state)?),
+        ])),
+        "session/checkpoint/read" => Ok(AcpDispatch::Responses(vec![
+            jsonrpc_success_response_without_id(acp_read_checkpoint(params, state)?),
+        ])),
+        "session/checkpoint/restore" => Ok(AcpDispatch::Responses(vec![
+            jsonrpc_success_response_without_id(acp_restore_checkpoint(params, state)?),
+        ])),
+        "session/tools/list" => Ok(AcpDispatch::Responses(vec![
+            jsonrpc_success_response_without_id(acp_session_tools_list(params, state)?),
+        ])),
+        "session/tools/call" => Ok(AcpDispatch::Responses(acp_session_tools_call_responses(
+            params, state,
+        )?)),
+        "session/prompt" => {
+            let (session_id, output) = acp_prompt(params, state)?;
+            let mut responses = Vec::new();
+            if !output.is_empty() {
+                responses.push(acp_session_update(&session_id, output));
+            }
+            responses.push(jsonrpc_success_response_without_id(object([(
+                "stopReason",
+                JsonValue::String("end_turn".to_string()),
+            )])));
+            Ok(AcpDispatch::Responses(responses))
+        }
+        "session/cancel" => Ok(AcpDispatch::Responses(vec![
+            jsonrpc_success_response_without_id(JsonValue::Null),
+        ])),
+        "shutdown" => Ok(AcpDispatch::Shutdown(vec![
+            jsonrpc_success_response_without_id(JsonValue::Null),
+        ])),
+        other => Err((-32601, format!("method not found: {other}"))),
+    }
+}
+
+fn acp_initialize_result(client_protocol_version: Option<u64>) -> JsonValue {
+    object([
+        (
+            "protocolVersion",
+            JsonValue::Number(
+                client_protocol_version
+                    .map(|version| version.min(ACP_PROTOCOL_VERSION))
+                    .unwrap_or(ACP_PROTOCOL_VERSION)
+                    .to_string(),
+            ),
+        ),
+        (
+            "agentCapabilities",
+            object([
+                ("loadSession", JsonValue::Bool(true)),
+                (
+                    "promptCapabilities",
+                    object([
+                        ("image", JsonValue::Bool(false)),
+                        ("audio", JsonValue::Bool(false)),
+                        ("embeddedContext", JsonValue::Bool(true)),
+                    ]),
+                ),
+                (
+                    "mcpCapabilities",
+                    object([
+                        ("http", JsonValue::Bool(false)),
+                        ("sse", JsonValue::Bool(false)),
+                    ]),
+                ),
+                (
+                    "sessionCapabilities",
+                    object([
+                        (
+                            "checkpoints",
+                            object([
+                                ("readOnly", JsonValue::Bool(false)),
+                                ("restore", JsonValue::Bool(true)),
+                                ("apply", JsonValue::Bool(true)),
+                            ]),
+                        ),
+                        (
+                            "tools",
+                            object([
+                                ("readOnly", JsonValue::Bool(true)),
+                                ("permissioned", JsonValue::Bool(true)),
+                            ]),
+                        ),
+                    ]),
+                ),
+            ]),
+        ),
+        (
+            "agentInfo",
+            object([
+                ("name", JsonValue::String("deepseek-code".to_string())),
+                ("title", JsonValue::String("DeepSeekCode".to_string())),
+                (
+                    "version",
+                    JsonValue::String(env!("CARGO_PKG_VERSION").to_string()),
+                ),
+            ]),
+        ),
+        ("authMethods", JsonValue::Array(Vec::new())),
+    ])
+}
+
+fn acp_new_session(
+    params: &BTreeMap<String, JsonValue>,
+    state: &mut AcpStdioState,
+) -> Result<JsonValue, (i64, String)> {
+    let cwd = params
+        .get("cwd")
+        .and_then(json_as_string)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state.default_cwd.clone());
+    state.next_session = state.next_session.saturating_add(1);
+    let session_id = format!("deepseekcode-{}-{}", std::process::id(), state.next_session);
+    state.sessions.insert(
+        session_id.clone(),
+        AcpSession {
+            cwd,
+            runtime_session_id: None,
+            runtime_thread_id: None,
+        },
+    );
+    Ok(object([(
+        "sessionId",
+        JsonValue::String(session_id.to_string()),
+    )]))
+}
+
+fn acp_list_sessions(
+    params: &BTreeMap<String, JsonValue>,
+    state: &AcpStdioState,
+) -> Result<JsonValue, (i64, String)> {
+    let limit = params
+        .get("limit")
+        .and_then(json_as_u64)
+        .map(|limit| limit.clamp(1, 100) as usize)
+        .unwrap_or(20);
+    let sessions = state
+        .store
+        .list_sessions(limit)
+        .map_err(|error| (-32603, error.to_string()))?
+        .iter()
+        .map(acp_session_summary)
+        .collect::<Vec<_>>();
+    Ok(object([
+        ("sessions", JsonValue::Array(sessions)),
+        ("nextCursor", JsonValue::Null),
+    ]))
+}
+
+fn acp_load_session(
+    params: &BTreeMap<String, JsonValue>,
+    state: &mut AcpStdioState,
+) -> Result<JsonValue, (i64, String)> {
+    let runtime_session_id = params
+        .get("sessionId")
+        .and_then(json_as_string)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| (-32602, "sessionId is required".to_string()))?;
+    let runtime_session = state
+        .store
+        .load_session(runtime_session_id)
+        .map_err(|error| (-32602, error.to_string()))?;
+    let thread = match params
+        .get("threadId")
+        .and_then(json_as_string)
+        .filter(|id| !id.trim().is_empty())
+    {
+        Some(thread_id) => Some(
+            state
+                .store
+                .load_thread(thread_id)
+                .map_err(|error| (-32602, error.to_string()))?,
+        ),
+        None => runtime_session
+            .active_thread_id
+            .as_deref()
+            .map(|thread_id| state.store.load_thread(thread_id))
+            .transpose()
+            .map_err(|error| (-32602, error.to_string()))?,
+    };
+    if let Some(thread) = thread.as_ref() {
+        if thread.session_id.as_deref() != Some(runtime_session.id.as_str()) {
+            return Err((
+                -32602,
+                format!(
+                    "threadId {} does not belong to sessionId {}",
+                    thread.id, runtime_session.id
+                ),
+            ));
+        }
+    }
+    let cwd = thread
+        .as_ref()
+        .map(|thread| PathBuf::from(&thread.workspace))
+        .unwrap_or_else(|| PathBuf::from(&runtime_session.workspace));
+    let acp_session_id = match thread.as_ref() {
+        Some(thread) => format!("runtime-{}", thread.id),
+        None => format!("runtime-{}", runtime_session.id),
+    };
+    state.sessions.insert(
+        acp_session_id.clone(),
+        AcpSession {
+            cwd,
+            runtime_session_id: Some(runtime_session.id.clone()),
+            runtime_thread_id: thread.as_ref().map(|thread| thread.id.clone()),
+        },
+    );
+
+    if let Some(thread) = thread.as_ref() {
+        Ok(object([
+            ("sessionId", JsonValue::String(acp_session_id)),
+            ("runtimeSession", acp_session_summary(&runtime_session)),
+            ("runtimeThread", thread_to_json(thread)),
+        ]))
+    } else {
+        Ok(object([
+            ("sessionId", JsonValue::String(acp_session_id)),
+            ("runtimeSession", acp_session_summary(&runtime_session)),
+        ]))
+    }
+}
+
+fn acp_session_summary(session: &crate::core::runtime::SessionRecord) -> JsonValue {
+    session_to_json(session)
+}
+
+fn acp_session_from_params<'a>(
+    params: &BTreeMap<String, JsonValue>,
+    state: &'a AcpStdioState,
+) -> Result<&'a AcpSession, (i64, String)> {
+    let session_id = params
+        .get("sessionId")
+        .and_then(json_as_string)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| (-32602, "sessionId is required".to_string()))?;
+    state
+        .sessions
+        .get(session_id)
+        .ok_or_else(|| (-32602, "unknown sessionId".to_string()))
+}
+
+fn acp_mcp_state_for_session(session: &AcpSession, state: &AcpStdioState) -> McpStdioState {
+    acp_mcp_state_for_session_turn(session, state, None)
+}
+
+fn acp_mcp_state_for_session_turn(
+    session: &AcpSession,
+    state: &AcpStdioState,
+    approval_turn_id: Option<String>,
+) -> McpStdioState {
+    McpStdioState {
+        store: state.store.clone(),
+        rollback: state.rollback.clone(),
+        workspace: session.cwd.clone(),
+        approval: state.config.approval.clone(),
+        diagnostics: state.config.diagnostics.clone(),
+        approval_thread_id: session.runtime_thread_id.clone(),
+        approval_turn_id,
+        approval_poll_interval: state.approval_poll_interval,
+        approval_max_polls: state.approval_max_polls,
+        allow_side_effect_tools: false,
+    }
+}
+
+fn acp_session_tools_list(
+    params: &BTreeMap<String, JsonValue>,
+    state: &AcpStdioState,
+) -> Result<JsonValue, (i64, String)> {
+    let session = acp_session_from_params(params, state)?;
+    let mcp_state = acp_mcp_state_for_session(session, state);
+    Ok(object([(
+        "tools",
+        JsonValue::Array(mcp_tool_definitions(&mcp_state)),
+    )]))
+}
+
+fn acp_session_tools_call_responses(
+    params: &BTreeMap<String, JsonValue>,
+    state: &AcpStdioState,
+) -> Result<Vec<JsonValue>, (i64, String)> {
+    let session_id = acp_session_id_from_params(params)?;
+    let name = acp_tool_name_from_params(params)?;
+    let outcome = acp_session_tools_call(params, state)?;
+    let mut responses = vec![acp_session_tool_call_update(
+        session_id,
+        name,
+        outcome.turn_id.as_deref(),
+        outcome.call_item_id.as_deref(),
+    )];
+    responses.push(acp_session_tool_result_update(session_id, name, &outcome));
+    responses.push(jsonrpc_success_response_without_id(outcome.result));
+    Ok(responses)
+}
+
+fn acp_session_id_from_params(params: &BTreeMap<String, JsonValue>) -> Result<&str, (i64, String)> {
+    params
+        .get("sessionId")
+        .and_then(json_as_string)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| (-32602, "sessionId is required".to_string()))
+}
+
+fn acp_tool_name_from_params(params: &BTreeMap<String, JsonValue>) -> Result<&str, (i64, String)> {
+    params
+        .get("name")
+        .and_then(json_as_string)
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| (-32602, "name is required".to_string()))
+}
+
+fn acp_session_tools_call(
+    params: &BTreeMap<String, JsonValue>,
+    state: &AcpStdioState,
+) -> Result<AcpToolCallOutcome, (i64, String)> {
+    let session = acp_session_from_params(params, state)?;
+    let name = acp_tool_name_from_params(params)?;
+    let arguments = match params.get("arguments") {
+        Some(value) => json_as_object(value)
+            .ok_or_else(|| (-32602, "arguments must be an object".to_string()))?
+            .clone(),
+        None => BTreeMap::new(),
+    };
+    if let Some(thread_id) = session.runtime_thread_id.as_deref() {
+        return acp_session_tools_call_recorded(thread_id, session, state, name, &arguments);
+    }
+    let mcp_state = acp_mcp_state_for_session(session, state);
+    match execute_mcp_tool(name, &arguments, &mcp_state) {
+        Ok(text) => Ok(AcpToolCallOutcome {
+            result: mcp_tool_text_result(text.clone(), false),
+            text,
+            is_error: false,
+            turn_id: None,
+            call_item_id: None,
+            result_item_id: None,
+        }),
+        Err(error) => {
+            let text = error.to_string();
+            Ok(AcpToolCallOutcome {
+                result: mcp_tool_text_result(text.clone(), true),
+                text,
+                is_error: true,
+                turn_id: None,
+                call_item_id: None,
+                result_item_id: None,
+            })
+        }
+    }
+}
+
+fn acp_session_tools_call_recorded(
+    thread_id: &str,
+    session: &AcpSession,
+    state: &AcpStdioState,
+    name: &str,
+    arguments: &BTreeMap<String, JsonValue>,
+) -> Result<AcpToolCallOutcome, (i64, String)> {
+    let turn = state
+        .store
+        .append_turn(
+            thread_id,
+            "assistant".to_string(),
+            format!("ACP tool call `{name}` running"),
+        )
+        .map_err(|error| (-32603, error.to_string()))?;
+    let call_item = state
+        .store
+        .append_item(
+            thread_id,
+            Some(&turn.id),
+            "tool_call".to_string(),
+            Some("assistant".to_string()),
+            acp_tool_call_content(name, arguments),
+            "running".to_string(),
+        )
+        .map_err(|error| (-32603, error.to_string()))?;
+    let mcp_state = acp_mcp_state_for_session_turn(session, state, Some(turn.id.clone()));
+    let (text, is_error) = match execute_mcp_tool(name, arguments, &mcp_state) {
+        Ok(text) => (text, false),
+        Err(error) => (error.to_string(), true),
+    };
+    let status = if is_error { "failed" } else { "completed" };
+    state
+        .store
+        .update_item(
+            thread_id,
+            &call_item.id,
+            call_item.content,
+            status.to_string(),
+        )
+        .map_err(|error| (-32603, error.to_string()))?;
+    let result_item = state
+        .store
+        .append_item(
+            thread_id,
+            Some(&turn.id),
+            "tool_result".to_string(),
+            Some("tool".to_string()),
+            text.clone(),
+            status.to_string(),
+        )
+        .map_err(|error| (-32603, error.to_string()))?;
+    state
+        .store
+        .update_turn(
+            thread_id,
+            &turn.id,
+            format!("ACP tool call `{name}` {status}"),
+            status.to_string(),
+        )
+        .map_err(|error| (-32603, error.to_string()))?;
+    Ok(AcpToolCallOutcome {
+        result: mcp_tool_text_result(text.clone(), is_error),
+        text,
+        is_error,
+        turn_id: Some(turn.id),
+        call_item_id: Some(call_item.id),
+        result_item_id: Some(result_item.id),
+    })
+}
+
+fn acp_tool_call_content(name: &str, arguments: &BTreeMap<String, JsonValue>) -> String {
+    json_value_to_string(&object([
+        ("tool", JsonValue::String(name.to_string())),
+        ("arguments", JsonValue::Object(arguments.clone())),
+    ]))
+}
+
+fn acp_list_checkpoints(
+    params: &BTreeMap<String, JsonValue>,
+    state: &AcpStdioState,
+) -> Result<JsonValue, (i64, String)> {
+    let limit = params
+        .get("limit")
+        .and_then(json_as_u64)
+        .map(|limit| limit.clamp(1, 100) as usize)
+        .unwrap_or(20);
+    let thread_filter = acp_checkpoint_thread_filter(params, state)?;
+    let checkpoints = state
+        .rollback
+        .list_snapshots(limit)
+        .map_err(|error| (-32603, error.to_string()))?
+        .into_iter()
+        .filter(|snapshot| {
+            thread_filter
+                .as_ref()
+                .map(|thread_id| snapshot.runtime_thread_id.as_deref() == Some(thread_id.as_str()))
+                .unwrap_or(true)
+        })
+        .map(|snapshot| snapshot_to_json(&snapshot))
+        .collect::<Vec<_>>();
+    Ok(object([
+        ("checkpoints", JsonValue::Array(checkpoints)),
+        ("nextCursor", JsonValue::Null),
+    ]))
+}
+
+fn acp_checkpoint_thread_filter(
+    params: &BTreeMap<String, JsonValue>,
+    state: &AcpStdioState,
+) -> Result<Option<String>, (i64, String)> {
+    if let Some(session_id) = params
+        .get("sessionId")
+        .and_then(json_as_string)
+        .filter(|id| !id.trim().is_empty())
+    {
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| (-32602, "unknown sessionId".to_string()))?;
+        return Ok(session
+            .runtime_thread_id
+            .clone()
+            .or_else(|| Some("__no_runtime_thread__".to_string())));
+    }
+    Ok(params
+        .get("threadId")
+        .and_then(json_as_string)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string))
+}
+
+fn acp_read_checkpoint(
+    params: &BTreeMap<String, JsonValue>,
+    state: &AcpStdioState,
+) -> Result<JsonValue, (i64, String)> {
+    let checkpoint_id = params
+        .get("checkpointId")
+        .or_else(|| params.get("id"))
+        .and_then(json_as_string)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| (-32602, "checkpointId is required".to_string()))?;
+    let checkpoint = state
+        .rollback
+        .load_snapshot_or_turn(checkpoint_id)
+        .map_err(|error| (-32602, error.to_string()))?;
+    let include_patch = matches!(params.get("includePatch"), Some(JsonValue::Bool(true)));
+    let mut response = BTreeMap::new();
+    response.insert("checkpoint".to_string(), snapshot_to_json(&checkpoint));
+    if include_patch {
+        let patch = state
+            .rollback
+            .snapshot_patch(&checkpoint.id)
+            .map_err(|error| (-32603, error.to_string()))?;
+        response.insert("patch".to_string(), JsonValue::String(patch));
+    }
+    Ok(JsonValue::Object(response))
+}
+
+fn acp_restore_checkpoint(
+    params: &BTreeMap<String, JsonValue>,
+    state: &AcpStdioState,
+) -> Result<JsonValue, (i64, String)> {
+    let checkpoint_id = params
+        .get("checkpointId")
+        .or_else(|| params.get("id"))
+        .and_then(json_as_string)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| (-32602, "checkpointId is required".to_string()))?;
+    let checkpoint = state
+        .rollback
+        .load_snapshot_or_turn(checkpoint_id)
+        .map_err(|error| (-32602, error.to_string()))?;
+    if let Some(thread_id) = acp_checkpoint_thread_filter(params, state)? {
+        if checkpoint.runtime_thread_id.as_deref() != Some(thread_id.as_str()) {
+            return Err((
+                -32602,
+                "checkpoint does not belong to the requested session/thread".to_string(),
+            ));
+        }
+    }
+    let apply = matches!(params.get("apply"), Some(JsonValue::Bool(true)));
+    let plan = state
+        .rollback
+        .restore_snapshot(&checkpoint.id, apply)
+        .map_err(|error| (-32603, error.to_string()))?;
+    Ok(object([
+        ("checkpoint", snapshot_to_json(&checkpoint)),
+        ("restore", restore_plan_to_json(&plan)),
+        (
+            "mode",
+            JsonValue::String(if apply { "applied" } else { "dry_run" }.to_string()),
+        ),
+    ]))
+}
+
+fn restore_plan_to_json(plan: &RestorePlan) -> JsonValue {
+    object([
+        ("snapshot_id", JsonValue::String(plan.snapshot_id.clone())),
+        ("applied", JsonValue::Bool(plan.applied)),
+        ("git_root", JsonValue::String(plan.git_root.clone())),
+        ("git_head", JsonValue::String(plan.git_head.clone())),
+        (
+            "patch_bytes",
+            JsonValue::Number(plan.patch_bytes.to_string()),
+        ),
+        (
+            "staged_patch_bytes",
+            JsonValue::Number(plan.staged_patch_bytes.to_string()),
+        ),
+        (
+            "unstaged_patch_bytes",
+            JsonValue::Number(plan.unstaged_patch_bytes.to_string()),
+        ),
+        (
+            "current_patch_bytes",
+            JsonValue::Number(plan.current_patch_bytes.to_string()),
+        ),
+        (
+            "changed_files",
+            JsonValue::Array(
+                plan.changed_files
+                    .iter()
+                    .cloned()
+                    .map(JsonValue::String)
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
+fn acp_prompt(
+    params: &BTreeMap<String, JsonValue>,
+    state: &AcpStdioState,
+) -> Result<(String, String), (i64, String)> {
+    let session_id = params
+        .get("sessionId")
+        .and_then(json_as_string)
+        .ok_or_else(|| (-32602, "sessionId is required".to_string()))?;
+    let session = state
+        .sessions
+        .get(session_id)
+        .ok_or_else(|| (-32602, "unknown sessionId".to_string()))?;
+    let _runtime_session_id = session.runtime_session_id.as_deref();
+    let prompt = params
+        .get("prompt")
+        .and_then(acp_extract_prompt_text)
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| (-32602, "prompt must include text content".to_string()))?;
+    let (output, usage) = acp_run_prompt(&state.config, &prompt, &session.cwd)
+        .map_err(|error| (-32603, error.to_string()))?;
+    if let Some(thread_id) = session.runtime_thread_id.as_deref() {
+        acp_record_prompt_result(&state.store, thread_id, &prompt, &output, usage)
+            .map_err(|error| (-32603, error.to_string()))?;
+    }
+    Ok((session_id.to_string(), output))
+}
+
+fn acp_run_prompt(
+    config: &AppConfig,
+    prompt: &str,
+    cwd: &Path,
+) -> AppResult<(String, Option<TokenUsage>)> {
+    let _cwd_guard = CwdGuard::enter(cwd)?;
+    let client = DeepSeekClient {
+        config: config.model.clone(),
+    };
+    let request = ModelRequest {
+        system_prompt: "You are a coding assistant inside an ACP-compatible editor. Give concise, actionable responses.".to_string(),
+        task: prompt.to_string(),
+        image_inputs: Vec::new(),
+        profile_name: "acp".to_string(),
+        profile_hints: Vec::new(),
+        primary_file: None,
+        suggested_test_command: None,
+        available_tools: Vec::new(),
+        observations: Vec::new(),
+        todos: Vec::new(),
+        planning_mode: false,
+        recent_steps: Vec::new(),
+    };
+    let mut events = NoopStreamEvents;
+    let (response, usage) = client.respond(request, &mut events)?;
+    Ok((response.message, usage))
+}
+
+fn acp_record_prompt_result(
+    store: &RuntimeStore,
+    thread_id: &str,
+    prompt: &str,
+    output: &str,
+    usage: Option<TokenUsage>,
+) -> AppResult<()> {
+    let user = store.append_turn(thread_id, "user".to_string(), prompt.to_string())?;
+    store.append_item(
+        thread_id,
+        Some(&user.id),
+        "message".to_string(),
+        Some("user".to_string()),
+        prompt.to_string(),
+        "completed".to_string(),
+    )?;
+    let assistant = store.append_turn(thread_id, "assistant".to_string(), output.to_string())?;
+    store.append_item(
+        thread_id,
+        Some(&assistant.id),
+        "message".to_string(),
+        Some("assistant".to_string()),
+        output.to_string(),
+        "completed".to_string(),
+    )?;
+    if let Some(usage) = usage {
+        let thread = store.load_thread(thread_id)?;
+        store.append_usage_with_cache(
+            thread_id,
+            Some(&assistant.id),
+            usage.model.unwrap_or(thread.model),
+            "acp".to_string(),
+            usage.prompt,
+            usage.completion,
+            usage.prompt_cache_hit,
+            usage.prompt_cache_miss,
+        )?;
+    }
+    Ok(())
+}
+
+fn acp_extract_prompt_text(value: &JsonValue) -> Option<String> {
+    match value {
+        JsonValue::String(text) => Some(text.clone()),
+        JsonValue::Array(blocks) => {
+            let parts = blocks
+                .iter()
+                .filter_map(acp_content_block_text)
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join("\n\n"))
+        }
+        _ => None,
+    }
+}
+
+fn acp_content_block_text(value: &JsonValue) -> Option<String> {
+    let object = json_as_object(value)?;
+    match object.get("type").and_then(json_as_string)? {
+        "text" => object
+            .get("text")
+            .and_then(json_as_string)
+            .map(str::to_string),
+        "resource" => {
+            if let Some(resource) = object.get("resource").and_then(json_as_object) {
+                if let Some(text) = resource.get("text").and_then(json_as_string) {
+                    return Some(text.to_string());
+                }
+                return acp_resource_uri(resource);
+            }
+            if let Some(text) = object.get("text").and_then(json_as_string) {
+                return Some(text.to_string());
+            }
+            acp_resource_uri(object)
+        }
+        "resource_link" | "resourceLink" => acp_resource_uri(object),
+        _ => None,
+    }
+}
+
+fn acp_resource_uri(object: &BTreeMap<String, JsonValue>) -> Option<String> {
+    object
+        .get("uri")
+        .and_then(json_as_string)
+        .map(|uri| format!("@{uri}"))
+}
+
+fn acp_session_update(session_id: &str, text: String) -> JsonValue {
+    object([
+        ("jsonrpc", JsonValue::String("2.0".to_string())),
+        ("method", JsonValue::String("session/update".to_string())),
+        (
+            "params",
+            object([
+                ("sessionId", JsonValue::String(session_id.to_string())),
+                (
+                    "update",
+                    object([
+                        (
+                            "sessionUpdate",
+                            JsonValue::String("agent_message_chunk".to_string()),
+                        ),
+                        (
+                            "content",
+                            object([
+                                ("type", JsonValue::String("text".to_string())),
+                                ("text", JsonValue::String(text)),
+                            ]),
+                        ),
+                    ]),
+                ),
+            ]),
+        ),
+    ])
+}
+
+fn acp_session_tool_call_update(
+    session_id: &str,
+    name: &str,
+    turn_id: Option<&str>,
+    call_item_id: Option<&str>,
+) -> JsonValue {
+    let mut tool_call = BTreeMap::new();
+    tool_call.insert("name".to_string(), JsonValue::String(name.to_string()));
+    tool_call.insert(
+        "status".to_string(),
+        JsonValue::String("running".to_string()),
+    );
+    if let Some(turn_id) = turn_id {
+        tool_call.insert("turnId".to_string(), JsonValue::String(turn_id.to_string()));
+    }
+    if let Some(call_item_id) = call_item_id {
+        tool_call.insert(
+            "callItemId".to_string(),
+            JsonValue::String(call_item_id.to_string()),
+        );
+    }
+    acp_structured_session_update(
+        session_id,
+        object([
+            (
+                "sessionUpdate",
+                JsonValue::String("tool_call_update".to_string()),
+            ),
+            ("toolCall", JsonValue::Object(tool_call)),
+        ]),
+    )
+}
+
+fn acp_session_tool_result_update(
+    session_id: &str,
+    name: &str,
+    outcome: &AcpToolCallOutcome,
+) -> JsonValue {
+    let status = if outcome.is_error {
+        "failed"
+    } else {
+        "completed"
+    };
+    let mut tool_result = BTreeMap::new();
+    tool_result.insert("name".to_string(), JsonValue::String(name.to_string()));
+    tool_result.insert("status".to_string(), JsonValue::String(status.to_string()));
+    tool_result.insert("isError".to_string(), JsonValue::Bool(outcome.is_error));
+    tool_result.insert("text".to_string(), JsonValue::String(outcome.text.clone()));
+    if let Some(turn_id) = outcome.turn_id.as_deref() {
+        tool_result.insert("turnId".to_string(), JsonValue::String(turn_id.to_string()));
+    }
+    if let Some(call_item_id) = outcome.call_item_id.as_deref() {
+        tool_result.insert(
+            "callItemId".to_string(),
+            JsonValue::String(call_item_id.to_string()),
+        );
+    }
+    if let Some(result_item_id) = outcome.result_item_id.as_deref() {
+        tool_result.insert(
+            "resultItemId".to_string(),
+            JsonValue::String(result_item_id.to_string()),
+        );
+    }
+    acp_structured_session_update(
+        session_id,
+        object([
+            (
+                "sessionUpdate",
+                JsonValue::String("tool_result_update".to_string()),
+            ),
+            ("toolResult", JsonValue::Object(tool_result)),
+        ]),
+    )
+}
+
+fn acp_structured_session_update(session_id: &str, update: JsonValue) -> JsonValue {
+    object([
+        ("jsonrpc", JsonValue::String("2.0".to_string())),
+        ("method", JsonValue::String("session/update".to_string())),
+        (
+            "params",
+            object([
+                ("sessionId", JsonValue::String(session_id.to_string())),
+                ("update", update),
+            ]),
+        ),
+    ])
+}
+
+fn jsonrpc_success_response_without_id(result: JsonValue) -> JsonValue {
+    object([
+        ("jsonrpc", JsonValue::String("2.0".to_string())),
+        ("result", result),
+    ])
+}
+
+fn jsonrpc_error_response(id: JsonValue, code: i64, message: &str) -> JsonValue {
+    object([
+        ("jsonrpc", JsonValue::String("2.0".to_string())),
+        ("id", id),
+        (
+            "error",
+            object([
+                ("code", JsonValue::Number(code.to_string())),
+                ("message", JsonValue::String(message.to_string())),
+            ]),
+        ),
+    ])
+}
+
+fn acp_response_needs_id(response: &JsonValue) -> bool {
+    json_as_object(response)
+        .map(|object| object.get("result").is_some() && object.get("id").is_none())
+        .unwrap_or(false)
+}
+
+fn add_jsonrpc_id(response: &mut JsonValue, id: JsonValue) {
+    if let JsonValue::Object(object) = response {
+        object.insert("id".to_string(), id);
+    }
 }
 
 fn serve_http_listener(listener: TcpListener, once: bool, store: &RuntimeStore) -> AppResult<()> {
@@ -132,6 +3341,9 @@ fn handle_sse_follow_request(
         return Ok(false);
     }
     let path = request_target.split('?').next().unwrap_or(request_target);
+    if path == "/v1/events/stream" {
+        return handle_global_sse_follow_request(request_target, stream, store);
+    }
     let Some(thread_id) = event_stream_thread_id(path) else {
         return Ok(false);
     };
@@ -174,6 +3386,53 @@ fn handle_sse_follow_request(
             stream.write_all(frame.as_bytes())?;
             stream.flush()?;
             since_seq = event.seq;
+            sent_events = sent_events.saturating_add(1);
+            if sent_events >= max_events {
+                return Ok(true);
+            }
+        }
+    }
+}
+
+fn handle_global_sse_follow_request(
+    request_target: &str,
+    stream: &mut TcpStream,
+    store: &RuntimeStore,
+) -> AppResult<bool> {
+    let mut cursor = event_cursor_from_query(request_target)?;
+    let default_since_seq = query_param_u64(request_target, "since_seq").unwrap_or(0);
+    stream.write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nX-Accel-Buffering: no\r\nConnection: close\r\n\r\n",
+    )?;
+    stream.flush()?;
+
+    let poll_ms = query_param_u64(request_target, "poll_ms")
+        .unwrap_or(100)
+        .clamp(SSE_MIN_POLL_MS, SSE_MAX_POLL_MS);
+    let max_events = query_param_u64(request_target, "max_events")
+        .unwrap_or(u64::MAX)
+        .max(1);
+    let deadline = query_param_u64(request_target, "max_ms")
+        .filter(|max_ms| *max_ms > 0)
+        .map(|max_ms| Instant::now() + Duration::from_millis(max_ms));
+    let mut sent_events = 0_u64;
+
+    loop {
+        let events = read_global_runtime_events(store, &cursor, default_since_seq)?;
+        if events.is_empty() {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                stream.write_all(b": follow timeout reached\n\n")?;
+                stream.flush()?;
+                return Ok(true);
+            }
+            thread::sleep(Duration::from_millis(poll_ms));
+            continue;
+        }
+        for event in events {
+            let frame = sse_global_event_frame(&event);
+            stream.write_all(frame.as_bytes())?;
+            stream.flush()?;
+            cursor.insert(event.thread_id.clone(), event.seq);
             sent_events = sent_events.saturating_add(1);
             if sent_events >= max_events {
                 return Ok(true);
@@ -345,6 +3604,11 @@ fn try_response_for_request(request: &str, state: &RuntimeHttpState) -> AppResul
             list_tasks_response(&state.store, request_target, None, None)?
         }
         ("POST", "/v1/tasks") => create_task_response(&state.store, body, None, None)?,
+        ("GET" | "HEAD", "/v1/events/stream") => {
+            let wait_ms = query_param_u64(request_target, "wait_ms").unwrap_or(0);
+            let poll_ms = query_param_u64(request_target, "poll_ms").unwrap_or(100);
+            global_events_stream_response(&state.store, request_target, wait_ms, poll_ms)?
+        }
         ("GET" | "HEAD", "/v1/threads") => list_threads_response(&state.store, request_target)?,
         ("POST", "/v1/threads") => create_thread_response(&state.store, body)?,
         ("GET" | "HEAD", "/v1/usage/summary") => {
@@ -418,6 +3682,7 @@ fn runtime_response() -> HttpResponse {
                         "/v1/tasks/{id}/cancel",
                         "/v1/tasks/{id}/pause",
                         "/v1/tasks/{id}/resume",
+                        "/v1/events/stream",
                         "/v1/threads",
                         "/v1/threads/{id}",
                         "/v1/threads/{id}/automations",
@@ -455,6 +3720,8 @@ fn runtime_response() -> HttpResponse {
                     ("events_sse", JsonValue::Bool(true)),
                     ("events_sse_wait", JsonValue::Bool(true)),
                     ("events_sse_follow", JsonValue::Bool(true)),
+                    ("events_global_sse", JsonValue::Bool(true)),
+                    ("events_global_sse_follow", JsonValue::Bool(true)),
                     ("diagnostics", JsonValue::Bool(true)),
                     ("diagnostics_changed", JsonValue::Bool(true)),
                     ("diagnostics_broker", JsonValue::Bool(true)),
@@ -1488,6 +4755,19 @@ fn create_event_response(
             json_string_field(payload, "request_id", "")?,
             json_string_field(payload, "decision", "")?,
         )?,
+        "user_input_request" => {
+            let questions = payload
+                .get("questions")
+                .cloned()
+                .ok_or_else(|| app_error("user_input_request requires `questions`"))?;
+            store.append_user_input_request(thread_id, turn_id.as_deref(), questions)?
+        }
+        "user_input_response" => store.append_user_input_response(
+            thread_id,
+            turn_id.as_deref(),
+            json_string_field(payload, "request_id", "")?,
+            json_string_map_field(payload, "answers")?,
+        )?,
         "cancel_requested" => store.append_cancel_request(
             thread_id,
             turn_id.as_deref(),
@@ -1496,7 +4776,7 @@ fn create_event_response(
         )?,
         _ => {
             return Ok(bad_request(
-                "only permission_request, permission_response, or cancel_requested events can be appended through this endpoint",
+                "only permission_request, permission_response, user_input_request, user_input_response, or cancel_requested events can be appended through this endpoint",
             ));
         }
     };
@@ -1544,9 +4824,99 @@ fn events_stream_response(
     Ok(HttpResponse::sse(body))
 }
 
+fn global_events_stream_response(
+    store: &RuntimeStore,
+    request_target: &str,
+    wait_ms: u64,
+    poll_ms: u64,
+) -> AppResult<HttpResponse> {
+    let cursor = event_cursor_from_query(request_target)?;
+    let default_since_seq = query_param_u64(request_target, "since_seq").unwrap_or(0);
+    let mut body = String::new();
+    let events = read_global_events_with_wait(
+        store,
+        &cursor,
+        default_since_seq,
+        wait_ms.min(SSE_MAX_WAIT_MS),
+        poll_ms.clamp(SSE_MIN_POLL_MS, SSE_MAX_POLL_MS),
+    )?;
+    for event in events {
+        body.push_str(&sse_global_event_frame(&event));
+    }
+    if body.is_empty() {
+        if wait_ms == 0 {
+            body.push_str(": no runtime events after cursor\n\n");
+        } else {
+            body.push_str(": no runtime events after cursor before wait timeout\n\n");
+        }
+    }
+    Ok(HttpResponse::sse(body))
+}
+
 const SSE_MAX_WAIT_MS: u64 = 30_000;
 const SSE_MIN_POLL_MS: u64 = 10;
 const SSE_MAX_POLL_MS: u64 = 1_000;
+
+fn event_cursor_from_query(request_target: &str) -> AppResult<BTreeMap<String, u64>> {
+    let mut cursor = BTreeMap::new();
+    let Some(raw_cursor) = query_param_string(request_target, "since") else {
+        return Ok(cursor);
+    };
+    for entry in raw_cursor.split(',').filter(|entry| !entry.is_empty()) {
+        let Some((thread_id, seq)) = entry.split_once(':') else {
+            return Err(app_error(format!(
+                "invalid runtime event cursor entry `{entry}`"
+            )));
+        };
+        validate_record_id(thread_id)?;
+        let seq = seq
+            .parse::<u64>()
+            .map_err(|_| app_error(format!("invalid runtime event cursor seq in `{entry}`")))?;
+        cursor.insert(thread_id.to_string(), seq);
+    }
+    Ok(cursor)
+}
+
+fn read_global_events_with_wait(
+    store: &RuntimeStore,
+    cursor: &BTreeMap<String, u64>,
+    default_since_seq: u64,
+    wait_ms: u64,
+    poll_ms: u64,
+) -> AppResult<Vec<RuntimeEvent>> {
+    let deadline = Instant::now() + Duration::from_millis(wait_ms);
+    loop {
+        let events = read_global_runtime_events(store, cursor, default_since_seq)?;
+        if !events.is_empty() || wait_ms == 0 {
+            return Ok(events);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(events);
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        thread::sleep(remaining.min(Duration::from_millis(poll_ms)));
+    }
+}
+
+fn read_global_runtime_events(
+    store: &RuntimeStore,
+    cursor: &BTreeMap<String, u64>,
+    default_since_seq: u64,
+) -> AppResult<Vec<RuntimeEvent>> {
+    let mut events = Vec::new();
+    for thread in store.list_threads(usize::MAX)? {
+        let since_seq = cursor.get(&thread.id).copied().unwrap_or(default_since_seq);
+        events.extend(store.read_events(&thread.id, since_seq)?);
+    }
+    events.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.thread_id.cmp(&b.thread_id))
+            .then_with(|| a.seq.cmp(&b.seq))
+    });
+    Ok(events)
+}
 
 fn event_stream_thread_id(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("/v1/threads/")?;
@@ -1558,9 +4928,17 @@ fn event_stream_thread_id(path: &str) -> Option<&str> {
 }
 
 fn sse_event_frame(event: &RuntimeEvent) -> String {
+    sse_event_frame_with_id(event, &event.seq.to_string())
+}
+
+fn sse_global_event_frame(event: &RuntimeEvent) -> String {
+    sse_event_frame_with_id(event, &format!("{}:{}", event.thread_id, event.seq))
+}
+
+fn sse_event_frame_with_id(event: &RuntimeEvent, id: &str) -> String {
     let mut frame = String::new();
     frame.push_str("id: ");
-    frame.push_str(&event.seq.to_string());
+    frame.push_str(id);
     frame.push('\n');
     frame.push_str("event: ");
     frame.push_str(&event.kind);
@@ -2006,6 +5384,7 @@ mod tests {
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpStream;
+    use std::process::Command;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2018,6 +5397,1653 @@ mod tests {
             "deepseek-serve-runtime-{label}-{}-{nanos}",
             std::process::id()
         )))
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "deepseek-serve-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn temp_git_repo(label: &str) -> PathBuf {
+        let repo = temp_dir(label);
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["config", "user.email", "test@example.com"]);
+        run_git(&repo, &["config", "user.name", "DeepSeekCode Test"]);
+        fs::write(repo.join("src.txt"), "base\n").unwrap();
+        run_git(&repo, &["add", "src.txt"]);
+        run_git(&repo, &["commit", "-m", "initial commit"]);
+        repo
+    }
+
+    fn mcp_state(label: &str) -> McpStdioState {
+        mcp_state_with_side_effects(label, false)
+    }
+
+    fn mcp_state_with_side_effects(label: &str, allow_side_effect_tools: bool) -> McpStdioState {
+        McpStdioState {
+            store: temp_store(label),
+            rollback: RollbackStore::new(temp_dir(&format!("{label}-rollback"))),
+            workspace: temp_dir(label),
+            approval: ApprovalConfig::default(),
+            diagnostics: DiagnosticsConfig::default(),
+            approval_thread_id: None,
+            approval_turn_id: None,
+            approval_poll_interval: Duration::from_millis(1),
+            approval_max_polls: Some(500),
+            allow_side_effect_tools,
+        }
+    }
+
+    fn mcp_state_with_durable_approvals(label: &str) -> McpStdioState {
+        let store = temp_store(label);
+        let workspace = temp_dir(label);
+        let session = store
+            .create_session("MCP approvals".to_string(), workspace.display().to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "MCP side-effect approvals".to_string(),
+                workspace.display().to_string(),
+                "deepseek-coder".to_string(),
+                "mcp".to_string(),
+            )
+            .unwrap();
+        McpStdioState {
+            store,
+            rollback: RollbackStore::new(temp_dir(&format!("{label}-rollback"))),
+            workspace,
+            approval: ApprovalConfig::default(),
+            diagnostics: DiagnosticsConfig::default(),
+            approval_thread_id: Some(thread.id),
+            approval_turn_id: None,
+            approval_poll_interval: Duration::from_millis(1),
+            approval_max_polls: Some(500),
+            allow_side_effect_tools: false,
+        }
+    }
+
+    fn spawn_mcp_permission_responder(
+        store: RuntimeStore,
+        thread_id: String,
+        decision: &'static str,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            for _ in 0..100 {
+                let events = store.read_events(&thread_id, 0).unwrap();
+                if let Some(request) = events
+                    .iter()
+                    .find(|event| event.kind == "permission_request")
+                {
+                    store
+                        .append_permission_response(
+                            &thread_id,
+                            None,
+                            request.id.clone(),
+                            decision.to_string(),
+                        )
+                        .unwrap();
+                    return;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            panic!("permission request was not recorded");
+        })
+    }
+
+    fn acp_state(label: &str) -> AcpStdioState {
+        let mut config = AppConfig::default();
+        config.model.api_key_env = format!("DSCODE_TEST_NO_KEY_{label}");
+        AcpStdioState {
+            store: temp_store(label),
+            rollback: RollbackStore::new(temp_dir(&format!("{label}-rollback"))),
+            config,
+            default_cwd: temp_dir(label),
+            approval_poll_interval: Duration::from_millis(1),
+            approval_max_polls: Some(500),
+            sessions: BTreeMap::new(),
+            next_session: 0,
+        }
+    }
+
+    #[test]
+    fn mcp_initialize_advertises_tools_capability() {
+        let state = mcp_state("mcp-init");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains(r#""protocolVersion":"2025-11-25""#));
+        assert!(rendered.contains(r#""serverInfo":{"name":"DeepSeekCode""#));
+        assert!(rendered.contains(r#""tools":{}"#));
+    }
+
+    #[test]
+    fn mcp_tools_list_includes_workspace_and_runtime_tools() {
+        let state = mcp_state("mcp-tools-list");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains(r#""name":"read_file""#));
+        assert!(rendered.contains(r#""name":"retrieve_tool_result""#));
+        assert!(rendered.contains(r#""name":"list_dir""#));
+        assert!(rendered.contains(r#""name":"grep_files""#));
+        assert!(rendered.contains(r#""name":"file_search""#));
+        assert!(rendered.contains(r#""name":"web_search""#));
+        assert!(rendered.contains(r#""name":"fetch_url""#));
+        assert!(rendered.contains(r#""name":"git_status""#));
+        assert!(rendered.contains(r#""name":"project_map""#));
+        assert!(rendered.contains(r#""name":"validate_data""#));
+        assert!(rendered.contains(r#""name":"git_log""#));
+        assert!(rendered.contains(r#""name":"github_issue_context""#));
+        assert!(rendered.contains(r#""name":"github_pr_context""#));
+        assert!(rendered.contains(r#""name":"runtime_list_sessions""#));
+        assert!(!rendered.contains(r#""name":"run_shell""#));
+        assert!(!rendered.contains(r#""name":"run_tests""#));
+    }
+
+    #[test]
+    fn mcp_tools_list_includes_run_shell_when_side_effects_enabled() {
+        let state = mcp_state_with_side_effects("mcp-tools-list-side-effects", true);
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains(r#""name":"run_shell""#));
+        assert!(rendered.contains(r#""name":"run_tests""#));
+    }
+
+    #[test]
+    fn mcp_prompts_list_includes_builtin_workflows() {
+        let state = mcp_state("mcp-prompts-list");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":3,"method":"prompts/list","params":{}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains(r#""prompts":["#) || rendered.contains(r#""prompts":[{"#));
+        assert!(rendered.contains(r#""name":"review_code""#));
+        assert!(rendered.contains(r#""name":"explain_code""#));
+        assert!(rendered.contains(r#""name":"plan_task""#));
+        assert!(rendered.contains(r#""required":true"#));
+    }
+
+    #[test]
+    fn mcp_prompts_get_renders_builtin_prompt_messages() {
+        let state = mcp_state("mcp-prompts-get");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":4,"method":"prompts/get","params":{"name":"review_code","arguments":{"path":"src/lib.rs","focus":"tests"}}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("Review a file or code area"));
+        assert!(rendered.contains("Review `src/lib.rs`"));
+        assert!(rendered.contains("Focus: tests"));
+        assert!(rendered.contains(r#""messages""#));
+        assert!(rendered.contains(r#""role":"user""#));
+    }
+
+    #[test]
+    fn mcp_prompts_get_rejects_missing_required_argument() {
+        let state = mcp_state("mcp-prompts-get-missing-arg");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":5,"method":"prompts/get","params":{"name":"review_code","arguments":{}}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains(r#""code":-32602"#));
+        assert!(rendered.contains("MCP prompt requires string argument `path`"));
+    }
+
+    #[test]
+    fn mcp_tools_call_executes_read_file() {
+        let state = mcp_state("mcp-read-file");
+        let root =
+            std::env::temp_dir().join(format!("deepseek-mcp-read-file-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("note.txt");
+        fs::write(&file, "hello from mcp\nsecond line\n").unwrap();
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"read_file","arguments":{{"path":"{}","max_lines":1}}}}}}"#,
+            crate::util::json::json_escape(&file.display().to_string())
+        );
+
+        let response = mcp_response_for_message(&request, &state).unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("hello from mcp"));
+        assert!(rendered.contains(r#""isError":false"#));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mcp_tools_call_rejects_run_shell_until_side_effects_enabled() {
+        let state = mcp_state("mcp-run-shell-disabled");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"run_shell","arguments":{"command":"pwd"}}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("MCP side-effect tool `run_shell` is disabled"));
+        assert!(rendered.contains(r#""isError":true"#));
+    }
+
+    #[test]
+    fn mcp_tools_call_executes_run_shell_when_side_effects_enabled() {
+        let state = mcp_state_with_side_effects("mcp-run-shell-enabled", true);
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"run_shell","arguments":{"command":"pwd"}}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("meta.command_kind=other"));
+        assert!(rendered.contains(r#""isError":false"#));
+    }
+
+    #[test]
+    fn mcp_tools_list_includes_run_shell_when_durable_approvals_enabled() {
+        let state = mcp_state_with_durable_approvals("mcp-run-shell-approval-list");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/list","params":{}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains(r#""name":"run_shell""#));
+        assert!(rendered.contains("durable runtime approvals"));
+    }
+
+    #[test]
+    fn mcp_tools_list_includes_write_tools_only_with_durable_approvals() {
+        let state = mcp_state("mcp-apply-patch-hidden");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/list","params":{}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+        assert!(!rendered.contains(r#""name":"apply_patch""#));
+        assert!(!rendered.contains(r#""name":"write_file""#));
+        assert!(!rendered.contains(r#""name":"edit_file""#));
+        assert!(!rendered.contains(r#""name":"delete_file""#));
+        assert!(!rendered.contains(r#""name":"copy_file""#));
+        assert!(!rendered.contains(r#""name":"move_file""#));
+        assert!(!rendered.contains(r#""name":"revert_turn""#));
+        assert!(!rendered.contains(r#""name":"github_comment""#));
+        assert!(!rendered.contains(r#""name":"github_close_issue""#));
+
+        let state = mcp_state_with_side_effects("mcp-apply-patch-side-effects", true);
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":10,"method":"tools/list","params":{}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+        assert!(rendered.contains(r#""name":"run_shell""#));
+        assert!(!rendered.contains(r#""name":"apply_patch""#));
+        assert!(!rendered.contains(r#""name":"write_file""#));
+        assert!(!rendered.contains(r#""name":"edit_file""#));
+        assert!(!rendered.contains(r#""name":"delete_file""#));
+        assert!(!rendered.contains(r#""name":"copy_file""#));
+        assert!(!rendered.contains(r#""name":"move_file""#));
+        assert!(!rendered.contains(r#""name":"revert_turn""#));
+        assert!(!rendered.contains(r#""name":"github_comment""#));
+        assert!(!rendered.contains(r#""name":"github_close_issue""#));
+
+        let state = mcp_state_with_durable_approvals("mcp-apply-patch-visible");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":11,"method":"tools/list","params":{}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+        assert!(rendered.contains(r#""name":"apply_patch""#));
+        assert!(rendered.contains(r#""name":"write_file""#));
+        assert!(rendered.contains(r#""name":"edit_file""#));
+        assert!(rendered.contains(r#""name":"delete_file""#));
+        assert!(rendered.contains(r#""name":"copy_file""#));
+        assert!(rendered.contains(r#""name":"move_file""#));
+        assert!(rendered.contains(r#""name":"revert_turn""#));
+        assert!(rendered.contains(r#""name":"github_comment""#));
+        assert!(rendered.contains(r#""name":"github_close_issue""#));
+        assert!(rendered.contains("durable runtime approvals"));
+    }
+
+    #[test]
+    fn mcp_tools_call_executes_revert_turn_after_runtime_approval() {
+        let mut state = mcp_state_with_durable_approvals("mcp-revert-turn-approval");
+        let repo = temp_git_repo("mcp-revert-turn-approval-repo");
+        state.workspace = repo.clone();
+        state.rollback = RollbackStore::new(temp_dir("mcp-revert-turn-approval-rollback"));
+        fs::write(repo.join("src.txt"), "snapshot\n").unwrap();
+        let snapshot = state
+            .rollback
+            .create_snapshot(&repo, "before mcp revert_turn".to_string())
+            .unwrap();
+        fs::write(repo.join("src.txt"), "later\n").unwrap();
+
+        let responder = spawn_mcp_permission_responder(
+            state.store.clone(),
+            state.approval_thread_id.clone().unwrap(),
+            "approved",
+        );
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{{"name":"revert_turn","arguments":{{"snapshot_id":"{}"}}}}}}"#,
+            snapshot.id
+        );
+        let response = mcp_response_for_message(&request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("meta.applied=true"));
+        assert_eq!(
+            fs::read_to_string(repo.join("src.txt")).unwrap(),
+            "snapshot\n"
+        );
+    }
+
+    #[test]
+    fn mcp_tools_call_executes_github_comment_after_runtime_approval() {
+        let state = mcp_state_with_durable_approvals("mcp-github-comment-approval");
+        let responder = spawn_mcp_permission_responder(
+            state.store.clone(),
+            state.approval_thread_id.clone().unwrap(),
+            "approved",
+        );
+        let request = r#"{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"github_comment","arguments":{"target":"pr","number":"7","body":"verified","evidence":{"tests_run":["cargo test"]},"dry_run":true}}}"#;
+        let response = mcp_response_for_message(request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("Dry run: would comment on pr #7"));
+        assert!(rendered.contains(r#""isError":false"#));
+    }
+
+    #[test]
+    fn mcp_tools_call_executes_run_shell_after_runtime_approval() {
+        let state = mcp_state_with_durable_approvals("mcp-run-shell-approval-allow");
+        let store = state.store.clone();
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let responder_thread_id = thread_id.clone();
+        let responder = thread::spawn(move || {
+            for _ in 0..100 {
+                let events = store.read_events(&responder_thread_id, 0).unwrap();
+                if let Some(request) = events
+                    .iter()
+                    .find(|event| event.kind == "permission_request")
+                {
+                    store
+                        .append_permission_response(
+                            &responder_thread_id,
+                            None,
+                            request.id.clone(),
+                            "approved".to_string(),
+                        )
+                        .unwrap();
+                    return;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            panic!("permission request was not recorded");
+        });
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"run_shell","arguments":{"command":"pwd"}}}"#,
+            &state,
+        )
+        .unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+        let events = state.store.read_events(&thread_id, 0).unwrap();
+
+        assert!(rendered.contains("meta.command_kind=other"));
+        assert!(rendered.contains(r#""isError":false"#));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "permission_request"));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "permission_response"));
+    }
+
+    #[test]
+    fn mcp_tools_call_rejects_run_shell_after_runtime_denial() {
+        let state = mcp_state_with_durable_approvals("mcp-run-shell-approval-deny");
+        let store = state.store.clone();
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let responder_thread_id = thread_id.clone();
+        let responder = thread::spawn(move || {
+            for _ in 0..100 {
+                let events = store.read_events(&responder_thread_id, 0).unwrap();
+                if let Some(request) = events
+                    .iter()
+                    .find(|event| event.kind == "permission_request")
+                {
+                    store
+                        .append_permission_response(
+                            &responder_thread_id,
+                            None,
+                            request.id.clone(),
+                            "denied".to_string(),
+                        )
+                        .unwrap();
+                    return;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            panic!("permission request was not recorded");
+        });
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"run_shell","arguments":{"command":"pwd"}}}"#,
+            &state,
+        )
+        .unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("MCP run_shell denied by runtime approval"));
+        assert!(rendered.contains(r#""isError":true"#));
+    }
+
+    #[test]
+    fn mcp_tools_call_executes_apply_patch_after_runtime_approval() {
+        let state = mcp_state_with_durable_approvals("mcp-apply-patch-approval-allow");
+        let file = state.workspace.join("note.txt");
+        fs::write(&file, "alpha\n").unwrap();
+        let store = state.store.clone();
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let responder = spawn_mcp_permission_responder(store, thread_id.clone(), "approved");
+        let patch = "--- note.txt\n+++ note.txt\n@@ -1 +1 @@\n-alpha\n+beta\n";
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{{"name":"apply_patch","arguments":{{"patch":"{}"}}}}}}"#,
+            crate::util::json::json_escape(patch)
+        );
+
+        let response = mcp_response_for_message(&request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+        let events = state.store.read_events(&thread_id, 0).unwrap();
+
+        assert!(rendered.contains("Applied unified patch"));
+        assert!(rendered.contains(r#""isError":false"#));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "beta\n");
+        assert!(events.iter().any(|event| {
+            event.kind == "permission_request"
+                && json_value_to_string(&event.payload).contains(r#""tool":"apply_patch""#)
+        }));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "permission_response"));
+    }
+
+    #[test]
+    fn mcp_tools_call_rejects_apply_patch_after_runtime_denial() {
+        let state = mcp_state_with_durable_approvals("mcp-apply-patch-approval-deny");
+        let file = state.workspace.join("note.txt");
+        fs::write(&file, "alpha\n").unwrap();
+        let store = state.store.clone();
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let responder = spawn_mcp_permission_responder(store, thread_id.clone(), "denied");
+        let patch = "--- note.txt\n+++ note.txt\n@@ -1 +1 @@\n-alpha\n+beta\n";
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{{"name":"apply_patch","arguments":{{"patch":"{}"}}}}}}"#,
+            crate::util::json::json_escape(patch)
+        );
+
+        let response = mcp_response_for_message(&request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("MCP apply_patch denied by runtime approval"));
+        assert!(rendered.contains(r#""isError":true"#));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "alpha\n");
+    }
+
+    #[test]
+    fn mcp_tools_call_executes_write_file_after_runtime_approval() {
+        let state = mcp_state_with_durable_approvals("mcp-write-file-approval-allow");
+        let file = state.workspace.join("nested").join("note.txt");
+        let store = state.store.clone();
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let responder = spawn_mcp_permission_responder(store, thread_id.clone(), "approved");
+        let request = r#"{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"write_file","arguments":{"path":"nested/note.txt","content":"hello from MCP\n"}}}"#;
+
+        let response = mcp_response_for_message(request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+        let events = state.store.read_events(&thread_id, 0).unwrap();
+
+        assert!(rendered.contains("Wrote 15 bytes to nested/note.txt"));
+        assert!(rendered.contains(r#""isError":false"#));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "hello from MCP\n");
+        assert!(events.iter().any(|event| {
+            event.kind == "permission_request"
+                && json_value_to_string(&event.payload).contains(r#""tool":"write_file""#)
+        }));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "permission_response"));
+    }
+
+    #[test]
+    fn mcp_tools_call_rejects_write_file_after_runtime_denial() {
+        let state = mcp_state_with_durable_approvals("mcp-write-file-approval-deny");
+        let file = state.workspace.join("note.txt");
+        let store = state.store.clone();
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let responder = spawn_mcp_permission_responder(store, thread_id.clone(), "denied");
+        let request = r#"{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"write_file","arguments":{"path":"note.txt","content":"blocked\n"}}}"#;
+
+        let response = mcp_response_for_message(request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("MCP write_file denied by runtime approval"));
+        assert!(rendered.contains(r#""isError":true"#));
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn mcp_tools_call_rejects_write_file_unsafe_path() {
+        let state = mcp_state_with_durable_approvals("mcp-write-file-unsafe");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"write_file","arguments":{"path":"../escape.txt","content":"nope\n"}}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("unsafe write_file path"));
+        assert!(rendered.contains(r#""isError":true"#));
+    }
+
+    #[test]
+    fn mcp_tools_call_executes_edit_file_after_runtime_approval() {
+        let state = mcp_state_with_durable_approvals("mcp-edit-file-approval-allow");
+        let file = state.workspace.join("note.txt");
+        fs::write(&file, "hello world hello").unwrap();
+        let store = state.store.clone();
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let responder = spawn_mcp_permission_responder(store, thread_id, "approved");
+        let request = r#"{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"edit_file","arguments":{"path":"note.txt","search":"hello","replace":"hi"}}}"#;
+
+        let response = mcp_response_for_message(request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("Replaced 2 occurrence"));
+        assert!(rendered.contains(r#""isError":false"#));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "hi world hi");
+    }
+
+    #[test]
+    fn mcp_tools_call_executes_delete_file_after_runtime_approval() {
+        let state = mcp_state_with_durable_approvals("mcp-delete-file-approval-allow");
+        let file = state.workspace.join("note.txt");
+        fs::write(&file, "delete me\n").unwrap();
+        let store = state.store.clone();
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let responder = spawn_mcp_permission_responder(store, thread_id.clone(), "approved");
+        let request = r#"{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"delete_file","arguments":{"path":"note.txt"}}}"#;
+
+        let response = mcp_response_for_message(request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+        let events = state.store.read_events(&thread_id, 0).unwrap();
+
+        assert!(rendered.contains("Deleted file note.txt"));
+        assert!(rendered.contains(r#""isError":false"#));
+        assert!(!file.exists());
+        assert!(events.iter().any(|event| {
+            event.kind == "permission_request"
+                && json_value_to_string(&event.payload).contains(r#""tool":"delete_file""#)
+        }));
+    }
+
+    #[test]
+    fn mcp_tools_call_rejects_delete_file_after_runtime_denial() {
+        let state = mcp_state_with_durable_approvals("mcp-delete-file-approval-deny");
+        let file = state.workspace.join("note.txt");
+        fs::write(&file, "keep me\n").unwrap();
+        let store = state.store.clone();
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let responder = spawn_mcp_permission_responder(store, thread_id.clone(), "denied");
+        let request = r#"{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"delete_file","arguments":{"path":"note.txt"}}}"#;
+
+        let response = mcp_response_for_message(request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("MCP delete_file denied by runtime approval"));
+        assert!(rendered.contains(r#""isError":true"#));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "keep me\n");
+    }
+
+    #[test]
+    fn mcp_tools_call_rejects_delete_file_unsafe_path() {
+        let state = mcp_state_with_durable_approvals("mcp-delete-file-unsafe");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"delete_file","arguments":{"path":"../escape.txt"}}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("unsafe delete_file path"));
+        assert!(rendered.contains(r#""isError":true"#));
+    }
+
+    #[test]
+    fn mcp_tools_call_executes_copy_file_after_runtime_approval() {
+        let state = mcp_state_with_durable_approvals("mcp-copy-file-approval-allow");
+        let source = state.workspace.join("note.txt");
+        let destination = state.workspace.join("nested").join("copy.txt");
+        fs::write(&source, "copy me\n").unwrap();
+        let store = state.store.clone();
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let responder = spawn_mcp_permission_responder(store, thread_id.clone(), "approved");
+        let request = r#"{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"copy_file","arguments":{"source_path":"note.txt","destination_path":"nested/copy.txt"}}}"#;
+
+        let response = mcp_response_for_message(request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+        let events = state.store.read_events(&thread_id, 0).unwrap();
+
+        assert!(rendered.contains("Copied file note.txt to nested/copy.txt"));
+        assert!(rendered.contains(r#""isError":false"#));
+        assert_eq!(fs::read_to_string(&source).unwrap(), "copy me\n");
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "copy me\n");
+        assert!(events.iter().any(|event| {
+            event.kind == "permission_request"
+                && json_value_to_string(&event.payload).contains(r#""tool":"copy_file""#)
+        }));
+    }
+
+    #[test]
+    fn mcp_tools_call_rejects_copy_file_after_runtime_denial() {
+        let state = mcp_state_with_durable_approvals("mcp-copy-file-approval-deny");
+        let source = state.workspace.join("note.txt");
+        let destination = state.workspace.join("copy.txt");
+        fs::write(&source, "keep source\n").unwrap();
+        let store = state.store.clone();
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let responder = spawn_mcp_permission_responder(store, thread_id.clone(), "denied");
+        let request = r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"copy_file","arguments":{"source_path":"note.txt","destination_path":"copy.txt"}}}"#;
+
+        let response = mcp_response_for_message(request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("MCP copy_file denied by runtime approval"));
+        assert!(rendered.contains(r#""isError":true"#));
+        assert_eq!(fs::read_to_string(&source).unwrap(), "keep source\n");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn mcp_tools_call_rejects_copy_file_unsafe_path() {
+        let state = mcp_state_with_durable_approvals("mcp-copy-file-unsafe");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"copy_file","arguments":{"source_path":"note.txt","destination_path":"../escape.txt"}}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("unsafe copy_file destination path"));
+        assert!(rendered.contains(r#""isError":true"#));
+    }
+
+    #[test]
+    fn mcp_tools_call_rejects_copy_file_existing_destination() {
+        let state = mcp_state_with_durable_approvals("mcp-copy-file-existing-destination");
+        let source = state.workspace.join("note.txt");
+        let destination = state.workspace.join("copy.txt");
+        fs::write(&source, "keep source\n").unwrap();
+        fs::write(&destination, "keep destination\n").unwrap();
+        let store = state.store.clone();
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let responder = spawn_mcp_permission_responder(store, thread_id, "approved");
+        let request = r#"{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"copy_file","arguments":{"source_path":"note.txt","destination_path":"copy.txt"}}}"#;
+
+        let response = mcp_response_for_message(request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("copy_file destination already exists"));
+        assert!(rendered.contains(r#""isError":true"#));
+        assert_eq!(fs::read_to_string(&source).unwrap(), "keep source\n");
+        assert_eq!(
+            fs::read_to_string(&destination).unwrap(),
+            "keep destination\n"
+        );
+    }
+
+    #[test]
+    fn mcp_tools_call_executes_move_file_after_runtime_approval() {
+        let state = mcp_state_with_durable_approvals("mcp-move-file-approval-allow");
+        let source = state.workspace.join("note.txt");
+        let destination = state.workspace.join("nested").join("moved.txt");
+        fs::write(&source, "move me\n").unwrap();
+        let store = state.store.clone();
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let responder = spawn_mcp_permission_responder(store, thread_id.clone(), "approved");
+        let request = r#"{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"move_file","arguments":{"source_path":"note.txt","destination_path":"nested/moved.txt"}}}"#;
+
+        let response = mcp_response_for_message(request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+        let events = state.store.read_events(&thread_id, 0).unwrap();
+
+        assert!(rendered.contains("Moved file note.txt to nested/moved.txt"));
+        assert!(rendered.contains(r#""isError":false"#));
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "move me\n");
+        assert!(events.iter().any(|event| {
+            event.kind == "permission_request"
+                && json_value_to_string(&event.payload).contains(r#""tool":"move_file""#)
+        }));
+    }
+
+    #[test]
+    fn mcp_tools_call_rejects_move_file_after_runtime_denial() {
+        let state = mcp_state_with_durable_approvals("mcp-move-file-approval-deny");
+        let source = state.workspace.join("note.txt");
+        let destination = state.workspace.join("moved.txt");
+        fs::write(&source, "keep me\n").unwrap();
+        let store = state.store.clone();
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let responder = spawn_mcp_permission_responder(store, thread_id.clone(), "denied");
+        let request = r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"move_file","arguments":{"source_path":"note.txt","destination_path":"moved.txt"}}}"#;
+
+        let response = mcp_response_for_message(request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("MCP move_file denied by runtime approval"));
+        assert!(rendered.contains(r#""isError":true"#));
+        assert_eq!(fs::read_to_string(&source).unwrap(), "keep me\n");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn mcp_tools_call_rejects_move_file_unsafe_path() {
+        let state = mcp_state_with_durable_approvals("mcp-move-file-unsafe");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"move_file","arguments":{"source_path":"note.txt","destination_path":"../escape.txt"}}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("unsafe move_file destination path"));
+        assert!(rendered.contains(r#""isError":true"#));
+    }
+
+    #[test]
+    fn mcp_tools_call_rejects_move_file_existing_destination() {
+        let state = mcp_state_with_durable_approvals("mcp-move-file-existing-destination");
+        let source = state.workspace.join("note.txt");
+        let destination = state.workspace.join("moved.txt");
+        fs::write(&source, "keep source\n").unwrap();
+        fs::write(&destination, "keep destination\n").unwrap();
+        let store = state.store.clone();
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let responder = spawn_mcp_permission_responder(store, thread_id, "approved");
+        let request = r#"{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"move_file","arguments":{"source_path":"note.txt","destination_path":"moved.txt"}}}"#;
+
+        let response = mcp_response_for_message(request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("move_file destination already exists"));
+        assert!(rendered.contains(r#""isError":true"#));
+        assert_eq!(fs::read_to_string(&source).unwrap(), "keep source\n");
+        assert_eq!(
+            fs::read_to_string(&destination).unwrap(),
+            "keep destination\n"
+        );
+    }
+
+    #[test]
+    fn mcp_runtime_tool_lists_sessions() {
+        let state = mcp_state("mcp-runtime-sessions");
+        state
+            .store
+            .create_session("MCP visible session".to_string(), ".".to_string())
+            .unwrap();
+
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"runtime_list_sessions","arguments":{"limit":5}}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("MCP visible session"));
+        assert!(rendered.contains(r#""isError":false"#));
+    }
+
+    #[test]
+    fn mcp_resources_list_includes_workspace_and_runtime_records() {
+        let state = mcp_state("mcp-resources-list");
+        let session = state
+            .store
+            .create_session(
+                "MCP resource session".to_string(),
+                state.workspace.display().to_string(),
+            )
+            .unwrap();
+        let thread = state
+            .store
+            .create_thread_for_session(
+                &session.id,
+                "MCP resource thread".to_string(),
+                state.workspace.display().to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        state
+            .store
+            .create_task(
+                Some(&session.id),
+                Some(&thread.id),
+                None,
+                "agent".to_string(),
+                "pending".to_string(),
+                "MCP resource task".to_string(),
+            )
+            .unwrap();
+
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":5,"method":"resources/list","params":{}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("file://"));
+        assert!(rendered.contains("MCP resource session"));
+        assert!(rendered.contains("deepseekcode://runtime/threads/"));
+        assert!(rendered.contains("MCP resource task"));
+    }
+
+    #[test]
+    fn mcp_resource_templates_list_returns_runtime_templates() {
+        let state = mcp_state("mcp-resource-templates-list");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":6,"method":"resources/templates/list","params":{}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains(r#""resourceTemplates":["#));
+        assert!(rendered.contains("deepseekcode://runtime/sessions/{id}"));
+        assert!(rendered.contains("deepseekcode://runtime/threads/{id}"));
+        assert!(rendered.contains("deepseekcode://runtime/tasks/{id}"));
+        assert!(rendered.contains(r#""nextCursor":null"#));
+    }
+
+    #[test]
+    fn mcp_resources_read_returns_runtime_thread_json() {
+        let state = mcp_state("mcp-resources-read");
+        let session = state
+            .store
+            .create_session("MCP read session".to_string(), ".".to_string())
+            .unwrap();
+        let thread = state
+            .store
+            .create_thread_for_session(
+                &session.id,
+                "MCP read thread".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let uri = format!("deepseekcode://runtime/threads/{}", thread.id);
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":6,"method":"resources/read","params":{{"uri":"{uri}"}}}}"#
+        );
+
+        let response = mcp_response_for_message(&request, &state).unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("MCP read thread"));
+        assert!(rendered.contains(r#""contents""#));
+        assert!(rendered.contains(r#""mimeType":"application/json""#));
+    }
+
+    #[test]
+    fn acp_initialize_advertises_baseline_agent() {
+        let mut state = acp_state("acp-init");
+        let dispatch = acp_dispatch_for_message(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}"#,
+            &mut state,
+        );
+        let AcpDispatch::Responses(responses) = dispatch else {
+            panic!("expected ACP responses");
+        };
+
+        assert_eq!(responses.len(), 1);
+        let rendered = json_value_to_string(&responses[0]);
+        assert!(rendered.contains(r#""id":1"#));
+        assert!(rendered.contains(r#""protocolVersion":1"#));
+        assert!(rendered.contains(r#""name":"deepseek-code""#));
+        assert!(rendered.contains(r#""embeddedContext":true"#));
+        assert!(rendered.contains(r#""loadSession":true"#));
+        assert!(
+            rendered.contains(r#""checkpoints":{"apply":true,"readOnly":false,"restore":true}"#)
+        );
+        assert!(rendered.contains(r#""tools":{"permissioned":true,"readOnly":true}"#));
+    }
+
+    #[test]
+    fn acp_session_list_returns_runtime_sessions() {
+        let mut state = acp_state("acp-list");
+        state
+            .store
+            .create_session("ACP existing session".to_string(), ".".to_string())
+            .unwrap();
+
+        let dispatch = acp_dispatch_for_message(
+            r#"{"jsonrpc":"2.0","id":2,"method":"session/list","params":{"limit":10}}"#,
+            &mut state,
+        );
+        let AcpDispatch::Responses(responses) = dispatch else {
+            panic!("expected ACP responses");
+        };
+        let rendered = json_value_to_string(&responses[0]);
+
+        assert!(rendered.contains(r#""id":2"#));
+        assert!(rendered.contains("ACP existing session"));
+        assert!(rendered.contains(r#""sessions""#));
+    }
+
+    #[test]
+    fn acp_session_load_maps_active_runtime_thread() {
+        let mut state = acp_state("acp-load");
+        let workspace = temp_dir("acp-load-workspace");
+        let session = state
+            .store
+            .create_session(
+                "ACP durable session".to_string(),
+                workspace.display().to_string(),
+            )
+            .unwrap();
+        let thread = state
+            .store
+            .create_thread_for_session(
+                &session.id,
+                "ACP durable thread".to_string(),
+                workspace.display().to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"session/load","params":{{"sessionId":"{}"}}}}"#,
+            session.id
+        );
+
+        let dispatch = acp_dispatch_for_message(&request, &mut state);
+        let AcpDispatch::Responses(responses) = dispatch else {
+            panic!("expected ACP responses");
+        };
+        let rendered = json_value_to_string(&responses[0]);
+        let root = parse_root_object(&rendered).unwrap();
+        let acp_session_id = root
+            .get("result")
+            .and_then(json_as_object)
+            .and_then(|result| result.get("sessionId"))
+            .and_then(json_as_string)
+            .unwrap();
+        let loaded = state.sessions.get(acp_session_id).unwrap();
+
+        assert_eq!(loaded.cwd, workspace);
+        assert_eq!(
+            loaded.runtime_session_id.as_deref(),
+            Some(session.id.as_str())
+        );
+        assert_eq!(
+            loaded.runtime_thread_id.as_deref(),
+            Some(thread.id.as_str())
+        );
+        assert!(rendered.contains("ACP durable thread"));
+    }
+
+    #[test]
+    fn acp_session_load_rejects_thread_from_another_session() {
+        let mut state = acp_state("acp-load-mismatch");
+        let session = state
+            .store
+            .create_session("ACP one".to_string(), ".".to_string())
+            .unwrap();
+        let other = state
+            .store
+            .create_session("ACP other".to_string(), ".".to_string())
+            .unwrap();
+        let thread = state
+            .store
+            .create_thread_for_session(
+                &other.id,
+                "Other thread".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"session/load","params":{{"sessionId":"{}","threadId":"{}"}}}}"#,
+            session.id, thread.id
+        );
+
+        let dispatch = acp_dispatch_for_message(&request, &mut state);
+        let AcpDispatch::Responses(responses) = dispatch else {
+            panic!("expected ACP responses");
+        };
+        let rendered = json_value_to_string(&responses[0]);
+
+        assert!(rendered.contains(r#""code":-32602"#));
+        assert!(rendered.contains("does not belong"));
+    }
+
+    #[test]
+    fn acp_session_tools_list_new_session_is_read_only() {
+        let mut state = acp_state("acp-tools-list-read-only");
+        let workspace = temp_dir("acp-tools-list-read-only-workspace");
+        let new_request = format!(
+            r#"{{"jsonrpc":"2.0","id":20,"method":"session/new","params":{{"cwd":"{}"}}}}"#,
+            crate::util::json::json_escape(&workspace.display().to_string())
+        );
+        let AcpDispatch::Responses(new_responses) =
+            acp_dispatch_for_message(&new_request, &mut state)
+        else {
+            panic!("expected ACP responses");
+        };
+        let rendered_new = json_value_to_string(&new_responses[0]);
+        let root = parse_root_object(&rendered_new).unwrap();
+        let acp_session_id = root
+            .get("result")
+            .and_then(json_as_object)
+            .and_then(|result| result.get("sessionId"))
+            .and_then(json_as_string)
+            .unwrap();
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":21,"method":"session/tools/list","params":{{"sessionId":"{acp_session_id}"}}}}"#
+        );
+
+        let AcpDispatch::Responses(responses) = acp_dispatch_for_message(&request, &mut state)
+        else {
+            panic!("expected ACP responses");
+        };
+        let rendered = json_value_to_string(&responses[0]);
+
+        assert!(rendered.contains(r#""name":"read_file""#));
+        assert!(rendered.contains(r#""name":"retrieve_tool_result""#));
+        assert!(rendered.contains(r#""name":"list_dir""#));
+        assert!(rendered.contains(r#""name":"grep_files""#));
+        assert!(rendered.contains(r#""name":"file_search""#));
+        assert!(rendered.contains(r#""name":"web_search""#));
+        assert!(rendered.contains(r#""name":"fetch_url""#));
+        assert!(rendered.contains(r#""name":"git_status""#));
+        assert!(rendered.contains(r#""name":"project_map""#));
+        assert!(rendered.contains(r#""name":"validate_data""#));
+        assert!(rendered.contains(r#""name":"github_issue_context""#));
+        assert!(rendered.contains(r#""name":"github_pr_context""#));
+        assert!(!rendered.contains(r#""name":"run_shell""#));
+        assert!(!rendered.contains(r#""name":"run_tests""#));
+        assert!(!rendered.contains(r#""name":"apply_patch""#));
+        assert!(!rendered.contains(r#""name":"write_file""#));
+        assert!(!rendered.contains(r#""name":"edit_file""#));
+        assert!(!rendered.contains(r#""name":"github_comment""#));
+        assert!(!rendered.contains(r#""name":"github_close_issue""#));
+    }
+
+    #[test]
+    fn acp_session_tools_call_reads_file_from_session_workspace() {
+        let mut state = acp_state("acp-tools-read-file");
+        let workspace = temp_dir("acp-tools-read-file-workspace");
+        fs::write(workspace.join("note.txt"), "hello acp tool\nsecond\n").unwrap();
+        let new_request = format!(
+            r#"{{"jsonrpc":"2.0","id":22,"method":"session/new","params":{{"cwd":"{}"}}}}"#,
+            crate::util::json::json_escape(&workspace.display().to_string())
+        );
+        let AcpDispatch::Responses(new_responses) =
+            acp_dispatch_for_message(&new_request, &mut state)
+        else {
+            panic!("expected ACP responses");
+        };
+        let rendered_new = json_value_to_string(&new_responses[0]);
+        let root = parse_root_object(&rendered_new).unwrap();
+        let acp_session_id = root
+            .get("result")
+            .and_then(json_as_object)
+            .and_then(|result| result.get("sessionId"))
+            .and_then(json_as_string)
+            .unwrap();
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":23,"method":"session/tools/call","params":{{"sessionId":"{acp_session_id}","name":"read_file","arguments":{{"path":"note.txt","max_lines":1}}}}}}"#
+        );
+
+        let AcpDispatch::Responses(responses) = acp_dispatch_for_message(&request, &mut state)
+        else {
+            panic!("expected ACP responses");
+        };
+        assert_eq!(responses.len(), 3);
+        let call_update = json_value_to_string(&responses[0]);
+        let result_update = json_value_to_string(&responses[1]);
+        let rendered = json_value_to_string(&responses[2]);
+
+        assert!(call_update.contains(r#""method":"session/update""#));
+        assert!(call_update.contains(r#""sessionUpdate":"tool_call_update""#));
+        assert!(call_update.contains(r#""name":"read_file""#));
+        assert!(result_update.contains(r#""sessionUpdate":"tool_result_update""#));
+        assert!(result_update.contains("hello acp tool"));
+        assert!(result_update.contains(r#""isError":false"#));
+        assert!(rendered.contains(r#""id":23"#));
+        assert!(rendered.contains("hello acp tool"));
+        assert!(rendered.contains(r#""isError":false"#));
+    }
+
+    #[test]
+    fn acp_loaded_session_tools_call_write_file_uses_runtime_approval() {
+        let mut state = acp_state("acp-tools-write-file");
+        let workspace = temp_dir("acp-tools-write-file-workspace");
+        let session = state
+            .store
+            .create_session(
+                "ACP tool session".to_string(),
+                workspace.display().to_string(),
+            )
+            .unwrap();
+        let thread = state
+            .store
+            .create_thread_for_session(
+                &session.id,
+                "ACP tool thread".to_string(),
+                workspace.display().to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let load_request = format!(
+            r#"{{"jsonrpc":"2.0","id":24,"method":"session/load","params":{{"sessionId":"{}","threadId":"{}"}}}}"#,
+            session.id, thread.id
+        );
+        let AcpDispatch::Responses(load_responses) =
+            acp_dispatch_for_message(&load_request, &mut state)
+        else {
+            panic!("expected ACP responses");
+        };
+        let rendered_load = json_value_to_string(&load_responses[0]);
+        let root = parse_root_object(&rendered_load).unwrap();
+        let acp_session_id = root
+            .get("result")
+            .and_then(json_as_object)
+            .and_then(|result| result.get("sessionId"))
+            .and_then(json_as_string)
+            .unwrap();
+        let list_request = format!(
+            r#"{{"jsonrpc":"2.0","id":25,"method":"session/tools/list","params":{{"sessionId":"{acp_session_id}"}}}}"#
+        );
+        let AcpDispatch::Responses(list_responses) =
+            acp_dispatch_for_message(&list_request, &mut state)
+        else {
+            panic!("expected ACP responses");
+        };
+        let rendered_list = json_value_to_string(&list_responses[0]);
+        assert!(rendered_list.contains(r#""name":"write_file""#));
+        assert!(rendered_list.contains(r#""name":"edit_file""#));
+        assert!(rendered_list.contains(r#""name":"apply_patch""#));
+
+        let responder =
+            spawn_mcp_permission_responder(state.store.clone(), thread.id.clone(), "approved");
+        let call_request = format!(
+            r#"{{"jsonrpc":"2.0","id":26,"method":"session/tools/call","params":{{"sessionId":"{acp_session_id}","name":"write_file","arguments":{{"path":"out.txt","content":"from acp\n"}}}}}}"#
+        );
+
+        let AcpDispatch::Responses(call_responses) =
+            acp_dispatch_for_message(&call_request, &mut state)
+        else {
+            panic!("expected ACP responses");
+        };
+        responder.join().unwrap();
+        assert_eq!(call_responses.len(), 3);
+        let rendered_call = json_value_to_string(&call_responses[2]);
+        let turns = state.store.list_turns(&thread.id).unwrap();
+        let items = state.store.list_items(&thread.id, None).unwrap();
+        let events = state.store.read_events(&thread.id, 0).unwrap();
+        let call_update = json_value_to_string(&call_responses[0]);
+        let result_update = json_value_to_string(&call_responses[1]);
+
+        assert!(call_update.contains(r#""sessionUpdate":"tool_call_update""#));
+        assert!(result_update.contains(r#""sessionUpdate":"tool_result_update""#));
+        assert!(rendered_call.contains("Wrote 9 bytes to out.txt"));
+        assert!(rendered_call.contains(r#""isError":false"#));
+        assert!(rendered_call.contains(r#""id":26"#));
+        assert_eq!(
+            fs::read_to_string(workspace.join("out.txt")).unwrap(),
+            "from acp\n"
+        );
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].role, "assistant");
+        assert_eq!(turns[0].status, "completed");
+        assert!(turns[0]
+            .content
+            .contains("ACP tool call `write_file` completed"));
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].item_type, "tool_call");
+        assert_eq!(items[0].status, "completed");
+        assert!(items[0].content.contains(r#""tool":"write_file""#));
+        assert_eq!(items[1].item_type, "tool_result");
+        assert_eq!(items[1].status, "completed");
+        assert!(items[1].content.contains("Wrote 9 bytes to out.txt"));
+        assert!(call_update.contains(&turns[0].id));
+        assert!(call_update.contains(&items[0].id));
+        assert!(result_update.contains(&turns[0].id));
+        assert!(result_update.contains(&items[0].id));
+        assert!(result_update.contains(&items[1].id));
+        assert!(events.iter().any(|event| {
+            event.kind == "permission_request"
+                && event.turn_id.as_deref() == Some(turns[0].id.as_str())
+                && json_value_to_string(&event.payload).contains(r#""tool":"write_file""#)
+        }));
+    }
+
+    #[test]
+    fn acp_session_checkpoints_lists_loaded_thread_snapshots() {
+        let mut state = acp_state("acp-checkpoints-list");
+        let repo = temp_git_repo("acp-checkpoints-list-repo");
+        fs::write(repo.join("src.txt"), "checkpoint one\n").unwrap();
+        let session = state
+            .store
+            .create_session(
+                "ACP checkpoint session".to_string(),
+                repo.display().to_string(),
+            )
+            .unwrap();
+        let thread = state
+            .store
+            .create_thread_for_session(
+                &session.id,
+                "ACP checkpoint thread".to_string(),
+                repo.display().to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let snapshot = state
+            .rollback
+            .create_snapshot(&repo, "visible checkpoint".to_string())
+            .unwrap();
+        state
+            .rollback
+            .bind_snapshot_runtime(&snapshot.id, Some(&thread.id), Some("turn-visible"))
+            .unwrap();
+
+        let other_repo = temp_git_repo("acp-checkpoints-list-other-repo");
+        fs::write(other_repo.join("src.txt"), "checkpoint two\n").unwrap();
+        let other_snapshot = state
+            .rollback
+            .create_snapshot(&other_repo, "hidden checkpoint".to_string())
+            .unwrap();
+        state
+            .rollback
+            .bind_snapshot_runtime(
+                &other_snapshot.id,
+                Some("thread-other"),
+                Some("turn-hidden"),
+            )
+            .unwrap();
+
+        let load_request = format!(
+            r#"{{"jsonrpc":"2.0","id":7,"method":"session/load","params":{{"sessionId":"{}","threadId":"{}"}}}}"#,
+            session.id, thread.id
+        );
+        let AcpDispatch::Responses(load_responses) =
+            acp_dispatch_for_message(&load_request, &mut state)
+        else {
+            panic!("expected ACP responses");
+        };
+        let rendered_load = json_value_to_string(&load_responses[0]);
+        let root = parse_root_object(&rendered_load).unwrap();
+        let acp_session_id = root
+            .get("result")
+            .and_then(json_as_object)
+            .and_then(|result| result.get("sessionId"))
+            .and_then(json_as_string)
+            .unwrap();
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":8,"method":"session/checkpoints","params":{{"sessionId":"{acp_session_id}","limit":10}}}}"#
+        );
+
+        let AcpDispatch::Responses(responses) = acp_dispatch_for_message(&request, &mut state)
+        else {
+            panic!("expected ACP responses");
+        };
+        let rendered = json_value_to_string(&responses[0]);
+
+        assert!(rendered.contains(r#""checkpoints""#));
+        assert!(rendered.contains(&snapshot.id));
+        assert!(rendered.contains("visible checkpoint"));
+        assert!(!rendered.contains(&other_snapshot.id));
+        assert!(!rendered.contains("hidden checkpoint"));
+    }
+
+    #[test]
+    fn acp_checkpoint_read_returns_manifest_and_patch_by_turn_id() {
+        let mut state = acp_state("acp-checkpoint-read");
+        let repo = temp_git_repo("acp-checkpoint-read-repo");
+        fs::write(repo.join("src.txt"), "checkpoint patch\n").unwrap();
+        let snapshot = state
+            .rollback
+            .create_snapshot(&repo, "read checkpoint".to_string())
+            .unwrap();
+        state
+            .rollback
+            .bind_snapshot_runtime(&snapshot.id, Some("thread-acp"), Some("turn-acp"))
+            .unwrap();
+
+        let dispatch = acp_dispatch_for_message(
+            r#"{"jsonrpc":"2.0","id":9,"method":"session/checkpoint/read","params":{"checkpointId":"turn-acp","includePatch":true}}"#,
+            &mut state,
+        );
+        let AcpDispatch::Responses(responses) = dispatch else {
+            panic!("expected ACP responses");
+        };
+        let rendered = json_value_to_string(&responses[0]);
+
+        assert!(rendered.contains(r#""id":9"#));
+        assert!(rendered.contains(r#""checkpoint""#));
+        assert!(rendered.contains(&snapshot.id));
+        assert!(rendered.contains("read checkpoint"));
+        assert!(rendered.contains(r#""patch""#));
+        assert!(rendered.contains("diff --git"));
+        assert!(rendered.contains("checkpoint patch"));
+    }
+
+    #[test]
+    fn acp_checkpoint_restore_dry_run_does_not_mutate_worktree() {
+        let mut state = acp_state("acp-checkpoint-restore-dry-run");
+        let repo = temp_git_repo("acp-checkpoint-restore-dry-run-repo");
+        fs::write(repo.join("src.txt"), "snapshot version\n").unwrap();
+        let snapshot = state
+            .rollback
+            .create_snapshot(&repo, "restore dry-run checkpoint".to_string())
+            .unwrap();
+        fs::write(repo.join("src.txt"), "later version\n").unwrap();
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":10,"method":"session/checkpoint/restore","params":{{"checkpointId":"{}"}}}}"#,
+            snapshot.id
+        );
+
+        let dispatch = acp_dispatch_for_message(&request, &mut state);
+        let AcpDispatch::Responses(responses) = dispatch else {
+            panic!("expected ACP responses");
+        };
+        let rendered = json_value_to_string(&responses[0]);
+
+        assert!(rendered.contains(r#""id":10"#));
+        assert!(rendered.contains(r#""mode":"dry_run""#));
+        assert!(rendered.contains(r#""applied":false"#));
+        assert!(rendered.contains(&snapshot.id));
+        assert_eq!(
+            fs::read_to_string(repo.join("src.txt")).unwrap(),
+            "later version\n"
+        );
+    }
+
+    #[test]
+    fn acp_checkpoint_restore_apply_restores_loaded_session_turn() {
+        let mut state = acp_state("acp-checkpoint-restore-apply");
+        let repo = temp_git_repo("acp-checkpoint-restore-apply-repo");
+        fs::write(repo.join("src.txt"), "snapshot version\n").unwrap();
+        let session = state
+            .store
+            .create_session(
+                "ACP restore session".to_string(),
+                repo.display().to_string(),
+            )
+            .unwrap();
+        let thread = state
+            .store
+            .create_thread_for_session(
+                &session.id,
+                "ACP restore thread".to_string(),
+                repo.display().to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let snapshot = state
+            .rollback
+            .create_snapshot(&repo, "restore apply checkpoint".to_string())
+            .unwrap();
+        state
+            .rollback
+            .bind_snapshot_runtime(&snapshot.id, Some(&thread.id), Some("turn-acp-restore"))
+            .unwrap();
+        fs::write(repo.join("src.txt"), "later version\n").unwrap();
+        let load_request = format!(
+            r#"{{"jsonrpc":"2.0","id":11,"method":"session/load","params":{{"sessionId":"{}","threadId":"{}"}}}}"#,
+            session.id, thread.id
+        );
+        let AcpDispatch::Responses(load_responses) =
+            acp_dispatch_for_message(&load_request, &mut state)
+        else {
+            panic!("expected ACP responses");
+        };
+        let rendered_load = json_value_to_string(&load_responses[0]);
+        let root = parse_root_object(&rendered_load).unwrap();
+        let acp_session_id = root
+            .get("result")
+            .and_then(json_as_object)
+            .and_then(|result| result.get("sessionId"))
+            .and_then(json_as_string)
+            .unwrap();
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":12,"method":"session/checkpoint/restore","params":{{"sessionId":"{acp_session_id}","checkpointId":"turn-acp-restore","apply":true}}}}"#
+        );
+
+        let dispatch = acp_dispatch_for_message(&request, &mut state);
+        let AcpDispatch::Responses(responses) = dispatch else {
+            panic!("expected ACP responses");
+        };
+        let rendered = json_value_to_string(&responses[0]);
+
+        assert!(rendered.contains(r#""id":12"#));
+        assert!(rendered.contains(r#""mode":"applied""#));
+        assert!(rendered.contains(r#""applied":true"#));
+        assert!(rendered.contains(r#""changed_files":["src.txt"]"#));
+        assert_eq!(
+            fs::read_to_string(repo.join("src.txt")).unwrap(),
+            "snapshot version\n"
+        );
+    }
+
+    #[test]
+    fn acp_loaded_session_prompt_records_durable_turns_and_items() {
+        let mut state = acp_state("acp-loaded-prompt");
+        let workspace = temp_dir("acp-loaded-prompt-workspace");
+        let session = state
+            .store
+            .create_session(
+                "ACP durable prompt".to_string(),
+                workspace.display().to_string(),
+            )
+            .unwrap();
+        let thread = state
+            .store
+            .create_thread_for_session(
+                &session.id,
+                "ACP prompt thread".to_string(),
+                workspace.display().to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let load_request = format!(
+            r#"{{"jsonrpc":"2.0","id":5,"method":"session/load","params":{{"sessionId":"{}","threadId":"{}"}}}}"#,
+            session.id, thread.id
+        );
+        let dispatch = acp_dispatch_for_message(&load_request, &mut state);
+        let AcpDispatch::Responses(load_responses) = dispatch else {
+            panic!("expected ACP responses");
+        };
+        let rendered_load = json_value_to_string(&load_responses[0]);
+        let root = parse_root_object(&rendered_load).unwrap();
+        let acp_session_id = root
+            .get("result")
+            .and_then(json_as_object)
+            .and_then(|result| result.get("sessionId"))
+            .and_then(json_as_string)
+            .unwrap();
+        let prompt_request = format!(
+            r#"{{"jsonrpc":"2.0","id":6,"method":"session/prompt","params":{{"sessionId":"{acp_session_id}","prompt":"Summarize ACP durable prompt"}}}}"#
+        );
+
+        let dispatch = acp_dispatch_for_message(&prompt_request, &mut state);
+        let AcpDispatch::Responses(prompt_responses) = dispatch else {
+            panic!("expected ACP responses");
+        };
+        let turns = state.store.list_turns(&thread.id).unwrap();
+        let items = state.store.list_items(&thread.id, None).unwrap();
+
+        assert_eq!(prompt_responses.len(), 2);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].role, "user");
+        assert_eq!(turns[1].role, "assistant");
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|item| item.role.as_deref() == Some("user")
+            && item.content.contains("Summarize ACP durable prompt")));
+        assert!(items.iter().any(
+            |item| item.role.as_deref() == Some("assistant") && !item.content.trim().is_empty()
+        ));
+    }
+
+    #[test]
+    fn acp_extract_prompt_text_accepts_text_and_resource_blocks() {
+        let prompt = JsonValue::Array(vec![
+            object([
+                ("type", JsonValue::String("text".to_string())),
+                ("text", JsonValue::String("Review this file".to_string())),
+            ]),
+            object([
+                ("type", JsonValue::String("resource".to_string())),
+                (
+                    "resource",
+                    object([
+                        ("uri", JsonValue::String("file:///tmp/app.rs".to_string())),
+                        ("mimeType", JsonValue::String("text/rust".to_string())),
+                        ("text", JsonValue::String("fn main() {}".to_string())),
+                    ]),
+                ),
+            ]),
+            object([
+                ("type", JsonValue::String("resource_link".to_string())),
+                ("uri", JsonValue::String("file:///tmp/lib.rs".to_string())),
+            ]),
+        ]);
+
+        let text = acp_extract_prompt_text(&prompt).expect("prompt text");
+
+        assert!(text.contains("Review this file"));
+        assert!(text.contains("fn main() {}"));
+        assert!(text.contains("@file:///tmp/lib.rs"));
+    }
+
+    #[test]
+    fn acp_session_prompt_emits_update_and_end_turn() {
+        let mut state = acp_state("acp-prompt");
+        let dispatch = acp_dispatch_for_message(
+            r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#,
+            &mut state,
+        );
+        let AcpDispatch::Responses(responses) = dispatch else {
+            panic!("expected ACP responses");
+        };
+        let rendered = json_value_to_string(&responses[0]);
+        let root = parse_root_object(&rendered).unwrap();
+        let session_id = root
+            .get("result")
+            .and_then(json_as_object)
+            .and_then(|result| result.get("sessionId"))
+            .and_then(json_as_string)
+            .unwrap()
+            .to_string();
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{{"sessionId":"{session_id}","prompt":"Say hello from ACP"}}}}"#
+        );
+
+        let dispatch = acp_dispatch_for_message(&request, &mut state);
+        let AcpDispatch::Responses(responses) = dispatch else {
+            panic!("expected ACP responses");
+        };
+
+        assert_eq!(responses.len(), 2);
+        let update = json_value_to_string(&responses[0]);
+        let result = json_value_to_string(&responses[1]);
+        assert!(update.contains(r#""method":"session/update""#));
+        let update_root = parse_root_object(&update).unwrap();
+        let text = update_root
+            .get("params")
+            .and_then(json_as_object)
+            .and_then(|params| params.get("update"))
+            .and_then(json_as_object)
+            .and_then(|update| update.get("content"))
+            .and_then(json_as_object)
+            .and_then(|content| content.get("text"))
+            .and_then(json_as_string)
+            .unwrap();
+        assert!(!text.trim().is_empty());
+        assert!(result.contains(r#""id":2"#));
+        assert!(result.contains(r#""stopReason":"end_turn""#));
     }
 
     #[test]
@@ -2847,6 +7873,79 @@ mod tests {
     }
 
     #[test]
+    fn global_event_stream_endpoint_replays_events_across_threads() {
+        let store = temp_store("global-sse");
+        let first = store
+            .create_thread(
+                "First runtime".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let second = store
+            .create_thread(
+                "Second runtime".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+
+        let stream = response_for_request(
+            "GET /v1/events/stream?since_seq=0 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            &store,
+        );
+
+        assert_eq!(stream.status, 200);
+        assert_eq!(stream.content_type, "text/event-stream; charset=utf-8");
+        assert!(stream.body.contains(&format!("id: {}:1\n", first.id)));
+        assert!(stream.body.contains(&format!("id: {}:1\n", second.id)));
+        assert_eq!(stream.body.matches("event: thread_created\n").count(), 2);
+    }
+
+    #[test]
+    fn global_event_stream_endpoint_waits_for_new_threads() {
+        let store = temp_store("global-sse-wait");
+        let existing = store
+            .create_thread(
+                "Existing runtime".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let worker_store = store.clone();
+        let existing_id = existing.id.clone();
+
+        let handle = thread::spawn(move || {
+            response_for_request(
+                &format!(
+                    "GET /v1/events/stream?since={existing_id}:1&wait_ms=1000&poll_ms=10 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                ),
+                &worker_store,
+            )
+        });
+        thread::sleep(Duration::from_millis(50));
+        let created = store
+            .create_thread(
+                "Created while waiting".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+
+        let stream = handle.join().unwrap();
+        assert_eq!(stream.status, 200);
+        assert!(stream.body.contains(&format!("id: {}:1\n", created.id)));
+        assert!(stream.body.contains("event: thread_created\n"));
+        assert!(!stream
+            .body
+            .contains("no runtime events after cursor before wait timeout"));
+    }
+
+    #[test]
     fn event_endpoint_appends_permission_request_events() {
         let store = temp_store("permission-event");
         let thread = store
@@ -2920,6 +8019,58 @@ mod tests {
         assert!(response_stream
             .body
             .contains("event: permission_response\n"));
+    }
+
+    #[test]
+    fn event_endpoint_appends_user_input_events() {
+        let store = temp_store("user-input-event");
+        let thread = store
+            .create_thread(
+                "Runtime parity".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let request_body = r#"{"type":"user_input_request","questions":[{"header":"Mode","id":"mode","question":"Which mode?","options":[{"label":"Plan","description":"Plan first."},{"label":"Apply","description":"Implement directly."}]}]}"#;
+        let create = response_for_request(
+            &format!(
+                "POST /v1/threads/{}/events HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                thread.id,
+                request_body.len(),
+                request_body
+            ),
+            &store,
+        );
+        assert_eq!(create.status, 201);
+        assert!(create.body.contains("\"kind\":\"user_input_request\""));
+        assert!(create.body.contains("\"question\":\"Which mode?\""));
+        let create_root = parse_root_object(&create.body).unwrap();
+        let request_id = create_root
+            .get("event")
+            .and_then(json_as_object)
+            .and_then(|event| event.get("id"))
+            .and_then(json_as_string)
+            .expect("user input request id")
+            .to_string();
+
+        let response_body = format!(
+            r#"{{"type":"user_input_response","request_id":"{}","answers":{{"mode":"Plan"}}}}"#,
+            request_id
+        );
+        let response = response_for_request(
+            &format!(
+                "POST /v1/threads/{}/events HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                thread.id,
+                response_body.len(),
+                response_body
+            ),
+            &store,
+        );
+
+        assert_eq!(response.status, 201);
+        assert!(response.body.contains("\"kind\":\"user_input_response\""));
+        assert!(response.body.contains("\"mode\":\"Plan\""));
     }
 
     #[test]

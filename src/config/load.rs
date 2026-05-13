@@ -77,6 +77,70 @@ fn apply_env_overrides(config: &mut AppConfig) {
             config.model.reasoning_effort = reasoning_effort;
         }
     }
+    if let Some(base_url) =
+        first_nonempty_env(&["DSCODE_VISION_BASE_URL", "DEEPSEEK_VISION_BASE_URL"])
+    {
+        config.vision.base_url = base_url;
+    }
+    if let Some(model) = first_nonempty_env(&["DSCODE_VISION_MODEL", "DEEPSEEK_VISION_MODEL"]) {
+        config.vision.model = model;
+    }
+    if let Some(api_key_env) =
+        first_nonempty_env(&["DSCODE_VISION_API_KEY_ENV", "DEEPSEEK_VISION_API_KEY_ENV"])
+    {
+        config.vision.api_key_env = api_key_env;
+    }
+    if let Some(value) = first_nonempty_env(&["DSCODE_MEMORY", "DEEPSEEK_MEMORY"]) {
+        config.memory.enabled = parse_env_bool(&value);
+    }
+    if let Some(value) = first_nonempty_env(&["DSCODE_NOTES_PATH", "DEEPSEEK_NOTES_PATH"]) {
+        config.memory.notes_path = value;
+    }
+    if let Some(value) = first_nonempty_env(&["DSCODE_MEMORY_PATH", "DEEPSEEK_MEMORY_PATH"]) {
+        config.memory.memory_path = value;
+    }
+    if let Some(value) = first_nonempty_env(&["DSCODE_NETWORK_DEFAULT", "DEEPSEEK_NETWORK_DEFAULT"])
+    {
+        config.network.default = value;
+    }
+    if let Some(value) = first_nonempty_env(&["DSCODE_NETWORK_ALLOW", "DEEPSEEK_NETWORK_ALLOW"]) {
+        config.network.allow = parse_env_list(&value);
+    }
+    if let Some(value) = first_nonempty_env(&["DSCODE_NETWORK_DENY", "DEEPSEEK_NETWORK_DENY"]) {
+        config.network.deny = parse_env_list(&value);
+    }
+    if let Some(value) = first_nonempty_env(&["DSCODE_NETWORK_AUDIT", "DEEPSEEK_NETWORK_AUDIT"]) {
+        config.network.audit = parse_env_bool(&value);
+    }
+    if let Some(value) =
+        first_nonempty_env(&["DSCODE_NETWORK_AUDIT_PATH", "DEEPSEEK_NETWORK_AUDIT_PATH"])
+    {
+        config.network.audit_path = value;
+    }
+}
+
+fn first_nonempty_env(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    })
+}
+
+fn parse_env_bool(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "on" | "true" | "yes" | "y" | "enabled"
+    )
+}
+
+fn parse_env_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn parse_config(content: &str, config: &mut AppConfig) -> AppResult<()> {
@@ -97,6 +161,11 @@ fn parse_config(content: &str, config: &mut AppConfig) -> AppResult<()> {
             "model.model" => config.model.model = unquote(value),
             "model.api_key_env" => config.model.api_key_env = unquote(value),
             "model.reasoning_effort" => config.model.reasoning_effort = unquote(value),
+            "vision.base_url" | "vision_model.base_url" => config.vision.base_url = unquote(value),
+            "vision.model" | "vision_model.model" => config.vision.model = unquote(value),
+            "vision.api_key_env" | "vision_model.api_key_env" => {
+                config.vision.api_key_env = unquote(value)
+            }
             "approval.require_write_confirmation" => {
                 config.approval.require_write_confirmation = parse_bool(value)?
             }
@@ -135,6 +204,30 @@ fn parse_config(content: &str, config: &mut AppConfig) -> AppResult<()> {
             }
             "diagnostics.post_edit" => {
                 config.diagnostics.post_edit = parse_bool(value)?;
+            }
+            "memory.enabled" => {
+                config.memory.enabled = parse_bool(value)?;
+            }
+            "memory.notes_path" | "notes_path" => {
+                config.memory.notes_path = unquote(value);
+            }
+            "memory.memory_path" | "memory_path" => {
+                config.memory.memory_path = unquote(value);
+            }
+            "network.default" => {
+                config.network.default = unquote(value);
+            }
+            "network.allow" => {
+                config.network.allow = parse_string_list(value)?;
+            }
+            "network.deny" => {
+                config.network.deny = parse_string_list(value)?;
+            }
+            "network.audit" => {
+                config.network.audit = parse_bool(value)?;
+            }
+            "network.audit_path" => {
+                config.network.audit_path = unquote(value);
             }
             "workspace.config_dir" => config.workspace.config_dir = unquote(value),
             "workspace.session_dir" => config.workspace.session_dir = unquote(value),
@@ -260,6 +353,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_config_overrides_vision_from_toml() {
+        let mut config = AppConfig::default();
+        let toml = r#"
+vision.base_url = "https://vision.example/v1"
+vision.model = "vision-model"
+vision.api_key_env = "VISION_KEY"
+"#;
+        parse_config(toml, &mut config).unwrap();
+
+        assert_eq!(config.vision.base_url, "https://vision.example/v1");
+        assert_eq!(config.vision.model, "vision-model");
+        assert_eq!(config.vision.api_key_env, "VISION_KEY");
+    }
+
+    #[test]
+    fn parse_config_accepts_vision_model_alias_from_toml() {
+        let mut config = AppConfig::default();
+        let toml = r#"
+vision_model.base_url = "https://compat.example/v1"
+vision_model.model = "compat-vision-model"
+vision_model.api_key_env = "COMPAT_VISION_KEY"
+"#;
+        parse_config(toml, &mut config).unwrap();
+
+        assert_eq!(config.vision.base_url, "https://compat.example/v1");
+        assert_eq!(config.vision.model, "compat-vision-model");
+        assert_eq!(config.vision.api_key_env, "COMPAT_VISION_KEY");
+    }
+
+    #[test]
     fn parse_config_overrides_approval_from_toml() {
         let mut config = AppConfig::default();
         let toml = r#"
@@ -329,6 +452,43 @@ mcp.user_file = "/custom/user-mcp.json"
         parse_config(toml, &mut config).unwrap();
 
         assert!(config.diagnostics.post_edit);
+    }
+
+    #[test]
+    fn parse_config_overrides_memory_from_toml() {
+        let mut config = AppConfig::default();
+        let toml = r#"
+memory.enabled = true
+memory.notes_path = "/custom/notes.md"
+memory.memory_path = "/custom/memory.md"
+"#;
+        parse_config(toml, &mut config).unwrap();
+
+        assert!(config.memory.enabled);
+        assert_eq!(config.memory.notes_path, "/custom/notes.md");
+        assert_eq!(config.memory.memory_path, "/custom/memory.md");
+    }
+
+    #[test]
+    fn parse_config_overrides_network_policy_from_toml() {
+        let mut config = AppConfig::default();
+        let toml = r#"
+network.default = "deny"
+network.allow = ["api.deepseek.com", ".example.com"]
+network.deny = ["tracking.example.com"]
+network.audit = false
+network.audit_path = "/tmp/dscode-network-audit.log"
+"#;
+        parse_config(toml, &mut config).unwrap();
+
+        assert_eq!(config.network.default, "deny");
+        assert_eq!(
+            config.network.allow,
+            vec!["api.deepseek.com", ".example.com"]
+        );
+        assert_eq!(config.network.deny, vec!["tracking.example.com"]);
+        assert!(!config.network.audit);
+        assert_eq!(config.network.audit_path, "/tmp/dscode-network-audit.log");
     }
 
     #[test]

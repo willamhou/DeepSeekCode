@@ -4,6 +4,7 @@ pub mod hooks;
 pub mod instructions;
 pub mod loop_runtime;
 pub mod memory;
+pub mod network_policy;
 pub mod observations;
 pub mod rollback;
 pub mod runtime;

@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub struct ListFilesTool;
+pub struct ListDirTool;
 
 impl Tool for ListFilesTool {
     fn name(&self) -> &str {
@@ -38,6 +39,21 @@ impl Tool for ListFilesTool {
                 files.join("\n")
             },
         })
+    }
+}
+
+impl Tool for ListDirTool {
+    fn name(&self) -> &str {
+        "list_dir"
+    }
+
+    fn execute(&self, mut input: ToolInput) -> AppResult<ToolOutput> {
+        if input.get("root").is_none() {
+            if let Some(path) = input.get("path").map(str::to_string) {
+                input.args.insert("root".to_string(), path);
+            }
+        }
+        ListFilesTool.execute(input)
     }
 }
 
@@ -94,4 +110,39 @@ fn should_skip(name: &str) -> bool {
         name,
         ".git" | "target" | "node_modules" | "dist" | ".dscode" | "__pycache__"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "deepseek-list-files-{name}-{}-{suffix}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn list_dir_maps_path_to_list_files_root() {
+        let root = temp_root("alias");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let output = ListDirTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("path", root.display().to_string())
+                    .with_arg("max_depth", "1")
+                    .with_arg("limit", "10"),
+            )
+            .unwrap();
+
+        assert!(output.summary.contains("src/"));
+        assert!(output.summary.contains("src/main.rs"));
+    }
 }

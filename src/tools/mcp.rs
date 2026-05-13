@@ -66,6 +66,118 @@ impl Tool for McpCallTool {
 }
 
 #[derive(Clone)]
+pub struct McpListPromptsTool {
+    pub config: AppConfig,
+}
+
+impl Tool for McpListPromptsTool {
+    fn name(&self) -> &str {
+        "mcp_list_prompts"
+    }
+
+    fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
+        let server = input.get("server").filter(|value| !value.trim().is_empty());
+        let summary = crate::cli::commands::mcp::list_remote_prompts_summary(&self.config, server)?;
+        Ok(ToolOutput { summary })
+    }
+}
+
+#[derive(Clone)]
+pub struct McpGetPromptTool {
+    pub config: AppConfig,
+}
+
+impl Tool for McpGetPromptTool {
+    fn name(&self) -> &str {
+        "mcp_get_prompt"
+    }
+
+    fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
+        let server = input
+            .get("server")
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| app_error("mcp_get_prompt requires `server`"))?;
+        let prompt = input
+            .get("prompt")
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| app_error("mcp_get_prompt requires `prompt`"))?;
+        let arguments = input
+            .get("arguments")
+            .filter(|value| !value.trim().is_empty());
+        let summary = crate::cli::commands::mcp::get_remote_prompt_summary(
+            &self.config,
+            server,
+            prompt,
+            arguments,
+        )?;
+        Ok(ToolOutput { summary })
+    }
+}
+
+#[derive(Clone)]
+pub struct McpListResourcesTool {
+    pub config: AppConfig,
+}
+
+impl Tool for McpListResourcesTool {
+    fn name(&self) -> &str {
+        "mcp_list_resources"
+    }
+
+    fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
+        let server = input.get("server").filter(|value| !value.trim().is_empty());
+        let summary =
+            crate::cli::commands::mcp::list_remote_resources_summary(&self.config, server)?;
+        Ok(ToolOutput { summary })
+    }
+}
+
+#[derive(Clone)]
+pub struct McpReadResourceTool {
+    pub config: AppConfig,
+}
+
+impl Tool for McpReadResourceTool {
+    fn name(&self) -> &str {
+        "mcp_read_resource"
+    }
+
+    fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
+        let server = input
+            .get("server")
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| app_error("mcp_read_resource requires `server`"))?;
+        let uri = input
+            .get("uri")
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| app_error("mcp_read_resource requires `uri`"))?;
+        let summary =
+            crate::cli::commands::mcp::get_remote_resource_summary(&self.config, server, uri)?;
+        Ok(ToolOutput { summary })
+    }
+}
+
+#[derive(Clone)]
+pub struct McpListResourceTemplatesTool {
+    pub config: AppConfig,
+}
+
+impl Tool for McpListResourceTemplatesTool {
+    fn name(&self) -> &str {
+        "mcp_list_resource_templates"
+    }
+
+    fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
+        let server = input.get("server").filter(|value| !value.trim().is_empty());
+        let summary = crate::cli::commands::mcp::list_remote_resource_templates_summary(
+            &self.config,
+            server,
+        )?;
+        Ok(ToolOutput { summary })
+    }
+}
+
+#[derive(Clone)]
 pub struct McpRemoteToolTool {
     pub name: String,
     pub server: String,
@@ -195,6 +307,26 @@ while IFS= read -r line; do
       printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"echo: hello"}],"structuredContent":{"ok":true},"isError":false}}'
       exit 0
       ;;
+    *'"method":"prompts/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"prompts":[{"name":"review_pr","description":"Review a PR","arguments":[{"name":"number","description":"PR number","required":true}]}]}}'
+      exit 0
+      ;;
+    *'"method":"prompts/get"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"description":"Review prompt","messages":[{"role":"user","content":{"type":"text","text":"Review PR #42"}}]}}'
+      exit 0
+      ;;
+    *'"method":"resources/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"resources":[{"uri":"file:///tmp/readme.md","name":"readme","description":"Project readme","mimeType":"text/markdown"}]}}'
+      exit 0
+      ;;
+    *'"method":"resources/read"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"contents":[{"uri":"file:///tmp/readme.md","mimeType":"text/markdown","text":"Hello from MCP"}]}}'
+      exit 0
+      ;;
+    *'"method":"resources/templates/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"resourceTemplates":[{"uriTemplate":"file:///tmp/{name}.md","name":"file-template","description":"File template","mimeType":"text/markdown"}]}}'
+      exit 0
+      ;;
   esac
 done
 "#,
@@ -254,6 +386,73 @@ done
         assert!(output.summary.contains("fake/echo [stdio]: ok"));
         assert!(output.summary.contains("echo: hello"));
         assert!(output.summary.contains(r#"{"ok":true}"#));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mcp_prompt_tools_execute_stdio_prompts() {
+        let root = temp_root("prompts");
+        let config = fake_server_config(&root);
+        let list = McpListPromptsTool {
+            config: config.clone(),
+        }
+        .execute(ToolInput::new().with_arg("server", "fake"))
+        .unwrap();
+        assert!(list.summary.contains("fake [stdio]: 1 prompt(s)"));
+        assert!(list.summary.contains("review_pr"));
+
+        let get = McpGetPromptTool { config }
+            .execute(
+                ToolInput::new()
+                    .with_arg("server", "fake")
+                    .with_arg("prompt", "review_pr")
+                    .with_arg("arguments", r#"{"number":42}"#),
+            )
+            .unwrap();
+        assert!(get.summary.contains("fake/review_pr [stdio]: ok"));
+        assert!(get.summary.contains("Review PR #42"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mcp_resource_tools_execute_stdio_resources() {
+        let root = temp_root("resources");
+        let config = fake_server_config(&root);
+        let list = McpListResourcesTool {
+            config: config.clone(),
+        }
+        .execute(ToolInput::new().with_arg("server", "fake"))
+        .unwrap();
+        assert!(list.summary.contains("fake [stdio]: 1 resource(s)"));
+        assert!(list.summary.contains("file:///tmp/readme.md"));
+
+        let read = McpReadResourceTool { config }
+            .execute(
+                ToolInput::new()
+                    .with_arg("server", "fake")
+                    .with_arg("uri", "file:///tmp/readme.md"),
+            )
+            .unwrap();
+        assert!(read
+            .summary
+            .contains("fake/file:///tmp/readme.md [stdio]: ok"));
+        assert!(read.summary.contains("Hello from MCP"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mcp_resource_template_tool_executes_stdio_templates_list() {
+        let root = temp_root("templates");
+        let config = fake_server_config(&root);
+        let output = McpListResourceTemplatesTool { config }
+            .execute(ToolInput::new().with_arg("server", "fake"))
+            .unwrap();
+
+        assert!(output.summary.contains("fake [stdio]: 1 template(s)"));
+        assert!(output.summary.contains("file:///tmp/{name}.md"));
 
         let _ = std::fs::remove_dir_all(root);
     }

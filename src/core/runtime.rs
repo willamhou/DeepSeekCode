@@ -144,6 +144,25 @@ fn runtime_write_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn write_json_file(path: PathBuf, content: String) -> AppResult<()> {
+    let mut temp_path = path.clone();
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    temp_path.set_extension(format!("json.tmp-{}-{suffix}", std::process::id()));
+    fs::write(&temp_path, content)?;
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+    fs::rename(&temp_path, &path).map_err(|error| {
+        let _ = fs::remove_file(&temp_path);
+        error
+    })?;
+    Ok(())
+}
+
 impl RuntimeStore {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
@@ -831,6 +850,102 @@ impl RuntimeStore {
         Ok(event)
     }
 
+    pub fn append_user_input_request(
+        &self,
+        thread_id: &str,
+        turn_id: Option<&str>,
+        questions: JsonValue,
+    ) -> AppResult<RuntimeEvent> {
+        validate_record_id(thread_id)?;
+        if let Some(turn_id) = turn_id {
+            validate_record_id(turn_id)?;
+        }
+        validate_user_input_questions(&questions)?;
+        self.ensure_dirs()?;
+        let mut thread = self.load_thread(thread_id)?;
+        if let Some(turn_id) = turn_id {
+            let path = self.turn_path(thread_id, turn_id);
+            if !path.exists() {
+                return Err(app_error(format!("runtime turn not found: {turn_id}")));
+            }
+        }
+        let event = self.append_event(
+            thread_id,
+            turn_id,
+            "user_input_request",
+            JsonValue::Object(object([
+                ("type", JsonValue::String("user_input_request".to_string())),
+                ("status", JsonValue::String("pending".to_string())),
+                ("questions", questions),
+            ])),
+        )?;
+        thread.updated_at = event.created_at.clone();
+        thread.event_seq = event.seq;
+        self.write_thread(&thread)?;
+        if let Some(session_id) = thread.session_id.as_deref() {
+            if let Ok(mut session) = self.load_session(session_id) {
+                session.active_thread_id = Some(thread.id.clone());
+                session.updated_at = thread.updated_at.clone();
+                self.write_session(&session)?;
+            }
+        }
+        Ok(event)
+    }
+
+    pub fn append_user_input_response(
+        &self,
+        thread_id: &str,
+        turn_id: Option<&str>,
+        request_id: String,
+        answers: BTreeMap<String, String>,
+    ) -> AppResult<RuntimeEvent> {
+        validate_record_id(thread_id)?;
+        if let Some(turn_id) = turn_id {
+            validate_record_id(turn_id)?;
+        }
+        validate_record_id(&request_id)?;
+        if answers.is_empty() {
+            return Err(app_error("user input response answers must not be empty"));
+        }
+        self.ensure_dirs()?;
+        let mut thread = self.load_thread(thread_id)?;
+        if let Some(turn_id) = turn_id {
+            let path = self.turn_path(thread_id, turn_id);
+            if !path.exists() {
+                return Err(app_error(format!("runtime turn not found: {turn_id}")));
+            }
+        }
+        let event = self.append_event(
+            thread_id,
+            turn_id,
+            "user_input_response",
+            JsonValue::Object(object([
+                ("type", JsonValue::String("user_input_response".to_string())),
+                ("request_id", JsonValue::String(request_id)),
+                (
+                    "answers",
+                    JsonValue::Object(
+                        answers
+                            .into_iter()
+                            .map(|(key, value)| (key, JsonValue::String(value)))
+                            .collect(),
+                    ),
+                ),
+            ])),
+        )?;
+        thread.updated_at = event.created_at.clone();
+        thread.event_seq = event.seq;
+        self.write_thread(&thread)?;
+        if let Some(session_id) = thread.session_id.as_deref() {
+            if let Ok(mut session) = self.load_session(session_id) {
+                session.active_thread_id = Some(thread.id.clone());
+                session.updated_at = thread.updated_at.clone();
+                self.write_session(&session)?;
+            }
+        }
+        Ok(event)
+    }
+
     pub fn append_cancel_request(
         &self,
         thread_id: &str,
@@ -1490,6 +1605,68 @@ impl RuntimeStore {
         Ok((automation, task))
     }
 
+    pub fn update_automation(
+        &self,
+        automation_id: &str,
+        name: Option<String>,
+        status: Option<String>,
+        schedule: Option<String>,
+        prompt: Option<String>,
+        next_run_at: Option<String>,
+    ) -> AppResult<AutomationRecord> {
+        validate_record_id(automation_id)?;
+        let mut automation = self.load_automation(automation_id)?;
+        let mut changed = false;
+        if let Some(name) = nonempty_override(name) {
+            automation.name = name;
+            changed = true;
+        }
+        if let Some(status) = nonempty_override(status) {
+            validate_automation_status(&status)?;
+            automation.status = status;
+            changed = true;
+        }
+        if let Some(schedule) = nonempty_override(schedule) {
+            automation.schedule = schedule;
+            changed = true;
+        }
+        if let Some(prompt) = nonempty_override(prompt) {
+            automation.prompt = prompt;
+            changed = true;
+        }
+        if let Some(next_run_at) = next_run_at {
+            automation.next_run_at = nonempty_override(Some(next_run_at));
+            changed = true;
+        }
+        if !changed {
+            return Err(app_error(
+                "runtime automation update requires at least one field",
+            ));
+        }
+        automation.updated_at = epoch_label();
+        self.write_automation(&automation)?;
+        self.append_automation_event(&automation, "automation_updated")?;
+        Ok(automation)
+    }
+
+    pub fn pause_automation(&self, automation_id: &str) -> AppResult<AutomationRecord> {
+        self.set_automation_status(automation_id, "paused", "automation_paused")
+    }
+
+    pub fn resume_automation(&self, automation_id: &str) -> AppResult<AutomationRecord> {
+        self.set_automation_status(automation_id, "active", "automation_resumed")
+    }
+
+    pub fn delete_automation(&self, automation_id: &str) -> AppResult<AutomationRecord> {
+        validate_record_id(automation_id)?;
+        let mut automation = self.load_automation(automation_id)?;
+        fs::remove_file(self.automation_path(automation_id))?;
+        automation.status = "cancelled".to_string();
+        automation.updated_at = epoch_label();
+        self.append_automation_event(&automation, "automation_deleted")?;
+        Ok(automation)
+    }
+
     pub fn update_automation_next_run(
         &self,
         automation_id: &str,
@@ -1633,7 +1810,7 @@ impl RuntimeStore {
 
     fn write_session(&self, session: &SessionRecord) -> AppResult<()> {
         fs::create_dir_all(self.sessions_dir())?;
-        fs::write(
+        write_json_file(
             self.session_path(&session.id),
             json_value_to_string(&session_to_json(session)),
         )?;
@@ -1642,7 +1819,7 @@ impl RuntimeStore {
 
     fn write_thread(&self, thread: &ThreadRecord) -> AppResult<()> {
         fs::create_dir_all(self.threads_dir())?;
-        fs::write(
+        write_json_file(
             self.thread_path(&thread.id),
             json_value_to_string(&thread_to_json(thread)),
         )?;
@@ -1651,7 +1828,7 @@ impl RuntimeStore {
 
     fn write_turn(&self, turn: &TurnRecord) -> AppResult<()> {
         fs::create_dir_all(self.turns_dir(&turn.thread_id))?;
-        fs::write(
+        write_json_file(
             self.turn_path(&turn.thread_id, &turn.id),
             json_value_to_string(&turn_to_json(turn)),
         )?;
@@ -1660,7 +1837,7 @@ impl RuntimeStore {
 
     fn write_item(&self, item: &ItemRecord) -> AppResult<()> {
         fs::create_dir_all(self.items_dir(&item.thread_id))?;
-        fs::write(
+        write_json_file(
             self.item_path(&item.thread_id, &item.id),
             json_value_to_string(&item_to_json(item)),
         )?;
@@ -1669,7 +1846,7 @@ impl RuntimeStore {
 
     fn write_usage(&self, usage: &UsageRecord) -> AppResult<()> {
         fs::create_dir_all(self.usage_dir(&usage.thread_id))?;
-        fs::write(
+        write_json_file(
             self.usage_path(&usage.thread_id, &usage.id),
             json_value_to_string(&usage_to_json(usage)),
         )?;
@@ -1678,7 +1855,7 @@ impl RuntimeStore {
 
     fn write_task(&self, task: &TaskRecord) -> AppResult<()> {
         fs::create_dir_all(self.tasks_dir())?;
-        fs::write(
+        write_json_file(
             self.task_path(&task.id),
             json_value_to_string(&task_to_json(task)),
         )?;
@@ -1687,10 +1864,50 @@ impl RuntimeStore {
 
     fn write_automation(&self, automation: &AutomationRecord) -> AppResult<()> {
         fs::create_dir_all(self.automations_dir())?;
-        fs::write(
+        write_json_file(
             self.automation_path(&automation.id),
             json_value_to_string(&automation_to_json(automation)),
         )?;
+        Ok(())
+    }
+
+    fn set_automation_status(
+        &self,
+        automation_id: &str,
+        status: &str,
+        event_kind: &str,
+    ) -> AppResult<AutomationRecord> {
+        validate_record_id(automation_id)?;
+        validate_automation_status(status)?;
+        let mut automation = self.load_automation(automation_id)?;
+        automation.status = status.to_string();
+        automation.updated_at = epoch_label();
+        self.write_automation(&automation)?;
+        self.append_automation_event(&automation, event_kind)?;
+        Ok(automation)
+    }
+
+    fn append_automation_event(&self, automation: &AutomationRecord, kind: &str) -> AppResult<()> {
+        if let Some(thread_id) = automation.thread_id.as_deref() {
+            let event =
+                self.append_event(thread_id, None, kind, automation_event_payload(automation))?;
+            let mut thread = self.load_thread(thread_id)?;
+            thread.updated_at = event.created_at;
+            thread.event_seq = event.seq;
+            self.write_thread(&thread)?;
+            if let Some(session_id) = thread.session_id.as_deref() {
+                if let Ok(mut session) = self.load_session(session_id) {
+                    session.active_thread_id = Some(thread.id.clone());
+                    session.updated_at = thread.updated_at.clone();
+                    self.write_session(&session)?;
+                }
+            }
+        } else if let Some(session_id) = automation.session_id.as_deref() {
+            if let Ok(mut session) = self.load_session(session_id) {
+                session.updated_at = automation.updated_at.clone();
+                self.write_session(&session)?;
+            }
+        }
         Ok(())
     }
 
@@ -2055,6 +2272,28 @@ pub fn automation_to_json(automation: &AutomationRecord) -> JsonValue {
     ]))
 }
 
+fn automation_event_payload(automation: &AutomationRecord) -> JsonValue {
+    let last_run_at = automation
+        .last_run_at
+        .as_ref()
+        .map(|value| JsonValue::String(value.clone()))
+        .unwrap_or(JsonValue::Null);
+    let next_run_at = automation
+        .next_run_at
+        .as_ref()
+        .map(|value| JsonValue::String(value.clone()))
+        .unwrap_or(JsonValue::Null);
+    JsonValue::Object(object([
+        ("automation_id", JsonValue::String(automation.id.clone())),
+        ("name", JsonValue::String(automation.name.clone())),
+        ("status", JsonValue::String(automation.status.clone())),
+        ("schedule", JsonValue::String(automation.schedule.clone())),
+        ("prompt", JsonValue::String(automation.prompt.clone())),
+        ("last_run_at", last_run_at),
+        ("next_run_at", next_run_at),
+    ]))
+}
+
 pub(crate) fn parse_session_record(root: &BTreeMap<String, JsonValue>) -> AppResult<SessionRecord> {
     Ok(SessionRecord {
         id: required_string(root, "id")?,
@@ -2396,6 +2635,63 @@ fn validate_task_status(status: &str) -> AppResult<()> {
     } else {
         Err(app_error(format!("invalid runtime task status `{status}`")))
     }
+}
+
+fn validate_user_input_questions(value: &JsonValue) -> AppResult<()> {
+    let questions = json_as_array(value)
+        .ok_or_else(|| app_error("user_input_request.questions must be a JSON array"))?;
+    if questions.is_empty() || questions.len() > 3 {
+        return Err(app_error(
+            "user_input_request.questions must contain 1 to 3 items",
+        ));
+    }
+    for question in questions {
+        let JsonValue::Object(question) = question else {
+            return Err(app_error(
+                "user_input_request.questions items must be objects",
+            ));
+        };
+        required_nonempty_payload_string(question, "header", "user_input_request question header")?;
+        required_nonempty_payload_string(question, "id", "user_input_request question id")?;
+        required_nonempty_payload_string(question, "question", "user_input_request question text")?;
+        let options = question
+            .get("options")
+            .and_then(json_as_array)
+            .ok_or_else(|| app_error("user_input_request question options must be an array"))?;
+        if options.len() < 2 || options.len() > 3 {
+            return Err(app_error(
+                "user_input_request question options must contain 2 or 3 items",
+            ));
+        }
+        for option in options {
+            let JsonValue::Object(option) = option else {
+                return Err(app_error(
+                    "user_input_request question options must be objects",
+                ));
+            };
+            required_nonempty_payload_string(option, "label", "user_input_request option label")?;
+            required_nonempty_payload_string(
+                option,
+                "description",
+                "user_input_request option description",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn required_nonempty_payload_string(
+    root: &BTreeMap<String, JsonValue>,
+    key: &str,
+    label: &str,
+) -> AppResult<String> {
+    let value = root
+        .get(key)
+        .and_then(json_as_string)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| app_error(format!("{label} cannot be empty")))?;
+    Ok(value.to_string())
 }
 
 fn nonempty_override(value: Option<String>) -> Option<String> {
@@ -2789,6 +3085,80 @@ mod tests {
             payload.get("decision").and_then(json_as_string),
             Some("approved")
         );
+        assert_eq!(
+            store.load_thread(&thread.id).unwrap().event_seq,
+            response.seq
+        );
+    }
+
+    #[test]
+    fn append_user_input_request_and_response_records_events() {
+        let store = RuntimeStore::new(temp_root("user-input"));
+        let thread = store
+            .create_thread(
+                "Investigate".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let questions = JsonValue::Array(vec![JsonValue::Object(object([
+            ("header", JsonValue::String("Mode".to_string())),
+            ("id", JsonValue::String("mode".to_string())),
+            (
+                "question",
+                JsonValue::String("Which mode should be used?".to_string()),
+            ),
+            (
+                "options",
+                JsonValue::Array(vec![
+                    JsonValue::Object(object([
+                        ("label", JsonValue::String("Plan".to_string())),
+                        (
+                            "description",
+                            JsonValue::String("Plan the change first.".to_string()),
+                        ),
+                    ])),
+                    JsonValue::Object(object([
+                        ("label", JsonValue::String("Apply".to_string())),
+                        (
+                            "description",
+                            JsonValue::String("Implement directly.".to_string()),
+                        ),
+                    ])),
+                ]),
+            ),
+        ]))]);
+
+        let request = store
+            .append_user_input_request(&thread.id, None, questions)
+            .unwrap();
+        let mut answers = BTreeMap::new();
+        answers.insert("mode".to_string(), "Plan".to_string());
+        let response = store
+            .append_user_input_response(&thread.id, None, request.id.clone(), answers)
+            .unwrap();
+
+        assert_eq!(request.kind, "user_input_request");
+        assert_eq!(response.kind, "user_input_response");
+        let events = store.read_events(&thread.id, 0).unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[1].id, request.id);
+        let JsonValue::Object(payload) = &events[2].payload else {
+            panic!("user input response payload should be an object");
+        };
+        assert_eq!(
+            payload.get("request_id").and_then(json_as_string),
+            Some(request.id.as_str())
+        );
+        let answers = payload
+            .get("answers")
+            .and_then(|value| match value {
+                JsonValue::Object(map) => Some(map),
+                _ => None,
+            })
+            .expect("answers object");
+        assert_eq!(answers.get("mode").and_then(json_as_string), Some("Plan"));
         assert_eq!(
             store.load_thread(&thread.id).unwrap().event_seq,
             response.seq
@@ -3219,6 +3589,68 @@ mod tests {
             .expect_err("paused automation should not trigger");
 
         assert!(error.to_string().contains("cannot be triggered"));
+    }
+
+    #[test]
+    fn update_pause_resume_and_delete_automation_records_events() {
+        let store = RuntimeStore::new(temp_root("automation-lifecycle"));
+        let session = store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Investigate".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let automation = store
+            .create_automation(
+                Some(&session.id),
+                Some(&thread.id),
+                "Nightly check".to_string(),
+                "active".to_string(),
+                "manual".to_string(),
+                "run diagnostics".to_string(),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let updated = store
+            .update_automation(
+                &automation.id,
+                Some("Weekly review".to_string()),
+                None,
+                Some("FREQ=WEEKLY;BYDAY=MO".to_string()),
+                Some("summarize open work".to_string()),
+                Some("epoch+999".to_string()),
+            )
+            .unwrap();
+        assert_eq!(updated.name, "Weekly review");
+        assert_eq!(updated.schedule, "FREQ=WEEKLY;BYDAY=MO");
+        assert_eq!(updated.prompt, "summarize open work");
+        assert_eq!(updated.next_run_at.as_deref(), Some("epoch+999"));
+
+        let paused = store.pause_automation(&automation.id).unwrap();
+        assert_eq!(paused.status, "paused");
+        let resumed = store.resume_automation(&automation.id).unwrap();
+        assert_eq!(resumed.status, "active");
+        let deleted = store.delete_automation(&automation.id).unwrap();
+        assert_eq!(deleted.status, "cancelled");
+        assert!(store.load_automation(&automation.id).is_err());
+
+        let events = store.read_events(&thread.id, 0).unwrap();
+        let kinds = events
+            .iter()
+            .map(|event| event.kind.as_str())
+            .collect::<Vec<_>>();
+        assert!(kinds.contains(&"automation_updated"));
+        assert!(kinds.contains(&"automation_paused"));
+        assert!(kinds.contains(&"automation_resumed"));
+        assert!(kinds.contains(&"automation_deleted"));
     }
 
     #[test]

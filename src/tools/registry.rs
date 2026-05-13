@@ -4,23 +4,67 @@ use std::env;
 use std::rc::Rc;
 
 use crate::config::types::AppConfig;
-use crate::config::types::ApprovalConfig;
+use crate::config::types::{ApprovalConfig, NetworkConfig};
 use crate::core::todos::TodoList;
 use crate::error::{app_error, policy_denied, tool_failure, AppResult};
 use crate::skills::schema::SkillSpec;
 use crate::tools::apply_patch::ApplyPatchTool;
 use crate::tools::diagnostics::DiagnosticsTool;
 use crate::tools::dispatch_subagent::{DispatchSubagentTool, DispatchSubagentsTool};
-use crate::tools::git_diff::GitDiffTool;
-use crate::tools::git_history::{GitBlameTool, GitLogTool, GitShowTool};
-use crate::tools::list_files::ListFilesTool;
-use crate::tools::mcp::{
-    remote_tool_registry_name, McpCallTool, McpListToolsTool, McpRemoteToolTool,
+use crate::tools::document::{ImageOcrTool, PandocConvertTool};
+use crate::tools::exec_shell::{
+    ExecShellCancelTool, ExecShellInteractTool, ExecShellListTool, ExecShellShowTool,
+    ExecShellTool, ExecShellWaitTool, TaskShellStartTool, TaskShellWaitTool,
 };
+use crate::tools::file_search::FileSearchTool;
+use crate::tools::file_write::{EditFileTool, FimEditTool, WriteFileTool};
+use crate::tools::git_diff::{GitDiffTool, GitStatusTool};
+use crate::tools::git_history::{GitBlameTool, GitLogTool, GitShowTool};
+use crate::tools::github::{
+    GithubCloseIssueTool, GithubCommentTool, GithubIssueContextTool, GithubPrContextTool,
+};
+use crate::tools::list_files::{ListDirTool, ListFilesTool};
+use crate::tools::mcp::{
+    remote_tool_registry_name, McpCallTool, McpGetPromptTool, McpListPromptsTool,
+    McpListResourceTemplatesTool, McpListResourcesTool, McpListToolsTool, McpReadResourceTool,
+    McpRemoteToolTool,
+};
+use crate::tools::notes::{NoteTool, RememberTool};
+use crate::tools::notify::NotifyTool;
+use crate::tools::project_map::ProjectMapTool;
 use crate::tools::read_file::ReadFileTool;
+use crate::tools::recall_archive::RecallArchiveTool;
+use crate::tools::revert_turn::RevertTurnTool;
+use crate::tools::review::ReviewTool;
+use crate::tools::rlm::{
+    RlmBatchTool, RlmChunkPlanTool, RlmMapReducePlanTool, RlmPythonSessionTool,
+    RlmPythonSessionsTool, RlmPythonTool, RlmTool,
+};
 use crate::tools::run_shell::{is_safe_shell_command, RunShellTool};
-use crate::tools::search_text::SearchTextTool;
+use crate::tools::run_tests::{render_run_tests_command, RunTestsTool};
+use crate::tools::runtime_tasks::{
+    AgentCancelTool, AgentCloseTool, AgentListTool, AgentResultTool, AgentResumeTool,
+    AgentSendInputTool, AgentSpawnTool, AutomationCreateTool, AutomationDeleteTool,
+    AutomationListTool, AutomationPauseTool, AutomationReadTool, AutomationResumeTool,
+    AutomationRunTool, AutomationUpdateTool, PrAttemptListTool, PrAttemptPreflightTool,
+    PrAttemptReadTool, PrAttemptRecordTool, TaskCancelTool, TaskCreateTool, TaskGateRunTool,
+    TaskListTool, TaskReadTool,
+};
+use crate::tools::search_text::{GrepFilesTool, SearchTextTool};
+use crate::tools::skill::LoadSkillTool;
+use crate::tools::todo::{
+    TodoAddTool, TodoListTool, TodoUpdateTool, TodoWriteAliasTool, TodoWriteTool, UpdatePlanTool,
+};
+use crate::tools::tool_output::RetrieveToolResultTool;
+use crate::tools::tool_search::{ToolSearchMode, ToolSearchTool};
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
+use crate::tools::user_input::RequestUserInputTool;
+use crate::tools::validate_data::ValidateDataTool;
+use crate::tools::vision::ImageAnalyzeTool;
+use crate::tools::web::{
+    network_permission_target_for_tool, FetchUrlTool, FinanceTool, WebRunTool, WebSearchTool,
+    NETWORK_APPROVED_ARG,
+};
 use crate::ui::confirm::confirm;
 use crate::util::cancel::CancellationCheck;
 
@@ -67,7 +111,7 @@ impl ToolRegistry {
     pub fn execute_with_policy_and_cancel(
         &self,
         name: &str,
-        input: ToolInput,
+        mut input: ToolInput,
         policy: &ExecutionPolicy,
         cancel_check: Option<&mut dyn CancellationCheck>,
     ) -> AppResult<ToolOutput> {
@@ -92,10 +136,46 @@ impl ToolRegistry {
             }
         }
 
-        if name == "run_shell" {
+        if name == "revert_turn" && policy.require_write_confirmation && !policy.auto_approve_writes
+        {
+            let target = describe_revert_turn_target(&input);
+            let prompt = format!(
+                "Restore rollback snapshot {}?",
+                sanitize_for_prompt(&target)
+            );
+            if !confirm(&prompt) {
+                return Err(policy_denied(format!(
+                    "rollback restore declined for {}; set DSCODE_AUTO_APPROVE_WRITES=1 to skip prompts or relax the active policy",
+                    sanitize_for_prompt(&target)
+                )));
+            }
+        }
+
+        if is_runtime_mutation_tool(name)
+            && policy.require_write_confirmation
+            && !policy.auto_approve_writes
+        {
+            let target = describe_runtime_task_target(name, &input);
+            let prompt = format!(
+                "Mutate runtime task state: {}?",
+                sanitize_for_prompt(&target)
+            );
+            if !confirm(&prompt) {
+                return Err(policy_denied(format!(
+                    "runtime task mutation declined for {}; set DSCODE_AUTO_APPROVE_WRITES=1 to skip prompts or relax the active policy",
+                    sanitize_for_prompt(&target)
+                )));
+            }
+        }
+
+        if name == "run_shell"
+            || name == "exec_shell"
+            || name == "task_shell_start"
+            || name == "task_gate_run"
+        {
             let command = input
                 .get("command")
-                .ok_or_else(|| app_error("run_shell requires a command"))?;
+                .ok_or_else(|| app_error(format!("{name} requires a command")))?;
             let cwd = input.get("cwd").unwrap_or(".");
 
             if !policy.shell_allowlist.is_empty()
@@ -128,6 +208,31 @@ impl ToolRegistry {
                         "shell command declined; set DSCODE_AUTO_APPROVE_SHELL=1 to skip prompts or relax the active policy",
                     ));
                 }
+            }
+        }
+
+        if name == "run_tests" && policy.require_shell_confirmation && !policy.auto_approve_shell {
+            let command = describe_run_tests_target(&input);
+            if !policy.shell_allowlist.is_empty()
+                && !policy
+                    .shell_allowlist
+                    .iter()
+                    .any(|prefix| command.trim().starts_with(prefix))
+            {
+                return Err(policy_denied(format!(
+                    "test command blocked by policy allowlist: {}",
+                    sanitize_for_prompt(&command)
+                )));
+            }
+            let prompt = format!(
+                "Run tests in {}: '{}'?",
+                sanitize_for_prompt(input.get("cwd").unwrap_or(".")),
+                sanitize_for_prompt(&command)
+            );
+            if !confirm(&prompt) {
+                return Err(policy_denied(
+                    "test command declined; set DSCODE_AUTO_APPROVE_SHELL=1 to skip prompts or relax the active policy",
+                ));
             }
         }
 
@@ -164,6 +269,12 @@ impl ToolRegistry {
             }
         }
 
+        if policy.auto_approve_network {
+            input
+                .args
+                .insert(NETWORK_APPROVED_ARG.to_string(), "true".to_string());
+        }
+
         tool.execute_with_cancel(input, cancel_check)
             .map_err(|error| {
                 if error.downcast_ref::<crate::error::AppError>().is_some() {
@@ -193,7 +304,65 @@ impl ToolRegistry {
             });
         }
 
-        if name == "run_shell" && policy.require_shell_confirmation && !policy.auto_approve_shell {
+        if name == "revert_turn" && policy.require_write_confirmation && !policy.auto_approve_writes
+        {
+            return Some(PermissionRequest {
+                kind: "write".to_string(),
+                target: describe_revert_turn_target(input),
+            });
+        }
+
+        if (name == "write_file" || name == "edit_file" || name == "fim_edit")
+            && policy.require_write_confirmation
+            && !policy.auto_approve_writes
+        {
+            return Some(PermissionRequest {
+                kind: "write".to_string(),
+                target: describe_file_write_target(name, input),
+            });
+        }
+
+        if name == "pandoc_convert"
+            && input
+                .get("output_path")
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+            && policy.require_write_confirmation
+            && !policy.auto_approve_writes
+        {
+            return Some(PermissionRequest {
+                kind: "write".to_string(),
+                target: describe_file_write_target(name, input),
+            });
+        }
+
+        if (name == "github_comment" || name == "github_close_issue")
+            && policy.require_write_confirmation
+            && !policy.auto_approve_writes
+        {
+            return Some(PermissionRequest {
+                kind: "write".to_string(),
+                target: describe_github_write_target(name, input),
+            });
+        }
+
+        if is_runtime_mutation_tool(name)
+            && policy.require_write_confirmation
+            && !policy.auto_approve_writes
+        {
+            return Some(PermissionRequest {
+                kind: "write".to_string(),
+                target: describe_runtime_task_target(name, input),
+            });
+        }
+
+        if (name == "run_shell"
+            || name == "exec_shell"
+            || name == "task_shell_start"
+            || name == "task_gate_run")
+            && policy.require_shell_confirmation
+            && !policy.auto_approve_shell
+        {
             let command = input.get("command")?;
             if !policy.shell_allowlist.is_empty()
                 && !policy
@@ -210,6 +379,30 @@ impl ToolRegistry {
                 kind: "shell".to_string(),
                 target: command.to_string(),
             });
+        }
+        if name == "run_tests" && policy.require_shell_confirmation && !policy.auto_approve_shell {
+            let target = describe_run_tests_target(input);
+            if !policy.shell_allowlist.is_empty()
+                && !policy
+                    .shell_allowlist
+                    .iter()
+                    .any(|prefix| target.trim().starts_with(prefix))
+            {
+                return None;
+            }
+            return Some(PermissionRequest {
+                kind: "shell".to_string(),
+                target,
+            });
+        }
+
+        if !policy.auto_approve_network {
+            if let Some(target) = network_permission_target_for_tool(name, input, &policy.network) {
+                return Some(PermissionRequest {
+                    kind: "network".to_string(),
+                    target,
+                });
+            }
         }
 
         let mcp_target = if name == "mcp_call" {
@@ -243,13 +436,23 @@ pub struct ExecutionPolicy {
     require_mcp_confirmation: bool,
     shell_allowlist: Vec<String>,
     mcp_call_allowlist: Vec<String>,
+    network: NetworkConfig,
     auto_approve_writes: bool,
     auto_approve_shell: bool,
     auto_approve_mcp: bool,
+    auto_approve_network: bool,
 }
 
 impl ExecutionPolicy {
     pub fn new(approval: &ApprovalConfig, skill: Option<&SkillSpec>) -> Self {
+        Self::with_network(approval, &NetworkConfig::default(), skill)
+    }
+
+    pub fn with_network(
+        approval: &ApprovalConfig,
+        network: &NetworkConfig,
+        skill: Option<&SkillSpec>,
+    ) -> Self {
         let (
             allowed_tools,
             require_write_confirmation,
@@ -278,9 +481,11 @@ impl ExecutionPolicy {
             require_mcp_confirmation: approval.require_mcp_confirmation,
             shell_allowlist,
             mcp_call_allowlist: approval.mcp_call_allowlist.clone(),
+            network: network.clone(),
             auto_approve_writes: env_flag("DSCODE_AUTO_APPROVE_WRITES"),
             auto_approve_shell: env_flag("DSCODE_AUTO_APPROVE_SHELL"),
             auto_approve_mcp: env_flag("DSCODE_AUTO_APPROVE_MCP"),
+            auto_approve_network: env_flag("DSCODE_AUTO_APPROVE_NETWORK"),
         }
     }
 
@@ -294,6 +499,7 @@ impl ExecutionPolicy {
             "write" => policy.auto_approve_writes = true,
             "shell" => policy.auto_approve_shell = true,
             "mcp" => policy.auto_approve_mcp = true,
+            "network" => policy.auto_approve_network = true,
             _ => {}
         }
         policy
@@ -315,6 +521,160 @@ fn describe_apply_patch_target(input: &ToolInput) -> String {
         return format!("{cwd} (unified diff)");
     }
     "current workspace".to_string()
+}
+
+fn describe_revert_turn_target(input: &ToolInput) -> String {
+    if let Some(id) = input
+        .get("snapshot_id")
+        .or_else(|| input.get("checkpoint_id"))
+        .or_else(|| input.get("id"))
+    {
+        return format!("snapshot {id}");
+    }
+    if let Some(turn_id) = input.get("turn_id") {
+        return format!("turn {turn_id}");
+    }
+    format!(
+        "turn_offset {}",
+        input
+            .get("turn_offset")
+            .or_else(|| input.get("offset"))
+            .unwrap_or("1")
+    )
+}
+
+fn describe_file_write_target(name: &str, input: &ToolInput) -> String {
+    let path = input.get("path").unwrap_or("?");
+    match name {
+        "write_file" => format!("write {path}"),
+        "edit_file" => format!("edit {path}"),
+        "fim_edit" => format!("fim edit {path}"),
+        "pandoc_convert" => {
+            let output = input.get("output_path").unwrap_or(path);
+            format!("pandoc convert {output}")
+        }
+        _ => path.to_string(),
+    }
+}
+
+fn describe_github_write_target(name: &str, input: &ToolInput) -> String {
+    let number = input
+        .get("number")
+        .or_else(|| input.get("issue"))
+        .or_else(|| input.get("pr"))
+        .or_else(|| input.get("ref"))
+        .unwrap_or("?");
+    let repo = input
+        .get("repo")
+        .or_else(|| input.get("repository"))
+        .map(|value| format!(" in {value}"))
+        .unwrap_or_default();
+    match name {
+        "github_comment" => {
+            let target = input.get("target").unwrap_or("issue/pr");
+            format!("github {target} #{number} comment{repo}")
+        }
+        "github_close_issue" => format!("github issue #{number} close{repo}"),
+        _ => format!("github write #{number}{repo}"),
+    }
+}
+
+fn describe_run_tests_target(input: &ToolInput) -> String {
+    render_run_tests_command(input).unwrap_or_else(|_| "run_tests".to_string())
+}
+
+fn is_runtime_mutation_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "task_create"
+            | "task_cancel"
+            | "automation_create"
+            | "automation_update"
+            | "automation_pause"
+            | "automation_resume"
+            | "automation_delete"
+            | "automation_run"
+            | "agent_spawn"
+            | "agent_cancel"
+            | "close_agent"
+            | "resume_agent"
+            | "send_input"
+    )
+}
+
+fn describe_runtime_task_target(name: &str, input: &ToolInput) -> String {
+    match name {
+        "task_create" => {
+            let summary = input
+                .get("prompt")
+                .or_else(|| input.get("summary"))
+                .unwrap_or("?");
+            format!("create runtime task: {}", sanitize_for_prompt(summary))
+        }
+        "task_cancel" => {
+            let id = input
+                .get("task_id")
+                .or_else(|| input.get("id"))
+                .unwrap_or("?");
+            format!("cancel runtime task {id}")
+        }
+        "automation_create" => {
+            let name = input.get("name").unwrap_or("?");
+            format!("create automation: {}", sanitize_for_prompt(name))
+        }
+        "automation_run" => {
+            let id = input
+                .get("automation_id")
+                .or_else(|| input.get("id"))
+                .unwrap_or("?");
+            format!("run automation {id}")
+        }
+        "automation_update" => {
+            let id = input
+                .get("automation_id")
+                .or_else(|| input.get("id"))
+                .unwrap_or("?");
+            format!("update automation {id}")
+        }
+        "automation_pause" => {
+            let id = input
+                .get("automation_id")
+                .or_else(|| input.get("id"))
+                .unwrap_or("?");
+            format!("pause automation {id}")
+        }
+        "automation_resume" => {
+            let id = input
+                .get("automation_id")
+                .or_else(|| input.get("id"))
+                .unwrap_or("?");
+            format!("resume automation {id}")
+        }
+        "automation_delete" => {
+            let id = input
+                .get("automation_id")
+                .or_else(|| input.get("id"))
+                .unwrap_or("?");
+            format!("delete automation {id}")
+        }
+        "agent_spawn" => {
+            let prompt = input
+                .get("prompt")
+                .or_else(|| input.get("message"))
+                .or_else(|| input.get("objective"))
+                .or_else(|| input.get("task"))
+                .unwrap_or("?");
+            format!("spawn sub-agent: {}", sanitize_for_prompt(prompt))
+        }
+        "agent_cancel" | "close_agent" | "resume_agent" | "send_input" => {
+            let id = input
+                .get("agent_id")
+                .or_else(|| input.get("id"))
+                .unwrap_or("?");
+            format!("{} {id}", name.replace('_', " "))
+        }
+        _ => "runtime task".to_string(),
+    }
 }
 
 fn mcp_call_target(input: &ToolInput) -> AppResult<(&str, &str)> {
@@ -405,24 +765,154 @@ pub fn default_registry_with_context(
         && (config.mcp.project_file_path().exists() || config.mcp.user_file_path().exists());
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(ListFilesTool),
+        Box::new(ListDirTool),
         Box::new(ReadFileTool),
+        Box::new(RetrieveToolResultTool),
         Box::new(SearchTextTool),
+        Box::new(GrepFilesTool),
+        Box::new(FileSearchTool),
+        Box::new(WebRunTool),
+        Box::new(WebSearchTool),
+        Box::new(FetchUrlTool),
+        Box::new(FinanceTool),
+        Box::new(PandocConvertTool),
+        Box::new(ImageOcrTool),
+        Box::new(ImageAnalyzeTool::new(&config)),
+        Box::new(ReviewTool::new(config.clone(), subagent_depth)),
+        Box::new(ToolSearchTool {
+            tool_name: "tool_search_tool_regex",
+            mode: ToolSearchMode::Regex,
+        }),
+        Box::new(ToolSearchTool {
+            tool_name: "tool_search_tool_bm25",
+            mode: ToolSearchMode::Bm25,
+        }),
+        Box::new(RequestUserInputTool),
         Box::new(ApplyPatchTool::new(config.diagnostics.clone())),
+        Box::new(WriteFileTool),
+        Box::new(EditFileTool),
+        Box::new(FimEditTool::new(&config)),
         Box::new(RunShellTool),
+        Box::new(ExecShellTool),
+        Box::new(TaskShellStartTool),
+        Box::new(TaskShellWaitTool),
+        Box::new(ExecShellWaitTool {
+            tool_name: "exec_shell_wait",
+        }),
+        Box::new(ExecShellWaitTool {
+            tool_name: "exec_wait",
+        }),
+        Box::new(ExecShellListTool),
+        Box::new(ExecShellShowTool),
+        Box::new(ExecShellInteractTool {
+            tool_name: "exec_shell_interact",
+        }),
+        Box::new(ExecShellInteractTool {
+            tool_name: "exec_interact",
+        }),
+        Box::new(ExecShellCancelTool),
+        Box::new(GitStatusTool),
         Box::new(GitDiffTool),
+        Box::new(ProjectMapTool),
         Box::new(DiagnosticsTool),
+        Box::new(ValidateDataTool),
+        Box::new(RecallArchiveTool::new(&config)),
+        Box::new(RunTestsTool),
+        Box::new(TaskCreateTool::new(&config)),
+        Box::new(TaskListTool::new(&config)),
+        Box::new(TaskReadTool::new(&config)),
+        Box::new(TaskCancelTool::new(&config)),
+        Box::new(TaskGateRunTool),
+        Box::new(AgentSpawnTool::new(&config)),
+        Box::new(AgentResultTool::new(&config)),
+        Box::new(AgentListTool::new(&config)),
+        Box::new(AgentCancelTool::new(&config)),
+        Box::new(AgentCloseTool::new(&config)),
+        Box::new(AgentResumeTool::new(&config)),
+        Box::new(AgentSendInputTool::new(&config)),
+        Box::new(PrAttemptRecordTool::new(&config)),
+        Box::new(PrAttemptListTool::new(&config)),
+        Box::new(PrAttemptReadTool::new(&config)),
+        Box::new(PrAttemptPreflightTool::new(&config)),
+        Box::new(AutomationCreateTool::new(&config)),
+        Box::new(AutomationListTool::new(&config)),
+        Box::new(AutomationReadTool::new(&config)),
+        Box::new(AutomationUpdateTool::new(&config)),
+        Box::new(AutomationPauseTool::new(&config)),
+        Box::new(AutomationResumeTool::new(&config)),
+        Box::new(AutomationDeleteTool::new(&config)),
+        Box::new(AutomationRunTool::new(&config)),
+        Box::new(RevertTurnTool::new(
+            std::path::PathBuf::from(&config.workspace.config_dir).join("rollback"),
+        )),
         Box::new(GitLogTool),
         Box::new(GitShowTool),
         Box::new(GitBlameTool),
-        Box::new(crate::tools::todo::TodoWriteTool {
+        Box::new(LoadSkillTool::new(config.clone())),
+        Box::new(NoteTool::new(config.memory.notes_path())),
+        Box::new(NotifyTool),
+        Box::new(GithubIssueContextTool),
+        Box::new(GithubPrContextTool),
+        Box::new(GithubCommentTool),
+        Box::new(GithubCloseIssueTool),
+        Box::new(TodoWriteTool {
             list: todos.clone(),
         }),
+        Box::new(UpdatePlanTool {
+            list: todos.clone(),
+        }),
+        Box::new(TodoWriteAliasTool {
+            list: todos.clone(),
+            tool_name: "checklist_write",
+        }),
+        Box::new(TodoAddTool {
+            list: todos.clone(),
+            tool_name: "todo_add",
+        }),
+        Box::new(TodoAddTool {
+            list: todos.clone(),
+            tool_name: "checklist_add",
+        }),
+        Box::new(TodoUpdateTool {
+            list: todos.clone(),
+            tool_name: "todo_update",
+        }),
+        Box::new(TodoUpdateTool {
+            list: todos.clone(),
+            tool_name: "checklist_update",
+        }),
+        Box::new(TodoListTool {
+            list: todos.clone(),
+            tool_name: "todo_list",
+        }),
+        Box::new(TodoListTool {
+            list: todos.clone(),
+            tool_name: "checklist_list",
+        }),
     ];
+    if config.memory.enabled {
+        tools.push(Box::new(RememberTool::new(config.memory.memory_path())));
+    }
     if expose_mcp_tools {
         tools.push(Box::new(McpListToolsTool {
             config: config.clone(),
         }));
         tools.push(Box::new(McpCallTool {
+            config: config.clone(),
+        }));
+        tools.push(Box::new(McpListPromptsTool {
+            config: config.clone(),
+        }));
+        tools.push(Box::new(McpGetPromptTool {
+            config: config.clone(),
+        }));
+        tools.push(Box::new(McpListResourcesTool {
+            config: config.clone(),
+        }));
+        tools.push(Box::new(McpReadResourceTool {
+            config: config.clone(),
+        }));
+        tools.push(Box::new(McpListResourceTemplatesTool {
             config: config.clone(),
         }));
         if config.mcp.expose_remote_tools {
@@ -457,6 +947,50 @@ pub fn default_registry_with_context(
             parent_depth: subagent_depth,
         }));
         tools.push(Box::new(DispatchSubagentsTool {
+            config: config.clone(),
+            parent_depth: subagent_depth,
+        }));
+        tools.push(Box::new(RlmTool {
+            tool_name: "rlm",
+            config: config.clone(),
+            parent_depth: subagent_depth,
+        }));
+        tools.push(Box::new(RlmTool {
+            tool_name: "rlm_query",
+            config: config.clone(),
+            parent_depth: subagent_depth,
+        }));
+        tools.push(Box::new(RlmTool {
+            tool_name: "llm_query",
+            config: config.clone(),
+            parent_depth: subagent_depth,
+        }));
+        tools.push(Box::new(RlmTool {
+            tool_name: "rlm_process",
+            config: config.clone(),
+            parent_depth: subagent_depth,
+        }));
+        tools.push(Box::new(RlmChunkPlanTool));
+        tools.push(Box::new(RlmMapReducePlanTool));
+        tools.push(Box::new(RlmPythonTool));
+        tools.push(Box::new(RlmPythonSessionTool {
+            config: config.clone(),
+        }));
+        tools.push(Box::new(RlmPythonSessionsTool {
+            config: config.clone(),
+        }));
+        tools.push(Box::new(RlmBatchTool {
+            tool_name: "rlm_batch",
+            config: config.clone(),
+            parent_depth: subagent_depth,
+        }));
+        tools.push(Box::new(RlmBatchTool {
+            tool_name: "rlm_query_batched",
+            config: config.clone(),
+            parent_depth: subagent_depth,
+        }));
+        tools.push(Box::new(RlmBatchTool {
+            tool_name: "llm_query_batched",
             config,
             parent_depth: subagent_depth,
         }));
@@ -478,9 +1012,11 @@ mod tests {
             require_mcp_confirmation: true,
             shell_allowlist: Vec::new(),
             mcp_call_allowlist: Vec::new(),
+            network: NetworkConfig::default(),
             auto_approve_writes: false,
             auto_approve_shell: false,
             auto_approve_mcp: false,
+            auto_approve_network: false,
         }
     }
 
@@ -560,10 +1096,194 @@ done
         let policy = ExecutionPolicy::new(&approval, None);
         let names = registry.names_for_policy(&policy);
 
+        assert!(names.contains(&"list_dir"));
+        assert!(names.contains(&"retrieve_tool_result"));
+        assert!(names.contains(&"grep_files"));
+        assert!(names.contains(&"file_search"));
+        assert!(names.contains(&"web_run"));
+        assert!(names.contains(&"web_search"));
+        assert!(names.contains(&"fetch_url"));
+        assert!(names.contains(&"finance"));
+        assert!(names.contains(&"pandoc_convert"));
+        assert!(names.contains(&"image_ocr"));
+        assert!(names.contains(&"image_analyze"));
+        assert!(names.contains(&"review"));
+        assert!(names.contains(&"tool_search_tool_regex"));
+        assert!(names.contains(&"tool_search_tool_bm25"));
+        assert!(names.contains(&"request_user_input"));
+        assert!(names.contains(&"write_file"));
+        assert!(names.contains(&"edit_file"));
+        assert!(names.contains(&"fim_edit"));
+        assert!(names.contains(&"task_shell_start"));
+        assert!(names.contains(&"task_shell_wait"));
+        assert!(names.contains(&"git_status"));
+        assert!(names.contains(&"project_map"));
+        assert!(names.contains(&"validate_data"));
+        assert!(names.contains(&"recall_archive"));
+        assert!(names.contains(&"task_create"));
+        assert!(names.contains(&"task_list"));
+        assert!(names.contains(&"task_read"));
+        assert!(names.contains(&"task_cancel"));
+        assert!(names.contains(&"task_gate_run"));
+        assert!(names.contains(&"agent_spawn"));
+        assert!(names.contains(&"agent_result"));
+        assert!(names.contains(&"agent_list"));
+        assert!(names.contains(&"agent_cancel"));
+        assert!(names.contains(&"close_agent"));
+        assert!(names.contains(&"resume_agent"));
+        assert!(names.contains(&"send_input"));
+        assert!(names.contains(&"pr_attempt_record"));
+        assert!(names.contains(&"pr_attempt_list"));
+        assert!(names.contains(&"pr_attempt_read"));
+        assert!(names.contains(&"pr_attempt_preflight"));
+        assert!(names.contains(&"automation_create"));
+        assert!(names.contains(&"automation_list"));
+        assert!(names.contains(&"automation_read"));
+        assert!(names.contains(&"automation_update"));
+        assert!(names.contains(&"automation_pause"));
+        assert!(names.contains(&"automation_resume"));
+        assert!(names.contains(&"automation_delete"));
+        assert!(names.contains(&"automation_run"));
+        assert!(names.contains(&"revert_turn"));
         assert!(names.contains(&"git_log"));
         assert!(names.contains(&"git_show"));
         assert!(names.contains(&"git_blame"));
+        assert!(names.contains(&"load_skill"));
+        assert!(names.contains(&"note"));
+        assert!(names.contains(&"notify"));
+        assert!(!names.contains(&"remember"));
+        assert!(names.contains(&"github_issue_context"));
+        assert!(names.contains(&"github_pr_context"));
+        assert!(names.contains(&"github_comment"));
+        assert!(names.contains(&"github_close_issue"));
         assert!(names.contains(&"diagnostics"));
+    }
+
+    #[test]
+    fn default_registry_includes_remember_only_when_memory_enabled() {
+        let mut config = AppConfig::default();
+        config.memory.enabled = true;
+        let registry =
+            default_registry_with_context(config, 0, Rc::new(RefCell::new(TodoList::default())));
+        let approval = ApprovalConfig::default();
+        let names = registry.names_for_policy(&ExecutionPolicy::new(&approval, None));
+
+        assert!(names.contains(&"note"));
+        assert!(names.contains(&"remember"));
+    }
+
+    #[test]
+    fn default_registry_includes_run_tests_with_shell_permission_request() {
+        let root = temp_root("run-tests-permission");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+
+        let registry = default_registry();
+        let policy = ExecutionPolicy {
+            allowed_tools: vec!["run_tests".to_string()],
+            ..deny_writes_policy()
+        };
+        let input = ToolInput::new().with_arg("cwd", root.display().to_string());
+        let request = registry
+            .permission_request_for("run_tests", &input, &policy)
+            .unwrap();
+
+        assert_eq!(request.kind, "shell");
+        assert_eq!(request.target, "cargo test");
+    }
+
+    #[test]
+    fn permission_request_for_reports_network_prompt() {
+        let registry = default_registry();
+        let approval = ApprovalConfig::default();
+        let mut network = NetworkConfig::default();
+        network.default = "prompt".to_string();
+        let policy = ExecutionPolicy::with_network(&approval, &network, None);
+        let input = ToolInput::new().with_arg("url", "https://example.com/docs");
+
+        let permission = registry
+            .permission_request_for("fetch_url", &input, &policy)
+            .expect("network permission request");
+
+        assert_eq!(permission.kind, "network");
+        assert!(permission.target.contains("example.com"));
+
+        let approved = policy.with_auto_approved_permission("network");
+        assert!(registry
+            .permission_request_for("fetch_url", &input, &approved)
+            .is_none());
+    }
+
+    #[test]
+    fn default_registry_includes_exec_shell_background_tools() {
+        let registry = default_registry();
+        let approval = ApprovalConfig::default();
+        let policy = ExecutionPolicy::new(&approval, None);
+        let names = registry.names_for_policy(&policy);
+
+        for name in [
+            "exec_shell",
+            "task_shell_start",
+            "task_shell_wait",
+            "exec_shell_wait",
+            "exec_wait",
+            "exec_shell_list",
+            "exec_shell_show",
+            "exec_shell_interact",
+            "exec_interact",
+            "exec_shell_cancel",
+        ] {
+            assert!(names.contains(&name), "missing tool {name}");
+        }
+
+        let policy = ExecutionPolicy {
+            allowed_tools: vec!["exec_shell".to_string()],
+            ..deny_writes_policy()
+        };
+        let request = registry
+            .permission_request_for(
+                "exec_shell",
+                &ToolInput::new().with_arg("command", "echo hello"),
+                &policy,
+            )
+            .unwrap();
+        assert_eq!(request.kind, "shell");
+        assert_eq!(request.target, "echo hello");
+
+        let request = registry
+            .permission_request_for(
+                "task_shell_start",
+                &ToolInput::new().with_arg("command", "echo task"),
+                &ExecutionPolicy {
+                    allowed_tools: vec!["task_shell_start".to_string()],
+                    ..deny_writes_policy()
+                },
+            )
+            .unwrap();
+        assert_eq!(request.kind, "shell");
+        assert_eq!(request.target, "echo task");
+    }
+
+    #[test]
+    fn default_registry_includes_todo_checklist_compat_tools() {
+        let registry = default_registry();
+        let approval = ApprovalConfig::default();
+        let policy = ExecutionPolicy::new(&approval, None);
+        let names = registry.names_for_policy(&policy);
+
+        for name in [
+            "todo_write",
+            "update_plan",
+            "checklist_write",
+            "todo_add",
+            "checklist_add",
+            "todo_update",
+            "checklist_update",
+            "todo_list",
+            "checklist_list",
+        ] {
+            assert!(names.contains(&name), "missing {name}");
+        }
     }
 
     #[test]
@@ -611,6 +1331,48 @@ done
         assert_eq!(write.kind, "write");
         assert_eq!(write.target, "src/lib.rs");
 
+        let edit = registry
+            .permission_request_for(
+                "edit_file",
+                &ToolInput::new().with_arg("path", "src/main.rs"),
+                &ExecutionPolicy {
+                    allowed_tools: vec!["edit_file".to_string()],
+                    ..deny_writes_policy()
+                },
+            )
+            .unwrap();
+        assert_eq!(edit.kind, "write");
+        assert_eq!(edit.target, "edit src/main.rs");
+
+        let fim = registry
+            .permission_request_for(
+                "fim_edit",
+                &ToolInput::new().with_arg("path", "src/lib.rs"),
+                &ExecutionPolicy {
+                    allowed_tools: vec!["fim_edit".to_string()],
+                    ..deny_writes_policy()
+                },
+            )
+            .unwrap();
+        assert_eq!(fim.kind, "write");
+        assert_eq!(fim.target, "fim edit src/lib.rs");
+
+        let pandoc = registry
+            .permission_request_for(
+                "pandoc_convert",
+                &ToolInput::new()
+                    .with_arg("source_path", "README.md")
+                    .with_arg("target_format", "html")
+                    .with_arg("output_path", "target/readme.html"),
+                &ExecutionPolicy {
+                    allowed_tools: vec!["pandoc_convert".to_string()],
+                    ..deny_writes_policy()
+                },
+            )
+            .unwrap();
+        assert_eq!(pandoc.kind, "write");
+        assert_eq!(pandoc.target, "pandoc convert target/readme.html");
+
         let shell = registry
             .permission_request_for(
                 "run_shell",
@@ -623,8 +1385,93 @@ done
         assert_eq!(shell.kind, "shell");
         assert_eq!(shell.target, "cargo test");
 
+        let github_policy = ExecutionPolicy {
+            allowed_tools: vec!["github_comment".to_string()],
+            ..deny_writes_policy()
+        };
+        let github = registry
+            .permission_request_for(
+                "github_comment",
+                &ToolInput::new()
+                    .with_arg("target", "pr")
+                    .with_arg("number", "7")
+                    .with_arg("repo", "owner/repo"),
+                &github_policy,
+            )
+            .unwrap();
+        assert_eq!(github.kind, "write");
+        assert_eq!(github.target, "github pr #7 comment in owner/repo");
+
+        let task = registry
+            .permission_request_for(
+                "task_create",
+                &ToolInput::new().with_arg("prompt", "run a durable check"),
+                &ExecutionPolicy {
+                    allowed_tools: vec!["task_create".to_string()],
+                    ..deny_writes_policy()
+                },
+            )
+            .unwrap();
+        assert_eq!(task.kind, "write");
+        assert_eq!(task.target, "create runtime task: run a durable check");
+
+        let automation = registry
+            .permission_request_for(
+                "automation_create",
+                &ToolInput::new().with_arg("name", "weekly review"),
+                &ExecutionPolicy {
+                    allowed_tools: vec!["automation_create".to_string()],
+                    ..deny_writes_policy()
+                },
+            )
+            .unwrap();
+        assert_eq!(automation.kind, "write");
+        assert_eq!(automation.target, "create automation: weekly review");
+
+        let automation_update = registry
+            .permission_request_for(
+                "automation_update",
+                &ToolInput::new().with_arg("automation_id", "automation_1"),
+                &ExecutionPolicy {
+                    allowed_tools: vec!["automation_update".to_string()],
+                    ..deny_writes_policy()
+                },
+            )
+            .unwrap();
+        assert_eq!(automation_update.kind, "write");
+        assert_eq!(automation_update.target, "update automation automation_1");
+
+        let agent = registry
+            .permission_request_for(
+                "agent_spawn",
+                &ToolInput::new().with_arg("prompt", "inspect the cache"),
+                &ExecutionPolicy {
+                    allowed_tools: vec!["agent_spawn".to_string()],
+                    ..deny_writes_policy()
+                },
+            )
+            .unwrap();
+        assert_eq!(agent.kind, "write");
+        assert_eq!(agent.target, "spawn sub-agent: inspect the cache");
+
+        let gate_policy = ExecutionPolicy {
+            allowed_tools: vec!["task_gate_run".to_string()],
+            ..deny_writes_policy()
+        };
+        let gate = registry
+            .permission_request_for(
+                "task_gate_run",
+                &ToolInput::new()
+                    .with_arg("gate", "test")
+                    .with_arg("command", "cargo test"),
+                &gate_policy,
+            )
+            .unwrap();
+        assert_eq!(gate.kind, "shell");
+        assert_eq!(gate.target, "cargo test");
+
         let mcp_policy = ExecutionPolicy {
-            allowed_tools: vec!["mcp_call".to_string()],
+            allowed_tools: vec!["mcp_call".to_string(), "mcp_get_prompt".to_string()],
             ..deny_writes_policy()
         };
         let mcp = registry
@@ -638,6 +1485,15 @@ done
             .unwrap();
         assert_eq!(mcp.kind, "mcp");
         assert_eq!(mcp.target, "fake/echo");
+        assert!(registry
+            .permission_request_for(
+                "mcp_get_prompt",
+                &ToolInput::new()
+                    .with_arg("server", "fake")
+                    .with_arg("prompt", "review_pr"),
+                &mcp_policy,
+            )
+            .is_none());
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -693,9 +1549,11 @@ done
             require_mcp_confirmation: true,
             shell_allowlist: Vec::new(),
             mcp_call_allowlist: Vec::new(),
+            network: NetworkConfig::default(),
             auto_approve_writes: false,
             auto_approve_shell: false,
             auto_approve_mcp: false,
+            auto_approve_network: false,
         };
 
         let input = ToolInput::new()
@@ -733,9 +1591,11 @@ done
             require_mcp_confirmation: false,
             shell_allowlist: Vec::new(),
             mcp_call_allowlist: vec!["github/*".to_string()],
+            network: NetworkConfig::default(),
             auto_approve_writes: false,
             auto_approve_shell: false,
             auto_approve_mcp: false,
+            auto_approve_network: false,
         };
 
         let input = ToolInput::new()
@@ -812,6 +1672,42 @@ done
         assert!(root
             .names_for_policy(&ExecutionPolicy::new(&approval, None))
             .contains(&"dispatch_subagents"));
+        assert!(root
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm"));
+        assert!(root
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_query"));
+        assert!(root
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"llm_query"));
+        assert!(root
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_process"));
+        assert!(root
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_chunk_plan"));
+        assert!(root
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_map_reduce_plan"));
+        assert!(root
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_python"));
+        assert!(root
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_python_session"));
+        assert!(root
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_python_sessions"));
+        assert!(root
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_batch"));
+        assert!(root
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_query_batched"));
+        assert!(root
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"llm_query_batched"));
 
         let nested = default_registry_with_context(
             AppConfig::default(),
@@ -824,6 +1720,42 @@ done
         assert!(nested
             .names_for_policy(&ExecutionPolicy::new(&approval, None))
             .contains(&"dispatch_subagents"));
+        assert!(nested
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm"));
+        assert!(nested
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_query"));
+        assert!(nested
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"llm_query"));
+        assert!(nested
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_process"));
+        assert!(nested
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_chunk_plan"));
+        assert!(nested
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_map_reduce_plan"));
+        assert!(nested
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_python"));
+        assert!(nested
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_python_session"));
+        assert!(nested
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_python_sessions"));
+        assert!(nested
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_batch"));
+        assert!(nested
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_query_batched"));
+        assert!(nested
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"llm_query_batched"));
 
         let at_limit = default_registry_with_context(
             AppConfig::default(),
@@ -836,6 +1768,42 @@ done
         assert!(!at_limit
             .names_for_policy(&ExecutionPolicy::new(&approval, None))
             .contains(&"dispatch_subagents"));
+        assert!(!at_limit
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm"));
+        assert!(!at_limit
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_query"));
+        assert!(!at_limit
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"llm_query"));
+        assert!(!at_limit
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_process"));
+        assert!(!at_limit
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_chunk_plan"));
+        assert!(!at_limit
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_map_reduce_plan"));
+        assert!(!at_limit
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_python"));
+        assert!(!at_limit
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_python_session"));
+        assert!(!at_limit
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_python_sessions"));
+        assert!(!at_limit
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_batch"));
+        assert!(!at_limit
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"rlm_query_batched"));
+        assert!(!at_limit
+            .names_for_policy(&ExecutionPolicy::new(&approval, None))
+            .contains(&"llm_query_batched"));
     }
 
     #[test]
@@ -859,6 +1827,11 @@ done
 
         assert!(names.contains(&"mcp_list_tools"));
         assert!(names.contains(&"mcp_call"));
+        assert!(names.contains(&"mcp_list_prompts"));
+        assert!(names.contains(&"mcp_get_prompt"));
+        assert!(names.contains(&"mcp_list_resources"));
+        assert!(names.contains(&"mcp_read_resource"));
+        assert!(names.contains(&"mcp_list_resource_templates"));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -892,9 +1865,11 @@ done
             require_mcp_confirmation: false,
             shell_allowlist: Vec::new(),
             mcp_call_allowlist: vec!["other/*".to_string()],
+            network: NetworkConfig::default(),
             auto_approve_writes: false,
             auto_approve_shell: false,
             auto_approve_mcp: false,
+            auto_approve_network: false,
         };
 
         let error = registry
@@ -923,5 +1898,10 @@ done
 
         assert!(!names.contains(&"mcp_list_tools"));
         assert!(!names.contains(&"mcp_call"));
+        assert!(!names.contains(&"mcp_list_prompts"));
+        assert!(!names.contains(&"mcp_get_prompt"));
+        assert!(!names.contains(&"mcp_list_resources"));
+        assert!(!names.contains(&"mcp_read_resource"));
+        assert!(!names.contains(&"mcp_list_resource_templates"));
     }
 }

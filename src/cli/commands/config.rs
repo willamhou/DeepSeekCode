@@ -28,6 +28,9 @@ fn print_config(config: &AppConfig) {
     println!("model.model = {}", config.model.model);
     println!("model.api_key_env = {}", config.model.api_key_env);
     println!("model.reasoning_effort = {}", config.model.reasoning_effort);
+    println!("vision.base_url = {}", config.vision.base_url);
+    println!("vision.model = {}", config.vision.model);
+    println!("vision.api_key_env = {}", config.vision.api_key_env);
     println!(
         "approval.require_write_confirmation = {}",
         config.approval.require_write_confirmation
@@ -70,6 +73,20 @@ fn print_config(config: &AppConfig) {
     println!("mcp.project_file = {}", config.mcp.project_file);
     println!("mcp.user_file = {}", config.mcp.user_file);
     println!("diagnostics.post_edit = {}", config.diagnostics.post_edit);
+    println!("memory.enabled = {}", config.memory.enabled);
+    println!("memory.notes_path = {}", config.memory.notes_path);
+    println!("memory.memory_path = {}", config.memory.memory_path);
+    println!("network.default = {}", config.network.default);
+    println!(
+        "network.allow = {}",
+        render_string_list(&config.network.allow)
+    );
+    println!(
+        "network.deny = {}",
+        render_string_list(&config.network.deny)
+    );
+    println!("network.audit = {}", config.network.audit);
+    println!("network.audit_path = {}", config.network.audit_path);
 }
 
 pub(crate) fn init_config_at(root: &std::path::Path, force: bool) -> AppResult<std::path::PathBuf> {
@@ -122,6 +139,11 @@ model.model = "{model}"
 model.api_key_env = "{api_key_env}"
 model.reasoning_effort = "{reasoning_effort}"
 
+# Optional OpenAI-compatible vision model for the image_analyze tool.
+vision.base_url = "{vision_base_url}"
+vision.model = "{vision_model}"
+vision.api_key_env = "{vision_api_key_env}"
+
 approval.require_write_confirmation = {require_write_confirmation}
 approval.require_shell_confirmation = {require_shell_confirmation}
 approval.require_mcp_confirmation = {require_mcp_confirmation}
@@ -150,11 +172,28 @@ mcp.user_file = "{mcp_user_file}"
 # Diagnostics can be run manually with `deepseek diagnostics`.
 # Set post_edit to true to append diagnostics after successful apply_patch calls.
 diagnostics.post_edit = {diagnostics_post_edit}
+
+# User memory is opt-in. `note` appends to notes_path; `remember` is exposed
+# only when memory.enabled is true and appends to memory_path.
+memory.enabled = {memory_enabled}
+memory.notes_path = "{memory_notes_path}"
+memory.memory_path = "{memory_memory_path}"
+
+# Read-only web/search/fetch tools honor this DeepSeek-TUI-style host policy.
+# Deny entries win over allow entries. A leading dot matches subdomains only.
+network.default = "{network_default}"
+network.allow = {network_allow}
+network.deny = {network_deny}
+network.audit = {network_audit}
+network.audit_path = "{network_audit_path}"
 "#,
         base_url = config.model.base_url,
         model = config.model.model,
         api_key_env = config.model.api_key_env,
         reasoning_effort = config.model.reasoning_effort,
+        vision_base_url = config.vision.base_url,
+        vision_model = config.vision.model,
+        vision_api_key_env = config.vision.api_key_env,
         require_write_confirmation = config.approval.require_write_confirmation,
         require_shell_confirmation = config.approval.require_shell_confirmation,
         require_mcp_confirmation = config.approval.require_mcp_confirmation,
@@ -173,6 +212,14 @@ diagnostics.post_edit = {diagnostics_post_edit}
         mcp_project_file = config.mcp.project_file,
         mcp_user_file = config.mcp.user_file,
         diagnostics_post_edit = config.diagnostics.post_edit,
+        memory_enabled = config.memory.enabled,
+        memory_notes_path = config.memory.notes_path,
+        memory_memory_path = config.memory.memory_path,
+        network_default = config.network.default,
+        network_allow = render_string_list(&config.network.allow),
+        network_deny = render_string_list(&config.network.deny),
+        network_audit = config.network.audit,
+        network_audit_path = config.network.audit_path,
     )
 }
 
@@ -227,6 +274,9 @@ mod tests {
         assert_eq!(path, root.join(".dscode/config.toml"));
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("model.base_url"));
+        assert!(content.contains("vision.model"));
+        assert!(content.contains("network.default"));
+        assert!(content.contains("network.audit_path"));
         assert!(content.contains("hooks.enabled = false"));
         assert!(root.join(".dscode/sessions").is_dir());
         assert!(root.join(".dscode/commands").is_dir());

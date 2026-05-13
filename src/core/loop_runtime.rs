@@ -23,6 +23,7 @@ use crate::tools::registry::ExecutionPolicy;
 use crate::ui::render::print_banner;
 use crate::ui::stream::StreamEvents;
 use crate::util::cancel::CancellationCheck;
+use crate::util::json::{json_value_to_string, JsonValue};
 
 pub struct AgentLoopOptions {
     pub steps: usize,
@@ -34,6 +35,7 @@ pub struct AgentLoopOptions {
     pub stream_events: Option<Box<dyn crate::ui::stream::StreamEvents>>,
     pub run_events: Option<SharedAgentRunEvents>,
     pub approval_resolver: Option<SharedAgentApprovalResolver>,
+    pub user_input_resolver: Option<SharedAgentUserInputResolver>,
     pub cancel_check: Option<SharedAgentCancelCheck>,
 }
 
@@ -51,6 +53,7 @@ impl Default for AgentLoopOptions {
             stream_events: None,
             run_events: None,
             approval_resolver: None,
+            user_input_resolver: None,
             cancel_check: None,
         }
     }
@@ -105,6 +108,22 @@ pub type SharedAgentApprovalResolver = Rc<RefCell<dyn AgentApprovalResolver>>;
 
 pub trait AgentApprovalResolver {
     fn resolve(&mut self, request: &AgentApprovalRequest) -> AppResult<AgentApprovalDecision>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentUserInputRequest {
+    pub input: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentUserInputResponse {
+    pub answers: BTreeMap<String, String>,
+}
+
+pub type SharedAgentUserInputResolver = Rc<RefCell<dyn AgentUserInputResolver>>;
+
+pub trait AgentUserInputResolver {
+    fn resolve(&mut self, request: &AgentUserInputRequest) -> AppResult<AgentUserInputResponse>;
 }
 
 pub type SharedAgentCancelCheck = Rc<RefCell<dyn AgentCancelCheck>>;
@@ -164,6 +183,7 @@ impl AgentLoop {
             mut stream_events,
             run_events,
             approval_resolver,
+            user_input_resolver,
             cancel_check,
         } = options;
         if emit_progress {
@@ -174,6 +194,10 @@ impl AgentLoop {
         let cwd = std::env::current_dir()?;
         let workspace_instructions =
             crate::core::instructions::load_workspace_instructions(&cwd, &self.config.workspace)?;
+        let user_memory = crate::core::memory::load_user_memory(
+            self.config.memory.enabled,
+            &self.config.memory.memory_path(),
+        )?;
         let hooks = crate::core::hooks::HookRunner::new(&self.config.hooks);
         let registry = crate::tools::registry::default_registry_with_context(
             self.config.clone(),
@@ -187,7 +211,8 @@ impl AgentLoop {
             SkillRegistry::load_dirs(&[repo_skills_dir.as_path(), user_skills_dir.as_path()])?;
         let resolved_skill = resolve_skill(&skills, context.skill.as_deref(), &context.task);
         let skill = resolved_skill.map(|resolved| resolved.spec);
-        let policy = ExecutionPolicy::new(&self.config.approval, skill);
+        let policy =
+            ExecutionPolicy::with_network(&self.config.approval, &self.config.network, skill);
         let memory = MemoryState::new(profile.name.clone());
         let primary_file = primary_file(&profile).map(str::to_string);
         let suggested_test_command = default_test_command(&profile).map(str::to_string);
@@ -267,6 +292,10 @@ impl AgentLoop {
                     println!("- {}{}", file.path.display(), suffix);
                 }
             }
+            if let Some(memory) = &user_memory {
+                let suffix = if memory.truncated { " (truncated)" } else { "" };
+                println!("User memory: {}{}", memory.path.display(), suffix);
+            }
         }
 
         let mut observations = initial_observations;
@@ -320,6 +349,7 @@ impl AgentLoop {
                         .iter()
                         .any(|tool| tool == "dispatch_subagent" || tool == "dispatch_subagents"),
                     &workspace_instructions,
+                    user_memory.as_ref(),
                 ),
                 task: context.task.clone(),
                 image_inputs: context.image_inputs.clone(),
@@ -585,13 +615,46 @@ impl AgentLoop {
                         }
                     }
 
-                    match execute_tool_with_cancel(
-                        &registry,
-                        &tool_name,
-                        input,
-                        &execution_policy,
-                        cancel_check.as_ref(),
-                    ) {
+                    let tool_result = if tool_name == "request_user_input" {
+                        if let Some(resolver) = user_input_resolver.as_ref() {
+                            match execute_tool_with_cancel(
+                                &registry,
+                                &tool_name,
+                                input.clone(),
+                                &execution_policy,
+                                cancel_check.as_ref(),
+                            ) {
+                                Ok(_) => {
+                                    let request = AgentUserInputRequest {
+                                        input: event_input.clone(),
+                                    };
+                                    let response = resolver.borrow_mut().resolve(&request)?;
+                                    Ok(crate::tools::types::ToolOutput {
+                                        summary: render_user_input_answers(&response.answers),
+                                    })
+                                }
+                                Err(error) => Err(error),
+                            }
+                        } else {
+                            execute_tool_with_cancel(
+                                &registry,
+                                &tool_name,
+                                input,
+                                &execution_policy,
+                                cancel_check.as_ref(),
+                            )
+                        }
+                    } else {
+                        execute_tool_with_cancel(
+                            &registry,
+                            &tool_name,
+                            input,
+                            &execution_policy,
+                            cancel_check.as_ref(),
+                        )
+                    };
+
+                    match tool_result {
                         Ok(mut output) => {
                             check_cancelled(cancel_check.as_ref())?;
                             if tool_name == "dispatch_subagent" {
@@ -606,6 +669,11 @@ impl AgentLoop {
                                     }
                                 }
                             }
+                            output.summary =
+                                crate::tools::tool_output::maybe_spill_successful_tool_output(
+                                    &tool_name,
+                                    &output.summary,
+                                );
                             let kind = ObservationKind::from_tool_name(&tool_name);
                             let observation_summary = summarize_for_kind(&output.summary, kind);
                             // CR-1: user sees full body (output.summary), observation/transcript get trim.
@@ -827,6 +895,26 @@ fn push_tool_event(
         events.borrow_mut().on_tool_result(&event);
     }
     tool_events.push(event);
+}
+
+fn render_user_input_answers(answers: &BTreeMap<String, String>) -> String {
+    let answers_json = JsonValue::Object(
+        answers
+            .iter()
+            .map(|(key, value)| (key.clone(), JsonValue::String(value.clone())))
+            .collect(),
+    );
+    let mut summary = String::new();
+    summary.push_str("meta.user_input_required=false\n");
+    summary.push_str(&format!("meta.answers={}\n", answers.len()));
+    summary.push_str("answers_json=");
+    summary.push_str(&json_value_to_string(&answers_json));
+    summary.push('\n');
+    summary.push_str("answers:\n");
+    for (key, value) in answers {
+        summary.push_str(&format!("- {key}: {value}\n"));
+    }
+    summary
 }
 
 fn model_respond_with_cancel<C: ModelClient>(
@@ -1515,6 +1603,7 @@ fn build_system_prompt_with_workspace_instructions(
     has_plan: bool,
     subagent_available: bool,
     workspace_instructions: &[crate::core::instructions::InstructionFile],
+    user_memory: Option<&crate::core::memory::PersistentMemory>,
 ) -> String {
     let mut prompt = build_system_prompt_with_flags(
         skill_name,
@@ -1528,6 +1617,10 @@ fn build_system_prompt_with_workspace_instructions(
     {
         prompt.push_str("\n\n");
         prompt.push_str(&instructions);
+    }
+    if let Some(memory) = user_memory {
+        prompt.push_str("\n\n");
+        prompt.push_str(&crate::core::memory::render_user_memory(memory));
     }
     prompt
 }
@@ -1558,11 +1651,34 @@ mod tests {
             false,
             false,
             &instructions,
+            None,
         );
 
         assert!(prompt.contains("Workspace instructions"));
         assert!(prompt.contains("AGENTS.md"));
         assert!(prompt.contains("Run cargo test before committing."));
+    }
+
+    #[test]
+    fn build_system_prompt_includes_user_memory() {
+        let memory = crate::core::memory::PersistentMemory {
+            path: std::path::PathBuf::from("memory.md"),
+            content: "- prefer cargo test".to_string(),
+            truncated: false,
+        };
+        let prompt = super::build_system_prompt_with_workspace_instructions(
+            None,
+            false,
+            false,
+            false,
+            false,
+            &[],
+            Some(&memory),
+        );
+
+        assert!(prompt.contains("User memory"));
+        assert!(prompt.contains("memory.md"));
+        assert!(prompt.contains("prefer cargo test"));
     }
 
     #[test]
@@ -2234,6 +2350,78 @@ mod cr1_regression_test {
             self.seen.borrow_mut().push(request.clone());
             Ok(self.decision)
         }
+    }
+
+    struct FixedUserInputResolver {
+        answers: BTreeMap<String, String>,
+        seen: Rc<RefCell<Vec<AgentUserInputRequest>>>,
+    }
+
+    impl AgentUserInputResolver for FixedUserInputResolver {
+        fn resolve(
+            &mut self,
+            request: &AgentUserInputRequest,
+        ) -> crate::error::AppResult<AgentUserInputResponse> {
+            self.seen.borrow_mut().push(request.clone());
+            Ok(AgentUserInputResponse {
+                answers: self.answers.clone(),
+            })
+        }
+    }
+
+    #[test]
+    fn run_with_client_uses_user_input_resolver_for_request_user_input() {
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("dummy".to_string(), None);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let answers = BTreeMap::from([("mode".to_string(), "Plan".to_string())]);
+        let resolver: SharedAgentUserInputResolver =
+            Rc::new(RefCell::new(FixedUserInputResolver {
+                answers,
+                seen: seen.clone(),
+            }));
+        let questions = r#"[{"header":"Mode","id":"mode","question":"Which mode?","options":[{"label":"Plan","description":"Plan first."},{"label":"Apply","description":"Implement directly."}]}]"#;
+        let client = ScriptedActionsClient {
+            captured_observations: RefCell::new(Vec::new()),
+            actions: vec![
+                ModelAction::CallTool {
+                    tool_name: "request_user_input".to_string(),
+                    input: ToolInput::new().with_arg("questions", questions),
+                },
+                ModelAction::Finish,
+            ],
+            calls: RefCell::new(0),
+        };
+
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 2,
+                    initial_observations: Vec::new(),
+                    todos: Rc::new(RefCell::new(TodoList::default())),
+                    emit_progress: false,
+                    user_input_resolver: Some(resolver),
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(seen.borrow().len(), 1);
+        assert!(seen.borrow()[0].input.contains_key("questions"));
+        assert_eq!(result.tool_events.len(), 1);
+        assert_eq!(
+            result.tool_events[0].status,
+            crate::model::protocol::ObservationStatus::Ok
+        );
+        assert!(result.tool_events[0]
+            .output
+            .contains("meta.user_input_required=false"));
+        assert!(result.tool_events[0]
+            .output
+            .contains(r#"answers_json={"mode":"Plan"}"#));
     }
 
     #[test]

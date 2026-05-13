@@ -57,8 +57,9 @@ impl ObservationKind {
         match name {
             "read_file" => Self::FileExcerpt,
             "list_files" => Self::Listing,
-            "search_text" => Self::SearchResults,
-            "apply_patch" => Self::Patch,
+            "search_text" | "grep_files" | "file_search" | "web_search" => Self::SearchResults,
+            "fetch_url" => Self::FileExcerpt,
+            "apply_patch" | "write_file" | "edit_file" | "revert_turn" => Self::Patch,
             "git_diff" => Self::Diff,
             "diagnostics" => Self::ShellOutput,
             "run_shell" => Self::ShellOutput,

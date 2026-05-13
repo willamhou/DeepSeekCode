@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub struct SearchTextTool;
+pub struct GrepFilesTool;
 
 impl Tool for SearchTextTool {
     fn name(&self) -> &str {
@@ -31,6 +32,35 @@ impl Tool for SearchTextTool {
                 matches.join("\n")
             },
         })
+    }
+}
+
+impl Tool for GrepFilesTool {
+    fn name(&self) -> &str {
+        "grep_files"
+    }
+
+    fn execute(&self, mut input: ToolInput) -> AppResult<ToolOutput> {
+        let pattern = input
+            .get("pattern")
+            .or_else(|| input.get("query"))
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| app_error("grep_files requires a pattern"))?;
+        if input.get("query").is_none() {
+            input.args.insert("query".to_string(), pattern);
+        }
+        if input.get("root").is_none() {
+            if let Some(path) = input.get("path").map(str::to_string) {
+                input.args.insert("root".to_string(), path);
+            }
+        }
+        if input.get("limit").is_none() {
+            if let Some(max_results) = input.get("max_results").map(str::to_string) {
+                input.args.insert("limit".to_string(), max_results);
+            }
+        }
+        SearchTextTool.execute(input)
     }
 }
 
@@ -93,4 +123,39 @@ fn should_skip(name: &str) -> bool {
         name,
         ".git" | "target" | "node_modules" | "dist" | ".dscode" | "__pycache__"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "deepseek-search-text-{name}-{}-{suffix}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn grep_files_maps_deepseek_tui_args_to_search_text() {
+        let root = temp_root("grep-alias");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn target_symbol() {}\n").unwrap();
+
+        let output = GrepFilesTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("pattern", "target_symbol")
+                    .with_arg("path", root.display().to_string())
+                    .with_arg("max_results", "5"),
+            )
+            .unwrap();
+
+        assert!(output.summary.contains("src/lib.rs:1"));
+        assert!(output.summary.contains("target_symbol"));
+    }
 }

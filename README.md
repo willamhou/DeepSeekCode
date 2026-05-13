@@ -30,16 +30,21 @@ This repository is an active workbench, not a polished hosted product.
 - Interactive REPL and one-shot task execution
 - Workspace scanning, file read/search, patch application, diff review
 - Permission-gated shell execution and approval flow
+- Read-only web/search/fetch tools with localhost blocking, configurable host
+  allow/deny/prompt policy, runtime approvals, and local audit logging
 - Durable sessions, threads, turns, items, events, tasks, usage, and
   automations under `.dscode/runtime/`
 - `deepseek tui` terminal workbench with Plan / Agent / YOLO modes
 - Background agent tasks and daemon runner
 - HTTP runtime with health, session, thread, task, event, usage, diagnostics,
   automation, and SSE stream endpoints
+- ACP stdio adapter for editor clients, including durable session list/load
 - LSP-backed and fallback diagnostics runners
 - Git rollback snapshots for TUI-started turns
-- MCP inventory/tooling, subagents, todo tracking, hooks, prompts, skills, and
-  language profiles
+- MCP client inventory/tooling/prompts/resources/templates/config CRUD, a full-width TUI MCP manager
+  screen plus scrollable discovery detail panel, MCP stdio server mode with `mcp add-self` registration
+  and approval-gated or trusted opt-in `run_shell` side-effect tool exposure,
+  subagents, RLM-lite child/batch analysis, todo tracking, hooks, prompts, skills, and language profiles
 - Release packaging for Cargo, npm platform wrappers, Docker, Homebrew
   formula rendering, and GitHub Actions release assets
 

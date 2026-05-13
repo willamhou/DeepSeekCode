@@ -5,7 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use crate::cli::app::McpAction;
+use crate::cli::app::{McpAction, McpConfigScope};
 use crate::config::load::load_or_default;
 use crate::config::types::AppConfig;
 use crate::error::{app_error, AppResult};
@@ -25,6 +25,10 @@ pub fn run(action: McpAction) -> AppResult<()> {
         McpAction::Doctor => doctor(&config),
         McpAction::Tools { server } => list_remote_tools(&config, server.as_deref()),
         McpAction::Prompts { server } => list_remote_prompts(&config, server.as_deref()),
+        McpAction::Resources { server } => list_remote_resources(&config, server.as_deref()),
+        McpAction::ResourceTemplates { server } => {
+            list_remote_resource_templates(&config, server.as_deref())
+        }
         McpAction::Call {
             server,
             tool,
@@ -35,29 +39,116 @@ pub fn run(action: McpAction) -> AppResult<()> {
             prompt,
             arguments_json,
         } => get_remote_prompt(&config, &server, &prompt, arguments_json.as_deref()),
+        McpAction::Resource { server, uri } => get_remote_resource(&config, &server, &uri),
+        McpAction::Add {
+            name,
+            command,
+            args,
+            url,
+            transport,
+            env,
+            headers,
+            disabled,
+            scope,
+        } => {
+            let path = add_mcp_server_at(
+                &std::env::current_dir()?,
+                &config,
+                scope,
+                McpServerConfigSpec {
+                    name,
+                    command,
+                    args,
+                    url,
+                    transport,
+                    env,
+                    headers,
+                    disabled,
+                },
+            )?;
+            println!("added MCP server in {}", path.display());
+            Ok(())
+        }
+        McpAction::Get { name } => get_server(&config, &name),
+        McpAction::Remove { name, scope } => {
+            let path = remove_mcp_server_at(&std::env::current_dir()?, &config, scope, &name)?;
+            println!("removed MCP server `{name}` from {}", path.display());
+            Ok(())
+        }
+        McpAction::Enable { name, scope } => {
+            let path =
+                set_mcp_server_enabled_at(&std::env::current_dir()?, &config, scope, &name, true)?;
+            println!("enabled MCP server `{name}` in {}", path.display());
+            Ok(())
+        }
+        McpAction::Disable { name, scope } => {
+            let path =
+                set_mcp_server_enabled_at(&std::env::current_dir()?, &config, scope, &name, false)?;
+            println!("disabled MCP server `{name}` in {}", path.display());
+            Ok(())
+        }
+        McpAction::Validate => validate_servers(&config),
         McpAction::Init { force } => {
             let path = init_mcp_config_at(&std::env::current_dir()?, &config, force)?;
             println!("initialized MCP config: {}", path.display());
+            Ok(())
+        }
+        McpAction::AddSelf {
+            name,
+            workspace,
+            scope,
+        } => {
+            let exe_path = std::env::current_exe()
+                .map_err(|error| app_error(format!("failed to resolve current binary: {error}")))?;
+            let command = exe_path.to_string_lossy().to_string();
+            let path = add_self_mcp_server_at(
+                &std::env::current_dir()?,
+                &config,
+                scope,
+                &name,
+                workspace.as_deref(),
+                &command,
+            )?;
+            println!(
+                "registered DeepSeekCode MCP server `{name}` in {}",
+                path.display()
+            );
+            println!("  command: {command}");
+            println!(
+                "  args:    serve --mcp{}",
+                workspace
+                    .as_deref()
+                    .map(|workspace| format!(" --workspace {workspace}"))
+                    .unwrap_or_default()
+            );
+            println!("Run `deepseek mcp tools {name}` to smoke test the connection.");
             Ok(())
         }
     }
 }
 
 fn list_servers(config: &AppConfig) -> AppResult<()> {
+    print!("{}", list_servers_summary(config)?);
+    Ok(())
+}
+
+pub(crate) fn list_servers_summary(config: &AppConfig) -> AppResult<String> {
     if !config.mcp.enabled {
-        println!("MCP is disabled by config: mcp.enabled = false");
-        return Ok(());
+        return Ok("MCP is disabled by config: mcp.enabled = false\n".to_string());
     }
 
     let inventory = load_inventory(config)?;
-    print_sources(&inventory);
+    let mut output = String::new();
+    push_sources(&mut output, &inventory);
 
     if inventory.servers.is_empty() {
-        println!("No MCP servers configured. Run `deepseek mcp init` to create .dscode/mcp.json.");
-        return Ok(());
+        output.push_str(
+            "No MCP servers configured. Run `deepseek mcp init` to create .dscode/mcp.json.\n",
+        );
+        return Ok(output);
     }
 
-    println!("MCP servers:");
+    output.push_str("MCP servers:\n");
     for server in &inventory.servers {
         let status = if server.enabled {
             "enabled"
@@ -83,13 +174,46 @@ fn list_servers(config: &AppConfig) -> AppResult<()> {
         } else {
             server.env.keys().cloned().collect::<Vec<_>>().join(",")
         };
-        println!(
-            "- {} [{} {}] {} (source={}, env={})",
+        output.push_str(&format!(
+            "- {} [{} {}] {} (source={}, env={})\n",
             server.name, status, server.transport, detail, server.source, env
-        );
+        ));
     }
 
-    Ok(())
+    Ok(output)
+}
+
+pub(crate) fn mcp_status_summary(config: &AppConfig) -> AppResult<String> {
+    if !config.mcp.enabled {
+        return Ok("mcp disabled by config".to_string());
+    }
+    let inventory = load_inventory(config)?;
+    let enabled = inventory
+        .servers
+        .iter()
+        .filter(|server| server.enabled)
+        .count();
+    if inventory.servers.is_empty() {
+        return Ok("mcp servers=0; run mcp init/add".to_string());
+    }
+    let mut names = inventory
+        .servers
+        .iter()
+        .take(6)
+        .map(|server| {
+            let state = if server.enabled { "on" } else { "off" };
+            format!("{}:{}:{state}", server.name, server.transport)
+        })
+        .collect::<Vec<_>>();
+    if inventory.servers.len() > names.len() {
+        names.push(format!("+{}", inventory.servers.len() - names.len()));
+    }
+    Ok(format!(
+        "mcp servers={} enabled={} [{}]",
+        inventory.servers.len(),
+        enabled,
+        names.join(", ")
+    ))
 }
 
 fn doctor(config: &AppConfig) -> AppResult<()> {
@@ -111,6 +235,123 @@ fn doctor(config: &AppConfig) -> AppResult<()> {
         enabled
     );
     Ok(())
+}
+
+fn get_server(config: &AppConfig, name: &str) -> AppResult<()> {
+    let inventory = load_inventory(config)?;
+    let Some(server) = inventory.servers.iter().find(|server| server.name == name) else {
+        return Err(app_error(format!("MCP server `{name}` not found")));
+    };
+    print_sources(&inventory);
+    println!("MCP server `{}`:", server.name);
+    println!("  source: {}", server.source);
+    println!("  enabled: {}", server.enabled);
+    println!("  transport: {}", server.transport);
+    if let Some(command) = server.command.as_deref() {
+        println!("  command: {command}");
+    }
+    if !server.args.is_empty() {
+        println!("  args: {}", server.args.join(" "));
+    }
+    if let Some(url) = server.url.as_deref() {
+        println!("  url: {url}");
+    }
+    if !server.env.is_empty() {
+        println!(
+            "  env: {}",
+            server.env.keys().cloned().collect::<Vec<_>>().join(",")
+        );
+    }
+    if !server.headers.is_empty() {
+        println!(
+            "  headers: {}",
+            server.headers.keys().cloned().collect::<Vec<_>>().join(",")
+        );
+    }
+    Ok(())
+}
+
+fn validate_servers(config: &AppConfig) -> AppResult<()> {
+    print!("{}", validate_servers_summary(config)?);
+    Ok(())
+}
+
+pub(crate) fn validate_servers_summary(config: &AppConfig) -> AppResult<String> {
+    if !config.mcp.enabled {
+        return Ok("MCP is disabled by config: mcp.enabled = false\n".to_string());
+    }
+
+    let inventory = load_inventory(config)?;
+    let mut output = String::new();
+    push_sources(&mut output, &inventory);
+    let targets = select_tool_targets(&inventory, None)?;
+
+    if targets.is_empty() {
+        output.push_str(
+            "No enabled MCP servers configured. Run `deepseek mcp list` to inspect config.\n",
+        );
+        output.push_str("mcp validate: ok\n");
+        return Ok(output);
+    }
+
+    output.push_str("MCP validation health:\n");
+    for server in targets {
+        if !matches!(server.transport.as_str(), "stdio" | "http" | "sse") {
+            output.push_str(&format!(
+                "- {} [{}]: skipped unsupported transport\n",
+                server.name, server.transport
+            ));
+            continue;
+        }
+
+        let tools = list_tools_for_server(server)?;
+        let prompts = summarize_optional_mcp_surface(
+            list_prompts_for_server(server).map(|items| items.len()),
+        );
+        let resources = summarize_optional_mcp_surface(
+            list_resources_for_server(server).map(|items| items.len()),
+        );
+        let templates = summarize_optional_mcp_surface(
+            list_resource_templates_for_server(server).map(|items| items.len()),
+        );
+        output.push_str(&format!(
+            "- {} [{}]: tools=ok({}), prompts={}, resources={}, templates={}\n",
+            server.name,
+            server.transport,
+            tools.len(),
+            prompts,
+            resources,
+            templates
+        ));
+    }
+    output.push_str("mcp validate: ok\n");
+    Ok(output)
+}
+
+fn summarize_optional_mcp_surface(result: AppResult<usize>) -> String {
+    match result {
+        Ok(count) => format!("ok({count})"),
+        Err(error) => format!("error({})", summarize_mcp_error(&error.to_string())),
+    }
+}
+
+fn summarize_mcp_error(error: &str) -> String {
+    let mut summary = error
+        .lines()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .unwrap_or_else(|| "unknown error".to_string());
+    if summary.len() > 120 {
+        summary.truncate(117);
+        summary.push_str("...");
+    }
+    summary
 }
 
 fn list_remote_tools(config: &AppConfig, requested_server: Option<&str>) -> AppResult<()> {
@@ -263,6 +504,154 @@ pub(crate) fn list_remote_prompts_summary(
                     compact_inline(&arguments, 260)
                 ));
             }
+        }
+    }
+
+    Ok(output)
+}
+
+fn list_remote_resources(config: &AppConfig, requested_server: Option<&str>) -> AppResult<()> {
+    print!(
+        "{}",
+        list_remote_resources_summary(config, requested_server)?
+    );
+    Ok(())
+}
+
+pub(crate) fn list_remote_resources_summary(
+    config: &AppConfig,
+    requested_server: Option<&str>,
+) -> AppResult<String> {
+    if !config.mcp.enabled {
+        return Ok("MCP is disabled by config: mcp.enabled = false\n".to_string());
+    }
+
+    let inventory = load_inventory(config)?;
+    let mut output = String::new();
+    push_sources(&mut output, &inventory);
+    let targets = select_tool_targets(&inventory, requested_server)?;
+
+    if targets.is_empty() {
+        output.push_str(
+            "No enabled MCP servers configured. Run `deepseek mcp list` to inspect config.\n",
+        );
+        return Ok(output);
+    }
+
+    output.push_str("MCP remote resources:\n");
+    for server in targets {
+        if !matches!(server.transport.as_str(), "stdio" | "http" | "sse") {
+            let message = format!(
+                "mcp resources currently supports stdio/http/sse servers only; `{}` uses {}",
+                server.name, server.transport
+            );
+            if requested_server.is_some() {
+                return Err(app_error(message));
+            }
+            output.push_str(&format!(
+                "- {} [{}]: skipped ({message})",
+                server.name, server.transport
+            ));
+            output.push('\n');
+            continue;
+        }
+
+        let resources = list_resources_for_server(server)?;
+        output.push_str(&format!(
+            "- {} [{}]: {} resource(s)\n",
+            server.name,
+            server.transport,
+            resources.len()
+        ));
+        for resource in resources {
+            let description = resource.description.as_deref().unwrap_or("-");
+            let mime_type = resource.mime_type.as_deref().unwrap_or("-");
+            output.push_str(&format!(
+                "  - {} ({mime_type}): {}\n",
+                resource.name.as_deref().unwrap_or(resource.uri.as_str()),
+                compact_inline(description, 140)
+            ));
+            output.push_str(&format!(
+                "    uri: {}\n",
+                compact_inline(&resource.uri, 220)
+            ));
+        }
+    }
+
+    Ok(output)
+}
+
+fn list_remote_resource_templates(
+    config: &AppConfig,
+    requested_server: Option<&str>,
+) -> AppResult<()> {
+    print!(
+        "{}",
+        list_remote_resource_templates_summary(config, requested_server)?
+    );
+    Ok(())
+}
+
+pub(crate) fn list_remote_resource_templates_summary(
+    config: &AppConfig,
+    requested_server: Option<&str>,
+) -> AppResult<String> {
+    if !config.mcp.enabled {
+        return Ok("MCP is disabled by config: mcp.enabled = false\n".to_string());
+    }
+
+    let inventory = load_inventory(config)?;
+    let mut output = String::new();
+    push_sources(&mut output, &inventory);
+    let targets = select_tool_targets(&inventory, requested_server)?;
+
+    if targets.is_empty() {
+        output.push_str(
+            "No enabled MCP servers configured. Run `deepseek mcp list` to inspect config.\n",
+        );
+        return Ok(output);
+    }
+
+    output.push_str("MCP remote resource templates:\n");
+    for server in targets {
+        if !matches!(server.transport.as_str(), "stdio" | "http" | "sse") {
+            let message = format!(
+                "mcp resource-templates currently supports stdio/http/sse servers only; `{}` uses {}",
+                server.name, server.transport
+            );
+            if requested_server.is_some() {
+                return Err(app_error(message));
+            }
+            output.push_str(&format!(
+                "- {} [{}]: skipped ({message})",
+                server.name, server.transport
+            ));
+            output.push('\n');
+            continue;
+        }
+
+        let templates = list_resource_templates_for_server(server)?;
+        output.push_str(&format!(
+            "- {} [{}]: {} template(s)\n",
+            server.name,
+            server.transport,
+            templates.len()
+        ));
+        for template in templates {
+            let description = template.description.as_deref().unwrap_or("-");
+            let mime_type = template.mime_type.as_deref().unwrap_or("-");
+            output.push_str(&format!(
+                "  - {} ({mime_type}): {}\n",
+                template
+                    .name
+                    .as_deref()
+                    .unwrap_or(template.uri_template.as_str()),
+                compact_inline(description, 140)
+            ));
+            output.push_str(&format!(
+                "    uriTemplate: {}\n",
+                compact_inline(&template.uri_template, 220)
+            ));
         }
     }
 
@@ -447,6 +836,50 @@ pub(crate) fn get_remote_prompt_text(
     Ok(render_remote_prompt_text(server_name, prompt_name, &result))
 }
 
+fn get_remote_resource(config: &AppConfig, server_name: &str, uri: &str) -> AppResult<()> {
+    print!("{}", get_remote_resource_summary(config, server_name, uri)?);
+    Ok(())
+}
+
+pub(crate) fn get_remote_resource_summary(
+    config: &AppConfig,
+    server_name: &str,
+    uri: &str,
+) -> AppResult<String> {
+    if !config.mcp.enabled {
+        return Ok("MCP is disabled by config: mcp.enabled = false\n".to_string());
+    }
+
+    let result = get_remote_resource_result(config, server_name, uri)?;
+    let mut output = String::new();
+    let inventory = load_inventory(config)?;
+    push_sources(&mut output, &inventory);
+    let targets = select_tool_targets(&inventory, Some(server_name))?;
+    let server = targets[0];
+
+    output.push_str("MCP resource:\n");
+    output.push_str(&format!(
+        "- {}/{} [{}]: ok\n",
+        server.name, uri, server.transport
+    ));
+    if result.contents.is_empty() {
+        output.push_str("  contents: -\n");
+    } else {
+        output.push_str("  contents:\n");
+        for content in result.contents {
+            let mime_type = content.mime_type.as_deref().unwrap_or("-");
+            let body = content.text.or(content.blob).unwrap_or_default();
+            output.push_str(&format!(
+                "  - {} ({mime_type}): {}\n",
+                content.uri,
+                compact_inline(&body, 260)
+            ));
+        }
+    }
+
+    Ok(output)
+}
+
 fn get_remote_prompt_result(
     config: &AppConfig,
     server_name: &str,
@@ -468,6 +901,32 @@ fn get_remote_prompt_result(
         "stdio" => get_stdio_prompt(server, prompt_name, &arguments),
         "http" => get_http_prompt(server, prompt_name, &arguments),
         "sse" => get_sse_prompt(server, prompt_name, &arguments),
+        _ => unreachable!("transport checked above"),
+    }
+}
+
+fn get_remote_resource_result(
+    config: &AppConfig,
+    server_name: &str,
+    uri: &str,
+) -> AppResult<McpResourceReadResult> {
+    if uri.trim().is_empty() {
+        return Err(app_error("mcp resource URI must not be empty"));
+    }
+    let inventory = load_inventory(config)?;
+    let targets = select_tool_targets(&inventory, Some(server_name))?;
+    let server = targets[0];
+    if !matches!(server.transport.as_str(), "stdio" | "http" | "sse") {
+        return Err(app_error(format!(
+            "mcp resource currently supports stdio/http/sse servers only; `{}` uses {}",
+            server.name, server.transport
+        )));
+    }
+
+    match server.transport.as_str() {
+        "stdio" => read_stdio_resource(server, uri),
+        "http" => read_http_resource(server, uri),
+        "sse" => read_sse_resource(server, uri),
         _ => unreachable!("transport checked above"),
     }
 }
@@ -548,6 +1007,32 @@ fn list_prompts_for_server(server: &McpServer) -> AppResult<Vec<McpRemotePrompt>
         "sse" => list_sse_prompts(server),
         _ => Err(app_error(format!(
             "mcp prompts currently supports stdio/http/sse servers only; `{}` uses {}",
+            server.name, server.transport
+        ))),
+    }
+}
+
+fn list_resources_for_server(server: &McpServer) -> AppResult<Vec<McpRemoteResource>> {
+    match server.transport.as_str() {
+        "stdio" => list_stdio_resources(server),
+        "http" => list_http_resources(server),
+        "sse" => list_sse_resources(server),
+        _ => Err(app_error(format!(
+            "mcp resources currently supports stdio/http/sse servers only; `{}` uses {}",
+            server.name, server.transport
+        ))),
+    }
+}
+
+fn list_resource_templates_for_server(
+    server: &McpServer,
+) -> AppResult<Vec<McpRemoteResourceTemplate>> {
+    match server.transport.as_str() {
+        "stdio" => list_stdio_resource_templates(server),
+        "http" => list_http_resource_templates(server),
+        "sse" => list_sse_resource_templates(server),
+        _ => Err(app_error(format!(
+            "mcp resource-templates currently supports stdio/http/sse servers only; `{}` uses {}",
             server.name, server.transport
         ))),
     }
@@ -668,6 +1153,90 @@ fn get_stdio_prompt(
     })?;
 
     let result = run_stdio_prompt_get_session(server, &mut child, prompt_name, arguments);
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+fn list_stdio_resources(server: &McpServer) -> AppResult<Vec<McpRemoteResource>> {
+    let command = server
+        .command
+        .as_deref()
+        .ok_or_else(|| app_error(format!("stdio MCP server `{}` has no command", server.name)))?;
+    let mut command_builder = Command::new(command);
+    command_builder
+        .args(&server.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for (key, value) in &server.env {
+        command_builder.env(key, value);
+    }
+
+    let mut child = command_builder.spawn().map_err(|error| {
+        app_error(format!(
+            "failed to start stdio MCP server `{}` with `{}`: {error}",
+            server.name, command
+        ))
+    })?;
+
+    let result = run_stdio_resources_session(server, &mut child);
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+fn read_stdio_resource(server: &McpServer, uri: &str) -> AppResult<McpResourceReadResult> {
+    let command = server
+        .command
+        .as_deref()
+        .ok_or_else(|| app_error(format!("stdio MCP server `{}` has no command", server.name)))?;
+    let mut command_builder = Command::new(command);
+    command_builder
+        .args(&server.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for (key, value) in &server.env {
+        command_builder.env(key, value);
+    }
+
+    let mut child = command_builder.spawn().map_err(|error| {
+        app_error(format!(
+            "failed to start stdio MCP server `{}` with `{}`: {error}",
+            server.name, command
+        ))
+    })?;
+
+    let result = run_stdio_resource_read_session(server, &mut child, uri);
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+fn list_stdio_resource_templates(server: &McpServer) -> AppResult<Vec<McpRemoteResourceTemplate>> {
+    let command = server
+        .command
+        .as_deref()
+        .ok_or_else(|| app_error(format!("stdio MCP server `{}` has no command", server.name)))?;
+    let mut command_builder = Command::new(command);
+    command_builder
+        .args(&server.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for (key, value) in &server.env {
+        command_builder.env(key, value);
+    }
+
+    let mut child = command_builder.spawn().map_err(|error| {
+        app_error(format!(
+            "failed to start stdio MCP server `{}` with `{}`: {error}",
+            server.name, command
+        ))
+    })?;
+
+    let result = run_stdio_resource_templates_session(server, &mut child);
     let _ = child.kill();
     let _ = child.wait();
     result
@@ -839,6 +1408,133 @@ fn get_http_prompt(
     parse_prompt_get_result(&root)
 }
 
+fn list_http_resources(server: &McpServer) -> AppResult<Vec<McpRemoteResource>> {
+    let mut session_id = None::<String>;
+    let initialize = post_http_json_rpc(server, &build_initialize_request(1), None)?;
+    if let Some(value) = initialize.session_id {
+        session_id = Some(value);
+    }
+    parse_http_json_rpc_response(&initialize.body, 1).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` initialize failed: {error}",
+            server.name
+        ))
+    })?;
+    let _ = post_http_json_rpc(
+        server,
+        build_initialized_notification(),
+        session_id.as_deref(),
+    )?;
+
+    let mut request_id = 2u64;
+    let mut cursor: Option<String> = None;
+    let mut resources = Vec::new();
+    loop {
+        let response = post_http_json_rpc(
+            server,
+            &build_resources_list_request(request_id, cursor.as_deref()),
+            session_id.as_deref(),
+        )?;
+        if let Some(value) = response.session_id {
+            session_id = Some(value);
+        }
+        let root = parse_http_json_rpc_response(&response.body, request_id).map_err(|error| {
+            app_error(format!(
+                "MCP server `{}` resources/list failed: {error}",
+                server.name
+            ))
+        })?;
+        let (mut page_resources, next_cursor) = parse_resources_list_result(&root)?;
+        resources.append(&mut page_resources);
+        let Some(next_cursor) = next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+        request_id += 1;
+    }
+
+    Ok(resources)
+}
+
+fn read_http_resource(server: &McpServer, uri: &str) -> AppResult<McpResourceReadResult> {
+    let mut session_id = None::<String>;
+    let initialize = post_http_json_rpc(server, &build_initialize_request(1), None)?;
+    if let Some(value) = initialize.session_id {
+        session_id = Some(value);
+    }
+    parse_http_json_rpc_response(&initialize.body, 1).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` initialize failed: {error}",
+            server.name
+        ))
+    })?;
+    let _ = post_http_json_rpc(
+        server,
+        build_initialized_notification(),
+        session_id.as_deref(),
+    )?;
+    let response = post_http_json_rpc(
+        server,
+        &build_resources_read_request(2, uri),
+        session_id.as_deref(),
+    )?;
+    let root = parse_http_json_rpc_response(&response.body, 2).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` resources/read failed: {error}",
+            server.name
+        ))
+    })?;
+    parse_resource_read_result(&root)
+}
+
+fn list_http_resource_templates(server: &McpServer) -> AppResult<Vec<McpRemoteResourceTemplate>> {
+    let mut session_id = None::<String>;
+    let initialize = post_http_json_rpc(server, &build_initialize_request(1), None)?;
+    if let Some(value) = initialize.session_id {
+        session_id = Some(value);
+    }
+    parse_http_json_rpc_response(&initialize.body, 1).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` initialize failed: {error}",
+            server.name
+        ))
+    })?;
+    let _ = post_http_json_rpc(
+        server,
+        build_initialized_notification(),
+        session_id.as_deref(),
+    )?;
+
+    let mut request_id = 2u64;
+    let mut cursor: Option<String> = None;
+    let mut templates = Vec::new();
+    loop {
+        let response = post_http_json_rpc(
+            server,
+            &build_resource_templates_list_request(request_id, cursor.as_deref()),
+            session_id.as_deref(),
+        )?;
+        if let Some(value) = response.session_id {
+            session_id = Some(value);
+        }
+        let root = parse_http_json_rpc_response(&response.body, request_id).map_err(|error| {
+            app_error(format!(
+                "MCP server `{}` resources/templates/list failed: {error}",
+                server.name
+            ))
+        })?;
+        let (mut page_templates, next_cursor) = parse_resource_templates_list_result(&root)?;
+        templates.append(&mut page_templates);
+        let Some(next_cursor) = next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+        request_id += 1;
+    }
+
+    Ok(templates)
+}
+
 fn list_sse_tools(server: &McpServer) -> AppResult<Vec<McpRemoteTool>> {
     let mut session = open_sse_session(server)?;
     post_sse_json_rpc(server, &session.endpoint, &build_initialize_request(1))?;
@@ -995,6 +1691,126 @@ fn get_sse_prompt(
     )?;
     let root = validate_json_rpc_response(root, 2)?;
     let result = parse_prompt_get_result(&root);
+    session.close();
+    result
+}
+
+fn list_sse_resources(server: &McpServer) -> AppResult<Vec<McpRemoteResource>> {
+    let mut session = open_sse_session(server)?;
+    post_sse_json_rpc(server, &session.endpoint, &build_initialize_request(1))?;
+    let response = read_sse_json_rpc_response(&session.receiver, 1, MCP_RESPONSE_TIMEOUT).map_err(
+        |error| {
+            app_error(format!(
+                "MCP server `{}` initialize failed: {error}",
+                server.name
+            ))
+        },
+    )?;
+    validate_json_rpc_response(response, 1)?;
+    post_sse_json_rpc(server, &session.endpoint, build_initialized_notification())?;
+
+    let mut request_id = 2u64;
+    let mut cursor: Option<String> = None;
+    let mut resources = Vec::new();
+    loop {
+        post_sse_json_rpc(
+            server,
+            &session.endpoint,
+            &build_resources_list_request(request_id, cursor.as_deref()),
+        )?;
+        let root = read_sse_json_rpc_response(&session.receiver, request_id, MCP_RESPONSE_TIMEOUT)
+            .map_err(|error| {
+                app_error(format!(
+                    "MCP server `{}` resources/list failed: {error}",
+                    server.name
+                ))
+            })?;
+        let root = validate_json_rpc_response(root, request_id)?;
+        let (mut page_resources, next_cursor) = parse_resources_list_result(&root)?;
+        resources.append(&mut page_resources);
+        let Some(next_cursor) = next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+        request_id += 1;
+    }
+
+    session.close();
+    Ok(resources)
+}
+
+fn list_sse_resource_templates(server: &McpServer) -> AppResult<Vec<McpRemoteResourceTemplate>> {
+    let mut session = open_sse_session(server)?;
+    post_sse_json_rpc(server, &session.endpoint, &build_initialize_request(1))?;
+    let response = read_sse_json_rpc_response(&session.receiver, 1, MCP_RESPONSE_TIMEOUT).map_err(
+        |error| {
+            app_error(format!(
+                "MCP server `{}` initialize failed: {error}",
+                server.name
+            ))
+        },
+    )?;
+    validate_json_rpc_response(response, 1)?;
+    post_sse_json_rpc(server, &session.endpoint, build_initialized_notification())?;
+
+    let mut request_id = 2u64;
+    let mut cursor: Option<String> = None;
+    let mut templates = Vec::new();
+    loop {
+        post_sse_json_rpc(
+            server,
+            &session.endpoint,
+            &build_resource_templates_list_request(request_id, cursor.as_deref()),
+        )?;
+        let root = read_sse_json_rpc_response(&session.receiver, request_id, MCP_RESPONSE_TIMEOUT)
+            .map_err(|error| {
+                app_error(format!(
+                    "MCP server `{}` resources/templates/list failed: {error}",
+                    server.name
+                ))
+            })?;
+        let root = validate_json_rpc_response(root, request_id)?;
+        let (mut page_templates, next_cursor) = parse_resource_templates_list_result(&root)?;
+        templates.append(&mut page_templates);
+        let Some(next_cursor) = next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+        request_id += 1;
+    }
+
+    session.close();
+    Ok(templates)
+}
+
+fn read_sse_resource(server: &McpServer, uri: &str) -> AppResult<McpResourceReadResult> {
+    let mut session = open_sse_session(server)?;
+    post_sse_json_rpc(server, &session.endpoint, &build_initialize_request(1))?;
+    let response = read_sse_json_rpc_response(&session.receiver, 1, MCP_RESPONSE_TIMEOUT).map_err(
+        |error| {
+            app_error(format!(
+                "MCP server `{}` initialize failed: {error}",
+                server.name
+            ))
+        },
+    )?;
+    validate_json_rpc_response(response, 1)?;
+    post_sse_json_rpc(server, &session.endpoint, build_initialized_notification())?;
+    post_sse_json_rpc(
+        server,
+        &session.endpoint,
+        &build_resources_read_request(2, uri),
+    )?;
+    let root = read_sse_json_rpc_response(&session.receiver, 2, MCP_RESPONSE_TIMEOUT).map_err(
+        |error| {
+            app_error(format!(
+                "MCP server `{}` resources/read failed: {error}",
+                server.name
+            ))
+        },
+    )?;
+    let root = validate_json_rpc_response(root, 2)?;
+    let result = parse_resource_read_result(&root);
     session.close();
     result
 }
@@ -1495,6 +2311,139 @@ fn run_stdio_prompts_session(
     Ok(prompts)
 }
 
+fn run_stdio_resources_session(
+    server: &McpServer,
+    child: &mut std::process::Child,
+) -> AppResult<Vec<McpRemoteResource>> {
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| app_error("failed to open MCP server stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| app_error("failed to open MCP server stdout"))?;
+    let receiver = spawn_stdout_reader(stdout);
+
+    send_json_rpc(&mut stdin, &build_initialize_request(1))?;
+    read_json_rpc_response(&receiver, 1, MCP_RESPONSE_TIMEOUT).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` initialize failed: {error}",
+            server.name
+        ))
+    })?;
+    send_json_rpc(&mut stdin, build_initialized_notification())?;
+
+    let mut request_id = 2u64;
+    let mut cursor: Option<String> = None;
+    let mut resources = Vec::new();
+    loop {
+        send_json_rpc(
+            &mut stdin,
+            &build_resources_list_request(request_id, cursor.as_deref()),
+        )?;
+        let response = read_json_rpc_response(&receiver, request_id, MCP_RESPONSE_TIMEOUT)
+            .map_err(|error| {
+                app_error(format!(
+                    "MCP server `{}` resources/list failed: {error}",
+                    server.name
+                ))
+            })?;
+        let (mut page_resources, next_cursor) = parse_resources_list_result(&response)?;
+        resources.append(&mut page_resources);
+        let Some(next_cursor) = next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+        request_id += 1;
+    }
+
+    Ok(resources)
+}
+
+fn run_stdio_resource_read_session(
+    server: &McpServer,
+    child: &mut std::process::Child,
+    uri: &str,
+) -> AppResult<McpResourceReadResult> {
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| app_error("failed to open MCP server stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| app_error("failed to open MCP server stdout"))?;
+    let receiver = spawn_stdout_reader(stdout);
+
+    send_json_rpc(&mut stdin, &build_initialize_request(1))?;
+    read_json_rpc_response(&receiver, 1, MCP_RESPONSE_TIMEOUT).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` initialize failed: {error}",
+            server.name
+        ))
+    })?;
+    send_json_rpc(&mut stdin, build_initialized_notification())?;
+    send_json_rpc(&mut stdin, &build_resources_read_request(2, uri))?;
+    let response = read_json_rpc_response(&receiver, 2, MCP_RESPONSE_TIMEOUT).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` resources/read failed: {error}",
+            server.name
+        ))
+    })?;
+    parse_resource_read_result(&response)
+}
+
+fn run_stdio_resource_templates_session(
+    server: &McpServer,
+    child: &mut std::process::Child,
+) -> AppResult<Vec<McpRemoteResourceTemplate>> {
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| app_error("failed to open MCP server stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| app_error("failed to open MCP server stdout"))?;
+    let receiver = spawn_stdout_reader(stdout);
+
+    send_json_rpc(&mut stdin, &build_initialize_request(1))?;
+    read_json_rpc_response(&receiver, 1, MCP_RESPONSE_TIMEOUT).map_err(|error| {
+        app_error(format!(
+            "MCP server `{}` initialize failed: {error}",
+            server.name
+        ))
+    })?;
+    send_json_rpc(&mut stdin, build_initialized_notification())?;
+
+    let mut request_id = 2u64;
+    let mut cursor: Option<String> = None;
+    let mut templates = Vec::new();
+    loop {
+        send_json_rpc(
+            &mut stdin,
+            &build_resource_templates_list_request(request_id, cursor.as_deref()),
+        )?;
+        let response = read_json_rpc_response(&receiver, request_id, MCP_RESPONSE_TIMEOUT)
+            .map_err(|error| {
+                app_error(format!(
+                    "MCP server `{}` resources/templates/list failed: {error}",
+                    server.name
+                ))
+            })?;
+        let (mut page_templates, next_cursor) = parse_resource_templates_list_result(&response)?;
+        templates.append(&mut page_templates);
+        let Some(next_cursor) = next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+        request_id += 1;
+    }
+
+    Ok(templates)
+}
+
 fn spawn_stdout_reader(stdout: std::process::ChildStdout) -> Receiver<Result<String, String>> {
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
@@ -1748,6 +2697,39 @@ fn build_prompts_get_request(
     )
 }
 
+fn build_resources_list_request(id: u64, cursor: Option<&str>) -> String {
+    match cursor {
+        Some(cursor) => format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"resources/list","params":{{"cursor":"{}"}}}}"#,
+            crate::util::json::json_escape(cursor)
+        ),
+        None => {
+            format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"resources/list","params":{{}}}}"#)
+        }
+    }
+}
+
+fn build_resources_read_request(id: u64, uri: &str) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"method":"resources/read","params":{{"uri":"{}"}}}}"#,
+        crate::util::json::json_escape(uri),
+    )
+}
+
+fn build_resource_templates_list_request(id: u64, cursor: Option<&str>) -> String {
+    match cursor {
+        Some(cursor) => format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"resources/templates/list","params":{{"cursor":"{}"}}}}"#,
+            crate::util::json::json_escape(cursor)
+        ),
+        None => {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"resources/templates/list","params":{{}}}}"#
+            )
+        }
+    }
+}
+
 fn parse_tools_list_result(
     response: &BTreeMap<String, JsonValue>,
 ) -> AppResult<(Vec<McpRemoteTool>, Option<String>)> {
@@ -1854,6 +2836,102 @@ fn parse_prompts_list_result(
     Ok((parsed, next_cursor))
 }
 
+fn parse_resources_list_result(
+    response: &BTreeMap<String, JsonValue>,
+) -> AppResult<(Vec<McpRemoteResource>, Option<String>)> {
+    let result = response
+        .get("result")
+        .and_then(json_as_object)
+        .ok_or_else(|| app_error("resources/list response `result` must be an object"))?;
+    let resources = result
+        .get("resources")
+        .and_then(json_as_array)
+        .ok_or_else(|| app_error("resources/list response `result.resources` must be an array"))?;
+    let next_cursor = result
+        .get("nextCursor")
+        .and_then(json_as_string)
+        .map(ToString::to_string);
+
+    let mut parsed = Vec::with_capacity(resources.len());
+    for resource in resources {
+        let object = json_as_object(resource)
+            .ok_or_else(|| app_error("resources/list response resource entries must be objects"))?;
+        let uri = object.get("uri").and_then(json_as_string).ok_or_else(|| {
+            app_error("resources/list response resource entry missing string `uri`")
+        })?;
+        parsed.push(McpRemoteResource {
+            uri: uri.to_string(),
+            name: object
+                .get("name")
+                .and_then(json_as_string)
+                .map(ToString::to_string),
+            description: object
+                .get("description")
+                .and_then(json_as_string)
+                .map(ToString::to_string),
+            mime_type: object
+                .get("mimeType")
+                .and_then(json_as_string)
+                .map(ToString::to_string),
+        });
+    }
+
+    Ok((parsed, next_cursor))
+}
+
+fn parse_resource_templates_list_result(
+    response: &BTreeMap<String, JsonValue>,
+) -> AppResult<(Vec<McpRemoteResourceTemplate>, Option<String>)> {
+    let result = response
+        .get("result")
+        .and_then(json_as_object)
+        .ok_or_else(|| app_error("resources/templates/list response `result` must be an object"))?;
+    let templates = result
+        .get("resourceTemplates")
+        .or_else(|| result.get("templates"))
+        .and_then(json_as_array)
+        .ok_or_else(|| {
+            app_error(
+                "resources/templates/list response `result.resourceTemplates` must be an array",
+            )
+        })?;
+    let next_cursor = result
+        .get("nextCursor")
+        .and_then(json_as_string)
+        .map(ToString::to_string);
+
+    let mut parsed = Vec::with_capacity(templates.len());
+    for template in templates {
+        let object = json_as_object(template).ok_or_else(|| {
+            app_error("resources/templates/list response template entries must be objects")
+        })?;
+        let uri_template = object
+            .get("uriTemplate")
+            .or_else(|| object.get("uri_template"))
+            .and_then(json_as_string)
+            .ok_or_else(|| {
+                app_error("resources/templates/list response template missing string `uriTemplate`")
+            })?;
+        parsed.push(McpRemoteResourceTemplate {
+            uri_template: uri_template.to_string(),
+            name: object
+                .get("name")
+                .and_then(json_as_string)
+                .map(ToString::to_string),
+            description: object
+                .get("description")
+                .and_then(json_as_string)
+                .map(ToString::to_string),
+            mime_type: object
+                .get("mimeType")
+                .and_then(json_as_string)
+                .map(ToString::to_string),
+        });
+    }
+
+    Ok((parsed, next_cursor))
+}
+
 fn parse_tool_call_result(response: &BTreeMap<String, JsonValue>) -> AppResult<McpToolCallResult> {
     let result = response
         .get("result")
@@ -1896,6 +2974,44 @@ fn parse_tool_call_result(response: &BTreeMap<String, JsonValue>) -> AppResult<M
         content,
         structured_content,
     })
+}
+
+fn parse_resource_read_result(
+    response: &BTreeMap<String, JsonValue>,
+) -> AppResult<McpResourceReadResult> {
+    let result = response
+        .get("result")
+        .and_then(json_as_object)
+        .ok_or_else(|| app_error("resources/read response `result` must be an object"))?;
+    let contents = result
+        .get("contents")
+        .and_then(json_as_array)
+        .ok_or_else(|| app_error("resources/read response `result.contents` must be an array"))?;
+    let mut parsed = Vec::with_capacity(contents.len());
+    for item in contents {
+        let object = json_as_object(item)
+            .ok_or_else(|| app_error("resources/read response content entries must be objects"))?;
+        let uri = object
+            .get("uri")
+            .and_then(json_as_string)
+            .ok_or_else(|| app_error("resources/read response content missing string `uri`"))?;
+        parsed.push(McpResourceContent {
+            uri: uri.to_string(),
+            mime_type: object
+                .get("mimeType")
+                .and_then(json_as_string)
+                .map(ToString::to_string),
+            text: object
+                .get("text")
+                .and_then(json_as_string)
+                .map(ToString::to_string),
+            blob: object
+                .get("blob")
+                .and_then(json_as_string)
+                .map(ToString::to_string),
+        });
+    }
+    Ok(McpResourceReadResult { contents: parsed })
 }
 
 fn parse_prompt_get_result(
@@ -2017,6 +3133,335 @@ pub(crate) fn init_mcp_config_at(
     }
     std::fs::write(&path, default_mcp_config())?;
     Ok(path)
+}
+
+pub(crate) struct McpServerConfigSpec {
+    name: String,
+    command: Option<String>,
+    args: Vec<String>,
+    url: Option<String>,
+    transport: Option<String>,
+    env: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
+    disabled: bool,
+}
+
+impl McpServerConfigSpec {
+    pub(crate) fn stdio(name: String, command: String, args: Vec<String>, disabled: bool) -> Self {
+        Self {
+            name,
+            command: Some(command),
+            args,
+            url: None,
+            transport: Some("stdio".to_string()),
+            env: Vec::new(),
+            headers: Vec::new(),
+            disabled,
+        }
+    }
+
+    pub(crate) fn remote(name: String, transport: String, url: String, disabled: bool) -> Self {
+        Self {
+            name,
+            command: None,
+            args: Vec::new(),
+            url: Some(url),
+            transport: Some(transport),
+            env: Vec::new(),
+            headers: Vec::new(),
+            disabled,
+        }
+    }
+}
+
+pub(crate) fn add_mcp_server_at(
+    root: &Path,
+    config: &AppConfig,
+    scope: McpConfigScope,
+    spec: McpServerConfigSpec,
+) -> AppResult<PathBuf> {
+    validate_mcp_server_spec(&spec)?;
+    let entry = build_mcp_server_config(&spec)?;
+    add_mcp_server_entry_at(root, config, scope, &spec.name, entry)
+}
+
+pub(crate) fn remove_mcp_server_at(
+    root: &Path,
+    config: &AppConfig,
+    scope: McpConfigScope,
+    name: &str,
+) -> AppResult<PathBuf> {
+    mutate_mcp_config_servers(root, config, scope, |path, servers| {
+        if servers.remove(name).is_none() {
+            return Err(app_error(format!(
+                "MCP server `{name}` not found in {}",
+                path.display()
+            )));
+        }
+        Ok(())
+    })
+}
+
+pub(crate) fn set_mcp_server_enabled_at(
+    root: &Path,
+    config: &AppConfig,
+    scope: McpConfigScope,
+    name: &str,
+    enabled: bool,
+) -> AppResult<PathBuf> {
+    mutate_mcp_config_servers(root, config, scope, |path, servers| {
+        let Some(server) = servers.get_mut(name).and_then(json_as_object_mut) else {
+            return Err(app_error(format!(
+                "MCP server `{name}` not found in {}",
+                path.display()
+            )));
+        };
+        server.insert("enabled".to_string(), JsonValue::Bool(enabled));
+        server.insert("disabled".to_string(), JsonValue::Bool(!enabled));
+        Ok(())
+    })
+}
+
+pub(crate) fn add_self_mcp_server_at(
+    root: &Path,
+    config: &AppConfig,
+    scope: McpConfigScope,
+    name: &str,
+    workspace: Option<&str>,
+    command: &str,
+) -> AppResult<PathBuf> {
+    if name.trim().is_empty() {
+        return Err(app_error("MCP server name must not be empty"));
+    }
+    if command.trim().is_empty() {
+        return Err(app_error("MCP server command must not be empty"));
+    }
+    if workspace.map(str::trim).is_some_and(str::is_empty) {
+        return Err(app_error("MCP server workspace must not be empty"));
+    }
+    add_mcp_server_entry_at(
+        root,
+        config,
+        scope,
+        name,
+        build_self_mcp_server_config(command, workspace),
+    )
+}
+
+fn mcp_config_path_for_scope(root: &Path, config: &AppConfig, scope: McpConfigScope) -> PathBuf {
+    let path = match scope {
+        McpConfigScope::User => config.mcp.user_file_path(),
+        McpConfigScope::Project => config.mcp.project_file_path(),
+    };
+    if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }
+}
+
+fn add_mcp_server_entry_at(
+    root: &Path,
+    config: &AppConfig,
+    scope: McpConfigScope,
+    name: &str,
+    entry: JsonValue,
+) -> AppResult<PathBuf> {
+    mutate_mcp_config_servers(root, config, scope, |path, servers| {
+        if servers.contains_key(name) {
+            return Err(app_error(format!(
+                "MCP server `{name}` already exists in {}",
+                path.display()
+            )));
+        }
+        servers.insert(name.to_string(), entry.clone());
+        Ok(())
+    })
+}
+
+fn mutate_mcp_config_servers<F>(
+    root: &Path,
+    config: &AppConfig,
+    scope: McpConfigScope,
+    mut mutate: F,
+) -> AppResult<PathBuf>
+where
+    F: FnMut(&Path, &mut BTreeMap<String, JsonValue>) -> AppResult<()>,
+{
+    let path = mcp_config_path_for_scope(root, config, scope);
+    let mut root_object = read_mcp_config_root(&path)?;
+    let servers_key = mcp_servers_key(&root_object);
+
+    {
+        let servers_value = root_object
+            .entry(servers_key.clone())
+            .or_insert_with(|| JsonValue::Object(BTreeMap::new()));
+        let JsonValue::Object(servers) = servers_value else {
+            return Err(app_error(format!(
+                "MCP config {} `{servers_key}` must be an object",
+                path.display()
+            )));
+        };
+        mutate(&path, servers)?;
+    }
+
+    write_mcp_config_root(&path, root_object)?;
+    Ok(path)
+}
+
+fn read_mcp_config_root(path: &Path) -> AppResult<BTreeMap<String, JsonValue>> {
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let content = std::fs::read_to_string(path)?;
+    parse_root_object(&content).map_err(|error| {
+        app_error(format!(
+            "failed to parse MCP config {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn write_mcp_config_root(path: &Path, root_object: BTreeMap<String, JsonValue>) -> AppResult<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut output = json_value_to_string(&JsonValue::Object(root_object));
+    output.push('\n');
+    std::fs::write(path, output)?;
+    Ok(())
+}
+
+fn mcp_servers_key(root_object: &BTreeMap<String, JsonValue>) -> String {
+    if root_object.contains_key("mcpServers") {
+        "mcpServers".to_string()
+    } else if root_object.contains_key("servers") {
+        "servers".to_string()
+    } else {
+        "mcpServers".to_string()
+    }
+}
+
+fn validate_mcp_server_spec(spec: &McpServerConfigSpec) -> AppResult<()> {
+    if spec.name.trim().is_empty() {
+        return Err(app_error("MCP server name must not be empty"));
+    }
+    if spec.command.is_some() == spec.url.is_some() {
+        return Err(app_error(
+            "mcp add requires exactly one of --command or --url",
+        ));
+    }
+    if spec
+        .command
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(str::is_empty)
+    {
+        return Err(app_error("MCP server command must not be empty"));
+    }
+    if spec
+        .url
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(str::is_empty)
+    {
+        return Err(app_error("MCP server url must not be empty"));
+    }
+    Ok(())
+}
+
+fn build_mcp_server_config(spec: &McpServerConfigSpec) -> AppResult<JsonValue> {
+    let transport = spec.transport.as_deref().unwrap_or_else(|| {
+        if spec.command.is_some() {
+            "stdio"
+        } else {
+            "http"
+        }
+    });
+    let transport = normalize_transport(transport)?;
+    if spec.command.is_some() && transport != "stdio" {
+        return Err(app_error(
+            "command-based MCP servers must use stdio transport",
+        ));
+    }
+    if spec.url.is_some() && transport == "stdio" {
+        return Err(app_error(
+            "url-based MCP servers must use http or sse transport",
+        ));
+    }
+
+    let mut server = BTreeMap::new();
+    server.insert("transport".to_string(), JsonValue::String(transport));
+    server.insert("enabled".to_string(), JsonValue::Bool(!spec.disabled));
+    server.insert("disabled".to_string(), JsonValue::Bool(spec.disabled));
+    if let Some(command) = spec.command.as_deref() {
+        server.insert(
+            "command".to_string(),
+            JsonValue::String(command.to_string()),
+        );
+    }
+    if !spec.args.is_empty() {
+        server.insert(
+            "args".to_string(),
+            JsonValue::Array(
+                spec.args
+                    .iter()
+                    .map(|arg| JsonValue::String(arg.clone()))
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(url) = spec.url.as_deref() {
+        server.insert("url".to_string(), JsonValue::String(url.to_string()));
+    }
+    if !spec.env.is_empty() {
+        server.insert("env".to_string(), string_pairs_object(&spec.env));
+    }
+    if !spec.headers.is_empty() {
+        server.insert("headers".to_string(), string_pairs_object(&spec.headers));
+    }
+    Ok(JsonValue::Object(server))
+}
+
+fn string_pairs_object(pairs: &[(String, String)]) -> JsonValue {
+    let mut object = BTreeMap::new();
+    for (key, value) in pairs {
+        object.insert(key.clone(), JsonValue::String(value.clone()));
+    }
+    JsonValue::Object(object)
+}
+
+fn json_as_object_mut(value: &mut JsonValue) -> Option<&mut BTreeMap<String, JsonValue>> {
+    match value {
+        JsonValue::Object(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn build_self_mcp_server_config(command: &str, workspace: Option<&str>) -> JsonValue {
+    let mut server = BTreeMap::new();
+    server.insert(
+        "transport".to_string(),
+        JsonValue::String("stdio".to_string()),
+    );
+    server.insert(
+        "command".to_string(),
+        JsonValue::String(command.to_string()),
+    );
+    server.insert("enabled".to_string(), JsonValue::Bool(true));
+    server.insert("disabled".to_string(), JsonValue::Bool(false));
+
+    let mut args = vec![
+        JsonValue::String("serve".to_string()),
+        JsonValue::String("--mcp".to_string()),
+    ];
+    if let Some(workspace) = workspace {
+        args.push(JsonValue::String("--workspace".to_string()));
+        args.push(JsonValue::String(workspace.to_string()));
+    }
+    server.insert("args".to_string(), JsonValue::Array(args));
+
+    JsonValue::Object(server)
 }
 
 fn default_mcp_config() -> &'static str {
@@ -2275,6 +3720,22 @@ struct McpRemotePrompt {
 }
 
 #[derive(Debug, Clone)]
+struct McpRemoteResource {
+    uri: String,
+    name: Option<String>,
+    description: Option<String>,
+    mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct McpRemoteResourceTemplate {
+    uri_template: String,
+    name: Option<String>,
+    description: Option<String>,
+    mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 struct McpPromptArgument {
     name: String,
     description: Option<String>,
@@ -2292,6 +3753,19 @@ struct McpToolCallResult {
 struct McpPromptGetResult {
     description: Option<String>,
     messages: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct McpResourceReadResult {
+    contents: Vec<McpResourceContent>,
+}
+
+#[derive(Debug, Clone)]
+struct McpResourceContent {
+    uri: String,
+    mime_type: Option<String>,
+    text: Option<String>,
+    blob: Option<String>,
 }
 
 #[cfg(test)]
@@ -2357,6 +3831,45 @@ mod tests {
                     _ => {
                         assert!(request.contains(&format!(r#""method":"{final_method}""#)));
                         write_http_response(&mut stream, 200, &[], final_response);
+                    }
+                }
+            }
+        });
+        (url, handle)
+    }
+
+    fn start_fake_http_mcp_sequence(
+        finals: Vec<(&'static str, &'static str)>,
+    ) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            for (final_method, final_response) in finals {
+                for step in 0..3 {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request = read_http_request(&mut stream);
+                    let lower = request.to_ascii_lowercase();
+                    if step > 0 {
+                        assert!(lower.contains("mcp-session-id: session-1"));
+                    }
+                    match step {
+                        0 => {
+                            assert!(request.contains(r#""method":"initialize""#));
+                            write_http_response(
+                                &mut stream,
+                                200,
+                                &[("Mcp-Session-Id", "session-1")],
+                                r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{},"prompts":{},"resources":{}},"serverInfo":{"name":"fake","version":"1"}}}"#,
+                            );
+                        }
+                        1 => {
+                            assert!(request.contains(r#""method":"notifications/initialized""#));
+                            write_http_response(&mut stream, 202, &[], "");
+                        }
+                        _ => {
+                            assert!(request.contains(&format!(r#""method":"{final_method}""#)));
+                            write_http_response(&mut stream, 200, &[], final_response);
+                        }
                     }
                 }
             }
@@ -2616,6 +4129,54 @@ mod tests {
     }
 
     #[test]
+    fn build_resource_protocol_messages_include_uri_and_cursor() {
+        let list = build_resources_list_request(2, Some("next page"));
+        let root = parse_root_object(&list).unwrap();
+        assert_eq!(
+            root.get("method").and_then(json_as_string),
+            Some("resources/list")
+        );
+        let params = root
+            .get("params")
+            .and_then(json_as_object)
+            .expect("resources/list params");
+        assert_eq!(
+            params.get("cursor").and_then(json_as_string),
+            Some("next page")
+        );
+
+        let read = build_resources_read_request(3, "file:///tmp/readme.md");
+        let root = parse_root_object(&read).unwrap();
+        assert_eq!(
+            root.get("method").and_then(json_as_string),
+            Some("resources/read")
+        );
+        let params = root
+            .get("params")
+            .and_then(json_as_object)
+            .expect("resources/read params");
+        assert_eq!(
+            params.get("uri").and_then(json_as_string),
+            Some("file:///tmp/readme.md")
+        );
+
+        let templates = build_resource_templates_list_request(4, Some("page two"));
+        let root = parse_root_object(&templates).unwrap();
+        assert_eq!(
+            root.get("method").and_then(json_as_string),
+            Some("resources/templates/list")
+        );
+        let params = root
+            .get("params")
+            .and_then(json_as_object)
+            .expect("resources/templates/list params");
+        assert_eq!(
+            params.get("cursor").and_then(json_as_string),
+            Some("page two")
+        );
+    }
+
+    #[test]
     fn parse_call_arguments_rejects_non_object_json() {
         let error = parse_call_arguments(Some("[1,2]")).unwrap_err().to_string();
         assert!(error.contains("must be an object"));
@@ -2727,6 +4288,83 @@ mod tests {
     }
 
     #[test]
+    fn parse_resources_results_read_metadata_and_contents() {
+        let list_root = parse_root_object(
+            r#"{
+              "jsonrpc": "2.0",
+              "id": 2,
+              "result": {
+                "nextCursor": "page-2",
+                "resources": [
+                  {
+                    "uri": "file:///tmp/readme.md",
+                    "name": "readme",
+                    "description": "Project readme",
+                    "mimeType": "text/markdown"
+                  }
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+        let (resources, next_cursor) = parse_resources_list_result(&list_root).unwrap();
+        assert_eq!(next_cursor.as_deref(), Some("page-2"));
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].uri, "file:///tmp/readme.md");
+        assert_eq!(resources[0].name.as_deref(), Some("readme"));
+        assert_eq!(resources[0].mime_type.as_deref(), Some("text/markdown"));
+
+        let read_root = parse_root_object(
+            r#"{
+              "jsonrpc": "2.0",
+              "id": 3,
+              "result": {
+                "contents": [
+                  {
+                    "uri": "file:///tmp/readme.md",
+                    "mimeType": "text/markdown",
+                    "text": "Hello from resource"
+                  }
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+        let result = parse_resource_read_result(&read_root).unwrap();
+        assert_eq!(result.contents.len(), 1);
+        assert_eq!(result.contents[0].uri, "file:///tmp/readme.md");
+        assert_eq!(
+            result.contents[0].text.as_deref(),
+            Some("Hello from resource")
+        );
+
+        let templates_root = parse_root_object(
+            r#"{
+              "jsonrpc": "2.0",
+              "id": 4,
+              "result": {
+                "nextCursor": "page-2",
+                "resourceTemplates": [
+                  {
+                    "uriTemplate": "file:///tmp/{name}.md",
+                    "name": "file-template",
+                    "description": "File template",
+                    "mimeType": "text/markdown"
+                  }
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+        let (templates, next_cursor) =
+            parse_resource_templates_list_result(&templates_root).unwrap();
+        assert_eq!(next_cursor.as_deref(), Some("page-2"));
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].uri_template, "file:///tmp/{name}.md");
+        assert_eq!(templates[0].name.as_deref(), Some("file-template"));
+    }
+
+    #[test]
     fn parse_prompt_get_result_reads_text_messages() {
         let root = parse_root_object(
             r#"{
@@ -2816,6 +4454,98 @@ mod tests {
         assert!(summary.contains("- remote/review_pr [http]: ok"));
         assert!(summary.contains("Review prompt"));
         assert!(summary.contains("user: Review PR 42"));
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn list_remote_resources_summary_supports_http_transport() {
+        let (url, handle) = start_fake_http_mcp(
+            "resources/list",
+            r#"{"jsonrpc":"2.0","id":2,"result":{"resources":[{"uri":"file:///tmp/readme.md","name":"readme","description":"Project readme","mimeType":"text/markdown"}]}}"#,
+        );
+        let root = temp_root("http-resources");
+        let config =
+            config_with_mcp_server(&root, &format!(r#"{{"transport":"http","url":"{url}"}}"#));
+
+        let summary = list_remote_resources_summary(&config, Some("remote")).unwrap();
+        assert!(summary.contains("- remote [http]: 1 resource(s)"));
+        assert!(summary.contains("file:///tmp/readme.md"));
+        assert!(summary.contains("Project readme"));
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn get_remote_resource_summary_supports_http_transport() {
+        let (url, handle) = start_fake_http_mcp(
+            "resources/read",
+            r#"{"jsonrpc":"2.0","id":2,"result":{"contents":[{"uri":"file:///tmp/readme.md","mimeType":"text/markdown","text":"Hello from resource"}]}}"#,
+        );
+        let root = temp_root("http-resource-read");
+        let config =
+            config_with_mcp_server(&root, &format!(r#"{{"transport":"http","url":"{url}"}}"#));
+
+        let summary =
+            get_remote_resource_summary(&config, "remote", "file:///tmp/readme.md").unwrap();
+        assert!(summary.contains("- remote/file:///tmp/readme.md [http]: ok"));
+        assert!(summary.contains("Hello from resource"));
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn list_remote_resource_templates_summary_supports_http_transport() {
+        let (url, handle) = start_fake_http_mcp(
+            "resources/templates/list",
+            r#"{"jsonrpc":"2.0","id":2,"result":{"resourceTemplates":[{"uriTemplate":"file:///tmp/{name}.md","name":"file-template","description":"File template","mimeType":"text/markdown"}]}}"#,
+        );
+        let root = temp_root("http-resource-templates");
+        let config =
+            config_with_mcp_server(&root, &format!(r#"{{"transport":"http","url":"{url}"}}"#));
+
+        let summary = list_remote_resource_templates_summary(&config, Some("remote")).unwrap();
+        assert!(summary.contains("- remote [http]: 1 template(s)"));
+        assert!(summary.contains("file:///tmp/{name}.md"));
+        assert!(summary.contains("File template"));
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn validate_servers_summary_reports_mcp_surface_health() {
+        let (url, handle) = start_fake_http_mcp_sequence(vec![
+            (
+                "tools/list",
+                r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo"}]}}"#,
+            ),
+            (
+                "prompts/list",
+                r#"{"jsonrpc":"2.0","id":2,"result":{"prompts":[{"name":"review"}]}}"#,
+            ),
+            (
+                "resources/list",
+                r#"{"jsonrpc":"2.0","id":2,"result":{"resources":[{"uri":"file:///tmp/readme.md"}]}}"#,
+            ),
+            (
+                "resources/templates/list",
+                r#"{"jsonrpc":"2.0","id":2,"result":{"resourceTemplates":[{"uriTemplate":"file:///tmp/{name}.md"}]}}"#,
+            ),
+        ]);
+        let root = temp_root("http-validate-health");
+        let config =
+            config_with_mcp_server(&root, &format!(r#"{{"transport":"http","url":"{url}"}}"#));
+
+        let summary = validate_servers_summary(&config).unwrap();
+        assert!(summary.contains("MCP validation health:"));
+        assert!(summary.contains(
+            "- remote [http]: tools=ok(1), prompts=ok(1), resources=ok(1), templates=ok(1)"
+        ));
+        assert!(summary.contains("mcp validate: ok"));
 
         handle.join().unwrap();
         let _ = std::fs::remove_dir_all(root);
@@ -3000,6 +4730,274 @@ data: {"jsonrpc":"2.0","id":2,"result":{"tools":[]}}
         init_mcp_config_at(&root, &config, true).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("mcpServers"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn add_self_mcp_server_writes_user_config_entry() {
+        let root = temp_root("add-self");
+        let mut config = AppConfig::default();
+        config.mcp.user_file = root.join("user-mcp.json").display().to_string();
+        config.mcp.project_file = root.join("project-mcp.json").display().to_string();
+
+        let path = add_self_mcp_server_at(
+            &root,
+            &config,
+            McpConfigScope::User,
+            "deepseek-code",
+            Some("/tmp/workspace"),
+            "/usr/local/bin/deepseek",
+        )
+        .unwrap();
+
+        assert_eq!(path, root.join("user-mcp.json"));
+        let content = std::fs::read_to_string(&path).unwrap();
+        let root_object = parse_root_object(&content).unwrap();
+        let servers = root_object
+            .get("mcpServers")
+            .and_then(json_as_object)
+            .unwrap();
+        let server = servers
+            .get("deepseek-code")
+            .and_then(json_as_object)
+            .unwrap();
+        assert_eq!(
+            server.get("command").and_then(json_as_string),
+            Some("/usr/local/bin/deepseek")
+        );
+        assert_eq!(
+            server.get("transport").and_then(json_as_string),
+            Some("stdio")
+        );
+        let args = server.get("args").and_then(json_as_array).unwrap();
+        let args = args
+            .iter()
+            .map(|value| json_as_string(value).unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec!["serve", "--mcp", "--workspace", "/tmp/workspace"]
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn add_mcp_server_writes_stdio_project_entry() {
+        let root = temp_root("add-server");
+        let mut config = AppConfig::default();
+        config.mcp.user_file = root.join("user-mcp.json").display().to_string();
+        config.mcp.project_file = root.join("project-mcp.json").display().to_string();
+
+        let path = add_mcp_server_at(
+            &root,
+            &config,
+            McpConfigScope::Project,
+            McpServerConfigSpec {
+                name: "filesystem".to_string(),
+                command: Some("npx".to_string()),
+                args: vec![
+                    "-y".to_string(),
+                    "@modelcontextprotocol/server-filesystem".to_string(),
+                    ".".to_string(),
+                ],
+                url: None,
+                transport: None,
+                env: vec![("ROOT".to_string(), ".".to_string())],
+                headers: Vec::new(),
+                disabled: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(path, root.join("project-mcp.json"));
+        let content = std::fs::read_to_string(&path).unwrap();
+        let root_object = parse_root_object(&content).unwrap();
+        let servers = root_object
+            .get("mcpServers")
+            .and_then(json_as_object)
+            .unwrap();
+        let server = servers.get("filesystem").and_then(json_as_object).unwrap();
+        assert_eq!(server.get("command").and_then(json_as_string), Some("npx"));
+        assert_eq!(
+            server.get("transport").and_then(json_as_string),
+            Some("stdio")
+        );
+        assert!(server.get("env").and_then(json_as_object).is_some());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn add_mcp_server_writes_http_user_entry_and_refuses_duplicate() {
+        let root = temp_root("add-server-http");
+        let mut config = AppConfig::default();
+        config.mcp.user_file = root.join("user-mcp.json").display().to_string();
+        config.mcp.project_file = root.join("project-mcp.json").display().to_string();
+
+        add_mcp_server_at(
+            &root,
+            &config,
+            McpConfigScope::User,
+            McpServerConfigSpec {
+                name: "remote".to_string(),
+                command: None,
+                args: Vec::new(),
+                url: Some("http://localhost:3000/mcp".to_string()),
+                transport: None,
+                env: Vec::new(),
+                headers: vec![("Authorization".to_string(), "Bearer token".to_string())],
+                disabled: true,
+            },
+        )
+        .unwrap();
+
+        let error = add_mcp_server_at(
+            &root,
+            &config,
+            McpConfigScope::User,
+            McpServerConfigSpec {
+                name: "remote".to_string(),
+                command: None,
+                args: Vec::new(),
+                url: Some("http://localhost:3000/mcp".to_string()),
+                transport: None,
+                env: Vec::new(),
+                headers: Vec::new(),
+                disabled: false,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("already exists"));
+
+        let content = std::fs::read_to_string(root.join("user-mcp.json")).unwrap();
+        let root_object = parse_root_object(&content).unwrap();
+        let server = root_object
+            .get("mcpServers")
+            .and_then(json_as_object)
+            .and_then(|servers| servers.get("remote"))
+            .and_then(json_as_object)
+            .unwrap();
+        assert_eq!(
+            server.get("transport").and_then(json_as_string),
+            Some("http")
+        );
+        assert!(matches!(
+            server.get("disabled"),
+            Some(JsonValue::Bool(true))
+        ));
+        assert!(server.get("headers").and_then(json_as_object).is_some());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_and_enable_mcp_server_mutate_existing_entry() {
+        let root = temp_root("remove-enable-server");
+        std::fs::create_dir_all(&root).unwrap();
+        let project_file = root.join("project-mcp.json");
+        std::fs::write(
+            &project_file,
+            r#"{"mcpServers":{"remote":{"transport":"http","url":"http://localhost:3000/mcp","enabled":true}}}"#,
+        )
+        .unwrap();
+
+        let mut config = AppConfig::default();
+        config.mcp.user_file = root.join("user-mcp.json").display().to_string();
+        config.mcp.project_file = project_file.display().to_string();
+
+        set_mcp_server_enabled_at(&root, &config, McpConfigScope::Project, "remote", false)
+            .unwrap();
+        let content = std::fs::read_to_string(&project_file).unwrap();
+        let root_object = parse_root_object(&content).unwrap();
+        let server = root_object
+            .get("mcpServers")
+            .and_then(json_as_object)
+            .and_then(|servers| servers.get("remote"))
+            .and_then(json_as_object)
+            .unwrap();
+        assert!(matches!(
+            server.get("enabled"),
+            Some(JsonValue::Bool(false))
+        ));
+        assert!(matches!(
+            server.get("disabled"),
+            Some(JsonValue::Bool(true))
+        ));
+
+        remove_mcp_server_at(&root, &config, McpConfigScope::Project, "remote").unwrap();
+        let content = std::fs::read_to_string(&project_file).unwrap();
+        let root_object = parse_root_object(&content).unwrap();
+        let servers = root_object
+            .get("mcpServers")
+            .and_then(json_as_object)
+            .unwrap();
+        assert!(servers.get("remote").is_none());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn add_self_mcp_server_refuses_duplicate_name() {
+        let root = temp_root("add-self-duplicate");
+        std::fs::create_dir_all(&root).unwrap();
+        let user_file = root.join("user-mcp.json");
+        std::fs::write(
+            &user_file,
+            r#"{"mcpServers":{"deepseek":{"command":"existing"}}}"#,
+        )
+        .unwrap();
+
+        let mut config = AppConfig::default();
+        config.mcp.user_file = user_file.display().to_string();
+        config.mcp.project_file = root.join("project-mcp.json").display().to_string();
+
+        let error = add_self_mcp_server_at(
+            &root,
+            &config,
+            McpConfigScope::User,
+            "deepseek",
+            None,
+            "/usr/local/bin/deepseek",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("already exists"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn add_self_mcp_server_preserves_existing_servers_key() {
+        let root = temp_root("add-self-servers-key");
+        std::fs::create_dir_all(&root).unwrap();
+        let project_file = root.join("project-mcp.json");
+        std::fs::write(
+            &project_file,
+            r#"{"servers":{"remote":{"command":"remote-server"}}}"#,
+        )
+        .unwrap();
+
+        let mut config = AppConfig::default();
+        config.mcp.user_file = root.join("user-mcp.json").display().to_string();
+        config.mcp.project_file = project_file.display().to_string();
+
+        add_self_mcp_server_at(
+            &root,
+            &config,
+            McpConfigScope::Project,
+            "deepseek",
+            None,
+            "/usr/local/bin/deepseek",
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&project_file).unwrap();
+        let root_object = parse_root_object(&content).unwrap();
+        assert!(root_object.get("mcpServers").is_none());
+        let servers = root_object.get("servers").and_then(json_as_object).unwrap();
+        assert!(servers.get("remote").is_some());
+        assert!(servers.get("deepseek").is_some());
 
         let _ = std::fs::remove_dir_all(root);
     }

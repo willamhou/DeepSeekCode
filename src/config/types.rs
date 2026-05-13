@@ -1,22 +1,45 @@
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub model: ModelConfig,
+    pub vision: VisionConfig,
     pub approval: ApprovalConfig,
     pub workspace: WorkspaceConfig,
     pub hooks: HooksConfig,
     pub mcp: McpConfig,
     pub diagnostics: DiagnosticsConfig,
+    pub memory: MemoryConfig,
+    pub network: NetworkConfig,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             model: ModelConfig::default(),
+            vision: VisionConfig::default(),
             approval: ApprovalConfig::default(),
             workspace: WorkspaceConfig::default(),
             hooks: HooksConfig::default(),
             mcp: McpConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
+            memory: MemoryConfig::default(),
+            network: NetworkConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VisionConfig {
+    pub base_url: String,
+    pub model: String,
+    pub api_key_env: String,
+}
+
+impl Default for VisionConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "gpt-4.1".to_string(),
+            api_key_env: "OPENAI_API_KEY".to_string(),
         }
     }
 }
@@ -105,6 +128,44 @@ pub struct DiagnosticsConfig {
 impl Default for DiagnosticsConfig {
     fn default() -> Self {
         Self { post_edit: false }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryConfig {
+    pub enabled: bool,
+    pub notes_path: String,
+    pub memory_path: String,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            notes_path: "~/.config/dscode/notes.md".to_string(),
+            memory_path: "~/.config/dscode/memory.md".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NetworkConfig {
+    pub default: String,
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+    pub audit: bool,
+    pub audit_path: String,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            default: "allow".to_string(),
+            allow: Vec::new(),
+            deny: Vec::new(),
+            audit: true,
+            audit_path: "~/.config/dscode/network-audit.log".to_string(),
+        }
     }
 }
 
