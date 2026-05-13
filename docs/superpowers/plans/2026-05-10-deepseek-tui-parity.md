@@ -227,7 +227,9 @@ Landed first slice:
   shell jobs through the Unix `script` PTY backend and persists `tty` /
   `pty_backend` metadata; `tty_rows` plus `tty_cols` set and persist initial
   PTY geometry; `exec_shell_replay` now replays durable stdout/stderr log
-  slices by byte offset for restart-safe shell-log replay
+  slices by byte offset for restart-safe shell-log replay; manifests now keep
+  stable child pid, process-group, and owner-pid metadata so detached snapshots
+  can report owner liveness separately from child status
 - richer structured data validation
 
 ### Phase D: TUI

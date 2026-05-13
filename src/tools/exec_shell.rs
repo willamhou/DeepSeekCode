@@ -359,6 +359,9 @@ struct BackgroundShellJob {
     command: String,
     cwd: String,
     tty_options: ShellTtyOptions,
+    owner_pid: u32,
+    child_pid: u32,
+    process_group: u32,
     child: Option<Child>,
     stdin: Option<ShellStdinControl>,
     stdout_cursor: usize,
@@ -445,6 +448,9 @@ impl BackgroundShellManager {
             .stderr(Stdio::from(stderr_file));
         configure_process_group(&mut process);
         let mut child = process.spawn()?;
+        let child_pid = child.id();
+        let owner_pid = std::process::id();
+        let process_group = child_pid;
         let mut stdin = stdin_mode.into_control(&mut child)?;
         if let Some(data) = stdin_data {
             if let Some(control) = stdin.as_mut() {
@@ -460,6 +466,9 @@ impl BackgroundShellManager {
                 command: command.to_string(),
                 cwd: cwd.to_string(),
                 tty_options,
+                owner_pid,
+                child_pid,
+                process_group,
                 child: Some(child),
                 stdin,
                 stdout_cursor: 0,
@@ -589,7 +598,7 @@ impl BackgroundShellManager {
         let stdout_total = durable_log_bytes(&job.record_dir, "stdout.log", 0);
         let stderr_total = durable_log_bytes(&job.record_dir, "stderr.log", 0);
         let mut out = format!(
-            "task_id: {}\nstatus: {}\nexit_code: {}\ncommand: {}\ncwd: {}\ntty: {}\npty_backend: {}\ntty_rows: {}\ntty_cols: {}\nstdout_total_bytes: {stdout_total}\nstderr_total_bytes: {stderr_total}\n",
+            "task_id: {}\nstatus: {}\nexit_code: {}\ncommand: {}\ncwd: {}\nowner_pid: {}\nowner_alive: {}\npid: {}\nprocess_group: {}\ntty: {}\npty_backend: {}\ntty_rows: {}\ntty_cols: {}\nstdout_total_bytes: {stdout_total}\nstderr_total_bytes: {stderr_total}\n",
             job.id,
             job.status.as_str(),
             job.exit_code
@@ -597,6 +606,10 @@ impl BackgroundShellManager {
                 .unwrap_or_else(|| "null".to_string()),
             job.command,
             job.cwd,
+            job.owner_pid,
+            process_is_alive(job.owner_pid),
+            job.child_pid,
+            job.process_group,
             job.tty_options.enabled,
             pty_backend_label(job.tty_options),
             tty_rows_label(job.tty_options.size),
@@ -627,7 +640,7 @@ impl BackgroundShellManager {
         let stdout_total = stdout.len();
         let stderr_total = stderr.len();
         let mut out = format!(
-            "task_id: {}\nstatus: {}\nexit_code: {}\ncommand: {}\ncwd: {}\ntty: {}\npty_backend: {}\ntty_rows: {}\ntty_cols: {}\nstdout_total_bytes: {stdout_total}\nstderr_total_bytes: {stderr_total}\n",
+            "task_id: {}\nstatus: {}\nexit_code: {}\ncommand: {}\ncwd: {}\nowner_pid: {}\nowner_alive: {}\npid: {}\nprocess_group: {}\ntty: {}\npty_backend: {}\ntty_rows: {}\ntty_cols: {}\nstdout_total_bytes: {stdout_total}\nstderr_total_bytes: {stderr_total}\n",
             job.id,
             job.status.as_str(),
             job.exit_code
@@ -635,6 +648,10 @@ impl BackgroundShellManager {
                 .unwrap_or_else(|| "null".to_string()),
             job.command,
             job.cwd,
+            job.owner_pid,
+            process_is_alive(job.owner_pid),
+            job.child_pid,
+            job.process_group,
             job.tty_options.enabled,
             pty_backend_label(job.tty_options),
             tty_rows_label(job.tty_options.size),
@@ -840,6 +857,17 @@ fn tty_cols_label(size: Option<ShellTtySize>) -> String {
         .unwrap_or_else(|| "null".to_string())
 }
 
+fn shell_optional_pid_label(pid: Option<u32>) -> String {
+    pid.map(|pid| pid.to_string())
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn owner_alive_label(pid: Option<u32>) -> String {
+    pid.map(process_is_alive)
+        .map(|alive| alive.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 fn script_pty_backend_available() -> bool {
     Command::new("script")
         .arg("--version")
@@ -1015,6 +1043,8 @@ struct DurableShellJobRecord {
     status: String,
     exit_code: Option<i32>,
     pid: u32,
+    owner_pid: Option<u32>,
+    process_group: Option<u32>,
     stdin_path: Option<String>,
     stdin_keeper_pid: Option<u32>,
     stdin_closed: bool,
@@ -1123,7 +1153,8 @@ fn cancel_detached_shell_job(cwd: &str, task_id: &str) -> AppResult<String> {
             "detached background shell task {task_id} has no recorded pid for cancellation"
         )));
     }
-    kill_detached_process_group(record.pid)?;
+    let process_group = record.process_group.unwrap_or(record.pid);
+    kill_detached_process_group(process_group, record.pid)?;
     if let Some(keeper_pid) = record.stdin_keeper_pid {
         let _ = kill_process(keeper_pid);
     }
@@ -1147,11 +1178,6 @@ fn persist_job_snapshot(job: &BackgroundShellJob) -> AppResult<()> {
         .exit_code
         .map(|code| JsonValue::Number(code.to_string()))
         .unwrap_or(JsonValue::Null);
-    let pid = job
-        .child
-        .as_ref()
-        .map(Child::id)
-        .unwrap_or_else(|| parse_pid_from_task_id(&job.id).unwrap_or(0));
     let (stdin_path, stdin_keeper_pid, stdin_closed) = job
         .stdin
         .as_ref()
@@ -1196,7 +1222,18 @@ fn persist_job_snapshot(job: &BackgroundShellJob) -> AppResult<()> {
             JsonValue::String(job.status.as_str().to_string()),
         ),
         ("exit_code".to_string(), exit_code),
-        ("pid".to_string(), JsonValue::Number(pid.to_string())),
+        (
+            "pid".to_string(),
+            JsonValue::Number(job.child_pid.to_string()),
+        ),
+        (
+            "owner_pid".to_string(),
+            JsonValue::Number(job.owner_pid.to_string()),
+        ),
+        (
+            "process_group".to_string(),
+            JsonValue::Number(job.process_group.to_string()),
+        ),
         ("stdin_path".to_string(), stdin_path),
         ("stdin_keeper_pid".to_string(), stdin_keeper_pid),
         ("stdin_closed".to_string(), stdin_closed),
@@ -1282,6 +1319,20 @@ fn write_durable_shell_job_manifest(cwd: &str, record: &DurableShellJobRecord) -
         ),
         ("exit_code".to_string(), exit_code),
         ("pid".to_string(), JsonValue::Number(record.pid.to_string())),
+        (
+            "owner_pid".to_string(),
+            record
+                .owner_pid
+                .map(|pid| JsonValue::Number(pid.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "process_group".to_string(),
+            record
+                .process_group
+                .map(|pid| JsonValue::Number(pid.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
         ("stdin_path".to_string(), stdin_path),
         ("stdin_keeper_pid".to_string(), stdin_keeper_pid),
         (
@@ -1355,7 +1406,7 @@ fn render_durable_snapshot(cwd: &str, task_id: &str) -> AppResult<String> {
         "unavailable"
     };
     let mut out = format!(
-        "task_id: {}\nstatus: {}\nmanaged: false\nexit_code: {}\npid: {}\ncommand: {}\ncwd: {}\ntty: {}\npty_backend: {}\ntty_rows: {}\ntty_cols: {}\nstarted_at: {}\nupdated_at: {}\nstdout_total_bytes: {}\nstderr_total_bytes: {}\nstdin_control: {}\nnote: durable metadata and logs are available; detached cancel is best-effort and detached stdin is available only when stdin_control=detached_fifo.\n",
+        "task_id: {}\nstatus: {}\nmanaged: false\nexit_code: {}\npid: {}\nowner_pid: {}\nowner_alive: {}\nprocess_group: {}\ncommand: {}\ncwd: {}\ntty: {}\npty_backend: {}\ntty_rows: {}\ntty_cols: {}\nstarted_at: {}\nupdated_at: {}\nstdout_total_bytes: {}\nstderr_total_bytes: {}\nstdin_control: {}\nnote: durable metadata and logs are available; detached cancel is best-effort and detached stdin is available only when stdin_control=detached_fifo.\n",
         record.id,
         record.status,
         record
@@ -1363,6 +1414,9 @@ fn render_durable_snapshot(cwd: &str, task_id: &str) -> AppResult<String> {
             .map(|code| code.to_string())
             .unwrap_or_else(|| "null".to_string()),
         record.pid,
+        shell_optional_pid_label(record.owner_pid),
+        owner_alive_label(record.owner_pid),
+        shell_optional_pid_label(record.process_group),
         record.command,
         record.cwd,
         record.tty,
@@ -1508,6 +1562,14 @@ fn read_durable_shell_job_manifest(path: &Path) -> AppResult<DurableShellJobReco
             Some(value) => json_as_u64(value).map(|value| value as i32),
         },
         pid: root.get("pid").and_then(json_as_u64).unwrap_or(0) as u32,
+        owner_pid: root
+            .get("owner_pid")
+            .and_then(json_as_u64)
+            .map(|pid| pid as u32),
+        process_group: root
+            .get("process_group")
+            .and_then(json_as_u64)
+            .map(|pid| pid as u32),
         stdin_path: root
             .get("stdin_path")
             .and_then(json_as_string)
@@ -1620,15 +1682,6 @@ fn create_fifo(path: &Path) -> AppResult<()> {
     }
 }
 
-fn parse_pid_from_task_id(task_id: &str) -> Option<u32> {
-    task_id
-        .strip_prefix("shell-")?
-        .split('-')
-        .next()?
-        .parse::<u32>()
-        .ok()
-}
-
 #[cfg(unix)]
 fn configure_process_group(process: &mut Command) {
     use std::os::unix::process::CommandExt;
@@ -1688,10 +1741,16 @@ fn kill_process(pid: u32) -> AppResult<()> {
     }
 }
 
-fn kill_detached_process_group(pid: u32) -> AppResult<()> {
-    if pid <= 1 || pid == std::process::id() {
+fn kill_detached_process_group(process_group: u32, pid: u32) -> AppResult<()> {
+    if process_group <= 1
+        || process_group > i32::MAX as u32
+        || process_group == std::process::id()
+        || pid <= 1
+        || pid > i32::MAX as u32
+        || pid == std::process::id()
+    {
         return Err(app_error(format!(
-            "refusing to cancel detached shell job with unsafe pid {pid}"
+            "refusing to cancel detached shell job with unsafe process group {process_group} and pid {pid}"
         )));
     }
     #[cfg(unix)]
@@ -1700,8 +1759,7 @@ fn kill_detached_process_group(pid: u32) -> AppResult<()> {
         unsafe extern "C" {
             fn kill(pid: i32, sig: i32) -> i32;
         }
-        let process_group = -(pid as i32);
-        let group_result = unsafe { kill(process_group, SIGKILL) };
+        let group_result = unsafe { kill(-(process_group as i32), SIGKILL) };
         if group_result == 0 {
             return Ok(());
         }
@@ -1723,6 +1781,10 @@ fn kill_detached_process_group(pid: u32) -> AppResult<()> {
 }
 
 fn detached_process_is_alive(pid: u32) -> bool {
+    process_is_alive(pid)
+}
+
+fn process_is_alive(pid: u32) -> bool {
     if pid <= 1 || pid > i32::MAX as u32 {
         return false;
     }
@@ -1975,6 +2037,78 @@ mod tests {
     }
 
     #[test]
+    fn exec_shell_manifest_keeps_child_pid_after_completion() {
+        let root = temp_root("owner-metadata");
+        fs::create_dir_all(&root).unwrap();
+        let cwd = root.display().to_string();
+        let started = ExecShellTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("command", "echo owner-meta")
+                    .with_arg("background", "true")
+                    .with_arg("cwd", cwd.clone()),
+            )
+            .unwrap();
+        let task_id = task_id_from(&started.summary);
+        let manifest_path = root
+            .join(".dscode/shell-jobs")
+            .join(&task_id)
+            .join("manifest.json");
+        let before = read_durable_shell_job_manifest(&manifest_path).unwrap();
+        assert_eq!(before.owner_pid, Some(std::process::id()));
+        assert_eq!(before.process_group, Some(before.pid));
+        assert_ne!(before.pid, std::process::id());
+
+        let waited = ExecShellWaitTool {
+            tool_name: "exec_shell_wait",
+        }
+        .execute(
+            ToolInput::new()
+                .with_arg("task_id", task_id.clone())
+                .with_arg("cwd", cwd.clone())
+                .with_arg("timeout_ms", "1000"),
+        )
+        .unwrap();
+        assert!(waited.summary.contains("owner_pid:"), "{}", waited.summary);
+        assert!(
+            waited.summary.contains("owner_alive: true"),
+            "{}",
+            waited.summary
+        );
+        assert!(
+            waited.summary.contains("process_group:"),
+            "{}",
+            waited.summary
+        );
+
+        let after = read_durable_shell_job_manifest(&manifest_path).unwrap();
+        assert_eq!(after.pid, before.pid);
+        assert_eq!(after.process_group, Some(before.pid));
+        assert_eq!(after.owner_pid, Some(std::process::id()));
+        shell_manager().lock().unwrap().jobs.remove(&task_id);
+
+        let shown = ExecShellShowTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("task_id", task_id)
+                    .with_arg("cwd", cwd.clone()),
+            )
+            .unwrap();
+        assert!(
+            shown.summary.contains("managed: false"),
+            "{}",
+            shown.summary
+        );
+        assert!(
+            shown.summary.contains("owner_alive: true"),
+            "{}",
+            shown.summary
+        );
+        assert!(shown.summary.contains("owner-meta"), "{}", shown.summary);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn exec_shell_replay_reads_durable_log_offsets() {
         let root = temp_root("replay");
         fs::create_dir_all(&root).unwrap();
@@ -2156,6 +2290,8 @@ mod tests {
             status: "running".to_string(),
             exit_code: None,
             pid: child.id(),
+            owner_pid: Some(999_998),
+            process_group: Some(child.id()),
             stdin_path: None,
             stdin_keeper_pid: None,
             stdin_closed: true,
@@ -2220,6 +2356,8 @@ mod tests {
             status: "running".to_string(),
             exit_code: None,
             pid: 9_999_999,
+            owner_pid: Some(999_998),
+            process_group: Some(9_999_999),
             stdin_path: None,
             stdin_keeper_pid: None,
             stdin_closed: true,

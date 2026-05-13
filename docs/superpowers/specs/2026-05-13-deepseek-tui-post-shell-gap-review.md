@@ -19,11 +19,11 @@ web, review, RLM helper, and request-user-input surfaces landed.
    detached cancel by persisted pid/process group, direct durable stdout/stderr
    logs, Unix FIFO detached stdin for new background jobs, and `tty=true`
    execution through the Unix `script` PTY backend. A later slice also adds
-   initial PTY geometry with `tty_rows` plus `tty_cols`, and durable
-   stdout/stderr log-slice replay with `exec_shell_replay`. The remaining shell
-   gap is a dedicated PTY supervisor with live resize, attachable terminal
-   replay, and robust ownership after the owner DeepSeekCode process has
-   exited.
+   initial PTY geometry with `tty_rows` plus `tty_cols`, durable stdout/stderr
+   log-slice replay with `exec_shell_replay`, and owner/process-group manifest
+   metadata. The remaining shell gap is a dedicated PTY supervisor with live
+   resize, attachable terminal replay, and robust ownership after the owner
+   DeepSeekCode process has exited.
 2. TUI interaction parity no longer has a first-order open item in the plan.
    The workbench has command history/completion, modal approvals, user-input
    Other answers, MCP manager keyboard/mouse/bulk flows, task multiselect, shell
@@ -58,9 +58,11 @@ detached process-group cancellation; detached stdin has since narrowed to Unix
 FIFO control for new jobs; `tty=true` has since narrowed to a Unix `script` PTY
 backend; initial PTY geometry has since narrowed to `tty_rows` plus `tty_cols`;
 durable shell replay has since narrowed to byte-offset stdout/stderr slices;
-RLM process semantics have since narrowed to durable model-session context plus
-session-only continuation. Live PTY resize, attachable terminal
-replay/supervisor takeover, and a true live model daemon remain open.
+shell ownership diagnostics now persist stable child pid, owner pid, and process
+group metadata; RLM process semantics have since narrowed to durable
+model-session context plus session-only continuation. Live PTY resize,
+attachable terminal replay/supervisor takeover, and a true live model daemon
+remain open.
 
 ## Next Candidate Specs
 

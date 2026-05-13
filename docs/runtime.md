@@ -1289,12 +1289,15 @@ Foreground `exec_shell` reuses the existing safe `run_shell` execution path.
 jobs, return a `task_id`, and can be polled by `task_shell_wait` or
 `exec_shell_wait`, sent stdin, or cancelled by the companion tools. Each
 background job writes durable metadata and stdout/stderr logs directly under
-`<cwd>/.dscode/shell-jobs/<task_id>/`. `exec_shell_list`, `exec_shell_show`,
-and `exec_shell_wait` can read those detached records when the caller supplies
-the same `cwd`, even after the original process exits. Detached `running`
-records are probed by persisted pid; if the process is already gone, the
-manifest is refreshed to `exited` before rendering. Detached records expose
-their status and captured logs with `managed: false`. On Unix, new background
+`<cwd>/.dscode/shell-jobs/<task_id>/`. Manifests record the child `pid`,
+`process_group`, and owning DeepSeekCode `owner_pid`; wait/show snapshots report
+`owner_alive` so detached clients can distinguish process lifecycle from owner
+lifecycle. `exec_shell_list`, `exec_shell_show`, and `exec_shell_wait` can read
+those detached records when the caller supplies the same `cwd`, even after the
+original process exits. Detached `running` records are probed by persisted pid;
+if the process is already gone, the manifest is refreshed to `exited` before
+rendering. Detached records expose their status and captured logs with
+`managed: false`. On Unix, new background
 jobs also get a durable FIFO stdin path plus a keeper process, so
 `exec_shell_interact cwd=<path> task_id=<id>` can write to a running detached
 record and `close_stdin=true` closes that FIFO by killing the keeper.
