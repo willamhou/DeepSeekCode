@@ -372,6 +372,10 @@ Landed first slice:
   custom markdown slash commands from `.dscode/commands/*.md` and the
   configured user commands dir, reusing REPL argument expansion semantics and
   submitting the rendered prompt to the active durable thread
+- local file-backed TUI composer now supports DeepSeek-TUI-style draft stash:
+  `Ctrl+S` parks the current composer text in `.dscode/tui/composer-stash.json`,
+  and `stash list|pop|clear` plus `/stash list|pop|clear` list, restore, or
+  clear parked drafts
 - AgentLoop cancellation now propagates into cancel-aware model/tool execution; `run_shell` starts commands in a process group and kills that group when a durable cancel event is observed, while remote model streams and blocked model process-pipe reads stop through cancel-aware polling
 - deterministic `--once` snapshot path for CI/release smoke tests
 

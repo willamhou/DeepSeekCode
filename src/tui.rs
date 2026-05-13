@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{fs, io};
 
 use crossterm::{
@@ -28,7 +28,7 @@ use crate::error::AppResult;
 use crate::tools::run_shell::is_safe_shell_command;
 use crate::util::json::{
     json_as_array, json_as_object, json_as_string, json_as_u64, json_value_to_string,
-    parse_root_object, JsonValue,
+    parse_json_value, parse_root_object, JsonValue,
 };
 
 const USER_INPUT_OTHER_MAX_CHARS: usize = 200;
@@ -444,6 +444,7 @@ pub enum TuiMcpDetailKind {
     Memory,
     Rollback,
     Reasoning,
+    ComposerStash,
 }
 
 impl TuiMcpDetailKind {
@@ -459,6 +460,7 @@ impl TuiMcpDetailKind {
             Self::Memory => "memory",
             Self::Rollback => "rollback",
             Self::Reasoning => "reasoning",
+            Self::ComposerStash => "stash",
         }
     }
 
@@ -474,6 +476,7 @@ impl TuiMcpDetailKind {
             Self::Memory => "Memory",
             Self::Rollback => "Rollback",
             Self::Reasoning => "Reasoning",
+            Self::ComposerStash => "Composer Stash",
         }
     }
 
@@ -489,6 +492,7 @@ impl TuiMcpDetailKind {
             Self::Memory => Self::Manager,
             Self::Rollback => Self::Manager,
             Self::Reasoning => Self::Manager,
+            Self::ComposerStash => Self::Manager,
         }
     }
 
@@ -504,6 +508,7 @@ impl TuiMcpDetailKind {
             Self::Memory => Self::Manager,
             Self::Rollback => Self::Manager,
             Self::Reasoning => Self::Manager,
+            Self::ComposerStash => Self::Manager,
         }
     }
 }
@@ -612,6 +617,45 @@ fn composer_memory_command(content: &str) -> Option<Result<TuiMemoryCommand, Str
                 .ok_or_else(|| "usage: /memory [show|path|clear|edit|help]".to_string()),
         ),
         _ => Some(Err("usage: /memory [show|path|clear|edit|help]".to_string())),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComposerStashEntry {
+    created_at: String,
+    text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiComposerStashCommand {
+    List,
+    Pop,
+    Clear,
+}
+
+fn parse_tui_stash_command(line: &str) -> Option<Result<TuiComposerStashCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/stash")
+        .or_else(|| strip_tui_command_prefix(trimmed, "stash"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "/park"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "park"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] | ["list"] | ["ls"] | ["show"] => Some(Ok(TuiComposerStashCommand::List)),
+        ["pop"] | ["restore"] => Some(Ok(TuiComposerStashCommand::Pop)),
+        ["clear"] | ["wipe"] | ["drop"] => Some(Ok(TuiComposerStashCommand::Clear)),
+        _ => Some(Err(
+            "usage: stash [list|pop|clear] or /stash [list|pop|clear]".to_string(),
+        )),
+    }
+}
+
+fn strip_tui_command_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = value.strip_prefix(prefix)?;
+    if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+        Some(rest)
+    } else {
+        None
     }
 }
 
@@ -785,6 +829,7 @@ const DEFAULT_TUI_REASONING_REPLAY_LIMIT: usize = 3;
 const MAX_TUI_REASONING_REPLAY_LIMIT: usize = 20;
 const TUI_REASONING_REPLAY_PREF_KIND: &str = "deepseek.tui.reasoning_replay.v1";
 const MAX_TUI_COMMAND_HISTORY: usize = 100;
+const MAX_TUI_COMPOSER_STASH_ENTRIES: usize = 100;
 const TUI_PICKER_PAGE_SIZE: usize = 5;
 const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "mode plan",
@@ -847,6 +892,10 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "automation trigger",
     "compact",
     "thread compact",
+    "stash",
+    "stash list",
+    "stash pop",
+    "stash clear",
     "reasoning",
     "reasoning list",
     "reasoning latest",
@@ -979,6 +1028,84 @@ fn write_reasoning_replay_preferences(
     Ok(())
 }
 
+fn read_composer_stash(path: &Path) -> AppResult<Vec<ComposerStashEntry>> {
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(path)?;
+    if content.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let value = parse_json_value(content.trim())?;
+    let Some(items) = json_as_array(&value) else {
+        return Ok(Vec::new());
+    };
+    let mut entries = Vec::new();
+    for item in items {
+        let Some(object) = json_as_object(item) else {
+            continue;
+        };
+        let Some(text) = object.get("text").and_then(json_as_string) else {
+            continue;
+        };
+        let created_at = object
+            .get("created_at")
+            .and_then(json_as_string)
+            .unwrap_or("unknown")
+            .to_string();
+        entries.push(ComposerStashEntry {
+            created_at,
+            text: text.to_string(),
+        });
+    }
+    if entries.len() > MAX_TUI_COMPOSER_STASH_ENTRIES {
+        let overflow = entries.len() - MAX_TUI_COMPOSER_STASH_ENTRIES;
+        entries.drain(0..overflow);
+    }
+    Ok(entries)
+}
+
+fn write_composer_stash(path: &Path, entries: &[ComposerStashEntry]) -> AppResult<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let items = entries
+        .iter()
+        .map(|entry| {
+            let mut object = BTreeMap::new();
+            object.insert(
+                "created_at".to_string(),
+                JsonValue::String(entry.created_at.clone()),
+            );
+            object.insert("text".to_string(), JsonValue::String(entry.text.clone()));
+            JsonValue::Object(object)
+        })
+        .collect::<Vec<_>>();
+    fs::write(path, json_value_to_string(&JsonValue::Array(items)))?;
+    Ok(())
+}
+
+fn composer_stash_timestamp() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format!("epoch+{seconds}")
+}
+
+fn composer_stash_preview(text: &str, max_chars: usize) -> String {
+    let first_line = text.lines().next().unwrap_or("").trim();
+    if first_line.chars().count() <= max_chars {
+        return first_line.to_string();
+    }
+    let mut preview = first_line
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    preview.push_str("...");
+    preview
+}
+
 #[derive(Debug, Clone)]
 pub struct TuiApp {
     mode: TuiMode,
@@ -1020,6 +1147,8 @@ pub struct TuiApp {
     composer: String,
     composer_cursor: usize,
     composer_focused: bool,
+    composer_stash: Vec<ComposerStashEntry>,
+    composer_stash_path: Option<PathBuf>,
     transcript_scroll: usize,
     reasoning_replay_limit: usize,
     reasoning_replay_pinned_turn_ids: BTreeSet<String>,
@@ -1180,6 +1309,8 @@ impl TuiApp {
             composer: String::new(),
             composer_cursor: 0,
             composer_focused: false,
+            composer_stash: Vec::new(),
+            composer_stash_path: None,
             transcript_scroll: 0,
             reasoning_replay_limit: DEFAULT_TUI_REASONING_REPLAY_LIMIT,
             reasoning_replay_pinned_turn_ids: BTreeSet::new(),
@@ -1231,6 +1362,21 @@ impl TuiApp {
             Err(error) => {
                 self.status = format!(
                     "failed to load reasoning replay preferences from {}: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    pub fn enable_composer_stash(&mut self, path: PathBuf) {
+        self.composer_stash_path = Some(path.clone());
+        match read_composer_stash(&path) {
+            Ok(entries) => {
+                self.composer_stash = entries;
+            }
+            Err(error) => {
+                self.status = format!(
+                    "failed to load composer stash from {}: {error}",
                     path.display()
                 );
             }
@@ -2494,6 +2640,11 @@ impl TuiApp {
             if matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
                 return false;
             }
+            if self.composer_focused && matches!(key.code, KeyCode::Char('s') | KeyCode::Char('S'))
+            {
+                self.stash_composer_draft();
+                return true;
+            }
             if self.show_command_palette {
                 let _ = handle_text_control_key(
                     &mut self.command_query,
@@ -2962,6 +3113,15 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_stash_command(&content) {
+                    match command {
+                        Ok(command) => self.handle_composer_stash_command(command),
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some((command, args)) = parse_tui_custom_slash_command(&content) {
                     if self.request_custom_slash_command(command, args) {
                         self.composer.clear();
@@ -3149,6 +3309,15 @@ impl TuiApp {
         let command = command.trim();
         if let Some(command) = command.strip_prefix('!') {
             self.request_shell_run(command.trim().to_string());
+            return;
+        }
+        if let Some(command) = parse_tui_stash_command(command) {
+            match command {
+                Ok(command) => self.handle_composer_stash_command(command),
+                Err(message) => {
+                    self.status = message;
+                }
+            }
             return;
         }
         if let Some((command, args)) = parse_tui_custom_slash_command(command) {
@@ -3825,7 +3994,7 @@ impl TuiApp {
             }
             ["cancel"] | ["stop"] => self.request_cancel_run(),
             ["help"] => {
-                self.status = "commands: mode plan|agent|yolo, sessions [filter], threads [filter], task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, memory [show|path|clear|edit|help], mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
+                self.status = "commands: mode plan|agent|yolo, sessions [filter], threads [filter], task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
             }
             _ => {
                 self.status = format!("unknown command: {command}");
@@ -4349,6 +4518,110 @@ impl TuiApp {
         });
         self.status = format!("custom slash command queued: {command}");
         true
+    }
+
+    fn handle_composer_stash_command(&mut self, command: TuiComposerStashCommand) {
+        self.reload_composer_stash();
+        match command {
+            TuiComposerStashCommand::List => self.show_composer_stash(),
+            TuiComposerStashCommand::Pop => self.pop_composer_stash(),
+            TuiComposerStashCommand::Clear => self.clear_composer_stash(),
+        }
+    }
+
+    fn stash_composer_draft(&mut self) {
+        if self.composer.is_empty() {
+            self.status = "composer stash skipped: draft is empty".to_string();
+            return;
+        }
+        self.reload_composer_stash();
+        self.composer_stash.push(ComposerStashEntry {
+            created_at: composer_stash_timestamp(),
+            text: self.composer.clone(),
+        });
+        if self.composer_stash.len() > MAX_TUI_COMPOSER_STASH_ENTRIES {
+            let overflow = self.composer_stash.len() - MAX_TUI_COMPOSER_STASH_ENTRIES;
+            self.composer_stash.drain(0..overflow);
+        }
+        self.composer.clear();
+        self.composer_cursor = 0;
+        self.status = "draft stashed; use stash pop to restore".to_string();
+        self.persist_composer_stash();
+    }
+
+    fn show_composer_stash(&mut self) {
+        if self.composer_stash.is_empty() {
+            self.set_mcp_detail(
+                TuiMcpDetailKind::ComposerStash,
+                "Composer stash empty.\n\nPress Ctrl+S in the composer to park the current draft.",
+            );
+            self.status = "composer stash empty".to_string();
+            return;
+        }
+        let mut detail = format!("Composer stash: {} draft(s)\n\n", self.composer_stash.len());
+        for (index, entry) in self.composer_stash.iter().enumerate() {
+            detail.push_str(&format!(
+                "{index}. [{}] {}\n",
+                entry.created_at,
+                composer_stash_preview(&entry.text, 80)
+            ));
+        }
+        detail.push_str("\nUse stash pop to restore the most recent draft.");
+        self.set_mcp_detail(TuiMcpDetailKind::ComposerStash, detail);
+        self.status = format!(
+            "composer stash listed: {} draft(s)",
+            self.composer_stash.len()
+        );
+    }
+
+    fn pop_composer_stash(&mut self) {
+        let Some(entry) = self.composer_stash.pop() else {
+            self.status = "composer stash empty; nothing to pop".to_string();
+            return;
+        };
+        self.composer = entry.text;
+        self.composer_cursor = self.composer.len();
+        self.composer_focused = true;
+        let remaining = self.composer_stash.len();
+        self.status = match remaining {
+            0 => "restored stashed draft; stash now empty".to_string(),
+            1 => "restored stashed draft; 1 draft remains".to_string(),
+            count => format!("restored stashed draft; {count} drafts remain"),
+        };
+        self.persist_composer_stash();
+    }
+
+    fn clear_composer_stash(&mut self) {
+        let count = self.composer_stash.len();
+        self.composer_stash.clear();
+        self.status = match count {
+            0 => "composer stash already empty".to_string(),
+            1 => "cleared 1 stashed draft".to_string(),
+            count => format!("cleared {count} stashed drafts"),
+        };
+        self.persist_composer_stash();
+        self.set_mcp_detail(TuiMcpDetailKind::ComposerStash, "Composer stash empty.");
+    }
+
+    fn reload_composer_stash(&mut self) {
+        let Some(path) = self.composer_stash_path.as_ref() else {
+            return;
+        };
+        match read_composer_stash(path) {
+            Ok(entries) => self.composer_stash = entries,
+            Err(error) => {
+                self.status = format!("failed to load composer stash: {error}");
+            }
+        }
+    }
+
+    fn persist_composer_stash(&mut self) {
+        let Some(path) = self.composer_stash_path.as_ref() else {
+            return;
+        };
+        if let Err(error) = write_composer_stash(path, &self.composer_stash) {
+            self.status = format!("{}; failed to save composer stash: {error}", self.status);
+        }
     }
 
     fn show_reasoning_list(&mut self) {
@@ -9070,6 +9343,58 @@ mod tests {
         assert!(app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL,)));
         assert_eq!(app.composer, "");
         assert_eq!(app.composer_cursor, 0);
+    }
+
+    #[test]
+    fn composer_ctrl_s_stashes_and_palette_pop_restores_draft() {
+        let mut app = TuiApp::new(Vec::new());
+
+        assert!(app.handle_key(KeyCode::Char('i')));
+        for ch in "draft for later".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL,)));
+
+        assert_eq!(app.composer, "");
+        assert_eq!(app.status, "draft stashed; use stash pop to restore");
+
+        assert!(app.handle_key(KeyCode::Esc));
+        run_palette_command(&mut app, "stash list");
+        let detail = app
+            .mcp_detail
+            .as_ref()
+            .map(|(_, detail)| detail.as_str())
+            .unwrap_or("");
+        assert!(detail.contains("Composer stash: 1 draft(s)"));
+        assert!(detail.contains("draft for later"));
+
+        run_palette_command(&mut app, "stash pop");
+
+        assert_eq!(app.composer, "draft for later");
+        assert_eq!(app.composer_cursor, app.composer.len());
+        assert!(app.composer_focused);
+        assert_eq!(app.status, "restored stashed draft; stash now empty");
+    }
+
+    #[test]
+    fn composer_stash_persists_to_configured_file() {
+        let root = temp_root("composer-stash");
+        let path = root.join("tui/composer-stash.json");
+        let mut app = TuiApp::new(Vec::new());
+        app.enable_composer_stash(path.clone());
+
+        assert!(app.handle_key(KeyCode::Char('i')));
+        for ch in "persisted draft".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL,)));
+
+        let mut restored = TuiApp::new(Vec::new());
+        restored.enable_composer_stash(path);
+        run_palette_command(&mut restored, "/stash pop");
+
+        assert_eq!(restored.composer, "persisted draft");
+        assert!(restored.composer_focused);
     }
 
     #[test]

@@ -77,6 +77,9 @@ pub fn run(args: TuiArgs) -> AppResult<()> {
     app.enable_reasoning_replay_preferences(
         PathBuf::from(&config.workspace.config_dir).join("tui/reasoning-replay.json"),
     );
+    app.enable_composer_stash(
+        PathBuf::from(&config.workspace.config_dir).join("tui/composer-stash.json"),
+    );
 
     if args.once {
         print!("{}", render_once(&app, 120, 36)?);
@@ -1136,6 +1139,9 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Memory => Err(app_error("memory details are not MCP details")),
         TuiMcpDetailKind::Rollback => Err(app_error("rollback details are not MCP details")),
         TuiMcpDetailKind::Reasoning => Err(app_error("reasoning details are not MCP details")),
+        TuiMcpDetailKind::ComposerStash => {
+            Err(app_error("composer stash details are not MCP details"))
+        }
     }
 }
 

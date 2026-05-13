@@ -13,6 +13,8 @@ Current surfaces:
   opt-in user memory without starting a model turn
 - composer and command palette custom slash commands from project
   `.dscode/commands/*.md` or the configured user commands dir
+- composer draft stash: `Ctrl+S` parks the current draft, and
+  `stash list|pop|clear` / `/stash list|pop|clear` manage parked drafts
 - composer and command-palette editing preserve terminal modifier keys, including
   Ctrl-based line, word, and cursor controls
 - task panel with active thread status, runtime item count, item state/type
@@ -177,6 +179,7 @@ Key bindings:
 | `Backspace`, `Delete` | Edit the focused composer or command palette text |
 | `Ctrl+A`, `Ctrl+E` | Move the focused composer or command palette cursor to start/end |
 | `Ctrl+U`, `Ctrl+K`, `Ctrl+W` | Clear line, delete to end of line, or delete previous word in the focused composer or command palette |
+| `Ctrl+S` | Stash the focused composer draft and clear the composer |
 | `Ctrl+Left`, `Ctrl+Right` | Move by word in the focused composer or command palette |
 | `Ctrl+C` | Quit the TUI |
 | `Up`, `Down`, `PageUp`, `PageDown` | Recall command-palette history while the palette is active; move through session/thread pickers while visible; scroll the MCP manager/detail panel while visible; otherwise scroll transcript history |
@@ -221,6 +224,9 @@ Command palette commands currently implemented:
 | `thread next`, `thread prev` | Move between durable threads in the selected session |
 | `thread <id>` | Jump to a durable thread by id, switching sessions if needed |
 | `/name [args]` | Expand a custom markdown slash command from `.dscode/commands/name.md` or the configured user commands dir, then submit it to the active thread |
+| `stash`, `stash list`, `/stash list` | List parked composer drafts in the right-side detail panel |
+| `stash pop`, `/stash pop` | Restore the most recently stashed composer draft |
+| `stash clear`, `/stash clear` | Clear all parked composer drafts |
 | `tasks`, `task` | Show active-thread task count in the status bar |
 | `task <summary>`, `task create <summary>` | Create a pending active-thread runtime task |
 | `task next`, `task prev` | Move the selected active-thread runtime task |
@@ -310,10 +316,10 @@ refreshes the MCP inventory. The manager also keeps a selected-server action
 strip so `n`/`p` can move selection and `e`/`d`/`x`/`t` can enable, disable,
 open a remove confirmation modal, or inspect tools for that server. The shorter
 discovery commands still use the scrollable right-side detail panel. Rollback,
-memory, custom slash commands, and MCP manager commands are
+memory, composer stash, custom slash commands, and MCP manager commands are
 local-only because they operate on the client's git worktree, project/user MCP
-config, configured MCP transports, custom command markdown files, and user
-memory file; HTTP-runtime TUI
+config, configured MCP transports, `.dscode/tui/composer-stash.json`, custom
+command markdown files, and user memory file; HTTP-runtime TUI
 sessions report that those commands require local file-backed TUI. General
 external command execution is currently limited to the allowlisted local
 background shell path.
