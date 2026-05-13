@@ -17,6 +17,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_WAIT_MS: u64 = 5_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
+const DEFAULT_REPLAY_LIMIT_BYTES: u64 = 20_000;
+const MAX_REPLAY_LIMIT_BYTES: u64 = 100_000;
 
 static JOB_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SHELL_JOBS: OnceLock<Mutex<BackgroundShellManager>> = OnceLock::new();
@@ -30,6 +32,8 @@ pub struct ExecShellWaitTool {
 pub struct ExecShellListTool;
 
 pub struct ExecShellShowTool;
+
+pub struct ExecShellReplayTool;
 
 pub struct ExecShellInteractTool {
     pub tool_name: &'static str,
@@ -239,6 +243,29 @@ impl Tool for ExecShellShowTool {
         manager.refresh(task_id)?;
         Ok(ToolOutput {
             summary: manager.render_snapshot(task_id)?,
+        })
+    }
+}
+
+impl Tool for ExecShellReplayTool {
+    fn name(&self) -> &str {
+        "exec_shell_replay"
+    }
+
+    fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
+        let task_id = required_task_id(&input)?;
+        let cwd = input.get("cwd").unwrap_or(".");
+        let stream = input
+            .get("stream")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("stdout");
+        let offset = input_u64(&input, "offset", 0) as usize;
+        let limit_bytes = input_u64(&input, "limit_bytes", DEFAULT_REPLAY_LIMIT_BYTES)
+            .min(MAX_REPLAY_LIMIT_BYTES) as usize;
+        let tail = truthy(input.get("tail"));
+        Ok(ToolOutput {
+            summary: render_shell_replay(cwd, task_id, stream, offset, limit_bytes, tail)?,
         })
     }
 }
@@ -1364,6 +1391,99 @@ fn render_durable_snapshot(cwd: &str, task_id: &str) -> AppResult<String> {
     Ok(out.trim_end().to_string())
 }
 
+fn render_shell_replay(
+    cwd: &str,
+    task_id: &str,
+    stream: &str,
+    offset: usize,
+    limit_bytes: usize,
+    tail: bool,
+) -> AppResult<String> {
+    let manifest = shell_job_manifest_path(cwd, task_id);
+    if !manifest.is_file() {
+        return Err(app_error(format!(
+            "unknown background shell task: {task_id}"
+        )));
+    }
+    let mut record = read_durable_shell_job_manifest(&manifest)?;
+    refresh_durable_running_status(cwd, &mut record)?;
+    let record_dir = shell_job_record_dir(cwd, task_id);
+    match stream {
+        "stdout" | "out" => Ok(render_shell_replay_stream(
+            &record,
+            &record_dir,
+            "stdout",
+            "stdout.log",
+            offset,
+            limit_bytes,
+            tail,
+        )),
+        "stderr" | "err" => Ok(render_shell_replay_stream(
+            &record,
+            &record_dir,
+            "stderr",
+            "stderr.log",
+            offset,
+            limit_bytes,
+            tail,
+        )),
+        "all" | "both" => {
+            let stdout = render_shell_replay_stream(
+                &record,
+                &record_dir,
+                "stdout",
+                "stdout.log",
+                offset,
+                limit_bytes,
+                tail,
+            );
+            let stderr = render_shell_replay_stream(
+                &record,
+                &record_dir,
+                "stderr",
+                "stderr.log",
+                offset,
+                limit_bytes,
+                tail,
+            );
+            Ok(format!("{stdout}\n---\n{stderr}"))
+        }
+        _ => Err(app_error(
+            "exec_shell_replay stream must be stdout, stderr, or all",
+        )),
+    }
+}
+
+fn render_shell_replay_stream(
+    record: &DurableShellJobRecord,
+    record_dir: &Path,
+    stream: &str,
+    log_name: &str,
+    offset: usize,
+    limit_bytes: usize,
+    tail: bool,
+) -> String {
+    let bytes = fs::read(record_dir.join(log_name)).unwrap_or_default();
+    let total = bytes.len();
+    let start = if tail {
+        total.saturating_sub(limit_bytes)
+    } else {
+        offset.min(total)
+    };
+    let end = start.saturating_add(limit_bytes).min(total);
+    let data = String::from_utf8_lossy(&bytes[start..end]);
+    let mut out = format!(
+        "task_id: {}\nstatus: {}\nstream: {stream}\noffset: {start}\nnext_offset: {end}\ntotal_bytes: {total}\ntail: {tail}\n",
+        record.id, record.status
+    );
+    if !data.is_empty() {
+        out.push_str("data:\n");
+        out.push_str(data.trim_end_matches('\n'));
+        out.push('\n');
+    }
+    out.trim_end().to_string()
+}
+
 fn read_durable_shell_job_manifest(path: &Path) -> AppResult<DurableShellJobRecord> {
     let content = fs::read_to_string(path)?;
     let root = parse_root_object(&content)?;
@@ -1851,6 +1971,98 @@ mod tests {
             cancel_output.summary
         );
         assert!(cancel_output.summary.contains("status: completed"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exec_shell_replay_reads_durable_log_offsets() {
+        let root = temp_root("replay");
+        fs::create_dir_all(&root).unwrap();
+        let cwd = root.display().to_string();
+        let task_id = shell_manager()
+            .lock()
+            .unwrap()
+            .spawn(
+                "printf 'alpha\\nbeta\\n'; printf 'warn\\n' >&2",
+                &cwd,
+                None,
+                ShellTtyOptions::default(),
+            )
+            .unwrap();
+        let _ = ExecShellWaitTool {
+            tool_name: "exec_shell_wait",
+        }
+        .execute(
+            ToolInput::new()
+                .with_arg("task_id", task_id.clone())
+                .with_arg("cwd", cwd.clone())
+                .with_arg("timeout_ms", "1000"),
+        )
+        .unwrap();
+        shell_manager().lock().unwrap().jobs.remove(&task_id);
+
+        let first = ExecShellReplayTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("task_id", task_id.clone())
+                    .with_arg("cwd", cwd.clone())
+                    .with_arg("stream", "stdout")
+                    .with_arg("offset", "0")
+                    .with_arg("limit_bytes", "6"),
+            )
+            .unwrap();
+        assert!(
+            first.summary.contains("stream: stdout"),
+            "{}",
+            first.summary
+        );
+        assert!(first.summary.contains("offset: 0"), "{}", first.summary);
+        assert!(
+            first.summary.contains("next_offset: 6"),
+            "{}",
+            first.summary
+        );
+        assert!(first.summary.contains("alpha"), "{}", first.summary);
+        assert!(!first.summary.contains("beta"), "{}", first.summary);
+
+        let second = ExecShellReplayTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("task_id", task_id.clone())
+                    .with_arg("cwd", cwd.clone())
+                    .with_arg("stream", "stdout")
+                    .with_arg("offset", "6")
+                    .with_arg("limit_bytes", "20"),
+            )
+            .unwrap();
+        assert!(second.summary.contains("offset: 6"), "{}", second.summary);
+        assert!(second.summary.contains("beta"), "{}", second.summary);
+
+        let stderr_tail = ExecShellReplayTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("task_id", task_id)
+                    .with_arg("cwd", cwd.clone())
+                    .with_arg("stream", "stderr")
+                    .with_arg("tail", "true")
+                    .with_arg("limit_bytes", "5"),
+            )
+            .unwrap();
+        assert!(
+            stderr_tail.summary.contains("stream: stderr"),
+            "{}",
+            stderr_tail.summary
+        );
+        assert!(
+            stderr_tail.summary.contains("tail: true"),
+            "{}",
+            stderr_tail.summary
+        );
+        assert!(
+            stderr_tail.summary.contains("warn"),
+            "{}",
+            stderr_tail.summary
+        );
         let _ = fs::remove_dir_all(root);
     }
 

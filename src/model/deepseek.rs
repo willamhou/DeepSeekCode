@@ -3045,6 +3045,12 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
         required_json: r#"["task_id"]"#,
     },
     StaticToolSpec {
+        name: "exec_shell_replay",
+        description: "Replay durable stdout/stderr log slices for a background exec_shell task by byte offset. Use next_offset to continue replaying without rereading prior output.",
+        properties_json: r#"{"task_id":{"type":"string","description":"Task id returned by exec_shell background=true."},"id":{"type":"string","description":"Alias for task_id."},"cwd":{"type":"string","description":"Working directory used to find detached durable shell records."},"stream":{"type":"string","description":"stdout, stderr, or all. Defaults to stdout."},"offset":{"type":"string","description":"Byte offset to start from. Defaults to 0."},"limit_bytes":{"type":"string","description":"Maximum bytes to return, default 20000 and capped at 100000."},"tail":{"type":"string","description":"Set true to replay the last limit_bytes bytes."}}"#,
+        required_json: r#"["task_id"]"#,
+    },
+    StaticToolSpec {
         name: "exec_wait",
         description: "Alias for exec_shell_wait.",
         properties_json: r#"{"task_id":{"type":"string","description":"Task id returned by exec_shell background=true."},"id":{"type":"string","description":"Alias for task_id."},"cwd":{"type":"string","description":"Working directory used to find detached durable shell records."},"timeout_ms":{"type":"string","description":"Maximum wait milliseconds, default 5000."},"wait":{"type":"string","description":"Set false to poll once without waiting."}}"#,
@@ -5098,6 +5104,7 @@ mod tests {
             "task_shell_start".to_string(),
             "task_shell_wait".to_string(),
             "exec_shell_wait".to_string(),
+            "exec_shell_replay".to_string(),
             "exec_shell_interact".to_string(),
             "exec_shell_cancel".to_string(),
             "exec_wait".to_string(),
@@ -5113,6 +5120,9 @@ mod tests {
         assert!(openai.contains("\"name\":\"task_shell_wait\""));
         assert!(openai.contains("\"gate\""));
         assert!(openai.contains("\"name\":\"exec_shell_wait\""));
+        assert!(openai.contains("\"name\":\"exec_shell_replay\""));
+        assert!(openai.contains("\"limit_bytes\""));
+        assert!(openai.contains("\"tail\""));
         assert!(openai.contains("\"name\":\"exec_shell_interact\""));
         assert!(openai.contains("\"name\":\"exec_shell_cancel\""));
         assert!(openai.contains("detached durable shell records"));

@@ -53,5 +53,5 @@ known initial terminal size.
 
 This is initial geometry control, not live terminal resize. DeepSeekCode still
 does not provide an attachable PTY session, resize event stream, terminal replay
-protocol, or independent supervisor daemon that owns PTY lifecycle after the
-starting CLI process exits.
+protocol beyond later durable stdout/stderr log slices, or independent
+supervisor daemon that owns PTY lifecycle after the starting CLI process exits.

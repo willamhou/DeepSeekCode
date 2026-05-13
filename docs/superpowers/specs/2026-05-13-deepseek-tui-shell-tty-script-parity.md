@@ -54,7 +54,7 @@ or adjust terminal behavior could not run through a PTY-backed path.
 
 This narrows `tty=true` from inert compatibility metadata to a real PTY-backed
 execution path for new Unix background jobs. It is still not a dedicated shell
-supervisor: even with the later initial-geometry slice, there is no live
-terminal resize control, replay protocol, attachable interactive terminal UI,
+supervisor: even with later initial-geometry and durable log replay slices,
+there is no live terminal resize control, attachable interactive terminal UI,
 or independent daemon that owns PTY lifecycle after the original DeepSeekCode
 process exits.

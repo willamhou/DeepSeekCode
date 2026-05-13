@@ -26,8 +26,8 @@ use crate::tools::apply_patch::ApplyPatchTool;
 use crate::tools::diagnostics::DiagnosticsTool;
 use crate::tools::document::{ImageOcrTool, PandocConvertTool};
 use crate::tools::exec_shell::{
-    ExecShellCancelTool, ExecShellInteractTool, ExecShellListTool, ExecShellShowTool,
-    ExecShellTool, ExecShellWaitTool, TaskShellStartTool, TaskShellWaitTool,
+    ExecShellCancelTool, ExecShellInteractTool, ExecShellListTool, ExecShellReplayTool,
+    ExecShellShowTool, ExecShellTool, ExecShellWaitTool, TaskShellStartTool, TaskShellWaitTool,
 };
 use crate::tools::file_search::FileSearchTool;
 use crate::tools::file_write::EditFileTool;
@@ -794,6 +794,7 @@ fn execute_mcp_tool(
         }
         "exec_shell_list" => ExecShellListTool.execute(input)?,
         "exec_shell_show" => ExecShellShowTool.execute(input)?,
+        "exec_shell_replay" => ExecShellReplayTool.execute(input)?,
         "exec_shell_wait" => ExecShellWaitTool {
             tool_name: "exec_shell_wait",
         }
@@ -3254,6 +3255,25 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
             ),
         ),
         mcp_tool_definition(
+            "exec_shell_replay",
+            "Replay a durable background shell stdout/stderr log slice by byte offset.",
+            mcp_schema(
+                vec![
+                    ("task_id", string_property("Background shell task id.")),
+                    ("id", string_property("Alias for task_id.")),
+                    (
+                        "cwd",
+                        string_property("Working directory used to find detached durable records."),
+                    ),
+                    ("stream", string_property("stdout, stderr, or all. Defaults to stdout.")),
+                    ("offset", number_property("Byte offset to start from.")),
+                    ("limit_bytes", number_property("Maximum bytes to return, capped at 100000.")),
+                    ("tail", string_property("Set true to replay the last limit_bytes bytes.")),
+                ],
+                &["task_id"],
+            ),
+        ),
+        mcp_tool_definition(
             "exec_shell_wait",
             "Wait for or poll a background exec_shell task and return incremental output.",
             mcp_schema(
@@ -5698,6 +5718,7 @@ fn acp_tool_kind(name: &str) -> &'static str {
         | "pr_review_comment_plan"
         | "recall_archive"
         | "load_skill"
+        | "exec_shell_replay"
         | "rlm_process_sessions"
         | "image_ocr" => "read",
         "write_file" | "edit_file" | "fim_edit" | "apply_patch" | "revert_turn" | "note"
@@ -8175,6 +8196,7 @@ mod tests {
         assert!(rendered.contains(r#""name":"notify""#));
         assert!(rendered.contains(r#""name":"exec_shell_list""#));
         assert!(rendered.contains(r#""name":"exec_shell_show""#));
+        assert!(rendered.contains(r#""name":"exec_shell_replay""#));
         assert!(rendered.contains(r#""name":"exec_shell_wait""#));
         assert!(rendered.contains(r#""name":"exec_wait""#));
         assert!(rendered.contains(r#""name":"task_shell_wait""#));

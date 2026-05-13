@@ -1308,13 +1308,18 @@ resize/replay or owner-process-independent terminal takeover.
 `exec_shell_cancel cwd=<path> task_id=<id>` can best-effort cancel a detached
 `running` record by its persisted pid/process group and then update the durable
 manifest to `killed`.
+`exec_shell_replay cwd=<path> task_id=<id>` replays durable stdout/stderr log
+slices by byte `offset`, `limit_bytes`, and `tail=true`, returning
+`next_offset` for clients that want deterministic shell-log replay without
+re-reading the whole clipped snapshot.
 `exec_shell_interact` distinguishes older detached durable records without FIFO
 stdin from unknown task ids and returns an explicit diagnostic instead of a
 generic missing-task error. MCP server mode
-exposes `exec_shell_list`, `exec_shell_show`, `exec_shell_wait`, `exec_wait`,
-and `task_shell_wait` as read-only tools by default, while `exec_shell`,
-`task_shell_start`, `exec_shell_interact`, `exec_interact`, and
-`exec_shell_cancel` require trusted side effects or durable runtime approvals.
+exposes `exec_shell_list`, `exec_shell_show`, `exec_shell_replay`,
+`exec_shell_wait`, `exec_wait`, and `task_shell_wait` as read-only tools by
+default, while `exec_shell`, `task_shell_start`, `exec_shell_interact`,
+`exec_interact`, and `exec_shell_cancel` require trusted side effects or
+durable runtime approvals.
 
 ### Exec Snapshot TOML
 
