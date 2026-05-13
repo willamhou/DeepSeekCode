@@ -1062,6 +1062,7 @@ impl Tool for RlmModelSessionsTool {
     }
 
     fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
+        let include_live = parse_bool_arg(input.get("include_live"));
         if let Some(session_id) = input
             .get("session_id")
             .map(str::trim)
@@ -1074,14 +1075,34 @@ impl Tool for RlmModelSessionsTool {
             let bytes = fs::metadata(&path)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0);
-            let summary = format!(
-                "{{\"session_id\":\"{}\",\"path\":\"{}\",\"exists\":{},\"bytes\":{},\"session\":{}}}",
+            let mut summary = format!(
+                "{{\"session_id\":\"{}\",\"path\":\"{}\",\"exists\":{},\"bytes\":{},\"session\":{}",
                 json_escape(session_id),
                 json_escape(&path.display().to_string()),
                 exists,
                 bytes,
                 json_value_to_string(&rlm_model_session_to_json(&session))
             );
+            if include_live {
+                let live_path = rlm_live_session_manifest_path(&self.config, session_id);
+                let live_exists = live_path.exists();
+                let live_session = if live_exists {
+                    json_value_to_string(&read_rlm_live_session_manifest(&live_path, session_id)?)
+                } else {
+                    "null".to_string()
+                };
+                let live_bytes = fs::metadata(&live_path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                summary.push_str(&format!(
+                    ",\"include_live\":true,\"live_path\":\"{}\",\"live_exists\":{},\"live_bytes\":{},\"live_session\":{}",
+                    json_escape(&live_path.display().to_string()),
+                    live_exists,
+                    live_bytes,
+                    live_session
+                ));
+            }
+            summary.push('}');
             return Ok(ToolOutput { summary });
         }
 
@@ -1154,12 +1175,57 @@ impl Tool for RlmModelSessionsTool {
             }
         }
 
-        Ok(ToolOutput {
-            summary: format!(
+        let mut live_sessions_json = String::new();
+        if include_live {
+            let mut live_sessions_count = 0usize;
+            for (session_id, path) in list_rlm_live_session_manifest_entries(&self.config)?
+                .into_iter()
+                .take(limit)
+            {
+                match read_rlm_live_session_manifest(&path, &session_id) {
+                    Ok(manifest) => {
+                        if live_sessions_count > 0 {
+                            live_sessions_json.push(',');
+                        }
+                        let bytes = fs::metadata(&path)
+                            .map(|metadata| metadata.len())
+                            .unwrap_or(0);
+                        live_sessions_json.push_str(&render_rlm_live_session_list_entry(
+                            &session_id,
+                            &path,
+                            bytes,
+                            &manifest,
+                        )?);
+                        live_sessions_count += 1;
+                    }
+                    Err(error) => {
+                        if errors_count > 0 {
+                            errors_json.push(',');
+                        }
+                        errors_json.push_str(&format!(
+                            "{{\"kind\":\"live\",\"session_id\":\"{}\",\"path\":\"{}\",\"error\":\"{}\"}}",
+                            json_escape(&session_id),
+                            json_escape(&path.display().to_string()),
+                            json_escape(&error.to_string())
+                        ));
+                        errors_count += 1;
+                    }
+                }
+            }
+        }
+
+        let summary = if include_live {
+            format!(
+                "{{\"sessions\":[{}],\"live_sessions\":[{}],\"errors\":[{}],\"limit\":{},\"include_live\":true}}",
+                sessions_json, live_sessions_json, errors_json, limit
+            )
+        } else {
+            format!(
                 "{{\"sessions\":[{}],\"errors\":[{}],\"limit\":{}}}",
                 sessions_json, errors_json, limit
-            ),
-        })
+            )
+        };
+        Ok(ToolOutput { summary })
     }
 }
 
@@ -1345,6 +1411,16 @@ fn rlm_model_sessions_dir(config: &AppConfig) -> PathBuf {
 
 fn rlm_model_session_path(config: &AppConfig, session_id: &str) -> PathBuf {
     rlm_model_sessions_dir(config).join(format!("{session_id}.json"))
+}
+
+fn rlm_live_sessions_dir(config: &AppConfig) -> PathBuf {
+    PathBuf::from(&config.workspace.config_dir).join("rlm-daemon")
+}
+
+fn rlm_live_session_manifest_path(config: &AppConfig, session_id: &str) -> PathBuf {
+    rlm_live_sessions_dir(config)
+        .join(session_id)
+        .join("manifest.json")
 }
 
 fn validate_rlm_model_session_id(session_id: &str) -> AppResult<()> {
@@ -1554,6 +1630,176 @@ fn rlm_model_session_turn_from_json(value: &JsonValue) -> Option<RlmModelSession
             .unwrap_or("epoch+0")
             .to_string(),
     })
+}
+
+fn read_rlm_live_session_manifest(path: &Path, session_id: &str) -> AppResult<JsonValue> {
+    let content = fs::read_to_string(path)
+        .map_err(|error| tool_failure(format!("rlm live session read failed: {error}")))?;
+    let value = parse_json_value(&content)
+        .map_err(|error| tool_failure(format!("rlm live session invalid JSON: {error}")))?;
+    let JsonValue::Object(root) = value else {
+        return Err(tool_failure(
+            "rlm live session manifest must be a JSON object",
+        ));
+    };
+    let stored_id = root
+        .get("session_id")
+        .and_then(json_as_string)
+        .unwrap_or(session_id);
+    if stored_id != session_id {
+        return Err(tool_failure("rlm live session_id mismatch"));
+    }
+    Ok(JsonValue::Object(BTreeMap::from([
+        (
+            "kind".to_string(),
+            JsonValue::String("deepseek.rlm.live_session.v1".to_string()),
+        ),
+        (
+            "session_id".to_string(),
+            JsonValue::String(session_id.to_string()),
+        ),
+        (
+            "status".to_string(),
+            JsonValue::String(
+                root.get("status")
+                    .and_then(json_as_string)
+                    .unwrap_or("unknown")
+                    .to_string(),
+            ),
+        ),
+        (
+            "daemon_pid".to_string(),
+            optional_u64_json(&root, "daemon_pid"),
+        ),
+        (
+            "daemon_epoch".to_string(),
+            optional_string_json(&root, "daemon_epoch"),
+        ),
+        (
+            "runtime_thread_id".to_string(),
+            optional_string_json(&root, "runtime_thread_id"),
+        ),
+        (
+            "runtime_session_id".to_string(),
+            optional_string_json(&root, "runtime_session_id"),
+        ),
+        (
+            "active_turn_id".to_string(),
+            optional_string_json(&root, "active_turn_id"),
+        ),
+        (
+            "queued_turns".to_string(),
+            optional_u64_json(&root, "queued_turns"),
+        ),
+        ("model".to_string(), optional_string_json(&root, "model")),
+        (
+            "workspace".to_string(),
+            optional_string_json(&root, "workspace"),
+        ),
+        (
+            "created_at".to_string(),
+            optional_string_json(&root, "created_at"),
+        ),
+        (
+            "updated_at".to_string(),
+            optional_string_json(&root, "updated_at"),
+        ),
+        (
+            "last_error".to_string(),
+            optional_string_json(&root, "last_error"),
+        ),
+    ])))
+}
+
+fn render_rlm_live_session_list_entry(
+    session_id: &str,
+    path: &Path,
+    bytes: u64,
+    manifest: &JsonValue,
+) -> AppResult<String> {
+    let JsonValue::Object(root) = manifest else {
+        return Err(tool_failure(
+            "rlm live session manifest must be a JSON object",
+        ));
+    };
+    let status = json_field_string(root, "status");
+    let updated_at = json_field_string(root, "updated_at");
+    let daemon_pid = json_field_value(root, "daemon_pid");
+    let runtime_thread_id = json_field_value(root, "runtime_thread_id");
+    let active_turn_id = json_field_value(root, "active_turn_id");
+    let queued_turns = json_field_value(root, "queued_turns");
+    let last_error = json_field_value(root, "last_error");
+    Ok(format!(
+        "{{\"session_id\":\"{}\",\"path\":\"{}\",\"bytes\":{},\"status\":\"{}\",\"daemon_pid\":{},\"runtime_thread_id\":{},\"active_turn_id\":{},\"queued_turns\":{},\"updated_at\":\"{}\",\"last_error\":{}}}",
+        json_escape(session_id),
+        json_escape(&path.display().to_string()),
+        bytes,
+        json_escape(&status),
+        daemon_pid,
+        runtime_thread_id,
+        active_turn_id,
+        queued_turns,
+        json_escape(&updated_at),
+        last_error
+    ))
+}
+
+fn list_rlm_live_session_manifest_entries(config: &AppConfig) -> AppResult<Vec<(String, PathBuf)>> {
+    let sessions_dir = rlm_live_sessions_dir(config);
+    let mut entries = Vec::new();
+    if !sessions_dir.exists() {
+        return Ok(entries);
+    }
+    for entry in fs::read_dir(&sessions_dir)
+        .map_err(|error| tool_failure(format!("rlm live sessions read_dir failed: {error}")))?
+    {
+        let entry = entry.map_err(|error| {
+            tool_failure(format!("rlm live sessions read entry failed: {error}"))
+        })?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(session_id) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if validate_rlm_model_session_id(session_id).is_err() {
+            continue;
+        }
+        let manifest_path = path.join("manifest.json");
+        if manifest_path.is_file() {
+            entries.push((session_id.to_string(), manifest_path));
+        }
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(entries)
+}
+
+fn optional_string_json(root: &BTreeMap<String, JsonValue>, key: &str) -> JsonValue {
+    root.get(key)
+        .and_then(json_as_string)
+        .map(|value| JsonValue::String(value.to_string()))
+        .unwrap_or(JsonValue::Null)
+}
+
+fn optional_u64_json(root: &BTreeMap<String, JsonValue>, key: &str) -> JsonValue {
+    root.get(key)
+        .and_then(json_as_u64)
+        .map(|value| JsonValue::Number(value.to_string()))
+        .unwrap_or(JsonValue::Null)
+}
+
+fn json_field_value(root: &BTreeMap<String, JsonValue>, key: &str) -> String {
+    root.get(key)
+        .map(json_value_to_string)
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn json_field_string(root: &BTreeMap<String, JsonValue>, key: &str) -> String {
+    root.get(key)
+        .and_then(json_as_string)
+        .unwrap_or("null")
+        .to_string()
 }
 
 fn rlm_epoch_label() -> String {
@@ -2758,6 +3004,61 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("limit"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rlm_process_sessions_can_include_live_daemon_manifests() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = cwd.join("target").join(format!(
+            "dscode-rlm-live-sessions-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut config = AppConfig::default();
+        config.workspace.config_dir = root.join(".dscode").display().to_string();
+        let manifest_path = rlm_live_session_manifest_path(&config, "live.1");
+        fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        fs::write(
+            &manifest_path,
+            r#"{"session_id":"live.1","status":"idle","daemon_pid":12345,"daemon_epoch":"epoch+1","runtime_thread_id":"thread-live","runtime_session_id":"session-live","active_turn_id":null,"queued_turns":2,"model":"deepseek-coder","workspace":"/tmp/ws","created_at":"epoch+1","updated_at":"epoch+2","last_error":null}"#,
+        )
+        .unwrap();
+
+        let tool = RlmModelSessionsTool {
+            config: config.clone(),
+        };
+        let default_list = tool.execute(ToolInput::new()).unwrap();
+        assert!(!default_list.summary.contains("live.1"));
+
+        let live_list = tool
+            .execute(ToolInput::new().with_arg("include_live", "true"))
+            .unwrap();
+        assert!(live_list.summary.contains(r#""include_live":true"#));
+        assert!(live_list.summary.contains(r#""live_sessions":["#));
+        assert!(live_list.summary.contains(r#""session_id":"live.1""#));
+        assert!(live_list.summary.contains(r#""status":"idle""#));
+        assert!(live_list
+            .summary
+            .contains(r#""runtime_thread_id":"thread-live""#));
+        assert!(live_list.summary.contains(r#""queued_turns":2"#));
+
+        let shown = tool
+            .execute(
+                ToolInput::new()
+                    .with_arg("session_id", "live.1")
+                    .with_arg("include_live", "true"),
+            )
+            .unwrap();
+        assert!(shown.summary.contains(r#""exists":false"#));
+        assert!(shown.summary.contains(r#""live_exists":true"#));
+        assert!(shown.summary.contains(r#""live_session":{"#));
+        assert!(shown
+            .summary
+            .contains(r#""kind":"deepseek.rlm.live_session.v1""#));
+        assert!(shown.summary.contains(r#""model":"deepseek-coder""#));
         let _ = fs::remove_dir_all(root);
     }
 

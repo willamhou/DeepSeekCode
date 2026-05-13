@@ -60,9 +60,10 @@ backend; initial PTY geometry has since narrowed to `tty_rows` plus `tty_cols`;
 durable shell replay has since narrowed to byte-offset stdout/stderr slices;
 shell ownership diagnostics now persist stable child pid, owner pid, and process
 group metadata; RLM process semantics have since narrowed to durable
-model-session context plus session-only continuation. Live PTY resize,
-attachable terminal replay/supervisor takeover, and a true live model daemon
-remain open.
+model-session context plus session-only continuation, and live RLM daemon
+manifest/inventory discovery has landed. Live PTY resize, attachable terminal
+replay/supervisor takeover, runtime-thread-backed live RLM turn queues, and
+live RLM streaming/cancellation/recovery remain open.
 
 ## Next Candidate Specs
 

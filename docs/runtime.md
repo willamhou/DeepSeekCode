@@ -343,7 +343,7 @@ Exposed tools:
 | `rlm_recursive_plan` | Plan a multi-round recursive RLM map/reduce workflow without running child agents |
 | `rlm_python` | Run restricted pure-compute Python helper code with imports/files/network/subprocess blocked |
 | `rlm_python_sessions` | List or inspect persisted `rlm_python_session` JSON state without running Python |
-| `rlm_process_sessions` | List or inspect persisted `rlm_process` durable model-session summaries without running a child model |
+| `rlm_process_sessions` | List or inspect persisted `rlm_process` durable model-session summaries, optionally including live daemon manifests, without running a child model |
 | `rlm_python_session` | Hidden by default; exposed with trusted `DSCODE_MCP_ENABLE_SIDE_EFFECTS=1` or durable runtime approvals, and writes `.dscode/rlm-python` helper state |
 | `rlm` | Hidden by default; exposed with trusted `DSCODE_MCP_ENABLE_SIDE_EFFECTS=1` or durable runtime approvals, and runs bounded model-backed RLM child analysis |
 | `rlm_query` | Alias for `rlm` |
@@ -1395,7 +1395,12 @@ without running Python, returning the JSON object state, file metadata, and
 DeepSeekCode process. `rlm_process_sessions` lists or inspects durable
 `rlm_process` model sessions stored under `.dscode/rlm-model/`, exposing turn
 counts, last task metadata, and full stored summaries for a requested
-`session_id` without spending model tokens.
+`session_id` without spending model tokens. Passing `include_live=true` also
+reports normalized live-daemon manifests from
+`.dscode/rlm-daemon/<session_id>/manifest.json`, including daemon status,
+runtime thread id, queued turn count, active turn id, and last error. This is a
+read-only inventory surface for the live RLM daemon design; it does not start a
+daemon or enqueue model work.
 This gives the model DeepSeek-TUI-style Recursive Language Model entrypoints for
 synthesis/classification tasks with both file-backed and optional process-backed
 Python helper state. MCP server mode exposes the local RLM planning helpers

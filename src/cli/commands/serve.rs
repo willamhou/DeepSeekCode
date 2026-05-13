@@ -3403,11 +3403,12 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
         ),
         mcp_tool_definition(
             "rlm_process_sessions",
-            "List or inspect persisted rlm_process durable model-session summaries without running a child model.",
+            "List or inspect persisted rlm_process durable model-session summaries, optionally including live RLM daemon manifests, without running a child model.",
             mcp_schema(
                 vec![
                     ("session_id", string_property("Optional session id to inspect.")),
                     ("limit", number_property("Maximum sessions to list.")),
+                    ("include_live", string_property("Set true to include .dscode/rlm-daemon live-session manifests.")),
                 ],
                 &[],
             ),
