@@ -30,6 +30,8 @@ Current surfaces:
 - cache telemetry inspection with `cache [count]` / `/cache [count]` plus
   read-only `cache inspect` / `cache warmup` explanations over durable usage
   records
+- model configuration inspection and switching with `model` / `/model`,
+  `model <name>` / `/model <name>`, and offline `models` / `/models`
 - skill registry inspection with `skills [prefix]` / `/skills [prefix]` and
   `skill <name>` / `/skill <name>` over DeepSeekCode's configured TOML skills
 - composer and command-palette editing preserve terminal modifier keys, including
@@ -281,6 +283,9 @@ Command palette commands currently implemented:
 | `cost`, `/cost` | Show active-thread approximate total, input, and output cost with telemetry caveats |
 | `cache`, `/cache`, `cache <count>` | Show active-thread durable cache hit/miss summary, hit rate, cache chart, context, and approximate cost |
 | `cache inspect`, `cache warmup` | Explain durable read-only cache limits: no persisted prompt layer hashes and no TUI-issued warmup request |
+| `model`, `/model` | Show selected workspace model config in the right-side detail panel |
+| `model <name>`, `/model <name>` | Update selected workspace `model.model`; aliases include `auto`, `flash`, `pro`, `chat`, `coder`, and `reasoner` |
+| `models`, `/models`, `model list` | Show the offline DeepSeekCode model catalog and current project model |
 | `skills`, `/skills`, `skills <prefix>` | List configured TOML skills from repo and user skill directories |
 | `skill <name>`, `/skill <name>` | Show one configured TOML skill's description, triggers, tools, references, policy, and system append |
 | `automations`, `automation` | Show active-thread automation count in the status bar |

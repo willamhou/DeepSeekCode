@@ -75,6 +75,23 @@ pub(crate) struct NetworkDefaultResult {
     pub(crate) changed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelConfigSummary {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) base_url: String,
+    pub(crate) model: String,
+    pub(crate) api_key_env: String,
+    pub(crate) reasoning_effort: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelSetResult {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) previous: String,
+    pub(crate) model: String,
+    pub(crate) changed: bool,
+}
+
 fn print_network_rule_result(result: &NetworkRuleResult) {
     if result.changed {
         println!("{}: added {}", result.key, result.host);
@@ -193,6 +210,46 @@ pub(crate) fn set_network_default_at(
     Ok(NetworkDefaultResult {
         path,
         value,
+        changed,
+    })
+}
+
+pub(crate) fn model_config_summary_at(root: &std::path::Path) -> AppResult<ModelConfigSummary> {
+    let path = network_config_path_at(root);
+    if !path.exists() {
+        init_config_at(root, false)?;
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let defaults = AppConfig::default();
+    Ok(ModelConfigSummary {
+        path,
+        base_url: read_string_key(&content, "model.base_url").unwrap_or(defaults.model.base_url),
+        model: read_string_key(&content, "model.model").unwrap_or(defaults.model.model),
+        api_key_env: read_string_key(&content, "model.api_key_env")
+            .unwrap_or(defaults.model.api_key_env),
+        reasoning_effort: read_string_key(&content, "model.reasoning_effort")
+            .unwrap_or(defaults.model.reasoning_effort),
+    })
+}
+
+pub(crate) fn set_model_at(root: &std::path::Path, model: &str) -> AppResult<ModelSetResult> {
+    let model = normalize_model_value(model)?;
+    let path = network_config_path_at(root);
+    if !path.exists() {
+        init_config_at(root, false)?;
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let previous = read_string_key(&content, "model.model")
+        .unwrap_or_else(|| AppConfig::default().model.model);
+    let changed = previous != model;
+    if changed {
+        let updated = replace_or_append_string_key(&content, "model.model", &model);
+        std::fs::write(&path, updated)?;
+    }
+    Ok(ModelSetResult {
+        path,
+        previous,
+        model,
         changed,
     })
 }
@@ -386,6 +443,31 @@ fn normalize_network_rule(host: &str) -> AppResult<String> {
     {
         return Err(app_error(
             "network host rule must be a host, .subdomain suffix, or *.subdomain suffix",
+        ));
+    }
+    Ok(normalized)
+}
+
+fn normalize_model_value(model: &str) -> AppResult<String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return Err(app_error("model must not be empty"));
+    }
+    let normalized = match trimmed.to_ascii_lowercase().as_str() {
+        "auto" | "auto-deepseek" | "deepseek-auto" => "auto".to_string(),
+        "flash" | "v4-flash" => "deepseek-v4-flash".to_string(),
+        "pro" | "v4-pro" => "deepseek-v4-pro".to_string(),
+        "chat" => "deepseek-chat".to_string(),
+        "coder" => "deepseek-coder".to_string(),
+        "reasoner" => "deepseek-reasoner".to_string(),
+        _ => trimmed.to_string(),
+    };
+    if normalized
+        .chars()
+        .any(|ch| ch.is_control() || ch.is_whitespace() || matches!(ch, '"' | '\'' | '\\'))
+    {
+        return Err(app_error(
+            "model must be a single model id token without quotes or whitespace",
         ));
     }
     Ok(normalized)

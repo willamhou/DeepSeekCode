@@ -15,8 +15,9 @@ use std::time::Duration;
 
 use crate::cli::app::{McpConfigScope, TuiArgs};
 use crate::cli::commands::config::{
-    network_policy_summary_at, remove_network_rule_at, set_network_default_at, set_network_rule_at,
-    NetworkPolicySummary, NetworkRuleTarget,
+    model_config_summary_at, network_policy_summary_at, remove_network_rule_at, set_model_at,
+    set_network_default_at, set_network_rule_at, ModelConfigSummary, NetworkPolicySummary,
+    NetworkRuleTarget,
 };
 use crate::cli::commands::mcp::{
     add_mcp_server_at, init_mcp_config_at, list_remote_prompts_summary,
@@ -55,8 +56,8 @@ use crate::tools::types::{Tool, ToolInput};
 use crate::tui::{
     render_once, run_interactive, run_interactive_with_refresh_actions_and_live, TuiAction, TuiApp,
     TuiApprovalRequest, TuiAutomationRecord, TuiItem, TuiLiveEvent, TuiMcpConfigScope,
-    TuiMcpDetailKind, TuiMemoryCommand, TuiNetworkCommand, TuiSession, TuiSkillsCommand,
-    TuiTaskRecord, TuiThread, TuiUsageSummary, TuiUserInputRequest,
+    TuiMcpDetailKind, TuiMemoryCommand, TuiModelCommand, TuiNetworkCommand, TuiSession,
+    TuiSkillsCommand, TuiTaskRecord, TuiThread, TuiUsageSummary, TuiUserInputRequest,
 };
 use crate::ui::stream::StreamEvents;
 use crate::util::json::{
@@ -617,6 +618,9 @@ fn handle_tui_http_action(
         TuiAction::Network { .. } => {
             app.set_status("network commands require local file-backed TUI".to_string());
         }
+        TuiAction::Model { .. } => {
+            app.set_status("model commands require local file-backed TUI".to_string());
+        }
         TuiAction::Skills { .. } => {
             app.set_status("skills commands require local file-backed TUI".to_string());
         }
@@ -1163,6 +1167,7 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Tokens => Err(app_error("token details are not MCP details")),
         TuiMcpDetailKind::Cost => Err(app_error("cost details are not MCP details")),
         TuiMcpDetailKind::Cache => Err(app_error("cache details are not MCP details")),
+        TuiMcpDetailKind::Model => Err(app_error("model details are not MCP details")),
         TuiMcpDetailKind::Skills => Err(app_error("skill details are not MCP details")),
         TuiMcpDetailKind::Rollback => Err(app_error("rollback details are not MCP details")),
         TuiMcpDetailKind::Reasoning => Err(app_error("reasoning details are not MCP details")),
@@ -1320,6 +1325,45 @@ fn format_network_policy_summary(summary: &NetworkPolicySummary) -> String {
     )
 }
 
+fn format_model_config_summary(summary: &ModelConfigSummary) -> String {
+    format!(
+        "DeepSeekCode Model Config ({})\n\nmodel.model = {}\nmodel.reasoning_effort = {}\nmodel.base_url = {}\nmodel.api_key_env = {}\n\nUse model <name> to update model.model in this project config. Common values: auto, deepseek-v4-flash, deepseek-v4-pro.",
+        summary.path.display(),
+        summary.model,
+        summary.reasoning_effort,
+        summary.base_url,
+        summary.api_key_env
+    )
+}
+
+fn format_model_catalog_summary(summary: &ModelConfigSummary) -> String {
+    let models = [
+        "auto",
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "deepseek-coder",
+    ];
+    let mut out = String::new();
+    out.push_str("DeepSeekCode Model Catalog\n");
+    out.push_str("==========================\n\n");
+    out.push_str(&format!("Current project model: {}\n", summary.model));
+    out.push_str(&format!("Reasoning effort: {}\n", summary.reasoning_effort));
+    out.push_str("\nKnown local model ids:\n");
+    for model in models {
+        if model == summary.model {
+            out.push_str(&format!("- {model} (current)\n"));
+        } else {
+            out.push_str(&format!("- {model}\n"));
+        }
+    }
+    out.push_str(
+        "\nThis list is local and offline. DeepSeek-TUI-style online /models fetching remains a separate runtime/API-backed gap.\n",
+    );
+    out
+}
+
 fn format_string_list(values: &[String]) -> String {
     if values.is_empty() {
         "[]".to_string()
@@ -1375,9 +1419,10 @@ fn handle_tui_action_with_live(
                 "completed".to_string(),
             )?;
             if let Some(config) = config {
+                let run_config = load_or_default().unwrap_or_else(|_| config.clone());
                 start_tui_agent_run(
                     store.clone(),
-                    config.clone(),
+                    run_config,
                     thread_id.clone(),
                     content,
                     app.reasoning_replay_limit(),
@@ -1413,9 +1458,10 @@ fn handle_tui_action_with_live(
                 content.clone(),
                 "completed".to_string(),
             )?;
+            let run_config = load_or_default().unwrap_or_else(|_| config.clone());
             start_tui_agent_run(
                 store.clone(),
-                config.clone(),
+                run_config,
                 thread_id.clone(),
                 content,
                 app.reasoning_replay_limit(),
@@ -1477,6 +1523,30 @@ fn handle_tui_action_with_live(
                 TuiMcpDetailKind::Network,
                 format_network_policy_summary(&summary),
             );
+            app.set_status(status);
+        }
+        TuiAction::Model { workspace, command } => {
+            let workspace = Path::new(&workspace);
+            let status = match &command {
+                TuiModelCommand::Show => "model config shown".to_string(),
+                TuiModelCommand::List => "model catalog shown".to_string(),
+                TuiModelCommand::Set { model } => {
+                    let result = set_model_at(workspace, model)?;
+                    if result.changed {
+                        format!("model set: {} -> {}", result.previous, result.model)
+                    } else {
+                        format!("model unchanged: {}", result.model)
+                    }
+                }
+            };
+            let summary = model_config_summary_at(workspace)?;
+            let detail = match command {
+                TuiModelCommand::List => format_model_catalog_summary(&summary),
+                TuiModelCommand::Show | TuiModelCommand::Set { .. } => {
+                    format_model_config_summary(&summary)
+                }
+            };
+            app.set_mcp_detail(TuiMcpDetailKind::Model, detail);
             app.set_status(status);
         }
         TuiAction::Skills { command } => {
@@ -4733,6 +4803,50 @@ mod tests {
         let output = render_once(&app, 120, 36).unwrap();
         assert!(output.contains("network default set: prompt"));
         assert!(output.contains("network.default = prompt"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handle_tui_action_manages_model_config() {
+        let root = temp_root("model-config");
+        let store = RuntimeStore::new(root.join("runtime"));
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::Model {
+                workspace: root.display().to_string(),
+                command: TuiModelCommand::Set {
+                    model: "pro".to_string(),
+                },
+            },
+        )
+        .unwrap();
+
+        let config = std::fs::read_to_string(root.join(".dscode/config.toml")).unwrap();
+        assert!(config.contains(r#"model.model = "deepseek-v4-pro""#));
+        let output = render_once(&app, 120, 36).unwrap();
+        assert!(output.contains("model set:"));
+        assert!(output.contains("model.model = deepseek-v4-pro"));
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::Model {
+                workspace: root.display().to_string(),
+                command: TuiModelCommand::List,
+            },
+        )
+        .unwrap();
+
+        let output = render_once(&app, 120, 36).unwrap();
+        assert!(output.contains("model catalog shown"));
+        assert!(output.contains("deepseek-v4-pro (current)"));
+        assert!(output.contains("auto"));
 
         let _ = std::fs::remove_dir_all(root);
     }

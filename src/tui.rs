@@ -467,6 +467,7 @@ pub enum TuiMcpDetailKind {
     Tokens,
     Cost,
     Cache,
+    Model,
     Skills,
     Rollback,
     Reasoning,
@@ -489,6 +490,7 @@ impl TuiMcpDetailKind {
             Self::Tokens => "tokens",
             Self::Cost => "cost",
             Self::Cache => "cache",
+            Self::Model => "model",
             Self::Skills => "skills",
             Self::Rollback => "rollback",
             Self::Reasoning => "reasoning",
@@ -511,6 +513,7 @@ impl TuiMcpDetailKind {
             Self::Tokens => "Tokens",
             Self::Cost => "Cost",
             Self::Cache => "Cache",
+            Self::Model => "Model",
             Self::Skills => "Skills",
             Self::Rollback => "Rollback",
             Self::Reasoning => "Reasoning",
@@ -533,6 +536,7 @@ impl TuiMcpDetailKind {
             Self::Tokens => Self::Manager,
             Self::Cost => Self::Manager,
             Self::Cache => Self::Manager,
+            Self::Model => Self::Manager,
             Self::Skills => Self::Manager,
             Self::Rollback => Self::Manager,
             Self::Reasoning => Self::Manager,
@@ -555,6 +559,7 @@ impl TuiMcpDetailKind {
             Self::Tokens => Self::Manager,
             Self::Cost => Self::Manager,
             Self::Cache => Self::Manager,
+            Self::Model => Self::Manager,
             Self::Skills => Self::Manager,
             Self::Rollback => Self::Manager,
             Self::Reasoning => Self::Manager,
@@ -693,6 +698,13 @@ pub enum TuiNetworkCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuiModelCommand {
+    Show,
+    List,
+    Set { model: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiSkillsCommand {
     List { prefix: Option<String> },
     Show { name: String },
@@ -798,6 +810,34 @@ fn parse_tui_cache_command(line: &str) -> Option<Result<TuiCacheCommand, String>
         },
         _ => Some(Err(
             "usage: cache [count|inspect|warmup] or /cache [count|inspect|warmup]".to_string(),
+        )),
+    }
+}
+
+fn parse_tui_model_command(line: &str) -> Option<Result<TuiModelCommand, String>> {
+    let trimmed = line.trim();
+    if let Some(rest) = strip_tui_command_prefix(trimmed, "/models")
+        .or_else(|| strip_tui_command_prefix(trimmed, "models"))
+    {
+        return if rest.trim().is_empty() {
+            Some(Ok(TuiModelCommand::List))
+        } else {
+            Some(Err(
+                "usage: model [name|list], models, /model [name|list], or /models".to_string(),
+            ))
+        };
+    }
+    let rest = strip_tui_command_prefix(trimmed, "/model")
+        .or_else(|| strip_tui_command_prefix(trimmed, "model"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] => Some(Ok(TuiModelCommand::Show)),
+        ["list" | "ls" | "show"] => Some(Ok(TuiModelCommand::List)),
+        [model] if !model.starts_with('-') => Some(Ok(TuiModelCommand::Set {
+            model: (*model).to_string(),
+        })),
+        _ => Some(Err(
+            "usage: model [name|list], models, /model [name|list], or /models".to_string(),
         )),
     }
 }
@@ -909,6 +949,10 @@ pub enum TuiAction {
     Network {
         workspace: String,
         command: TuiNetworkCommand,
+    },
+    Model {
+        workspace: String,
+        command: TuiModelCommand,
     },
     Skills {
         command: TuiSkillsCommand,
@@ -1134,6 +1178,11 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "cache",
     "cache inspect",
     "cache warmup",
+    "model",
+    "model auto",
+    "model deepseek-v4-flash",
+    "model deepseek-v4-pro",
+    "models",
     "skills",
     "skill ",
     "automations",
@@ -3442,6 +3491,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_model_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.request_model_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) =
                     parse_tui_skills_command(&content).or_else(|| parse_tui_skill_command(&content))
                 {
@@ -3730,6 +3792,17 @@ impl TuiApp {
             match command {
                 Ok(command) => {
                     self.show_cache_detail(command);
+                }
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_model_command(command) {
+            match command {
+                Ok(command) => {
+                    self.request_model_command(command);
                 }
                 Err(message) => {
                     self.status = message;
@@ -5021,6 +5094,18 @@ impl TuiApp {
             command,
         });
         self.status = format!("network command queued: {workspace}");
+    }
+
+    fn request_model_command(&mut self, command: TuiModelCommand) {
+        let workspace = self
+            .selected_session()
+            .map(|session| session.workspace.clone())
+            .unwrap_or_else(|| ".".to_string());
+        self.pending_actions.push(TuiAction::Model {
+            workspace: workspace.clone(),
+            command,
+        });
+        self.status = format!("model command queued: {workspace}");
     }
 
     fn request_skills_command(&mut self, command: TuiSkillsCommand) {
@@ -10219,6 +10304,59 @@ mod tests {
     }
 
     #[test]
+    fn command_palette_requests_model_actions() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: "/tmp/deepseek-model".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        run_palette_command(&mut app, "model");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Model {
+                workspace: "/tmp/deepseek-model".to_string(),
+                command: TuiModelCommand::Show,
+            }]
+        );
+
+        run_palette_command(&mut app, "/model auto");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Model {
+                workspace: "/tmp/deepseek-model".to_string(),
+                command: TuiModelCommand::Set {
+                    model: "auto".to_string(),
+                },
+            }]
+        );
+
+        run_palette_command(&mut app, "models");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Model {
+                workspace: "/tmp/deepseek-model".to_string(),
+                command: TuiModelCommand::List,
+            }]
+        );
+    }
+
+    #[test]
     fn command_palette_requests_skills_actions() {
         let mut app = TuiApp::new(Vec::new());
 
@@ -10477,6 +10615,21 @@ mod tests {
                 workspace: ".".to_string(),
                 command: TuiNetworkCommand::Deny {
                     host: "telemetry.example.com".to_string(),
+                },
+            }]
+        );
+
+        for ch in "/model auto".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Model {
+                workspace: ".".to_string(),
+                command: TuiModelCommand::Set {
+                    model: "auto".to_string(),
                 },
             }]
         );

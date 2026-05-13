@@ -399,6 +399,11 @@ Landed first slice:
   command-palette `cache`, rendering durable active-thread cache hit/miss
   telemetry as a read-only detail view; `inspect` and `warmup` explicitly
   surface the current prompt-hash persistence and non-mutating warmup limits
+- TUI now supports DeepSeek-TUI-style `/model [name]` and `/models` plus
+  command-palette `model` / `models`, showing and updating the selected
+  workspace `model.model` in `.dscode/config.toml` and listing an offline
+  DeepSeekCode model catalog; online API model fetching and a two-pane picker
+  remain separate UI parity gaps
 - TUI now supports DeepSeek-TUI-style `/skills [prefix]` and `/skill <name>`
   plus command-palette `skills` / `skill`, listing and inspecting
   DeepSeekCode's configured repo/user TOML skill registry in the detail panel
