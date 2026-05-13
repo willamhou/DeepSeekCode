@@ -691,6 +691,7 @@ pub enum TuiAction {
         cursor: Option<usize>,
         tail: bool,
     },
+    ShellSupervisorStatus,
     SendShellStdin {
         task_id: String,
         input: String,
@@ -801,6 +802,7 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "shell list",
     "shell show ",
     "shell attach ",
+    "shell supervisor",
     "shell stdin ",
     "shell close-stdin ",
     "shell wait ",
@@ -810,6 +812,7 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "jobs list",
     "jobs show ",
     "jobs attach ",
+    "jobs supervisor",
     "jobs stdin ",
     "jobs close-stdin ",
     "jobs wait ",
@@ -3337,7 +3340,7 @@ impl TuiApp {
             }
             ["shell"] | ["sh"] => {
                 self.status =
-                    "shell commands: run|list|show|wait|poll|stdin|close-stdin|resize|cancel"
+                    "shell commands: run|list|show|attach|supervisor|wait|poll|stdin|close-stdin|resize|cancel"
                         .to_string();
             }
             ["shell", "run"] | ["sh", "run"] => {
@@ -3380,6 +3383,15 @@ impl TuiApp {
             | ["sh", "attach", id, cursor]
             | ["jobs", "attach", id, cursor] => {
                 self.request_shell_attach_from_cursor(id, cursor);
+            }
+            ["shell", "supervisor"]
+            | ["shell", "supervisor-status"]
+            | ["shell", "status"]
+            | ["sh", "supervisor"]
+            | ["sh", "supervisor-status"]
+            | ["jobs", "supervisor"]
+            | ["jobs", "supervisor-status"] => {
+                self.request_shell_supervisor_status();
             }
             ["shell", "stdin"]
             | ["shell", "send"]
@@ -4889,6 +4901,11 @@ impl TuiApp {
         } else {
             format!("shell attach requested: {task_id}")
         };
+    }
+
+    fn request_shell_supervisor_status(&mut self) {
+        self.pending_actions.push(TuiAction::ShellSupervisorStatus);
+        self.status = "shell supervisor status requested".to_string();
     }
 
     fn request_shell_stdin(&mut self, task_id: &str, input: String, close: bool) {
@@ -8439,6 +8456,10 @@ mod tests {
                 tail: true,
             }]
         );
+
+        run_palette_command(&mut app, "jobs supervisor");
+        assert_eq!(app.drain_actions(), vec![TuiAction::ShellSupervisorStatus]);
+        assert!(app.status.contains("supervisor status requested"));
 
         run_palette_command(&mut app, "jobs stdin shell-1 hello world");
         assert_eq!(

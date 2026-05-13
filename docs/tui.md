@@ -110,10 +110,13 @@ Current surfaces:
   commands open an explicit approval modal and only run once after approval.
   Approved commands start as process-local background jobs, and can be listed
   with `shell list`, inspected with `shell show <id>` /
-  `shell poll <id>` / `shell wait <id> [ms]`, fed with
-  `shell stdin <id> <input>` / `shell close-stdin <id>`, or stopped with
-  `shell cancel <id|all>`; `/jobs`-style
-  `jobs list|show|poll|wait|stdin|close-stdin|cancel` aliases are also accepted
+  `shell attach <id> [cursor|tail]` / `shell poll <id>` /
+  `shell wait <id> [ms]`, fed with `shell stdin <id> <input>` /
+  `shell close-stdin <id>`, resized with `shell resize <id> <rows> <cols>`,
+  stopped with `shell cancel <id|all>`, or paired with workspace-local
+  supervisor protocol health through `shell supervisor`; `/jobs`-style
+  `jobs list|show|attach|poll|wait|stdin|close-stdin|resize|cancel|supervisor`
+  aliases are also accepted
 - local file-backed TUI sessions expose user-memory controls when
   `memory.enabled = true` or `DSCODE_MEMORY=on`: a composer line beginning with
   a single `#` appends a durable memory note without submitting a user turn, and
@@ -227,11 +230,14 @@ Command palette commands currently implemented:
 | `shell <command>`, `shell run <command>`, `! <command>` | Start an allowlisted local background shell job, or request foreground approval for an unallowlisted command |
 | `shell list`, `jobs list` | List known local background shell jobs |
 | `shell show <id>`, `jobs show <id>` | Show a shell job snapshot with accumulated output |
+| `shell attach <id> [cursor|tail]`, `jobs attach <id> [cursor|tail]` | Replay terminal-oriented durable stdout PTY/log bytes |
 | `shell poll <id>`, `jobs poll <id>` | Poll one local background shell job without waiting |
 | `shell wait <id> [ms]`, `jobs wait <id> [ms]` | Wait briefly for one local background shell job and show output deltas |
 | `shell stdin <id> <input>`, `jobs stdin <id> <input>` | Send stdin to a running local background shell job |
 | `shell close-stdin <id>`, `jobs close-stdin <id>` | Close stdin for a running local background shell job |
+| `shell resize <id> <rows> <cols>`, `jobs resize <id> <rows> <cols>` | Resize a TTY-backed shell job with best-effort control |
 | `shell cancel <id|all>`, `jobs cancel <id|all>` | Cancel one or all local background shell jobs |
+| `shell supervisor`, `jobs supervisor` | Show workspace-local shell supervisor manifest, socket, and protocol health |
 | `memory`, `memory show` | Show configured user memory in the right-side detail panel |
 | `memory path` | Show the configured user memory path and enabled/disabled state |
 | `memory clear` | Empty the configured user memory file when memory is enabled |

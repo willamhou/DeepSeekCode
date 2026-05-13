@@ -353,7 +353,9 @@ Landed first slice:
   DeepSeek-TUI-style
   `jobs list|show|attach|poll|wait|stdin|close-stdin|resize|cancel` aliases over
   the existing `exec_shell` job manager; shell metadata and stdout/stderr logs
-  are persisted for detached later inspection through the same job id and cwd
+  are persisted for detached later inspection through the same job id and cwd;
+  `shell supervisor` / `jobs supervisor` also expose workspace-local shell
+  supervisor manifest, socket, and protocol health in the shell detail panel
 - local file-backed TUI command palette now routes unallowlisted foreground
   shell commands through an explicit modal approval; approved commands run once
   through a trusted TUI-only background shell path without adding an allowlist

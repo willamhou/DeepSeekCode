@@ -38,7 +38,8 @@ use crate::core::runtime::{
 use crate::error::{app_error, AppResult};
 use crate::tools::exec_shell::{
     run_trusted_background_shell, ExecShellAttachTool, ExecShellCancelTool, ExecShellInteractTool,
-    ExecShellListTool, ExecShellResizeTool, ExecShellShowTool, ExecShellTool, ExecShellWaitTool,
+    ExecShellListTool, ExecShellResizeTool, ExecShellShowTool, ExecShellSupervisorStatusTool,
+    ExecShellTool, ExecShellWaitTool,
 };
 use crate::tools::types::{Tool, ToolInput};
 use crate::tui::{
@@ -713,6 +714,7 @@ fn handle_tui_http_action(
         | TuiAction::ListShell
         | TuiAction::ShowShell { .. }
         | TuiAction::AttachShell { .. }
+        | TuiAction::ShellSupervisorStatus
         | TuiAction::SendShellStdin { .. }
         | TuiAction::WaitShell { .. }
         | TuiAction::ResizeShell { .. }
@@ -1292,6 +1294,9 @@ fn handle_tui_action_with_live(
             tail,
         } => {
             run_tui_shell_attach(app, &task_id, cursor, tail);
+        }
+        TuiAction::ShellSupervisorStatus => {
+            run_tui_shell_supervisor_status(app);
         }
         TuiAction::SendShellStdin {
             task_id,
@@ -1950,6 +1955,24 @@ fn run_tui_shell_attach(app: &mut TuiApp, task_id: &str, cursor: Option<usize>, 
         }
         Err(error) => {
             app.set_status(format!("shell attach failed for {task_id}: {error}"));
+        }
+    }
+}
+
+fn run_tui_shell_supervisor_status(app: &mut TuiApp) {
+    match ExecShellSupervisorStatusTool.execute(ToolInput::new()) {
+        Ok(output) => {
+            app.set_status(last_nonempty_line(
+                &output.summary,
+                "shell supervisor status shown",
+            ));
+            app.set_mcp_detail(
+                TuiMcpDetailKind::Shell,
+                format_shell_detail("Shell supervisor status", &output.summary),
+            );
+        }
+        Err(error) => {
+            app.set_status(format!("shell supervisor status failed: {error}"));
         }
     }
 }
@@ -3758,6 +3781,12 @@ mod tests {
             },
         )
         .unwrap();
+
+        assert!(render_once(&app, 120, 36)
+            .unwrap()
+            .contains("shell commands require local file-backed TUI"));
+
+        handle_tui_http_action(&client, &mut app, TuiAction::ShellSupervisorStatus).unwrap();
 
         assert!(render_once(&app, 120, 36)
             .unwrap()

@@ -1353,6 +1353,9 @@ manifest/socket state, reports absent/stale/ready status and supported method
 names, probes socket protocol health with a bounded `health` request, and never
 prints `control_token_hash`. Unsupported PTY methods return structured
 `unsupported` responses until native supervisor-owned PTY sessions land.
+Local file-backed TUI sessions surface the same read-only protocol check through
+the command palette with `shell supervisor` and `jobs supervisor`, rendering the
+result in the shell detail panel.
 Optional `tty_rows` plus `tty_cols` set the initial PTY geometry and are
 persisted in shell job manifests.
 `exec_shell_resize cwd=<path> task_id=<id> tty_rows=<n>
