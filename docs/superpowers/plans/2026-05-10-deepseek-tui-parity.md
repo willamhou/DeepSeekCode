@@ -449,8 +449,10 @@ Remaining:
   long-input processing can be invoked without first reshaping it into
   `context` + `question`
 - `rlm_process` now exists as an explicit DeepSeek-TUI-compatible long-input
-  entrypoint; this currently reuses the bounded child-agent process adapter
-  while the full long-lived REPL loop remains future work
+  entrypoint; this currently reuses the bounded child-agent process adapter,
+  and optional `session_id` / `reset` fields persist prior process summaries
+  under `.dscode/rlm-model/` so later calls receive durable process-style
+  context while the full live model REPL/daemon loop remains future work
 - RLM batch helper now exists: `rlm_batch` maps shared `context` plus up to 16
   `questions` onto parallel bounded child-agent analyses, matching the
   `llm_query_batched` / `rlm_query_batched` usage pattern without a Python REPL

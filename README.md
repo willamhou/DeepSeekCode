@@ -19,10 +19,11 @@ This repository is an active workbench, not a polished hosted product.
   panels, diagnostics, compaction, automations, and local rollback commands.
 - The runtime contract is file-backed first, with an HTTP/SSE mode for local
   supervisors and TUI clients.
-- Compared with `DeepSeek-TUI`, the remaining gap is still material. The
-  strongest parts are the agent core, regression tests, and runtime plumbing;
-  the biggest missing pieces are product-level TUI polish, broader tool
-  surfaces, and long-running workflow ergonomics.
+- Compared with `DeepSeek-TUI`, the common terminal/runtime workflow is now
+  substantially closer. The remaining gap is concentrated in hard
+  infrastructure edges: cross-process shell takeover, a true live model-backed
+  RLM daemon, platform-specific rollback fidelity, and external publishing or
+  write-fixture validation.
 
 ## Feature Surface
 
@@ -44,7 +45,8 @@ This repository is an active workbench, not a polished hosted product.
 - MCP client inventory/tooling/prompts/resources/templates/config CRUD, a full-width TUI MCP manager
   screen plus scrollable discovery detail panel, MCP stdio server mode with `mcp add-self` registration
   and approval-gated or trusted opt-in `run_shell` side-effect tool exposure,
-  subagents, RLM-lite child/batch analysis, todo tracking, hooks, prompts, skills, and language profiles
+  subagents, RLM child/batch/long-input analysis with durable model-session
+  context, todo tracking, hooks, prompts, skills, and language profiles
 - Release packaging for Cargo, npm platform wrappers, Docker, Homebrew
   formula rendering, and GitHub Actions release assets
 

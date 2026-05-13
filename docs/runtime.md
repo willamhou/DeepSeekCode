@@ -1327,8 +1327,11 @@ that wrap either `context` + `question` inputs or DeepSeek-TUI-style
 child-agent execution path. `file_path` is workspace-relative only, `content`
 is capped at 200k chars, and `max_depth` is accepted as a compatibility alias
 for the child step budget. `rlm_process` is also exposed as the explicit
-DeepSeek-TUI-compatible long-input process entrypoint; it currently uses the
-same bounded child-agent adapter, not a full long-lived REPL loop.
+DeepSeek-TUI-compatible long-input process entrypoint. It uses the same bounded
+child-agent adapter and accepts optional `session_id` / `reset` fields; when a
+session is provided, prior process summaries are stored under
+`.dscode/rlm-model/` and injected into later calls as process-style context.
+This is durable session context, not a full live model REPL loop.
 `rlm_batch` / `rlm_query_batched` /
 `llm_query_batched` map shared context plus up to 16 questions onto parallel
 child analyses.

@@ -31,9 +31,9 @@ web, review, RLM helper, and request-user-input surfaces landed.
    especially device nodes and Windows symlink behavior.
 4. RLM parity covers model-running one-shot/batch tools, chunk/map-reduce/
    recursive planners, restricted Python helpers, stateful Python sessions,
-   persistent Python REPL processes, and MCP/ACP exposure. The remaining RLM
-   gap is a model-backed long-lived RLM process loop rather than local helper
-   state.
+   persistent Python REPL processes, durable `rlm_process` model-session
+   context, and MCP/ACP exposure. The remaining RLM gap is a true live
+   model-backed RLM REPL/daemon rather than persisted child-agent summaries.
 5. Remote PR review/comment workflows have deterministic planners, guarded
    mutation tools, failure recovery, and readiness checks. Remaining validation
    depends on external live GitHub fixtures with explicit write authorization.
@@ -49,13 +49,15 @@ not complete because full cross-process shell control, model-backed long-lived
 RLM process semantics, platform-specific rollback edges, and live external
 publishing/write fixtures still need either more architecture or explicit
 external resources. Shell cancel has since narrowed to best-effort detached
-process-group cancellation; stdin/PTY takeover remains open.
+process-group cancellation; RLM process semantics have since narrowed to
+durable model-session context; stdin/PTY takeover and a true live model daemon
+remain open.
 
 ## Next Candidate Specs
 
 - Shell supervisor/PTY design for cross-process takeover of detached stdin/PTY
   sessions and stronger process ownership guarantees.
-- Model-backed RLM process session design, likely backed by durable runtime
-  threads rather than a stateless child-agent call.
+- True live model-backed RLM REPL/daemon design, likely backed by durable
+  runtime threads rather than persisted child-agent summaries.
 - Platform restore strategy for device nodes and Windows symlink semantics.
 - Live GitHub write-fixture harness behind an explicit opt-in test repository.
