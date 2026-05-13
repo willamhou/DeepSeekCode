@@ -32,6 +32,7 @@ const MAX_RLM_MODEL_SESSION_TURNS: usize = 20;
 const MAX_RLM_MODEL_SESSION_CONTEXT_TURNS: usize = 6;
 const MAX_RLM_MODEL_SESSION_SUMMARY_CHARS: usize = 12_000;
 const MAX_RLM_LIVE_TASK_LIST: usize = 10_000;
+const MAX_RLM_LIVE_TURN_PREVIEW_CHARS: usize = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RlmPythonInterpreter {
@@ -1234,7 +1235,9 @@ impl Tool for RlmModelSessionsTool {
     }
 
     fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
-        let include_live = parse_bool_arg(input.get("include_live"));
+        let include_turns = parse_bool_arg(input.get("include_turns"));
+        let include_live = parse_bool_arg(input.get("include_live")) || include_turns;
+        let limit = parse_rlm_model_sessions_limit(input.get("limit"))?;
         if let Some(session_id) = input
             .get("session_id")
             .map(str::trim)
@@ -1273,12 +1276,17 @@ impl Tool for RlmModelSessionsTool {
                     live_bytes,
                     live_session
                 ));
+                if include_turns {
+                    summary.push_str(&format!(
+                        ",\"include_turns\":true,\"live_turns\":[{}]",
+                        render_rlm_live_turn_entries(&self.config, session_id, limit)?
+                    ));
+                }
             }
             summary.push('}');
             return Ok(ToolOutput { summary });
         }
 
-        let limit = parse_rlm_model_sessions_limit(input.get("limit"))?;
         let sessions_dir = rlm_model_sessions_dir(&self.config);
         let mut entries = Vec::new();
         if sessions_dir.exists() {
@@ -1367,6 +1375,9 @@ impl Tool for RlmModelSessionsTool {
                             &path,
                             bytes,
                             &manifest,
+                            include_turns,
+                            limit,
+                            &self.config,
                         )?);
                         live_sessions_count += 1;
                     }
@@ -1388,8 +1399,8 @@ impl Tool for RlmModelSessionsTool {
 
         let summary = if include_live {
             format!(
-                "{{\"sessions\":[{}],\"live_sessions\":[{}],\"errors\":[{}],\"limit\":{},\"include_live\":true}}",
-                sessions_json, live_sessions_json, errors_json, limit
+                "{{\"sessions\":[{}],\"live_sessions\":[{}],\"errors\":[{}],\"limit\":{},\"include_live\":true,\"include_turns\":{}}}",
+                sessions_json, live_sessions_json, errors_json, limit, include_turns
             )
         } else {
             format!(
@@ -2740,6 +2751,9 @@ fn render_rlm_live_session_list_entry(
     path: &Path,
     bytes: u64,
     manifest: &JsonValue,
+    include_turns: bool,
+    turn_limit: usize,
+    config: &AppConfig,
 ) -> AppResult<String> {
     let JsonValue::Object(root) = manifest else {
         return Err(tool_failure(
@@ -2753,7 +2767,7 @@ fn render_rlm_live_session_list_entry(
     let active_turn_id = json_field_value(root, "active_turn_id");
     let queued_turns = json_field_value(root, "queued_turns");
     let last_error = json_field_value(root, "last_error");
-    Ok(format!(
+    let mut rendered = format!(
         "{{\"session_id\":\"{}\",\"path\":\"{}\",\"bytes\":{},\"status\":\"{}\",\"daemon_pid\":{},\"runtime_thread_id\":{},\"active_turn_id\":{},\"queued_turns\":{},\"updated_at\":\"{}\",\"last_error\":{}}}",
         json_escape(session_id),
         json_escape(&path.display().to_string()),
@@ -2765,7 +2779,206 @@ fn render_rlm_live_session_list_entry(
         queued_turns,
         json_escape(&updated_at),
         last_error
-    ))
+    );
+    if include_turns {
+        let turns = render_rlm_live_turn_entries(config, session_id, turn_limit)?;
+        rendered.pop();
+        rendered.push_str(&format!(",\"turns\":[{}]}}", turns));
+    }
+    Ok(rendered)
+}
+
+fn render_rlm_live_turn_entries(
+    config: &AppConfig,
+    session_id: &str,
+    limit: usize,
+) -> AppResult<String> {
+    let turns_dir = rlm_live_session_turns_dir(config, session_id);
+    if !turns_dir.exists() {
+        return Ok(String::new());
+    }
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(&turns_dir)
+        .map_err(|error| tool_failure(format!("rlm live turns read_dir failed: {error}")))?
+    {
+        let entry = entry
+            .map_err(|error| tool_failure(format!("rlm live turns read entry failed: {error}")))?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let content = fs::read_to_string(&path)
+            .map_err(|error| tool_failure(format!("rlm live turn payload read failed: {error}")))?;
+        let value = parse_json_value(&content).map_err(|error| {
+            tool_failure(format!("rlm live turn payload invalid JSON: {error}"))
+        })?;
+        let JsonValue::Object(root) = &value else {
+            return Err(tool_failure("rlm live turn payload must be a JSON object"));
+        };
+        let created_at = root
+            .get("created_at")
+            .and_then(json_as_string)
+            .unwrap_or("")
+            .to_string();
+        let task_id = root
+            .get("task_id")
+            .and_then(json_as_string)
+            .unwrap_or("")
+            .to_string();
+        entries.push((created_at, task_id, path, value));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    let mut out = String::new();
+    for (_created_at, _task_id, path, value) in entries.into_iter().take(limit) {
+        if !out.is_empty() {
+            out.push(',');
+        }
+        out.push_str(&json_value_to_string(&rlm_live_turn_inventory_json(
+            config, session_id, &path, &value,
+        )?));
+    }
+    Ok(out)
+}
+
+fn rlm_live_turn_inventory_json(
+    config: &AppConfig,
+    session_id: &str,
+    path: &Path,
+    value: &JsonValue,
+) -> AppResult<JsonValue> {
+    let JsonValue::Object(root) = value else {
+        return Err(tool_failure("rlm live turn payload must be a JSON object"));
+    };
+    let task_id = required_json_string(root, "task_id", "rlm live turn payload")?;
+    let payload_session_id = required_json_string(root, "session_id", "rlm live turn payload")?;
+    if payload_session_id != session_id {
+        return Err(tool_failure(format!(
+            "rlm live turn payload session_id `{payload_session_id}` does not match `{session_id}`"
+        )));
+    }
+    let runtime_task = rlm_runtime_store(config).load_task(task_id).ok();
+    let input_root = match root.get("input") {
+        Some(JsonValue::Object(input)) => Some(input),
+        _ => None,
+    };
+    let (result_preview, result_chars, result_truncated) =
+        rlm_preview_json(root.get("result_summary").and_then(json_as_string));
+    let (error_preview, error_chars, error_truncated) =
+        rlm_preview_json(root.get("error").and_then(json_as_string));
+    Ok(JsonValue::Object(BTreeMap::from([
+        (
+            "task_id".to_string(),
+            JsonValue::String(task_id.to_string()),
+        ),
+        (
+            "path".to_string(),
+            JsonValue::String(path.display().to_string()),
+        ),
+        (
+            "bytes".to_string(),
+            JsonValue::Number(
+                fs::metadata(path)
+                    .map(|meta| meta.len())
+                    .unwrap_or(0)
+                    .to_string(),
+            ),
+        ),
+        (
+            "status".to_string(),
+            root.get("status").cloned().unwrap_or(JsonValue::Null),
+        ),
+        (
+            "runtime_status".to_string(),
+            runtime_task
+                .as_ref()
+                .map(|task| JsonValue::String(task.status.clone()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "runtime_updated_at".to_string(),
+            runtime_task
+                .as_ref()
+                .map(|task| JsonValue::String(task.updated_at.clone()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "task".to_string(),
+            root.get("task").cloned().unwrap_or(JsonValue::Null),
+        ),
+        (
+            "steps".to_string(),
+            root.get("steps").cloned().unwrap_or(JsonValue::Null),
+        ),
+        (
+            "model".to_string(),
+            root.get("model").cloned().unwrap_or(JsonValue::Null),
+        ),
+        (
+            "workspace".to_string(),
+            root.get("workspace").cloned().unwrap_or(JsonValue::Null),
+        ),
+        (
+            "created_at".to_string(),
+            root.get("created_at").cloned().unwrap_or(JsonValue::Null),
+        ),
+        (
+            "updated_at".to_string(),
+            root.get("updated_at").cloned().unwrap_or(JsonValue::Null),
+        ),
+        (
+            "input_label".to_string(),
+            input_root
+                .and_then(|input| input.get("label").cloned())
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "input_chars".to_string(),
+            input_root
+                .and_then(|input| input.get("char_count").cloned())
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "input_lines".to_string(),
+            input_root
+                .and_then(|input| input.get("line_count").cloned())
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "cancel_reason".to_string(),
+            root.get("cancel_reason")
+                .cloned()
+                .unwrap_or(JsonValue::Null),
+        ),
+        ("result_summary_preview".to_string(), result_preview),
+        ("result_summary_chars".to_string(), result_chars),
+        ("result_summary_truncated".to_string(), result_truncated),
+        ("error_preview".to_string(), error_preview),
+        ("error_chars".to_string(), error_chars),
+        ("error_truncated".to_string(), error_truncated),
+    ])))
+}
+
+fn rlm_preview_json(raw: Option<&str>) -> (JsonValue, JsonValue, JsonValue) {
+    let Some(raw) = raw else {
+        return (JsonValue::Null, JsonValue::Null, JsonValue::Bool(false));
+    };
+    let chars = raw.chars().count();
+    let truncated = chars > MAX_RLM_LIVE_TURN_PREVIEW_CHARS;
+    let preview = if truncated {
+        let mut out = raw
+            .chars()
+            .take(MAX_RLM_LIVE_TURN_PREVIEW_CHARS)
+            .collect::<String>();
+        out.push_str("\n...[truncated]");
+        out
+    } else {
+        raw.to_string()
+    };
+    (
+        JsonValue::String(preview),
+        JsonValue::Number(chars.to_string()),
+        JsonValue::Bool(truncated),
+    )
 }
 
 fn list_rlm_live_session_manifest_entries(config: &AppConfig) -> AppResult<Vec<(String, PathBuf)>> {
@@ -2810,10 +3023,11 @@ fn rlm_live_session_turn_payload_path(
     session_id: &str,
     task_id: &str,
 ) -> PathBuf {
-    rlm_live_sessions_dir(config)
-        .join(session_id)
-        .join("turns")
-        .join(format!("{task_id}.json"))
+    rlm_live_session_turns_dir(config, session_id).join(format!("{task_id}.json"))
+}
+
+fn rlm_live_session_turns_dir(config: &AppConfig, session_id: &str) -> PathBuf {
+    rlm_live_sessions_dir(config).join(session_id).join("turns")
 }
 
 fn rlm_live_manifest_string_field(manifest: &JsonValue, key: &str) -> Option<String> {
@@ -4318,6 +4532,41 @@ mod tests {
         assert!(events.contains(r#""kind":"turn_queued""#));
         assert!(events.contains(r#""seq":1"#));
         assert!(events.contains(r#""seq":2"#));
+
+        let sessions = RlmModelSessionsTool {
+            config: config.clone(),
+        }
+        .execute(
+            ToolInput::new()
+                .with_arg("session_id", "live.queue")
+                .with_arg("include_turns", "true"),
+        )
+        .unwrap();
+        assert!(sessions.summary.contains(r#""include_live":true"#));
+        assert!(sessions.summary.contains(r#""include_turns":true"#));
+        assert!(sessions.summary.contains(r#""live_turns":["#));
+        assert!(sessions.summary.contains(&first_turn));
+        assert!(sessions.summary.contains(&second_turn));
+        assert!(sessions.summary.contains(r#""runtime_status":"pending""#));
+        assert!(sessions
+            .summary
+            .contains(r#""input_label":"inline content""#));
+        assert!(sessions
+            .summary
+            .contains(r#""input_label":"live session context only""#));
+
+        let listed = RlmModelSessionsTool {
+            config: config.clone(),
+        }
+        .execute(
+            ToolInput::new()
+                .with_arg("include_live", "true")
+                .with_arg("include_turns", "true"),
+        )
+        .unwrap();
+        assert!(listed.summary.contains(r#""include_turns":true"#));
+        assert!(listed.summary.contains(r#""turns":["#));
+        assert!(listed.summary.contains(&first_turn));
         let _ = fs::remove_dir_all(root);
     }
 

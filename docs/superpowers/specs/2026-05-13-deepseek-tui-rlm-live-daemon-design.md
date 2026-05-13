@@ -141,9 +141,11 @@ resumption.
 1. Live-session manifest and inventory:
    - add `.dscode/rlm-daemon/<session_id>/manifest.json`
    - extend `rlm_process_sessions include_live=true`
+   - extend `rlm_process_sessions include_turns=true`
    - no model execution yet
    - status: implemented by
-     `2026-05-13-deepseek-tui-rlm-live-session-inventory.md`
+     `2026-05-13-deepseek-tui-rlm-live-session-inventory.md` and
+     `2026-05-13-deepseek-tui-rlm-live-turn-inventory.md`
 2. Runtime-thread-backed live session:
    - create/reuse runtime thread per live RLM session
    - persist per-turn payloads with task, input, and execution options

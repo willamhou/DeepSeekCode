@@ -3466,8 +3466,8 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
     },
     StaticToolSpec {
         name: "rlm_process_sessions",
-        description: "List or inspect persisted rlm_process durable model-session summaries, optionally including live RLM daemon manifests, without running a child model. Use to discover existing long-input RLM process sessions before continuing or resetting them.",
-        properties_json: r#"{"session_id":{"type":"string","description":"Optional durable RLM model session id to inspect. Omit to list sessions."},"limit":{"type":"string","description":"Optional list limit, clamped to 1-100 and defaulting to 20."},"include_live":{"type":"string","description":"Set true/1/yes/on to include .dscode/rlm-daemon live-session manifests alongside legacy .dscode/rlm-model summaries."}}"#,
+        description: "List or inspect persisted rlm_process durable model-session summaries, optionally including live RLM daemon manifests and live turn inventory, without running a child model. Use to discover existing long-input RLM process sessions before continuing or resetting them.",
+        properties_json: r#"{"session_id":{"type":"string","description":"Optional durable RLM model session id to inspect. Omit to list sessions."},"limit":{"type":"string","description":"Optional list limit, clamped to 1-100 and defaulting to 20."},"include_live":{"type":"string","description":"Set true/1/yes/on to include .dscode/rlm-daemon live-session manifests alongside legacy .dscode/rlm-model summaries."},"include_turns":{"type":"string","description":"Set true/1/yes/on to include live turn payload inventory with runtime status, input metadata, result preview, and error preview. Implies include_live."}}"#,
         required_json: r#"[]"#,
     },
     StaticToolSpec {
@@ -5205,6 +5205,7 @@ mod tests {
         assert!(openai.contains("\"session_id\""));
         assert!(openai.contains("\"reset\""));
         assert!(openai.contains("\"include_live\""));
+        assert!(openai.contains("\"include_turns\""));
         assert!(openai.contains("\"after_seq\""));
         assert!(openai.contains("\"timeout_ms\""));
         assert!(openai.contains("\"turn_id\""));

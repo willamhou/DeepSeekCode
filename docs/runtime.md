@@ -1402,9 +1402,12 @@ counts, last task metadata, and full stored summaries for a requested
 `session_id` without spending model tokens. Passing `include_live=true` also
 reports normalized live-daemon manifests from
 `.dscode/rlm-daemon/<session_id>/manifest.json`, including daemon status,
-runtime thread id, queued turn count, active turn id, and last error. This is a
-read-only inventory surface for the live RLM daemon design; it does not start a
-daemon. `rlm_process live=true session_id=<id>` creates or reuses a live
+runtime thread id, queued turn count, active turn id, and last error. Passing
+`include_turns=true` implies `include_live=true` and adds live turn payload
+inventory with runtime status, input label/counts, cancellation reason, and
+bounded result/error previews without returning the long input content. This is
+a read-only inventory surface for the live RLM daemon design; it does not start
+a daemon. `rlm_process live=true session_id=<id>` creates or reuses a live
 session runtime thread, enqueues a pending `rlm_process` runtime task, writes
 the live manifest, persists the turn payload under
 `.dscode/rlm-daemon/<session_id>/turns/<task-id>.json`, and appends a
