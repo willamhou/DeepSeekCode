@@ -132,6 +132,7 @@ Supported event directories:
 .dscode/hooks/subagent_start/*
 .dscode/hooks/subagent_stop/*
 .dscode/hooks/pre_compact/*
+.dscode/hooks/shell_env/*
 ```
 
 Scripts must be executable. DeepseekCode runs user hooks first, then project hooks, in lexical path
@@ -139,6 +140,9 @@ order. Each script receives a JSON payload on stdin and `DSCODE_HOOK_EVENT` in t
 `user_prompt_submit`, `pre_tool_use`, and `permission_request` scripts block the turn or tool call
 when they exit nonzero or return `{"decision":"deny","reason":"..."}`. Other hook failures are
 added back as advisory hook observations.
+`shell_env` runs immediately before `run_shell`, `exec_shell`, and `task_shell_start` tool
+execution. Its stdout is parsed as `KEY=VALUE` or `export KEY=VALUE` lines and injected into that
+one shell process; only applied key names are reported back to the model, not values.
 
 ## Cross-turn context
 

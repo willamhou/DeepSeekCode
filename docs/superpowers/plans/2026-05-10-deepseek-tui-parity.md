@@ -136,6 +136,10 @@ Landed first slice:
   AgentLoop/runtime/TUI `kind = "network"` permission requests, with direct
   non-registry tool execution still fail-closed; `deepseek config network
   allow|deny <host>` persists host decisions back into project config
+- DeepSeek-TUI `shell_env` hook parity landed: enabled local hooks can now run
+  immediately before `run_shell`, `exec_shell`, and `task_shell_start`, parse
+  `KEY=VALUE` / `export KEY=VALUE` stdout, inject those values into the spawned
+  shell process, and report only applied key names back to the model/runtime
 - DeepSeek-TUI optional document/image helpers (`pandoc_convert` and
   `image_ocr`) landed as local dependency wrappers with clear missing-binary
   errors

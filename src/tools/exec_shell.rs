@@ -1,5 +1,7 @@
 use crate::error::{app_error, AppResult};
-use crate::tools::run_shell::{is_safe_shell_command, RunShellTool};
+use crate::tools::run_shell::{
+    apply_shell_env, is_safe_shell_command, shell_env_from_input, RunShellTool,
+};
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
 use crate::util::json::{
     json_as_string, json_as_u64, json_value_to_string, parse_root_object, JsonValue,
@@ -86,6 +88,7 @@ impl Tool for ExecShellTool {
         if !is_safe_shell_command(command) {
             return Err(app_error(format!("command not allowed: {command}")));
         }
+        let shell_env = shell_env_from_input(&input);
         let background = truthy(input.get("background"));
         let tty_options = parse_tty_options(&input)?;
         if !background {
@@ -98,11 +101,20 @@ impl Tool for ExecShellTool {
                     .get("stdin")
                     .or_else(|| input.get("input"))
                     .or_else(|| input.get("data"));
-                return run_managed_foreground_shell(command, cwd, stdin, detach_after_ms);
+                return run_managed_foreground_shell(
+                    command,
+                    cwd,
+                    stdin,
+                    detach_after_ms,
+                    &shell_env,
+                );
             }
             let mut shell_input = ToolInput::new().with_arg("command", command.to_string());
             if let Some(cwd) = input.get("cwd") {
                 shell_input = shell_input.with_arg("cwd", cwd.to_string());
+            }
+            for (key, value) in &shell_env {
+                shell_input = shell_input.with_arg(format!("env.{key}"), value.clone());
             }
             return RunShellTool.execute(shell_input);
         }
@@ -112,10 +124,13 @@ impl Tool for ExecShellTool {
             .get("stdin")
             .or_else(|| input.get("input"))
             .or_else(|| input.get("data"));
-        let task_id = shell_manager()
-            .lock()
-            .unwrap()
-            .spawn(command, cwd, stdin, tty_options)?;
+        let task_id = shell_manager().lock().unwrap().spawn_with_env(
+            command,
+            cwd,
+            stdin,
+            tty_options,
+            &shell_env,
+        )?;
         Ok(ToolOutput {
             summary: format!(
                 "task_id: {task_id}\nstatus: running\ncommand: {command}\ncwd: {cwd}\ntty: {}\npty_backend: {}\nattachable: false\nresizable: false\ntty_rows: {}\ntty_cols: {}\nPoll with exec_shell_wait task_id={task_id} or cancel with exec_shell_cancel task_id={task_id}.",
@@ -133,12 +148,15 @@ fn run_managed_foreground_shell(
     cwd: &str,
     stdin: Option<&str>,
     detach_after_ms: u64,
+    env: &BTreeMap<String, String>,
 ) -> AppResult<ToolOutput> {
-    let task_id =
-        shell_manager()
-            .lock()
-            .unwrap()
-            .spawn(command, cwd, stdin, ShellTtyOptions::default())?;
+    let task_id = shell_manager().lock().unwrap().spawn_with_env(
+        command,
+        cwd,
+        stdin,
+        ShellTtyOptions::default(),
+        env,
+    )?;
     let deadline = Instant::now() + Duration::from_millis(detach_after_ms.min(MAX_TIMEOUT_MS));
     loop {
         let mut manager = shell_manager().lock().unwrap();
@@ -194,6 +212,11 @@ impl Tool for TaskShellStartTool {
         }
         if let Some(tty_cols) = input.get("tty_cols") {
             shell_input = shell_input.with_arg("tty_cols", tty_cols.to_string());
+        }
+        for (key, value) in &input.args {
+            if key.starts_with("env.") {
+                shell_input = shell_input.with_arg(key.clone(), value.clone());
+            }
         }
         let mut output = ExecShellTool.execute(shell_input)?;
         output.summary = output
@@ -588,6 +611,17 @@ impl BackgroundShellManager {
         stdin_data: Option<&str>,
         tty_options: ShellTtyOptions,
     ) -> AppResult<String> {
+        self.spawn_with_env(command, cwd, stdin_data, tty_options, &BTreeMap::new())
+    }
+
+    fn spawn_with_env(
+        &mut self,
+        command: &str,
+        cwd: &str,
+        stdin_data: Option<&str>,
+        tty_options: ShellTtyOptions,
+        env: &BTreeMap<String, String>,
+    ) -> AppResult<String> {
         let id = generated_job_id();
         let record_dir = shell_job_record_dir(cwd, &id);
         fs::create_dir_all(&record_dir)?;
@@ -604,6 +638,7 @@ impl BackgroundShellManager {
             mode: stdin_mode,
         } = prepare_background_stdin(&record_dir)?;
         let mut process = shell_process_for_background_job(command, tty_options)?;
+        apply_shell_env(&mut process, env);
         process
             .current_dir(cwd)
             .stdin(stdin_stdio)
@@ -2719,6 +2754,40 @@ mod tests {
         assert!(waited.summary.contains("status: completed"));
         assert!(waited.summary.contains("stdout_delta:"));
         assert!(waited.summary.contains("ready"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exec_shell_background_applies_hidden_env_args() {
+        let root = temp_root("env");
+        fs::create_dir_all(&root).unwrap();
+        let cwd = root.display().to_string();
+        let started = ExecShellTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("command", "echo $DSCODE_EXEC_SHELL_ENV_TEST")
+                    .with_arg("background", "true")
+                    .with_arg("cwd", cwd.clone())
+                    .with_arg("env.DSCODE_EXEC_SHELL_ENV_TEST", "from-exec-env"),
+            )
+            .unwrap();
+        let task_id = task_id_from(&started.summary);
+        let waited = ExecShellWaitTool {
+            tool_name: "exec_shell_wait",
+        }
+        .execute(
+            ToolInput::new()
+                .with_arg("task_id", task_id)
+                .with_arg("cwd", cwd.clone())
+                .with_arg("timeout_ms", "1000"),
+        )
+        .unwrap();
+
+        assert!(
+            waited.summary.contains("from-exec-env"),
+            "{}",
+            waited.summary
+        );
         let _ = fs::remove_dir_all(root);
     }
 

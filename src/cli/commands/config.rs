@@ -163,6 +163,7 @@ pub(crate) fn init_config_at(root: &std::path::Path, force: bool) -> AppResult<s
         "subagent_start",
         "subagent_stop",
         "pre_compact",
+        "shell_env",
     ] {
         std::fs::create_dir_all(root.join(&config.hooks.project_dir).join(event))?;
     }
@@ -481,6 +482,7 @@ mod tests {
         assert!(root.join(".dscode/sessions").is_dir());
         assert!(root.join(".dscode/commands").is_dir());
         assert!(root.join(".dscode/hooks/pre_tool_use").is_dir());
+        assert!(root.join(".dscode/hooks/shell_env").is_dir());
         assert!(root.join(".dscode/mcp.json").is_file());
         let mcp = std::fs::read_to_string(root.join(".dscode/mcp.json")).unwrap();
         assert!(mcp.contains("mcpServers"));

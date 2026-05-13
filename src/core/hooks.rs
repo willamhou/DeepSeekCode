@@ -22,6 +22,7 @@ pub enum HookEvent {
     SubagentStart,
     SubagentStop,
     PreCompact,
+    ShellEnv,
 }
 
 impl HookEvent {
@@ -36,6 +37,7 @@ impl HookEvent {
             Self::SubagentStart => "subagent_start",
             Self::SubagentStop => "subagent_stop",
             Self::PreCompact => "pre_compact",
+            Self::ShellEnv => "shell_env",
         }
     }
 
@@ -256,6 +258,50 @@ impl HookRunner {
         )
     }
 
+    pub fn shell_env(
+        &self,
+        task: &str,
+        tool_name: &str,
+        input: &ToolInput,
+    ) -> AppResult<ShellEnvHookResult> {
+        let mut result = ShellEnvHookResult::default();
+        if !self.enabled {
+            return Ok(result);
+        }
+
+        let payload = hook_payload(HookPayload {
+            event: HookEvent::ShellEnv,
+            task,
+            tool_name: Some(tool_name),
+            tool_input: Some(input),
+            tool_status: None,
+            tool_output: None,
+            metadata: BTreeMap::new(),
+        });
+
+        for script in self.scripts_for(HookEvent::ShellEnv)? {
+            let hook = run_hook_script(&script, HookEvent::ShellEnv, &payload, self.timeout_ms)?;
+            if !hook.success {
+                result.notices.push(format!(
+                    "hook `{}` produced no shell env because it failed or timed out",
+                    script.display()
+                ));
+                continue;
+            }
+            let (vars, notices) = parse_shell_env_stdout(&hook.stdout);
+            for (key, value) in vars {
+                result.vars.insert(key, value);
+            }
+            result.notices.extend(
+                notices
+                    .into_iter()
+                    .map(|notice| format!("{}: {notice}", script.display())),
+            );
+        }
+
+        Ok(result)
+    }
+
     fn run(&self, event: HookEvent, payload: String) -> AppResult<Option<String>> {
         if !self.enabled {
             return Ok(None);
@@ -389,6 +435,58 @@ fn hook_payload(payload: HookPayload<'_>) -> String {
 enum HookStdoutDecision {
     Allow(Option<String>),
     Deny(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShellEnvHookResult {
+    pub vars: BTreeMap<String, String>,
+    pub notices: Vec<String>,
+}
+
+fn parse_shell_env_stdout(stdout: &str) -> (BTreeMap<String, String>, Vec<String>) {
+    let mut vars = BTreeMap::new();
+    let mut notices = Vec::new();
+    for raw_line in stdout.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let Some((key, value)) = line.split_once('=') else {
+            notices.push("ignored shell_env line without `=`".to_string());
+            continue;
+        };
+        let key = key.trim();
+        if !is_valid_env_key(key) {
+            notices.push("ignored invalid shell_env key".to_string());
+            continue;
+        }
+        vars.insert(key.to_string(), unquote_env_value(value.trim()));
+    }
+    (vars, notices)
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn unquote_env_value(value: &str) -> String {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+        {
+            return value[1..value.len() - 1].to_string();
+        }
+    }
+    value.to_string()
 }
 
 fn hook_stdout_decision(event: HookEvent, stdout: &str) -> AppResult<HookStdoutDecision> {
@@ -744,6 +842,22 @@ mod tests {
     }
 
     #[test]
+    fn shell_env_stdout_parser_accepts_export_lines_and_reports_invalid_lines() {
+        let (vars, notices) = parse_shell_env_stdout(
+            "export DSCODE_TOKEN=secret\nPATH_APPEND=\"/tmp/bin\"\n# comment\nbad line\n1BAD=no\n",
+        );
+
+        assert_eq!(vars.get("DSCODE_TOKEN").map(String::as_str), Some("secret"));
+        assert_eq!(
+            vars.get("PATH_APPEND").map(String::as_str),
+            Some("/tmp/bin")
+        );
+        assert_eq!(notices.len(), 2);
+        assert!(notices[0].contains("without `=`"));
+        assert!(notices[1].contains("invalid shell_env key"));
+    }
+
+    #[test]
     #[cfg(unix)]
     fn user_prompt_submit_collects_hook_stdout() {
         let root = temp_root("user-prompt");
@@ -848,5 +962,39 @@ mod tests {
             .unwrap();
 
         assert!(output.contains("compact note"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shell_env_runs_hooks_and_returns_vars_without_values_in_notices() {
+        let root = temp_root("shell-env");
+        let hook = root.join("hooks/shell_env/10-env");
+        write_hook(
+            &hook,
+            "printf 'DSCODE_SHELL_ENV_TEST=from-hook\\nexport SECOND_VALUE=\"two\"\\n'",
+        );
+        let runner = HookRunner::new(&HooksConfig {
+            enabled: true,
+            project_dir: root.join("hooks").display().to_string(),
+            ..HooksConfig::default()
+        });
+
+        let output = runner
+            .shell_env(
+                "task",
+                "exec_shell",
+                &ToolInput::new().with_arg("command", "echo $DSCODE_SHELL_ENV_TEST"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            output.vars.get("DSCODE_SHELL_ENV_TEST").map(String::as_str),
+            Some("from-hook")
+        );
+        assert_eq!(
+            output.vars.get("SECOND_VALUE").map(String::as_str),
+            Some("two")
+        );
+        assert!(output.notices.is_empty(), "{:?}", output.notices);
     }
 }

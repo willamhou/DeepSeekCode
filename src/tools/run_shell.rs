@@ -2,6 +2,7 @@ use crate::error::app_error;
 use crate::error::AppResult;
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
 use crate::util::cancel::{check_cancelled, CancellationCheck};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
@@ -47,6 +48,7 @@ impl RunShellTool {
 
         let mut process = Command::new("sh");
         process.args(["-lc", command]).current_dir(cwd);
+        apply_shell_env(&mut process, &shell_env_from_input(&input));
         if let Some(path) = augmented_path_for_toolchains() {
             process.env("PATH", path);
         }
@@ -104,6 +106,35 @@ impl RunShellTool {
 
         Ok(ToolOutput { summary })
     }
+}
+
+pub(crate) fn shell_env_from_input(input: &ToolInput) -> BTreeMap<String, String> {
+    input
+        .args
+        .iter()
+        .filter_map(|(key, value)| {
+            key.strip_prefix("env.")
+                .filter(|env_key| is_valid_shell_env_key(env_key))
+                .map(|env_key| (env_key.to_string(), value.clone()))
+        })
+        .collect()
+}
+
+pub(crate) fn apply_shell_env(process: &mut Command, env: &BTreeMap<String, String>) {
+    for (key, value) in env {
+        process.env(key, value);
+    }
+}
+
+fn is_valid_shell_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn run_command_output(
@@ -517,6 +548,33 @@ mod tests {
         assert!(uses_isolated_python_cache("python -m pytest tests"));
         assert!(!uses_isolated_python_cache("python script.py"));
         assert!(!uses_isolated_python_cache("cargo test"));
+    }
+
+    #[test]
+    fn run_shell_applies_hidden_env_args() {
+        let output = RunShellTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("command", "echo $DSCODE_RUN_SHELL_ENV_TEST")
+                    .with_arg("env.DSCODE_RUN_SHELL_ENV_TEST", "from-env"),
+            )
+            .unwrap();
+
+        assert!(output.summary.contains("from-env"), "{}", output.summary);
+    }
+
+    #[test]
+    fn shell_env_from_input_ignores_invalid_keys() {
+        let env = shell_env_from_input(
+            &ToolInput::new()
+                .with_arg("env.GOOD_KEY", "ok")
+                .with_arg("env.1BAD", "bad")
+                .with_arg("command", "echo hi"),
+        );
+
+        assert_eq!(env.get("GOOD_KEY").map(String::as_str), Some("ok"));
+        assert!(!env.contains_key("1BAD"));
+        assert!(!env.contains_key("command"));
     }
 
     #[test]

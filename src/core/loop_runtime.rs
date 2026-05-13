@@ -418,7 +418,10 @@ impl AgentLoop {
             }
 
             match response.action {
-                ModelAction::CallTool { tool_name, input } => {
+                ModelAction::CallTool {
+                    tool_name,
+                    mut input,
+                } => {
                     check_cancelled(cancel_check.as_ref())?;
                     let event_input = input.args.clone();
                     emit_tool_call(run_events.as_ref(), &tool_name, &event_input);
@@ -620,6 +623,39 @@ impl AgentLoop {
                                     );
                                     continue;
                                 }
+                            }
+                        }
+                    }
+
+                    if shell_env_hook_applies_to(&tool_name) {
+                        match hooks.shell_env(&context.task, &tool_name, &input) {
+                            Ok(shell_env) => {
+                                let mut applied_keys = Vec::new();
+                                for (key, value) in shell_env.vars {
+                                    input.args.insert(format!("env.{key}"), value);
+                                    applied_keys.push(key);
+                                }
+                                if !applied_keys.is_empty() {
+                                    observations.push(Observation::ok(
+                                        "hook",
+                                        format!(
+                                            "shell_env applied keys: {}",
+                                            applied_keys.join(", ")
+                                        ),
+                                    ));
+                                }
+                                if !shell_env.notices.is_empty() {
+                                    observations.push(Observation::ok(
+                                        "hook",
+                                        format!("shell_env: {}", shell_env.notices.join("; ")),
+                                    ));
+                                }
+                            }
+                            Err(error) => {
+                                observations.push(Observation::ok(
+                                    "hook",
+                                    format!("shell_env hook skipped: {error}"),
+                                ));
                             }
                         }
                     }
@@ -955,6 +991,10 @@ fn execute_tool_with_cancel(
     } else {
         registry.execute_with_policy_and_cancel(tool_name, input, policy, None)
     }
+}
+
+fn shell_env_hook_applies_to(tool_name: &str) -> bool {
+    matches!(tool_name, "exec_shell" | "run_shell" | "task_shell_start")
 }
 
 fn check_cancelled(cancel_check: Option<&SharedAgentCancelCheck>) -> AppResult<()> {
@@ -3190,6 +3230,36 @@ shell_allowlist = []
         }
     }
 
+    struct ShellEnvHookClient {
+        calls: RefCell<usize>,
+    }
+
+    impl ModelClient for ShellEnvHookClient {
+        fn respond(
+            &self,
+            _input: ModelRequest,
+            _events: &mut dyn StreamEvents,
+        ) -> crate::error::AppResult<(ModelResponse, Option<TokenUsage>)> {
+            let n = *self.calls.borrow();
+            *self.calls.borrow_mut() = n + 1;
+            let action = if n == 0 {
+                ModelAction::CallTool {
+                    tool_name: "run_shell".to_string(),
+                    input: ToolInput::new().with_arg("command", "echo $DSCODE_SHELL_ENV_SECRET"),
+                }
+            } else {
+                ModelAction::Finish
+            };
+            Ok((
+                ModelResponse {
+                    message: format!("shell env step {n}"),
+                    action,
+                },
+                None,
+            ))
+        }
+    }
+
     #[test]
     #[cfg(unix)]
     fn run_with_client_blocks_tool_when_pre_tool_hook_denies() {
@@ -3237,6 +3307,66 @@ shell_allowlist = []
             crate::model::protocol::ObservationStatus::Failed
         );
         assert!(event.output.contains("blocked by pre hook"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_with_client_applies_shell_env_hook_without_recording_secret_input() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_tmp("shell_env_hook");
+        let hook_dir = root.join("hooks/shell_env");
+        fs::create_dir_all(&hook_dir).unwrap();
+        let hook_path = hook_dir.join("10-env");
+        fs::write(
+            &hook_path,
+            "#!/bin/sh\nprintf 'DSCODE_SHELL_ENV_SECRET=hook-secret\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&hook_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook_path, permissions).unwrap();
+
+        let mut cfg = crate::config::types::AppConfig::default();
+        cfg.approval.require_shell_confirmation = false;
+        cfg.hooks.enabled = true;
+        cfg.hooks.project_dir = root.join("hooks").display().to_string();
+        let agent = AgentLoop::new(cfg);
+        let client = ShellEnvHookClient {
+            calls: RefCell::new(0),
+        };
+
+        let result = agent
+            .run_with_client(
+                TaskContext::new("shell env hook".to_string(), None),
+                AgentLoopOptions {
+                    steps: 2,
+                    emit_progress: false,
+                    persist_session: false,
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(result.tool_events.len(), 1);
+        let event = &result.tool_events[0];
+        assert_eq!(event.tool_name, "run_shell");
+        assert!(event.output.contains("hook-secret"), "{}", event.output);
+        assert_eq!(
+            event.input.get("command").map(String::as_str),
+            Some("echo $DSCODE_SHELL_ENV_SECRET")
+        );
+        assert!(
+            !event
+                .input
+                .values()
+                .any(|value| value.contains("hook-secret")),
+            "{:?}",
+            event.input
+        );
 
         let _ = fs::remove_dir_all(root);
     }
