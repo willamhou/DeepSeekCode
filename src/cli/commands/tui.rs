@@ -14,6 +14,10 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::cli::app::{McpConfigScope, TuiArgs};
+use crate::cli::commands::config::{
+    network_policy_summary_at, remove_network_rule_at, set_network_default_at, set_network_rule_at,
+    NetworkPolicySummary, NetworkRuleTarget,
+};
 use crate::cli::commands::mcp::{
     add_mcp_server_at, init_mcp_config_at, list_remote_prompts_summary,
     list_remote_resource_templates_summary, list_remote_resources_summary,
@@ -47,8 +51,8 @@ use crate::tools::types::{Tool, ToolInput};
 use crate::tui::{
     render_once, run_interactive, run_interactive_with_refresh_actions_and_live, TuiAction, TuiApp,
     TuiApprovalRequest, TuiAutomationRecord, TuiItem, TuiLiveEvent, TuiMcpConfigScope,
-    TuiMcpDetailKind, TuiMemoryCommand, TuiSession, TuiTaskRecord, TuiThread, TuiUsageSummary,
-    TuiUserInputRequest,
+    TuiMcpDetailKind, TuiMemoryCommand, TuiNetworkCommand, TuiSession, TuiTaskRecord, TuiThread,
+    TuiUsageSummary, TuiUserInputRequest,
 };
 use crate::ui::stream::StreamEvents;
 use crate::util::json::{
@@ -606,6 +610,9 @@ fn handle_tui_http_action(
         TuiAction::InitProjectInstructions { .. } => {
             app.set_status("project instructions init requires local file-backed TUI".to_string());
         }
+        TuiAction::Network { .. } => {
+            app.set_status("network commands require local file-backed TUI".to_string());
+        }
         TuiAction::RespondApproval {
             thread_id,
             turn_id,
@@ -1144,11 +1151,30 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Health => validate_servers_summary(config),
         TuiMcpDetailKind::Shell => Err(app_error("shell details are not MCP details")),
         TuiMcpDetailKind::Memory => Err(app_error("memory details are not MCP details")),
+        TuiMcpDetailKind::Network => Err(app_error("network details are not MCP details")),
         TuiMcpDetailKind::Rollback => Err(app_error("rollback details are not MCP details")),
         TuiMcpDetailKind::Reasoning => Err(app_error("reasoning details are not MCP details")),
         TuiMcpDetailKind::ComposerStash => {
             Err(app_error("composer stash details are not MCP details"))
         }
+    }
+}
+
+fn format_network_policy_summary(summary: &NetworkPolicySummary) -> String {
+    format!(
+        "Network policy ({})\n\nnetwork.default = {}\nnetwork.allow = {}\nnetwork.deny = {}\n\nUse network allow <host>, network deny <host>, network remove <host>, or network default <allow|deny|prompt>.",
+        summary.path.display(),
+        summary.default,
+        format_string_list(&summary.allow),
+        format_string_list(&summary.deny)
+    )
+}
+
+fn format_string_list(values: &[String]) -> String {
+    if values.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[{}]", values.join(", "))
     }
 }
 
@@ -1258,6 +1284,50 @@ fn handle_tui_action_with_live(
         TuiAction::InitProjectInstructions { workspace } => {
             let path = init_project_instructions_at(Path::new(&workspace))?;
             app.set_status(format!("created project instructions: {}", path.display()));
+        }
+        TuiAction::Network { workspace, command } => {
+            let workspace = Path::new(&workspace);
+            let status = match command {
+                TuiNetworkCommand::List => "network policy listed".to_string(),
+                TuiNetworkCommand::Allow { host } => {
+                    let result = set_network_rule_at(workspace, &host, NetworkRuleTarget::Allow)?;
+                    if result.changed {
+                        format!("network host allowed: {}", result.host)
+                    } else {
+                        format!("network host already allowed: {}", result.host)
+                    }
+                }
+                TuiNetworkCommand::Deny { host } => {
+                    let result = set_network_rule_at(workspace, &host, NetworkRuleTarget::Deny)?;
+                    if result.changed {
+                        format!("network host denied: {}", result.host)
+                    } else {
+                        format!("network host already denied: {}", result.host)
+                    }
+                }
+                TuiNetworkCommand::Remove { host } => {
+                    let result = remove_network_rule_at(workspace, &host)?;
+                    if result.changed {
+                        format!("network host removed: {}", result.host)
+                    } else {
+                        format!("network host not present: {}", result.host)
+                    }
+                }
+                TuiNetworkCommand::Default { value } => {
+                    let result = set_network_default_at(workspace, &value)?;
+                    if result.changed {
+                        format!("network default set: {}", result.value)
+                    } else {
+                        format!("network default unchanged: {}", result.value)
+                    }
+                }
+            };
+            let summary = network_policy_summary_at(workspace)?;
+            app.set_mcp_detail(
+                TuiMcpDetailKind::Network,
+                format_network_policy_summary(&summary),
+            );
+            app.set_status(status);
         }
         TuiAction::RespondApproval {
             thread_id,
@@ -3917,6 +3987,26 @@ mod tests {
     }
 
     #[test]
+    fn handle_tui_http_action_rejects_network_commands_as_local_only() {
+        let client = RuntimeHttpClient::from_url("http://127.0.0.1:9").unwrap();
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_http_action(
+            &client,
+            &mut app,
+            TuiAction::Network {
+                workspace: ".".to_string(),
+                command: TuiNetworkCommand::List,
+            },
+        )
+        .unwrap();
+
+        assert!(render_once(&app, 120, 36)
+            .unwrap()
+            .contains("network commands require local file-backed TUI"));
+    }
+
+    #[test]
     fn handle_tui_http_action_cancels_remote_task() {
         let store = temp_store("http-task-cancel-action");
         let session = store
@@ -4391,6 +4481,68 @@ mod tests {
         assert!(render_once(&app, 120, 36)
             .unwrap()
             .contains("created project instructions"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handle_tui_action_manages_network_policy() {
+        let root = temp_root("network-policy");
+        let store = RuntimeStore::new(root.join("runtime"));
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::Network {
+                workspace: root.display().to_string(),
+                command: TuiNetworkCommand::Deny {
+                    host: "*.Example.com".to_string(),
+                },
+            },
+        )
+        .unwrap();
+
+        let config = std::fs::read_to_string(root.join(".dscode/config.toml")).unwrap();
+        assert!(config.contains(r#"network.deny = [".example.com"]"#));
+        assert!(render_once(&app, 120, 36)
+            .unwrap()
+            .contains("network host denied: .example.com"));
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::Network {
+                workspace: root.display().to_string(),
+                command: TuiNetworkCommand::Allow {
+                    host: "*.example.com".to_string(),
+                },
+            },
+        )
+        .unwrap();
+
+        let config = std::fs::read_to_string(root.join(".dscode/config.toml")).unwrap();
+        assert!(config.contains(r#"network.allow = [".example.com"]"#));
+        assert!(config.contains("network.deny = []"));
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::Network {
+                workspace: root.display().to_string(),
+                command: TuiNetworkCommand::Default {
+                    value: "prompt".to_string(),
+                },
+            },
+        )
+        .unwrap();
+
+        let output = render_once(&app, 120, 36).unwrap();
+        assert!(output.contains("network default set: prompt"));
+        assert!(output.contains("network.default = prompt"));
 
         let _ = std::fs::remove_dir_all(root);
     }

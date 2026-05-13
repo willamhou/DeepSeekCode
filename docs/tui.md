@@ -19,6 +19,8 @@ Current surfaces:
   `rename <title>` / `/rename <title>`
 - project instruction initialization with `init` / `/init`, creating
   `AGENTS.md` in the selected session workspace
+- network policy controls with `network list|allow|deny|remove|default`,
+  editing the selected session workspace `.dscode/config.toml`
 - composer and command-palette editing preserve terminal modifier keys, including
   Ctrl-based line, word, and cursor controls
 - task panel with active thread status, runtime item count, item state/type
@@ -258,6 +260,11 @@ Command palette commands currently implemented:
 | `memory clear` | Empty the configured user memory file when memory is enabled |
 | `memory edit` | Print the editor command for the configured user memory file |
 | `memory help` | Show local memory command help |
+| `network`, `network list`, `/network list` | Show `network.default`, `network.allow`, and `network.deny` in the right-side detail panel |
+| `network allow <host>`, `/network allow <host>` | Allow a host in the selected workspace project config |
+| `network deny <host>`, `/network deny <host>` | Deny a host in the selected workspace project config |
+| `network remove <host>`, `/network remove <host>` | Remove a host from allow and deny lists |
+| `network default <allow\|deny\|prompt>` | Set the default host policy |
 | `automations`, `automation` | Show active-thread automation count in the status bar |
 | `automation trigger`, `automation run` | Trigger the first active automation in the current thread |
 | `automation trigger <id> [prompt]` | Trigger one current-thread automation with an optional prompt override |
@@ -322,11 +329,11 @@ refreshes the MCP inventory. The manager also keeps a selected-server action
 strip so `n`/`p` can move selection and `e`/`d`/`x`/`t` can enable, disable,
 open a remove confirmation modal, or inspect tools for that server. The shorter
 discovery commands still use the scrollable right-side detail panel. Project
-instruction init, session rename, rollback, memory, composer stash, custom slash
-commands, and MCP manager commands are local-only because they operate on the
-client's runtime/session files, git worktree, project/user MCP config,
-configured MCP transports, `.dscode/tui/composer-stash.json`, custom command
-markdown files, and user memory file; HTTP-runtime TUI
+instruction init, session rename, rollback, memory, network policy, composer
+stash, custom slash commands, and MCP manager commands are local-only because
+they operate on the client's runtime/session files, git worktree, project/user
+MCP config, configured MCP transports, `.dscode/tui/composer-stash.json`,
+custom command markdown files, and user memory file; HTTP-runtime TUI
 sessions report that those commands require local file-backed TUI. General
 external command execution is currently limited to the allowlisted local
 background shell path.

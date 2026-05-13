@@ -442,6 +442,7 @@ pub enum TuiMcpDetailKind {
     Health,
     Shell,
     Memory,
+    Network,
     Rollback,
     Reasoning,
     ComposerStash,
@@ -458,6 +459,7 @@ impl TuiMcpDetailKind {
             Self::Health => "health",
             Self::Shell => "shell",
             Self::Memory => "memory",
+            Self::Network => "network",
             Self::Rollback => "rollback",
             Self::Reasoning => "reasoning",
             Self::ComposerStash => "stash",
@@ -474,6 +476,7 @@ impl TuiMcpDetailKind {
             Self::Health => "MCP Health",
             Self::Shell => "Shell Jobs",
             Self::Memory => "Memory",
+            Self::Network => "Network",
             Self::Rollback => "Rollback",
             Self::Reasoning => "Reasoning",
             Self::ComposerStash => "Composer Stash",
@@ -490,6 +493,7 @@ impl TuiMcpDetailKind {
             Self::Health => Self::Manager,
             Self::Shell => Self::Manager,
             Self::Memory => Self::Manager,
+            Self::Network => Self::Manager,
             Self::Rollback => Self::Manager,
             Self::Reasoning => Self::Manager,
             Self::ComposerStash => Self::Manager,
@@ -506,6 +510,7 @@ impl TuiMcpDetailKind {
             Self::Health => Self::ResourceTemplates,
             Self::Shell => Self::Manager,
             Self::Memory => Self::Manager,
+            Self::Network => Self::Manager,
             Self::Rollback => Self::Manager,
             Self::Reasoning => Self::Manager,
             Self::ComposerStash => Self::Manager,
@@ -633,6 +638,15 @@ enum TuiComposerStashCommand {
     Clear,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuiNetworkCommand {
+    List,
+    Allow { host: String },
+    Deny { host: String },
+    Remove { host: String },
+    Default { value: String },
+}
+
 fn parse_tui_stash_command(line: &str) -> Option<Result<TuiComposerStashCommand, String>> {
     let trimmed = line.trim();
     let rest = strip_tui_command_prefix(trimmed, "/stash")
@@ -646,6 +660,32 @@ fn parse_tui_stash_command(line: &str) -> Option<Result<TuiComposerStashCommand,
         ["clear"] | ["wipe"] | ["drop"] => Some(Ok(TuiComposerStashCommand::Clear)),
         _ => Some(Err(
             "usage: stash [list|pop|clear] or /stash [list|pop|clear]".to_string(),
+        )),
+    }
+}
+
+fn parse_tui_network_command(line: &str) -> Option<Result<TuiNetworkCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/network")
+        .or_else(|| strip_tui_command_prefix(trimmed, "network"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] | ["list"] | ["ls"] | ["show"] => Some(Ok(TuiNetworkCommand::List)),
+        ["allow", host] => Some(Ok(TuiNetworkCommand::Allow {
+            host: (*host).to_string(),
+        })),
+        ["deny", host] | ["block", host] => Some(Ok(TuiNetworkCommand::Deny {
+            host: (*host).to_string(),
+        })),
+        ["remove", host] | ["forget", host] => Some(Ok(TuiNetworkCommand::Remove {
+            host: (*host).to_string(),
+        })),
+        ["default", value] => Some(Ok(TuiNetworkCommand::Default {
+            value: (*value).to_string(),
+        })),
+        _ => Some(Err(
+            "usage: network [list|allow <host>|deny <host>|remove <host>|default <allow|deny|prompt>]"
+                .to_string(),
         )),
     }
 }
@@ -717,6 +757,10 @@ pub enum TuiAction {
     },
     InitProjectInstructions {
         workspace: String,
+    },
+    Network {
+        workspace: String,
+        command: TuiNetworkCommand,
     },
     RespondApproval {
         thread_id: String,
@@ -927,6 +971,11 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "memory clear",
     "memory edit",
     "memory help",
+    "network",
+    "network allow ",
+    "network deny ",
+    "network remove ",
+    "network default ",
     "automations",
     "automation trigger",
     "compact",
@@ -3161,6 +3210,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_network_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.request_network_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(title) = parse_tui_rename_command(&content) {
                     match title {
                         Ok(title) => {
@@ -3380,6 +3442,17 @@ impl TuiApp {
         if let Some(command) = parse_tui_stash_command(command) {
             match command {
                 Ok(command) => self.handle_composer_stash_command(command),
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_network_command(command) {
+            match command {
+                Ok(command) => {
+                    self.request_network_command(command);
+                }
                 Err(message) => {
                     self.status = message;
                 }
@@ -4645,6 +4718,18 @@ impl TuiApp {
                 workspace: workspace.clone(),
             });
         self.status = format!("project instructions init queued: {workspace}");
+    }
+
+    fn request_network_command(&mut self, command: TuiNetworkCommand) {
+        let workspace = self
+            .selected_session()
+            .map(|session| session.workspace.clone())
+            .unwrap_or_else(|| ".".to_string());
+        self.pending_actions.push(TuiAction::Network {
+            workspace: workspace.clone(),
+            command,
+        });
+        self.status = format!("network command queued: {workspace}");
     }
 
     fn handle_composer_stash_command(&mut self, command: TuiComposerStashCommand) {
@@ -9236,6 +9321,52 @@ mod tests {
     }
 
     #[test]
+    fn command_palette_requests_network_actions() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: "/tmp/deepseek-network".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        run_palette_command(&mut app, "network allow api.example.com");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Network {
+                workspace: "/tmp/deepseek-network".to_string(),
+                command: TuiNetworkCommand::Allow {
+                    host: "api.example.com".to_string(),
+                },
+            }]
+        );
+
+        run_palette_command(&mut app, "/network default prompt");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Network {
+                workspace: "/tmp/deepseek-network".to_string(),
+                command: TuiNetworkCommand::Default {
+                    value: "prompt".to_string(),
+                },
+            }]
+        );
+    }
+
+    #[test]
     fn command_palette_requests_mcp_server_mutations() {
         let mut app = TuiApp::new(Vec::new());
 
@@ -9455,6 +9586,21 @@ mod tests {
             app.drain_actions(),
             vec![TuiAction::InitProjectInstructions {
                 workspace: ".".to_string(),
+            }]
+        );
+
+        for ch in "/network deny telemetry.example.com".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Network {
+                workspace: ".".to_string(),
+                command: TuiNetworkCommand::Deny {
+                    host: "telemetry.example.com".to_string(),
+                },
             }]
         );
 

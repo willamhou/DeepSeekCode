@@ -38,7 +38,7 @@ pub fn run(args: ConfigArgs) -> AppResult<()> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NetworkRuleTarget {
+pub(crate) enum NetworkRuleTarget {
     Allow,
     Deny,
 }
@@ -53,11 +53,26 @@ impl NetworkRuleTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct NetworkRuleResult {
-    path: std::path::PathBuf,
-    key: &'static str,
-    host: String,
-    changed: bool,
+pub(crate) struct NetworkRuleResult {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) key: &'static str,
+    pub(crate) host: String,
+    pub(crate) changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NetworkPolicySummary {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) default: String,
+    pub(crate) allow: Vec<String>,
+    pub(crate) deny: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NetworkDefaultResult {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) value: String,
+    pub(crate) changed: bool,
 }
 
 fn print_network_rule_result(result: &NetworkRuleResult) {
@@ -67,6 +82,119 @@ fn print_network_rule_result(result: &NetworkRuleResult) {
         println!("{}: {} already present", result.key, result.host);
     }
     println!("config: {}", result.path.display());
+}
+
+pub(crate) fn network_policy_summary_at(root: &std::path::Path) -> AppResult<NetworkPolicySummary> {
+    let path = network_config_path_at(root);
+    if !path.exists() {
+        init_config_at(root, false)?;
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let default = read_string_key(&content, "network.default").unwrap_or_else(|| {
+        crate::config::types::NetworkConfig::default()
+            .default
+            .to_string()
+    });
+    let allow = read_string_list_key(&content, "network.allow");
+    let deny = read_string_list_key(&content, "network.deny");
+    Ok(NetworkPolicySummary {
+        path,
+        default,
+        allow,
+        deny,
+    })
+}
+
+pub(crate) fn set_network_rule_at(
+    root: &std::path::Path,
+    host: &str,
+    target: NetworkRuleTarget,
+) -> AppResult<NetworkRuleResult> {
+    let host = normalize_network_rule(host)?;
+    let path = network_config_path_at(root);
+    if !path.exists() {
+        init_config_at(root, false)?;
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let mut allow = read_string_list_key(&content, "network.allow");
+    let mut deny = read_string_list_key(&content, "network.deny");
+    let changed = match target {
+        NetworkRuleTarget::Allow => {
+            let removed = remove_normalized_host(&mut deny, &host);
+            insert_sorted_unique(&mut allow, &host) || removed
+        }
+        NetworkRuleTarget::Deny => {
+            let removed = remove_normalized_host(&mut allow, &host);
+            insert_sorted_unique(&mut deny, &host) || removed
+        }
+    };
+    if changed {
+        let updated = replace_or_append_string_list_key(&content, "network.allow", &allow);
+        let updated = replace_or_append_string_list_key(&updated, "network.deny", &deny);
+        std::fs::write(&path, updated)?;
+    }
+    Ok(NetworkRuleResult {
+        path,
+        key: target.key(),
+        host,
+        changed,
+    })
+}
+
+pub(crate) fn remove_network_rule_at(
+    root: &std::path::Path,
+    host: &str,
+) -> AppResult<NetworkRuleResult> {
+    let host = normalize_network_rule(host)?;
+    let path = network_config_path_at(root);
+    if !path.exists() {
+        init_config_at(root, false)?;
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let mut allow = read_string_list_key(&content, "network.allow");
+    let mut deny = read_string_list_key(&content, "network.deny");
+    let changed =
+        remove_normalized_host(&mut allow, &host) || remove_normalized_host(&mut deny, &host);
+    if changed {
+        let updated = replace_or_append_string_list_key(&content, "network.allow", &allow);
+        let updated = replace_or_append_string_list_key(&updated, "network.deny", &deny);
+        std::fs::write(&path, updated)?;
+    }
+    Ok(NetworkRuleResult {
+        path,
+        key: "network.allow/network.deny",
+        host,
+        changed,
+    })
+}
+
+pub(crate) fn set_network_default_at(
+    root: &std::path::Path,
+    value: &str,
+) -> AppResult<NetworkDefaultResult> {
+    let value = match value.trim().to_ascii_lowercase().as_str() {
+        "allow" => "allow",
+        "deny" | "block" => "deny",
+        "prompt" | "ask" => "prompt",
+        _ => return Err(app_error("network default must be allow, deny, or prompt")),
+    }
+    .to_string();
+    let path = network_config_path_at(root);
+    if !path.exists() {
+        init_config_at(root, false)?;
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let previous = read_string_key(&content, "network.default");
+    let changed = previous.as_deref() != Some(value.as_str());
+    if changed {
+        let updated = replace_or_append_string_key(&content, "network.default", &value);
+        std::fs::write(&path, updated)?;
+    }
+    Ok(NetworkDefaultResult {
+        path,
+        value,
+        changed,
+    })
 }
 
 fn print_config(config: &AppConfig) {
@@ -235,6 +363,17 @@ fn insert_sorted_unique(values: &mut Vec<String>, value: &str) -> bool {
     true
 }
 
+fn remove_normalized_host(values: &mut Vec<String>, host: &str) -> bool {
+    let before = values.len();
+    values.retain(|existing| normalize_host(existing) != host);
+    before != values.len()
+}
+
+fn network_config_path_at(root: &std::path::Path) -> std::path::PathBuf {
+    let default_config = AppConfig::default();
+    root.join(default_config.workspace.config_path())
+}
+
 fn normalize_network_rule(host: &str) -> AppResult<String> {
     let normalized = normalize_host(host);
     if normalized.is_empty()
@@ -250,6 +389,30 @@ fn normalize_network_rule(host: &str) -> AppResult<String> {
         ));
     }
     Ok(normalized)
+}
+
+fn read_string_key(content: &str, key: &str) -> Option<String> {
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix(key) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(value) = rest.strip_prefix('=') else {
+            continue;
+        };
+        return Some(unquote_config_string(value.trim()));
+    }
+    None
+}
+
+fn unquote_config_string(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        trimmed[1..trimmed.len() - 1].replace("\\\"", "\"")
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn read_string_list_key(content: &str, key: &str) -> Vec<String> {
@@ -306,6 +469,15 @@ fn parse_string_list_literal(value: &str) -> Vec<String> {
 
 fn replace_or_append_string_list_key(content: &str, key: &str, values: &[String]) -> String {
     let rendered = format!("{key} = {}", render_string_list(values));
+    replace_or_append_line(content, key, rendered)
+}
+
+fn replace_or_append_string_key(content: &str, key: &str, value: &str) -> String {
+    let rendered = format!("{key} = \"{}\"", value.replace('"', "\\\""));
+    replace_or_append_line(content, key, rendered)
+}
+
+fn replace_or_append_line(content: &str, key: &str, rendered: String) -> String {
     let mut replaced = false;
     let mut lines = Vec::new();
     for line in content.lines() {
