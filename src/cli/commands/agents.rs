@@ -16,10 +16,12 @@ use crate::core::loop_runtime::{
 };
 use crate::core::rollback::RollbackStore;
 use crate::core::runtime::{
-    AutomationRecord, RuntimeStore, TaskRecord, ThreadCompactionRecord, ThreadRecord,
+    AutomationRecord, RuntimeStore, TaskRecord, ThreadCompactionRecord, ThreadRecord, TurnRecord,
 };
 use crate::error::{app_error, AppResult};
-use crate::model::protocol::ObservationStatus;
+use crate::model::client::ModelClient;
+use crate::model::deepseek::DeepSeekClient;
+use crate::model::protocol::{ModelAction, ModelRequest, ObservationStatus};
 use crate::tools::dispatch_subagent::{
     active_agent_thread_path, agent_threads_dir, thread_file_path, validate_thread_id,
 };
@@ -676,21 +678,64 @@ fn run_runtime_daemon_tick(
         }
     }
 
-    run_runtime_daemon_compactions(store, json, &mut tick)?;
+    run_runtime_daemon_compactions(config, store, json, &mut tick)?;
 
     Ok(tick)
 }
 
 fn run_runtime_daemon_compactions(
+    config: &AppConfig,
     store: &RuntimeStore,
     json: bool,
     tick: &mut RuntimeDaemonTick,
 ) -> AppResult<()> {
+    run_runtime_daemon_compactions_with_summary_provider(store, json, tick, |store, thread| {
+        automatic_model_compaction_summary(config, store, thread, DAEMON_COMPACTION_KEEP_TAIL_TURNS)
+    })
+}
+
+fn run_runtime_daemon_compactions_with_summary_provider<F>(
+    store: &RuntimeStore,
+    json: bool,
+    tick: &mut RuntimeDaemonTick,
+    mut summary_provider: F,
+) -> AppResult<()>
+where
+    F: FnMut(&RuntimeStore, &ThreadRecord) -> AppResult<Option<String>>,
+{
     for thread in store.list_threads(1_000)? {
         if !thread_needs_compaction(store, &thread)? {
             continue;
         }
-        match store.compact_thread(&thread.id, DAEMON_COMPACTION_KEEP_TAIL_TURNS, None) {
+        let model_summary = match summary_provider(store, &thread) {
+            Ok(summary) => summary,
+            Err(error) => {
+                if json {
+                    println!(
+                        "{}",
+                        json_value_to_string(&daemon_error_event(
+                            "compaction_summary_failed",
+                            &thread.id,
+                            &error.to_string(),
+                        ))
+                    );
+                } else {
+                    eprintln!("compaction summary {} failed: {error}", thread.id);
+                }
+                None
+            }
+        };
+        let result = if let Some(summary) = model_summary {
+            store.compact_thread_with_summary_source(
+                &thread.id,
+                DAEMON_COMPACTION_KEEP_TAIL_TURNS,
+                summary,
+                "model",
+            )
+        } else {
+            store.compact_thread(&thread.id, DAEMON_COMPACTION_KEEP_TAIL_TURNS, None)
+        };
+        match result {
             Ok(compaction) => {
                 tick.compacted_threads += 1;
                 if json {
@@ -718,6 +763,148 @@ fn run_runtime_daemon_compactions(
         }
     }
     Ok(())
+}
+
+fn automatic_model_compaction_summary(
+    config: &AppConfig,
+    store: &RuntimeStore,
+    thread: &ThreadRecord,
+    keep_tail_turns: usize,
+) -> AppResult<Option<String>> {
+    if !model_api_key_configured(&config.model.api_key_env) {
+        return Ok(None);
+    }
+    let turns = store.list_turns(&thread.id)?;
+    if turns.len() <= keep_tail_turns {
+        return Ok(None);
+    }
+    let client = DeepSeekClient {
+        config: config.model.clone(),
+    };
+    model_compaction_summary_with_client(&client, thread, &turns, keep_tail_turns).map(Some)
+}
+
+fn model_api_key_configured(api_key_env: &str) -> bool {
+    std::env::var(api_key_env)
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn model_compaction_summary_with_client<C: ModelClient>(
+    client: &C,
+    thread: &ThreadRecord,
+    turns: &[TurnRecord],
+    keep_tail_turns: usize,
+) -> AppResult<String> {
+    if keep_tail_turns >= turns.len() {
+        return Err(app_error(
+            "model compaction requires at least one older turn to summarize",
+        ));
+    }
+    let request = build_model_compaction_request(thread, turns, keep_tail_turns);
+    let mut events = crate::ui::stream::NoopStreamEvents;
+    let (response, _usage) = client.respond(request, &mut events)?;
+    if !matches!(response.action, ModelAction::Finish) {
+        return Err(app_error(
+            "model compaction summary returned a tool call; expected final summary text",
+        ));
+    }
+    let summary = response.message.trim();
+    if summary.is_empty() {
+        return Err(app_error("model compaction summary was empty"));
+    }
+    Ok(summary.to_string())
+}
+
+fn build_model_compaction_request(
+    thread: &ThreadRecord,
+    turns: &[TurnRecord],
+    keep_tail_turns: usize,
+) -> ModelRequest {
+    ModelRequest {
+        system_prompt: "Summarize older durable runtime context for automatic compaction. Return only the summary text. Preserve user intent, decisions, constraints, changed files, tool outcomes, unresolved tasks, and anything the next assistant turn must remember. Be concise and actionable.".to_string(),
+        task: render_model_compaction_task(thread, turns, keep_tail_turns),
+        image_inputs: Vec::new(),
+        profile_name: "runtime-compaction".to_string(),
+        profile_hints: vec![
+            "No tools are available.".to_string(),
+            "Write a durable context summary, not a user-facing answer.".to_string(),
+        ],
+        primary_file: None,
+        suggested_test_command: None,
+        available_tools: Vec::new(),
+        observations: Vec::new(),
+        todos: Vec::new(),
+        planning_mode: false,
+        recent_steps: Vec::new(),
+    }
+}
+
+fn render_model_compaction_task(
+    thread: &ThreadRecord,
+    turns: &[TurnRecord],
+    keep_tail_turns: usize,
+) -> String {
+    const MAX_SUMMARIZED_TURNS: usize = 32;
+    const MAX_TURN_CHARS: usize = 700;
+
+    let split_at = turns.len().saturating_sub(keep_tail_turns);
+    let summarized_turns = &turns[..split_at];
+    let kept_turns = &turns[split_at..];
+    let omitted = summarized_turns.len().saturating_sub(MAX_SUMMARIZED_TURNS);
+    let summarized_window = summarized_turns.iter().skip(omitted).collect::<Vec<_>>();
+
+    let mut task = String::new();
+    task.push_str("Create a compact durable summary for older turns in this runtime thread.\n");
+    task.push_str("Thread title: ");
+    task.push_str(&thread.title);
+    task.push('\n');
+    task.push_str("Thread id: ");
+    task.push_str(&thread.id);
+    task.push('\n');
+    task.push_str("Older turns to summarize: ");
+    task.push_str(&summarized_turns.len().to_string());
+    task.push('\n');
+    task.push_str("Tail turns preserved verbatim: ");
+    task.push_str(&kept_turns.len().to_string());
+    task.push_str("\n\n");
+    if omitted > 0 {
+        task.push_str("The oldest ");
+        task.push_str(&omitted.to_string());
+        task.push_str(" summarized turn(s) were omitted from this bounded summary prompt.\n\n");
+    }
+    task.push_str("Summarized turn window:\n");
+    for turn in summarized_window {
+        task.push_str("- #");
+        task.push_str(&turn.index.to_string());
+        task.push(' ');
+        task.push_str(&turn.role);
+        task.push_str(" turn_id=");
+        task.push_str(&turn.id);
+        task.push_str(": ");
+        task.push_str(&compaction_excerpt(&turn.content, MAX_TURN_CHARS));
+        task.push('\n');
+    }
+    if let Some(first_kept) = kept_turns.first() {
+        task.push_str("\nThe live tail begins at turn #");
+        task.push_str(&first_kept.index.to_string());
+        task.push_str(" (turn_id=");
+        task.push_str(&first_kept.id);
+        task.push_str(
+            "). Do not restate the tail verbatim; summarize only what older turns establish.\n",
+        );
+    }
+    task
+}
+
+fn compaction_excerpt(content: &str, max_chars: usize) -> String {
+    let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut excerpt = normalized.chars().take(max_chars).collect::<String>();
+    if normalized.chars().count() > max_chars {
+        excerpt.push_str("...");
+    }
+    excerpt
 }
 
 fn thread_needs_compaction(store: &RuntimeStore, thread: &ThreadRecord) -> AppResult<bool> {
@@ -1089,6 +1276,10 @@ fn daemon_compaction_event(compaction: &ThreadCompactionRecord) -> JsonValue {
     root.insert(
         "keep_tail_turns".to_string(),
         JsonValue::Number(compaction.keep_tail_turns.to_string()),
+    );
+    root.insert(
+        "summary_source".to_string(),
+        JsonValue::String(compaction.summary_source.clone()),
     );
     JsonValue::Object(root)
 }
@@ -1757,12 +1948,99 @@ mod tests {
         assert_eq!(updated.status, "completed");
     }
 
+    struct RecordingSummaryClient {
+        request: std::cell::RefCell<Option<ModelRequest>>,
+        message: String,
+    }
+
+    impl ModelClient for RecordingSummaryClient {
+        fn respond(
+            &self,
+            input: ModelRequest,
+            _events: &mut dyn crate::ui::stream::StreamEvents,
+        ) -> AppResult<(
+            crate::model::protocol::ModelResponse,
+            Option<crate::model::protocol::TokenUsage>,
+        )> {
+            *self.request.borrow_mut() = Some(input);
+            Ok((
+                crate::model::protocol::ModelResponse {
+                    message: self.message.clone(),
+                    action: ModelAction::Finish,
+                },
+                None,
+            ))
+        }
+    }
+
+    #[test]
+    fn model_compaction_summary_request_captures_prior_context() {
+        let store = RuntimeStore::new(temp_root("model-compact-request"));
+        let thread = store
+            .create_thread(
+                "Model compact".to_string(),
+                ".".to_string(),
+                "deepseek-v4-flash".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        store
+            .append_turn(
+                &thread.id,
+                "user".to_string(),
+                "key decision: keep the Rust CLI local-first".to_string(),
+            )
+            .unwrap();
+        store
+            .append_turn(
+                &thread.id,
+                "assistant".to_string(),
+                "implemented runtime state and wrote docs".to_string(),
+            )
+            .unwrap();
+        store
+            .append_turn(&thread.id, "user".to_string(), "tail request".to_string())
+            .unwrap();
+        store
+            .append_turn(
+                &thread.id,
+                "assistant".to_string(),
+                "tail answer".to_string(),
+            )
+            .unwrap();
+        let turns = store.list_turns(&thread.id).unwrap();
+        let client = RecordingSummaryClient {
+            request: std::cell::RefCell::new(None),
+            message: "Model summary: local-first Rust CLI, runtime docs done.".to_string(),
+        };
+
+        let summary = model_compaction_summary_with_client(&client, &thread, &turns, 2).unwrap();
+
+        assert_eq!(
+            summary,
+            "Model summary: local-first Rust CLI, runtime docs done."
+        );
+        let request = client.request.borrow();
+        let request = request.as_ref().expect("expected model request");
+        assert_eq!(request.profile_name, "runtime-compaction");
+        assert!(request.available_tools.is_empty());
+        assert!(!request.planning_mode);
+        assert!(request.system_prompt.contains("automatic compaction"));
+        assert!(request.task.contains("Thread title: Model compact"));
+        assert!(request
+            .task
+            .contains("key decision: keep the Rust CLI local-first"));
+        assert!(request.task.contains("Tail turns preserved verbatim: 2"));
+        assert!(request.task.contains("The live tail begins at turn #3"));
+    }
+
     #[test]
     fn runtime_daemon_tick_compacts_threads_after_usage_warning() {
         let root = temp_root("runtime-daemon-compact");
         let config_dir = root.join(".dscode");
         let mut config = AppConfig::default();
         config.workspace.config_dir = config_dir.display().to_string();
+        config.model.api_key_env = "DSCODE_TEST_NO_KEY".to_string();
         let store = RuntimeStore::new(config_dir.join("runtime"));
         let thread = store
             .create_thread(
@@ -1804,6 +2082,74 @@ mod tests {
                 .filter(|event| event.kind == "thread_compacted")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn runtime_daemon_compaction_uses_model_summary_provider() {
+        let root = temp_root("runtime-daemon-model-compact");
+        let config_dir = root.join(".dscode");
+        let store = RuntimeStore::new(config_dir.join("runtime"));
+        let thread = store
+            .create_thread(
+                "Long model context".to_string(),
+                ".".to_string(),
+                "deepseek-v4-flash".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let mut latest_turn_id = String::new();
+        for index in 1..=10 {
+            latest_turn_id = store
+                .append_turn(&thread.id, "assistant".to_string(), format!("turn {index}"))
+                .unwrap()
+                .id;
+        }
+        store
+            .append_usage_with_cache(
+                &thread.id,
+                Some(&latest_turn_id),
+                "deepseek-v4-flash".to_string(),
+                "test".to_string(),
+                850_000,
+                25,
+                200_000,
+                650_000,
+            )
+            .unwrap();
+        let mut tick = RuntimeDaemonTick::default();
+        let mut called = 0usize;
+
+        run_runtime_daemon_compactions_with_summary_provider(
+            &store,
+            false,
+            &mut tick,
+            |_store, _thread| {
+                called += 1;
+                Ok(Some("Generated model context summary".to_string()))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(called, 1);
+        assert_eq!(tick.compacted_threads, 1);
+        let items = store.list_items(&thread.id, None).unwrap();
+        assert!(items.iter().any(|item| {
+            item.item_type == "summary" && item.content == "Generated model context summary"
+        }));
+        let events = store.read_events(&thread.id, 0).unwrap();
+        let compaction_event = events
+            .iter()
+            .find(|event| event.kind == "thread_compacted")
+            .expect("expected compaction event");
+        let JsonValue::Object(payload) = &compaction_event.payload else {
+            panic!("expected object payload");
+        };
+        assert_eq!(
+            payload
+                .get("summary_source")
+                .and_then(crate::util::json::json_as_string),
+            Some("model")
         );
     }
 

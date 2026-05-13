@@ -639,8 +639,10 @@ optional:
 ```
 
 If `summary` is omitted, the runtime creates a deterministic extractive summary
-from older turns. `keep_tail_turns` defaults to `8` and is capped at `200`; the
-request is rejected if it leaves no turns to summarize. The response uses schema
+from older turns. Manual requests with `summary` use `summary_source =
+"provided"`; daemon-generated model summaries use `summary_source = "model"`.
+`keep_tail_turns` defaults to `8` and is capped at `200`; the request is
+rejected if it leaves no turns to summarize. The response uses schema
 `deepseek.runtime.thread_compaction.v1`:
 
 ```json
@@ -845,9 +847,14 @@ creates a pre-run rollback snapshot when possible. For background execution,
 `deepseek agents daemon [--interval-ms 1000] [--budget N]` polls the same
 runtime store, triggers due active automations, executes one thread-linked
 pending task per tick, and performs non-destructive compaction for threads whose
-latest usage record crosses the 800k-token warning threshold. The daemon skips a
-thread when a `thread_compacted` event already exists after the latest
-`usage_recorded` event, so repeated ticks do not append duplicate summaries.
+latest usage record crosses the 800k-token warning threshold. When the
+configured model API key environment variable is present, daemon compaction asks
+the model for a concise older-context summary and records
+`summary_source = "model"`; if the key is absent or summary generation fails, it
+falls back to the deterministic extractive summary so compaction still
+proceeds. The daemon skips a thread when a `thread_compacted` event already
+exists after the latest `usage_recorded` event, so repeated ticks do not append
+duplicate summaries.
 
 `GET /v1/automations?session_id={id}&thread_id={id}&limit=50`,
 `GET /v1/sessions/{id}/automations`, and

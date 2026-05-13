@@ -638,6 +638,45 @@ impl RuntimeStore {
         keep_tail_turns: usize,
         summary: Option<String>,
     ) -> AppResult<ThreadCompactionRecord> {
+        let summary = summary
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let source = summary.as_ref().map(|_| "provided".to_string());
+        self.compact_thread_inner(thread_id, keep_tail_turns, summary, source)
+    }
+
+    pub fn compact_thread_with_summary_source(
+        &self,
+        thread_id: &str,
+        keep_tail_turns: usize,
+        summary: String,
+        summary_source: &str,
+    ) -> AppResult<ThreadCompactionRecord> {
+        let summary = summary.trim().to_string();
+        if summary.is_empty() {
+            return Err(app_error("runtime compaction summary must not be empty"));
+        }
+        let summary_source = summary_source.trim();
+        if summary_source.is_empty() {
+            return Err(app_error(
+                "runtime compaction summary_source must not be empty",
+            ));
+        }
+        self.compact_thread_inner(
+            thread_id,
+            keep_tail_turns,
+            Some(summary),
+            Some(summary_source.to_string()),
+        )
+    }
+
+    fn compact_thread_inner(
+        &self,
+        thread_id: &str,
+        keep_tail_turns: usize,
+        summary: Option<String>,
+        summary_source: Option<String>,
+    ) -> AppResult<ThreadCompactionRecord> {
         validate_record_id(thread_id)?;
         self.ensure_dirs()?;
         let thread = self.load_thread(thread_id)?;
@@ -664,9 +703,10 @@ impl RuntimeStore {
             .map(|turn| turn.id.clone())
             .collect::<Vec<_>>();
         let (summary_content, summary_source) = match summary {
-            Some(summary) if !summary.trim().is_empty() => {
-                (summary.trim().to_string(), "provided".to_string())
-            }
+            Some(summary) => (
+                summary,
+                summary_source.unwrap_or_else(|| "provided".to_string()),
+            ),
             _ => (
                 build_compaction_summary(&thread, summarized_turns, kept_turns),
                 "extractive".to_string(),
@@ -2955,6 +2995,48 @@ mod tests {
         assert_eq!(
             events.last().unwrap().turn_id.as_deref(),
             Some(compaction.summary_turn.id.as_str())
+        );
+    }
+
+    #[test]
+    fn compact_thread_records_custom_summary_source() {
+        let store = RuntimeStore::new(temp_root("compact-source"));
+        let thread = store
+            .create_thread(
+                "Investigate".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        for index in 1..=4 {
+            store
+                .append_turn(&thread.id, "assistant".to_string(), format!("turn {index}"))
+                .unwrap();
+        }
+
+        let compaction = store
+            .compact_thread_with_summary_source(
+                &thread.id,
+                2,
+                "Model summary with decisions".to_string(),
+                "model",
+            )
+            .unwrap();
+
+        assert_eq!(compaction.summary_source, "model");
+        assert_eq!(
+            compaction.summary_turn.content,
+            "Model summary with decisions"
+        );
+        let events = store.read_events(&thread.id, 0).unwrap();
+        let payload = match &events.last().unwrap().payload {
+            JsonValue::Object(payload) => payload,
+            _ => panic!("expected object payload"),
+        };
+        assert_eq!(
+            payload.get("summary_source").and_then(json_as_string),
+            Some("model")
         );
     }
 

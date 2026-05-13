@@ -99,18 +99,13 @@ impl DeepSeekClient {
         let system_prompt = build_openai_tool_system_prompt(&input.system_prompt);
         let user_prompt = build_user_prompt(input);
         let user_message = build_openai_user_message(input, &user_prompt, &self.config)?;
-        let tools = build_openai_tools(&input.available_tools);
         let reasoning = route.reasoning;
         let temperature_field = if reasoning.thinking_enabled() {
             ""
         } else {
             "\"temperature\":0,"
         };
-        let tool_choice_field = if reasoning.thinking_enabled() {
-            ""
-        } else {
-            "\"tool_choice\":\"auto\","
-        };
+        let tool_fields = openai_tool_fields(&input.available_tools, reasoning);
         let reasoning_fields = reasoning.openai_fields();
         let body = format!(
             concat!(
@@ -122,8 +117,6 @@ impl DeepSeekClient {
                 "\"stream\":true,",
                 "\"stream_options\":{{\"include_usage\":true}},",
                 "{}",
-                "\"parallel_tool_calls\":false,",
-                "\"tools\":{},",
                 "\"messages\":[",
                 "{{\"role\":\"system\",\"content\":\"{}\"}},",
                 "{}",
@@ -133,8 +126,7 @@ impl DeepSeekClient {
             json_escape(&route.model),
             temperature_field,
             reasoning_fields,
-            tool_choice_field,
-            tools,
+            tool_fields,
             json_escape(&system_prompt),
             user_message,
         );
@@ -194,13 +186,8 @@ impl DeepSeekClient {
         let system_prompt = build_anthropic_tool_system_prompt(&input.system_prompt);
         let user_prompt = build_user_prompt(input);
         let user_content = build_anthropic_user_content(input, &user_prompt, &self.config)?;
-        let tools = build_anthropic_tools(&input.available_tools);
         let reasoning = route.reasoning;
-        let tool_choice_field = if reasoning.thinking_enabled() {
-            ""
-        } else {
-            "\"tool_choice\":{{\"type\":\"auto\"}},"
-        };
+        let tool_fields = anthropic_tool_fields(&input.available_tools, reasoning);
         let reasoning_fields = reasoning.anthropic_fields();
         let body = format!(
             concat!(
@@ -210,7 +197,6 @@ impl DeepSeekClient {
                 "\"stream\":true,",
                 "{}",
                 "{}",
-                "\"tools\":{},",
                 "\"system\":\"{}\",",
                 "\"messages\":[",
                 "{{\"role\":\"user\",\"content\":{}}}",
@@ -218,9 +204,8 @@ impl DeepSeekClient {
                 "}}"
             ),
             json_escape(&route.model),
-            tool_choice_field,
             reasoning_fields,
-            tools,
+            tool_fields,
             json_escape(&system_prompt),
             user_content,
         );
@@ -2290,6 +2275,38 @@ fn build_anthropic_tools(names: &[String]) -> String {
     render_tools(names, anthropic_envelope)
 }
 
+fn openai_tool_fields(names: &[String], reasoning: ReasoningTier) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    let tool_choice_field = if reasoning.thinking_enabled() {
+        ""
+    } else {
+        "\"tool_choice\":\"auto\","
+    };
+    format!(
+        "{}\"parallel_tool_calls\":false,\"tools\":{},",
+        tool_choice_field,
+        build_openai_tools(names)
+    )
+}
+
+fn anthropic_tool_fields(names: &[String], reasoning: ReasoningTier) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    let tool_choice_field = if reasoning.thinking_enabled() {
+        ""
+    } else {
+        "\"tool_choice\":{\"type\":\"auto\"},"
+    };
+    format!(
+        "{}\"tools\":{},",
+        tool_choice_field,
+        build_anthropic_tools(names)
+    )
+}
+
 fn render_tools(names: &[String], envelope: fn(&ToolSpec) -> String) -> String {
     let tools = names
         .iter()
@@ -3985,10 +4002,10 @@ fn is_supported_quote_delimiter(bytes: &[u8], index: usize, byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        api_flavor, build_anthropic_tools, build_openai_tools, child_files_from_summary,
-        derive_edit_request, derive_search_query, last_patched_file_path, parse_anthropic_messages,
-        parse_anthropic_usage, parse_openai_chat_completion, parse_openai_usage, ApiFlavor,
-        DeepSeekClient,
+        anthropic_tool_fields, api_flavor, build_anthropic_tools, build_openai_tools,
+        child_files_from_summary, derive_edit_request, derive_search_query, last_patched_file_path,
+        openai_tool_fields, parse_anthropic_messages, parse_anthropic_usage,
+        parse_openai_chat_completion, parse_openai_usage, ApiFlavor, DeepSeekClient, ReasoningTier,
     };
     use crate::config::types::ModelConfig;
     use crate::model::client::ModelClient;
@@ -4078,6 +4095,21 @@ mod tests {
         assert!(tools.contains("\"name\":\"apply_patch\""));
         assert!(tools.contains("\"input_schema\":"));
         assert!(!tools.contains("\"function\":"));
+    }
+
+    #[test]
+    fn tool_fields_are_omitted_for_no_tool_requests() {
+        assert_eq!(openai_tool_fields(&[], ReasoningTier::Off), "");
+        assert_eq!(anthropic_tool_fields(&[], ReasoningTier::Off), "");
+
+        let openai = openai_tool_fields(&["read_file".to_string()], ReasoningTier::Off);
+        assert!(openai.contains("\"tool_choice\":\"auto\""));
+        assert!(openai.contains("\"parallel_tool_calls\":false"));
+        assert!(openai.contains("\"tools\":["));
+
+        let anthropic = anthropic_tool_fields(&["read_file".to_string()], ReasoningTier::Off);
+        assert!(anthropic.contains("\"tool_choice\":{\"type\":\"auto\"}"));
+        assert!(anthropic.contains("\"tools\":["));
     }
 
     #[test]

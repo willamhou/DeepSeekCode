@@ -348,12 +348,15 @@ Landed first slice:
 - runtime-backed TUI and daemon agent runs preload compact persisted reasoning
   items from the active durable thread into the next model request, extending
   reasoning replay beyond a single in-process tool loop
+- daemon automatic compaction now attempts model-generated older-context
+  summaries when the configured model API key is present, records
+  `summary_source = "model"`, and falls back to deterministic extractive
+  summaries when the key is absent or summary generation fails
 
 Remaining:
 
 - richer reasoning UX, including fuller reasoning-content browsing and replay
   controls in the TUI
-- model-generated automatic compaction policy
 
 ### Phase F: LSP + Revert
 
