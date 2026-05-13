@@ -374,7 +374,8 @@ Landed first slice:
   submitting the rendered prompt to the active durable thread
 - local file-backed TUI composer now shows DeepSeek-TUI-style slash-command
   hints while typing `/...` and uses `Tab` to complete built-in local slash
-  commands plus project `.dscode/commands/**/*.md` custom commands before
+  commands, project `.dscode/commands/**/*.md` custom commands, configured
+  user custom commands, and configured `/skill <name>` entries before
   submission
 - local file-backed TUI composer now supports DeepSeek-TUI-style draft stash:
   `Ctrl+S` parks the current composer text in `.dscode/tui/composer-stash.json`,

@@ -1537,6 +1537,7 @@ pub struct TuiApp {
     reasoning_replay_limit: usize,
     reasoning_replay_pinned_turn_ids: BTreeSet<String>,
     reasoning_replay_preferences_path: Option<PathBuf>,
+    extra_slash_completions: Vec<String>,
     pending_actions: Vec<TuiAction>,
     status: String,
     mcp_detail: Option<(TuiMcpDetailKind, String)>,
@@ -1699,6 +1700,7 @@ impl TuiApp {
             reasoning_replay_limit: DEFAULT_TUI_REASONING_REPLAY_LIMIT,
             reasoning_replay_pinned_turn_ids: BTreeSet::new(),
             reasoning_replay_preferences_path: None,
+            extra_slash_completions: Vec::new(),
             pending_actions: Vec::new(),
             status: "ready".to_string(),
             mcp_detail: None,
@@ -1750,6 +1752,30 @@ impl TuiApp {
                 );
             }
         }
+    }
+
+    pub fn set_extra_slash_completions<I, S>(&mut self, completions: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.extra_slash_completions = completions
+            .into_iter()
+            .map(Into::into)
+            .filter(|completion| {
+                completion.starts_with('/')
+                    && completion
+                        .chars()
+                        .all(|ch| !ch.is_control() && ch != '\n' && ch != '\r')
+            })
+            .collect();
+        self.extra_slash_completions.sort();
+        self.extra_slash_completions.dedup();
+    }
+
+    #[cfg(test)]
+    pub fn extra_slash_completions_for_test(&self) -> &[String] {
+        &self.extra_slash_completions
     }
 
     pub fn enable_composer_stash(&mut self, path: PathBuf) {
@@ -7563,6 +7589,12 @@ fn composer_slash_completion_matches(app: &TuiApp, prefix: &str) -> Vec<String> 
         .map(str::to_string)
         .collect::<Vec<_>>();
     matches.extend(
+        app.extra_slash_completions
+            .iter()
+            .filter(|command| command.starts_with(prefix))
+            .cloned(),
+    );
+    matches.extend(
         project_custom_slash_commands(app)
             .into_iter()
             .filter(|command| command.starts_with(prefix)),
@@ -7576,9 +7608,12 @@ fn project_custom_slash_commands(app: &TuiApp) -> Vec<String> {
     let Some(session) = app.selected_session() else {
         return Vec::new();
     };
-    let root = Path::new(&session.workspace).join(".dscode/commands");
+    discover_custom_slash_commands_dir(&Path::new(&session.workspace).join(".dscode/commands"))
+}
+
+pub fn discover_custom_slash_commands_dir(root: &Path) -> Vec<String> {
     let mut commands = Vec::new();
-    collect_project_custom_slash_commands(&root, Path::new(""), 0, &mut commands);
+    collect_project_custom_slash_commands(root, Path::new(""), 0, &mut commands);
     commands.sort();
     commands.dedup();
     commands
@@ -11447,6 +11482,35 @@ mod tests {
         assert_eq!(app.composer, "/pr/fix");
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn composer_slash_hints_include_extra_configured_entries() {
+        let mut app = TuiApp::new(Vec::new());
+        app.set_extra_slash_completions(vec![
+            "/global/fix".to_string(),
+            "/skill pr-review".to_string(),
+            "not-a-slash".to_string(),
+        ]);
+
+        assert!(app.handle_key(KeyCode::Char('i')));
+        for ch in "/glo".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        let output = render_once(&app, 120, 36).unwrap();
+        assert!(output.contains("Slash: /global/fix"));
+        assert!(!output.contains("not-a-slash"));
+
+        assert!(app.handle_key(KeyCode::Tab));
+        assert_eq!(app.composer, "/global/fix");
+
+        app.composer.clear();
+        app.composer_cursor = 0;
+        for ch in "/skill pr".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Tab));
+        assert_eq!(app.composer, "/skill pr-review");
     }
 
     #[test]

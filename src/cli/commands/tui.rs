@@ -55,10 +55,11 @@ use crate::tools::exec_shell::{
 };
 use crate::tools::types::{Tool, ToolInput};
 use crate::tui::{
-    render_once, run_interactive, run_interactive_with_refresh_actions_and_live, TuiAction, TuiApp,
-    TuiApprovalRequest, TuiAutomationRecord, TuiItem, TuiLiveEvent, TuiMcpConfigScope,
-    TuiMcpDetailKind, TuiMemoryCommand, TuiModelCommand, TuiNetworkCommand, TuiProviderCommand,
-    TuiSession, TuiSkillsCommand, TuiTaskRecord, TuiThread, TuiUsageSummary, TuiUserInputRequest,
+    discover_custom_slash_commands_dir, render_once, run_interactive,
+    run_interactive_with_refresh_actions_and_live, TuiAction, TuiApp, TuiApprovalRequest,
+    TuiAutomationRecord, TuiItem, TuiLiveEvent, TuiMcpConfigScope, TuiMcpDetailKind,
+    TuiMemoryCommand, TuiModelCommand, TuiNetworkCommand, TuiProviderCommand, TuiSession,
+    TuiSkillsCommand, TuiTaskRecord, TuiThread, TuiUsageSummary, TuiUserInputRequest,
 };
 use crate::ui::stream::StreamEvents;
 use crate::util::json::{
@@ -85,6 +86,7 @@ pub fn run(args: TuiArgs) -> AppResult<()> {
     let runtime_root = PathBuf::from(&config.workspace.config_dir).join("runtime");
     let runtime_store = RuntimeStore::new(runtime_root);
     let mut app = app_from_store(&runtime_store)?;
+    configure_tui_slash_completions(&mut app, &config);
     app.enable_reasoning_replay_preferences(
         PathBuf::from(&config.workspace.config_dir).join("tui/reasoning-replay.json"),
     );
@@ -1116,6 +1118,22 @@ fn app_from_store(store: &RuntimeStore) -> AppResult<TuiApp> {
             snapshot.user_inputs,
         ),
     )
+}
+
+fn configure_tui_slash_completions(app: &mut TuiApp, config: &AppConfig) {
+    let mut completions = discover_custom_slash_commands_dir(&config.workspace.user_commands_dir());
+    let repo_dir = resolve_repo_skills_dir();
+    let user_dir = expand_tilde(&config.workspace.user_skills_dir);
+    if let Ok((registry, _stats)) =
+        SkillRegistry::load_dirs(&[repo_dir.as_path(), user_dir.as_path()])
+    {
+        completions.extend(
+            registry
+                .iter()
+                .map(|skill| format!("/skill {}", skill.name)),
+        );
+    }
+    app.set_extra_slash_completions(completions);
 }
 
 fn refresh_app_from_store(store: &RuntimeStore, app: &mut TuiApp) -> AppResult<()> {
@@ -3872,6 +3890,37 @@ mod tests {
         let mut config = AppConfig::default();
         config.workspace.config_dir = root.join(".dscode").display().to_string();
         config
+    }
+
+    #[test]
+    fn configure_tui_slash_completions_includes_user_commands_and_skills() {
+        let root = temp_root("slash-completions-config");
+        let user_commands = root.join("user-commands");
+        let user_skills = root.join("user-skills");
+        fs::create_dir_all(user_commands.join("global")).unwrap();
+        fs::create_dir_all(&user_skills).unwrap();
+        fs::write(user_commands.join("global/fix.md"), "Fix: $ARGUMENTS").unwrap();
+        fs::write(
+            user_skills.join("pr-review.toml"),
+            r#"
+name = "pr-review"
+description = "Review pull requests."
+"#,
+        )
+        .unwrap();
+
+        let mut config = temp_config(&root);
+        config.workspace.user_commands_dir = user_commands.display().to_string();
+        config.workspace.user_skills_dir = user_skills.display().to_string();
+        let mut app = TuiApp::new(Vec::new());
+
+        configure_tui_slash_completions(&mut app, &config);
+
+        let completions = app.extra_slash_completions_for_test();
+        assert!(completions.iter().any(|value| value == "/global/fix"));
+        assert!(completions.iter().any(|value| value == "/skill pr-review"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {
