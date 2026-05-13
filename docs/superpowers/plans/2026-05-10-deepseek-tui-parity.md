@@ -697,9 +697,11 @@ Landed first slice:
   entry (`serve --mcp`, optional `--workspace`) to user or project MCP config
 - `deepseek serve --mcp --workspace <path>` runs the MCP server from an explicit
   workspace
-- `deepseek serve --acp` now runs a minimal Agent Client Protocol stdio adapter:
+- `deepseek serve --acp` now runs an Agent Client Protocol stdio adapter:
   `initialize`, `session/new`, `session/list`, `session/load`,
-  `session/prompt`, `session/cancel`, and `shutdown`
+  checkpoint read/restore methods, `session/tools/list`,
+  `session/tools/call`, `session/rlm/subscribe`, `session/prompt`,
+  `session/cancel`, and `shutdown`
 - ACP `session/list` exposes durable runtime sessions and `session/load` maps
   a runtime session/thread workspace into an in-process ACP session
 - Loaded ACP `session/prompt` records user/assistant durable turns and message
@@ -748,6 +750,10 @@ Landed first slice:
   streaming for `exec_shell` and `task_shell_start` through `stream=true` or
   `follow=true`, flushing partial `tool_call_update` deltas while shell jobs are
   still running before the final completion result
+- ACP `session/rlm/subscribe` now lets loaded runtime-thread sessions consume
+  mirrored `rlm_live_event` runtime events by cursor and receive standard
+  `session/update` `tool_call` / `tool_call_update` notifications before the
+  final `nextCursor` response
 - `deepseek serve --acp --workspace <path>` starts ACP from an explicit
   workspace
 - `deepseek mcp add/get/remove/enable/disable/validate` covers common MCP

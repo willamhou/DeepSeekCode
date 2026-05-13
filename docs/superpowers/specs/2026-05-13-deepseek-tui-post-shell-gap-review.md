@@ -74,12 +74,12 @@ explicitly supplied; `deepseek agents daemon` now runs that safe all-session
 recovery before claiming queued live RLM turns; `rlm_process_status` now gives
 TUI/MCP/model clients a read-only lifecycle dashboard with owner, queue, stale,
 and recommended-action state.
-Live PTY resize, attachable terminal replay/supervisor takeover, and
-ACP-specific RLM push subscriptions remain open. RLM daemon package/service UX
-is now covered by `deepseek agents service`, packaged systemd/launchd
-templates, and release-package `SERVICES.md` guidance for the same agents
-daemon loop that recovers stale live RLM ownership and runs one queued live RLM
-turn per tick.
+Live PTY resize and attachable terminal replay/supervisor takeover remain
+separate shell follow-ups. ACP-specific RLM push subscriptions are now covered
+by `session/rlm/subscribe`. RLM daemon package/service UX is now covered by
+`deepseek agents service`, packaged systemd/launchd templates, and
+release-package `SERVICES.md` guidance for the same agents daemon loop that
+recovers stale live RLM ownership and runs one queued live RLM turn per tick.
 
 ## Next Candidate Specs
 
@@ -88,14 +88,14 @@ turn per tick.
   slice should be either the supervisor protocol skeleton or native Unix PTY
   backend.
 - True live model-backed RLM REPL/daemon implementation now has a design spec:
-  `2026-05-13-deepseek-tui-rlm-live-daemon-design.md`. The next executable
-  slice should be ACP-specific push subscriptions because queueing,
-  event replay/wait, HTTP SSE streaming, worker delta/tool event logging, payload persistence,
+  `2026-05-13-deepseek-tui-rlm-live-daemon-design.md`. No first-order RLM
+  subscription slice is currently open because queueing, event replay/wait,
+  HTTP SSE streaming, worker delta/tool event logging, payload persistence,
   queued cancellation, single-step execution, bounded drain, all-session
-  interrupted-turn recovery, and the agents-daemon worker loop plus stop
-  command, owner liveness inventory, and live-owner recovery guard plus
-  daemon-tick stale recovery, status dashboard, and cooperative active worker
-  cancellation plus explicit force interruption, runtime event mirroring, and
-  daemon package/service UX have landed.
+  interrupted-turn recovery, the agents-daemon worker loop plus stop command,
+  owner liveness inventory, live-owner recovery guard, daemon-tick stale
+  recovery, status dashboard, cooperative active worker cancellation, explicit
+  force interruption, runtime event mirroring, daemon package/service UX, and
+  ACP `session/rlm/subscribe` have landed.
 - Platform restore strategy for device nodes and Windows symlink semantics.
 - Live GitHub write-fixture harness behind an explicit opt-in test repository.

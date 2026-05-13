@@ -43,6 +43,6 @@ RLM manifests, payloads, or event logs.
 
 ## Remaining Gap
 
-DeepSeekCode still needs ACP-specific push subscriptions. Daemon
-package/service UX is now covered by generated agents-daemon service
+ACP-specific push subscriptions are now covered by `session/rlm/subscribe`.
+Daemon package/service UX is covered by generated agents-daemon service
 templates.

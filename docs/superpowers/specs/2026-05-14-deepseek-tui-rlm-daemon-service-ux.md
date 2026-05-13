@@ -34,5 +34,6 @@ packaged supervisor files did not explicitly tell operators that
 
 ## Remaining
 
-ACP-specific RLM push subscriptions remain open. Published npm package and
-Homebrew tap distribution are still tracked under the broader packaging phase.
+ACP-specific RLM push subscriptions are now covered by `session/rlm/subscribe`.
+Published npm package and Homebrew tap distribution are still tracked under the
+broader packaging phase.

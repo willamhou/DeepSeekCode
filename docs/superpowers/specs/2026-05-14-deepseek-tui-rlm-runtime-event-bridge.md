@@ -40,5 +40,5 @@ subscription path as turns, tasks, approvals, and user-input requests.
 
 ## Remaining
 
-ACP-specific push subscriptions remain open; daemon package/service UX is now
-covered by generated agents-daemon service templates.
+ACP-specific push subscriptions are now covered by `session/rlm/subscribe`;
+daemon package/service UX is covered by generated agents-daemon service templates.

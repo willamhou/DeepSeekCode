@@ -46,5 +46,5 @@ active live RLM worker.
 
 Forced cross-process interruption is implemented separately in
 `2026-05-14-deepseek-tui-rlm-force-worker-interrupt.md`. TUI/ACP subscription
-ACP-specific push subscriptions remain open; daemon package/service UX is now
-covered by generated agents-daemon service templates.
+ACP-specific push subscriptions are now covered by `session/rlm/subscribe`;
+daemon package/service UX is covered by generated agents-daemon service templates.

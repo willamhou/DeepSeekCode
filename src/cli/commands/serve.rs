@@ -4650,6 +4650,9 @@ fn acp_handle_request(
         "session/tools/call" => Ok(AcpDispatch::Responses(acp_session_tools_call_responses(
             params, state,
         )?)),
+        "session/rlm/subscribe" => Ok(AcpDispatch::Responses(acp_session_rlm_subscribe_responses(
+            params, state,
+        )?)),
         "session/prompt" => {
             let (session_id, output) = acp_prompt(params, state)?;
             let mut responses = Vec::new();
@@ -4718,6 +4721,13 @@ fn acp_initialize_result(client_protocol_version: Option<u64>) -> JsonValue {
                             object([
                                 ("readOnly", JsonValue::Bool(true)),
                                 ("permissioned", JsonValue::Bool(true)),
+                            ]),
+                        ),
+                        (
+                            "rlmLiveEvents",
+                            object([
+                                ("subscribe", JsonValue::Bool(true)),
+                                ("cursor", JsonValue::String("runtime_event_seq".to_string())),
                             ]),
                         ),
                     ]),
@@ -4951,6 +4961,64 @@ fn acp_session_tools_call_responses(
     Ok(responses)
 }
 
+fn acp_session_rlm_subscribe_responses(
+    params: &BTreeMap<String, JsonValue>,
+    state: &AcpStdioState,
+) -> Result<Vec<JsonValue>, (i64, String)> {
+    let session_id = acp_session_id_from_params(params)?;
+    let session = acp_session_from_params(params, state)?;
+    let thread_id = session.runtime_thread_id.as_deref().ok_or_else(|| {
+        (
+            -32602,
+            "session/rlm/subscribe requires a loaded runtime thread".to_string(),
+        )
+    })?;
+    let cursor = acp_u64_param(params, &["cursor", "sinceSeq", "since_seq"])?.unwrap_or(0);
+    let limit = acp_u64_param(params, &["limit"])?
+        .map(|limit| limit.clamp(1, 500) as usize)
+        .unwrap_or(50);
+    let wait_ms = acp_u64_param(params, &["waitMs", "wait_ms"])?
+        .map(|wait| wait.min(30_000))
+        .unwrap_or(0);
+    let poll_ms = acp_u64_param(params, &["pollMs", "poll_ms"])?
+        .map(|poll| poll.clamp(10, 5_000))
+        .unwrap_or(100);
+
+    let started = Instant::now();
+    let timeout = Duration::from_millis(wait_ms);
+    let poll = Duration::from_millis(poll_ms);
+    let mut events;
+    loop {
+        events = state
+            .store
+            .read_events(thread_id, cursor)
+            .map_err(|error| (-32603, error.to_string()))?
+            .into_iter()
+            .filter(|event| event.kind == "rlm_live_event")
+            .take(limit)
+            .collect::<Vec<_>>();
+        if !events.is_empty() || wait_ms == 0 || started.elapsed() >= timeout {
+            break;
+        }
+        thread::sleep(poll.min(timeout.saturating_sub(started.elapsed())));
+    }
+
+    let next_cursor = events.iter().map(|event| event.seq).max().unwrap_or(cursor);
+    let timed_out = events.is_empty() && wait_ms > 0 && started.elapsed() >= timeout;
+    let mut responses = events
+        .iter()
+        .map(|event| acp_rlm_live_event_update(session_id, event))
+        .collect::<Vec<_>>();
+    responses.push(jsonrpc_success_response_without_id(object([
+        ("cursor", JsonValue::Number(cursor.to_string())),
+        ("nextCursor", JsonValue::Number(next_cursor.to_string())),
+        ("threadId", JsonValue::String(thread_id.to_string())),
+        ("updates", JsonValue::Number(events.len().to_string())),
+        ("timedOut", JsonValue::Bool(timed_out)),
+    ])));
+    Ok(responses)
+}
+
 fn acp_session_id_from_params(params: &BTreeMap<String, JsonValue>) -> Result<&str, (i64, String)> {
     params
         .get("sessionId")
@@ -4965,6 +5033,25 @@ fn acp_tool_name_from_params(params: &BTreeMap<String, JsonValue>) -> Result<&st
         .and_then(json_as_string)
         .filter(|name| !name.trim().is_empty())
         .ok_or_else(|| (-32602, "name is required".to_string()))
+}
+
+fn acp_u64_param(
+    params: &BTreeMap<String, JsonValue>,
+    names: &[&str],
+) -> Result<Option<u64>, (i64, String)> {
+    for name in names {
+        let Some(value) = params.get(*name) else {
+            continue;
+        };
+        return match value {
+            JsonValue::Number(number) | JsonValue::String(number) => number
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|_| (-32602, format!("{name} must be a non-negative integer"))),
+            _ => Err((-32602, format!("{name} must be a non-negative integer"))),
+        };
+    }
+    Ok(None)
 }
 
 fn acp_session_tools_call(
@@ -6031,6 +6118,157 @@ fn acp_structured_session_update(session_id: &str, update: JsonValue) -> JsonVal
             object([
                 ("sessionId", JsonValue::String(session_id.to_string())),
                 ("update", update),
+            ]),
+        ),
+    ])
+}
+
+fn acp_rlm_live_event_update(session_id: &str, event: &RuntimeEvent) -> JsonValue {
+    let payload = json_as_object(&event.payload);
+    let rlm_session_id = payload
+        .and_then(|payload| payload.get("session_id"))
+        .and_then(json_as_string)
+        .unwrap_or("-");
+    let live_event = payload
+        .and_then(|payload| payload.get("event"))
+        .cloned()
+        .unwrap_or(JsonValue::Null);
+    let live_object = json_as_object(&live_event);
+    let live_kind = live_object
+        .and_then(|event| event.get("kind"))
+        .and_then(json_as_string)
+        .unwrap_or("rlm_event");
+    let task_id = live_object
+        .and_then(|event| event.get("task_id"))
+        .and_then(json_as_string);
+    let tool_call_id = acp_rlm_tool_call_id(rlm_session_id, task_id);
+    let summary = match task_id {
+        Some(task_id) => format!("rlm {rlm_session_id}: {live_kind} task={task_id}"),
+        None => format!("rlm {rlm_session_id}: {live_kind}"),
+    };
+    let session_update = if live_kind == "turn_queued" {
+        "tool_call"
+    } else {
+        "tool_call_update"
+    };
+
+    let mut update = BTreeMap::new();
+    update.insert(
+        "sessionUpdate".to_string(),
+        JsonValue::String(session_update.to_string()),
+    );
+    update.insert("toolCallId".to_string(), JsonValue::String(tool_call_id));
+    update.insert(
+        "title".to_string(),
+        JsonValue::String(format!("RLM {live_kind}")),
+    );
+    update.insert(
+        "kind".to_string(),
+        JsonValue::String(acp_rlm_live_update_kind(live_kind).to_string()),
+    );
+    update.insert(
+        "status".to_string(),
+        JsonValue::String(acp_rlm_live_update_status(live_kind).to_string()),
+    );
+    update.insert(
+        "content".to_string(),
+        JsonValue::Array(vec![object([
+            ("type", JsonValue::String("content".to_string())),
+            (
+                "content",
+                object([
+                    ("type", JsonValue::String("text".to_string())),
+                    ("text", JsonValue::String(summary)),
+                ]),
+            ),
+        ])]),
+    );
+    if session_update == "tool_call" {
+        update.insert("rawInput".to_string(), live_event.clone());
+    }
+    update.insert(
+        "rawOutput".to_string(),
+        acp_rlm_live_raw_output(event, live_event),
+    );
+    update.insert(
+        "_meta".to_string(),
+        acp_rlm_live_event_meta(event, rlm_session_id),
+    );
+    acp_structured_session_update(session_id, JsonValue::Object(update))
+}
+
+fn acp_rlm_live_update_status(kind: &str) -> &'static str {
+    match kind {
+        "turn_completed" | "session_stopped" => "completed",
+        "turn_failed" | "worker_failed" => "failed",
+        "turn_cancelled" | "worker_interrupted" => "failed",
+        _ => "in_progress",
+    }
+}
+
+fn acp_rlm_live_update_kind(kind: &str) -> &'static str {
+    if kind.contains("tool") || kind.contains("started") || kind.contains("run") {
+        "execute"
+    } else {
+        "think"
+    }
+}
+
+fn acp_rlm_tool_call_id(session_id: &str, task_id: Option<&str>) -> String {
+    let mut id = format!("rlm_{}", acp_stable_id_segment(session_id));
+    if let Some(task_id) = task_id {
+        id.push('_');
+        id.push_str(&acp_stable_id_segment(task_id));
+    }
+    id
+}
+
+fn acp_stable_id_segment(value: &str) -> String {
+    let segment = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if segment.is_empty() {
+        "unknown".to_string()
+    } else {
+        segment
+    }
+}
+
+fn acp_rlm_live_raw_output(event: &RuntimeEvent, live_event: JsonValue) -> JsonValue {
+    object([
+        ("runtimeEvent", event_to_json(event)),
+        ("event", live_event),
+    ])
+}
+
+fn acp_rlm_live_event_meta(event: &RuntimeEvent, rlm_session_id: &str) -> JsonValue {
+    object([
+        (
+            "deepseek",
+            object([
+                (
+                    "kind",
+                    JsonValue::String("deepseek.acp.rlm_live_event.v1".to_string()),
+                ),
+                (
+                    "rlmSessionId",
+                    JsonValue::String(rlm_session_id.to_string()),
+                ),
+            ]),
+        ),
+        (
+            "runtime",
+            object([
+                ("threadId", JsonValue::String(event.thread_id.clone())),
+                ("eventId", JsonValue::String(event.id.clone())),
+                ("seq", JsonValue::Number(event.seq.to_string())),
             ]),
         ),
     ])
@@ -10419,6 +10657,9 @@ shell_allowlist = ["cargo test"]
         assert!(
             rendered.contains(r#""checkpoints":{"apply":true,"readOnly":false,"restore":true}"#)
         );
+        assert!(
+            rendered.contains(r#""rlmLiveEvents":{"cursor":"runtime_event_seq","subscribe":true}"#)
+        );
         assert!(rendered.contains(r#""tools":{"permissioned":true,"readOnly":true}"#));
     }
 
@@ -10494,6 +10735,119 @@ shell_allowlist = ["cargo test"]
             Some(thread.id.as_str())
         );
         assert!(rendered.contains("ACP durable thread"));
+    }
+
+    #[test]
+    fn acp_session_rlm_subscribe_pushes_runtime_rlm_events() {
+        let mut state = acp_state("acp-rlm-subscribe");
+        let workspace = temp_dir("acp-rlm-subscribe-workspace");
+        let session = state
+            .store
+            .create_session(
+                "ACP RLM session".to_string(),
+                workspace.display().to_string(),
+            )
+            .unwrap();
+        let thread = state
+            .store
+            .create_thread_for_session(
+                &session.id,
+                "ACP RLM thread".to_string(),
+                workspace.display().to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let event = state
+            .store
+            .append_thread_event(
+                &thread.id,
+                "rlm_live_event",
+                object([
+                    (
+                        "kind",
+                        JsonValue::String("deepseek.rlm.live_event.v1".to_string()),
+                    ),
+                    ("session_id", JsonValue::String("live.1".to_string())),
+                    (
+                        "event",
+                        object([
+                            ("seq", JsonValue::Number("1".to_string())),
+                            ("kind", JsonValue::String("turn_queued".to_string())),
+                            ("task_id", JsonValue::String("task_1".to_string())),
+                        ]),
+                    ),
+                ]),
+            )
+            .unwrap();
+        let load_request = format!(
+            r#"{{"jsonrpc":"2.0","id":41,"method":"session/load","params":{{"sessionId":"{}","threadId":"{}"}}}}"#,
+            session.id, thread.id
+        );
+        let AcpDispatch::Responses(load_responses) =
+            acp_dispatch_for_message(&load_request, &mut state)
+        else {
+            panic!("expected ACP responses");
+        };
+        let acp_session_id = parse_root_object(&json_value_to_string(&load_responses[0]))
+            .unwrap()
+            .get("result")
+            .and_then(json_as_object)
+            .and_then(|result| result.get("sessionId"))
+            .and_then(json_as_string)
+            .unwrap()
+            .to_string();
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":42,"method":"session/rlm/subscribe","params":{{"sessionId":"{acp_session_id}","cursor":0,"limit":10}}}}"#
+        );
+
+        let AcpDispatch::Responses(responses) = acp_dispatch_for_message(&request, &mut state)
+        else {
+            panic!("expected ACP responses");
+        };
+
+        assert_eq!(responses.len(), 2);
+        let update = json_value_to_string(&responses[0]);
+        assert!(update.contains(r#""method":"session/update""#));
+        assert!(update.contains(r#""sessionUpdate":"tool_call""#));
+        assert!(update.contains(r#""toolCallId":"rlm_live_1_task_1""#));
+        assert!(update.contains("rlm live.1: turn_queued task=task_1"));
+        assert!(update.contains("deepseek.acp.rlm_live_event.v1"));
+        let result = json_value_to_string(&responses[1]);
+        assert!(result.contains(r#""id":42"#));
+        assert!(result.contains(&format!(r#""nextCursor":{}"#, event.seq)));
+        assert!(result.contains(r#""updates":1"#));
+    }
+
+    #[test]
+    fn acp_session_rlm_subscribe_requires_loaded_runtime_thread() {
+        let mut state = acp_state("acp-rlm-subscribe-gate");
+        let new_dispatch = acp_dispatch_for_message(
+            r#"{"jsonrpc":"2.0","id":43,"method":"session/new","params":{}}"#,
+            &mut state,
+        );
+        let AcpDispatch::Responses(new_responses) = new_dispatch else {
+            panic!("expected ACP responses");
+        };
+        let acp_session_id = parse_root_object(&json_value_to_string(&new_responses[0]))
+            .unwrap()
+            .get("result")
+            .and_then(json_as_object)
+            .and_then(|result| result.get("sessionId"))
+            .and_then(json_as_string)
+            .unwrap()
+            .to_string();
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":44,"method":"session/rlm/subscribe","params":{{"sessionId":"{acp_session_id}"}}}}"#
+        );
+
+        let AcpDispatch::Responses(responses) = acp_dispatch_for_message(&request, &mut state)
+        else {
+            panic!("expected ACP responses");
+        };
+        let rendered = json_value_to_string(&responses[0]);
+        assert!(rendered.contains(r#""id":44"#));
+        assert!(rendered.contains("requires a loaded runtime thread"));
     }
 
     #[test]

@@ -224,6 +224,6 @@ Future implementation should add these gates:
 
 Do not rename the existing bounded child-agent `rlm_process` implementation as a
 live daemon. It is already useful and should remain the default until a real
-live worker exists. The remaining executable RLM slices should focus on
-ACP-specific push subscriptions; daemon package/service UX is now covered by
-generated agents-daemon service templates.
+live worker exists. ACP-specific push subscriptions are now covered by
+`session/rlm/subscribe`; daemon package/service UX is covered by generated
+agents-daemon service templates.

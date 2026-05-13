@@ -49,5 +49,5 @@ start, completion, or failure events.
 
 This is long-polling over JSONL; the follow-on HTTP SSE bridge is implemented
 in `2026-05-14-deepseek-tui-rlm-http-sse-stream.md`. Service packaging and
-ACP-specific push subscriptions remain open; daemon package/service UX is now
-covered by generated agents-daemon service templates.
+ACP-specific push subscriptions are now covered by `session/rlm/subscribe`;
+daemon package/service UX is covered by generated agents-daemon service templates.

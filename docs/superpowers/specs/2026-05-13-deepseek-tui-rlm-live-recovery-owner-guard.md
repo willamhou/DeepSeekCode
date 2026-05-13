@@ -37,4 +37,4 @@ clobber a worker that is still running.
 
 Daemon-tick stale-owner recovery is implemented in
 `2026-05-13-deepseek-tui-rlm-live-daemon-auto-recover.md`. Broader lifecycle
-ACP-specific push subscriptions remain a separate gap; daemon package/service UX is now covered by generated agents-daemon service templates.
+ACP-specific push subscriptions are now covered by `session/rlm/subscribe`; daemon package/service UX is covered by generated agents-daemon service templates.

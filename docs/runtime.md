@@ -482,6 +482,7 @@ The first slice supports:
 - `session/checkpoint/restore`
 - `session/tools/list`
 - `session/tools/call`
+- `session/rlm/subscribe`
 - `session/prompt`
 - `session/cancel`
 - `shutdown`
@@ -524,6 +525,13 @@ running, then sends a final `tool_call_update` with the matching `toolCallId`,
 final status, complete text content, and `rawOutput`.
 Loaded-session updates include the runtime turn/item ids under `_meta.runtime`
 so clients can align incremental UI state with the durable audit trail.
+`session/rlm/subscribe` is a DeepSeekCode ACP extension for loaded runtime
+threads. It reads mirrored runtime `rlm_live_event` records after `cursor` /
+`sinceSeq`, optionally waits with `waitMs` and `pollMs`, emits ACP
+`session/update` notifications using standard `tool_call` /
+`tool_call_update` payloads, and returns `nextCursor` based on the runtime
+event sequence. This gives ACP clients the same live RLM subscription path that
+HTTP clients consume through aggregate runtime SSE.
 
 ```bash
 deepseek serve --acp
