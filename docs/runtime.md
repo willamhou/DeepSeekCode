@@ -1199,6 +1199,13 @@ not the apex domain, so `.example.com` matches `docs.example.com` but not
 `example.com`. When `network.default = "prompt"`, AgentLoop/runtime/TUI
 execution emits a `permission_request` with `kind = "network"` for the host list
 and, after approval, marks that single tool invocation as network-approved.
+Persist hosts that should not prompt again with:
+
+```bash
+deepseek config network allow api.example.com
+deepseek config network deny tracking.example.com
+```
+
 Direct tool execution without the registry approval path still fails closed with
 a clear approval-required error; set `DSCODE_AUTO_APPROVE_NETWORK=1` only in
 trusted non-interactive runs. When `network.audit = true`, each attempted web

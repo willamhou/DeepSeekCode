@@ -132,7 +132,8 @@ Landed first slice:
   policy now gates shared web fetches with deny-wins precedence and best-effort
   local network audit logging; `network.default = "prompt"` now flows through
   AgentLoop/runtime/TUI `kind = "network"` permission requests, with direct
-  non-registry tool execution still fail-closed
+  non-registry tool execution still fail-closed; `deepseek config network
+  allow|deny <host>` persists host decisions back into project config
 - DeepSeek-TUI optional document/image helpers (`pandoc_convert` and
   `image_ocr`) landed as local dependency wrappers with clear missing-binary
   errors

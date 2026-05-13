@@ -119,6 +119,13 @@ For npm wrapper metadata:
 node npm/scripts/check-version-sync.js
 ```
 
+For persistent network host policy:
+
+```bash
+deepseek config network allow api.example.com
+deepseek config network deny tracking.example.com
+```
+
 ## Documentation
 
 - [Install](./docs/install.md)

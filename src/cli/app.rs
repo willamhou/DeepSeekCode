@@ -526,6 +526,8 @@ pub struct ConfigArgs {
     pub print_default: bool,
     pub init: bool,
     pub force: bool,
+    pub network_allow: Option<String>,
+    pub network_deny: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -1000,21 +1002,55 @@ fn parse_config_args(args: Vec<String>) -> Result<ConfigArgs, String> {
         print_default: false,
         init: false,
         force: false,
+        network_allow: None,
+        network_deny: None,
     };
 
-    for arg in args {
-        match arg.as_str() {
-            "--print-default" => parsed.print_default = true,
-            "init" => parsed.init = true,
-            "--force" | "-f" => parsed.force = true,
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--print-default" => {
+                parsed.print_default = true;
+                index += 1;
+            }
+            "init" => {
+                parsed.init = true;
+                index += 1;
+            }
+            "--force" | "-f" => {
+                parsed.force = true;
+                index += 1;
+            }
+            "network" if index + 2 < args.len() && args[index + 1] == "allow" => {
+                parsed.network_allow = Some(args[index + 2].clone());
+                index += 3;
+            }
+            "network" if index + 2 < args.len() && args[index + 1] == "deny" => {
+                parsed.network_deny = Some(args[index + 2].clone());
+                index += 3;
+            }
+            "network" => {
+                return Err("config network requires allow|deny <host>".to_string());
+            }
             other => {
                 return Err(format!(
-                    "unknown config argument `{other}`; expected init|--force|--print-default"
+                    "unknown config argument `{other}`; expected init|network allow|network deny|--force|--print-default"
                 ));
             }
         }
     }
 
+    let network_mutations =
+        usize::from(parsed.network_allow.is_some()) + usize::from(parsed.network_deny.is_some());
+    if network_mutations > 1 {
+        return Err("config accepts only one network allow/deny mutation at a time".to_string());
+    }
+    if network_mutations > 0 && (parsed.print_default || parsed.init || parsed.force) {
+        return Err(
+            "config network allow|deny cannot be combined with init, --force, or --print-default"
+                .to_string(),
+        );
+    }
     if parsed.print_default && parsed.init {
         return Err("config init cannot be combined with --print-default".to_string());
     }
@@ -3410,6 +3446,27 @@ mod tests {
             Some(Command::Config(args)) => {
                 assert!(args.init);
                 assert!(args.force);
+                assert!(!args.print_default);
+            }
+            other => panic!("expected Command::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_config_network_allow() {
+        let cli = Cli::from_argv(vec![
+            "config".to_string(),
+            "network".to_string(),
+            "allow".to_string(),
+            "api.example.com".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Config(args)) => {
+                assert_eq!(args.network_allow.as_deref(), Some("api.example.com"));
+                assert_eq!(args.network_deny, None);
+                assert!(!args.init);
                 assert!(!args.print_default);
             }
             other => panic!("expected Command::Config, got {other:?}"),

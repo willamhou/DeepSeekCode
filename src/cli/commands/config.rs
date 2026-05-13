@@ -1,10 +1,24 @@
 use crate::cli::app::ConfigArgs;
 use crate::config::load::load_or_default;
 use crate::config::types::AppConfig;
+use crate::core::network_policy::{decide, normalize_host, NetworkDecision};
 use crate::error::app_error;
 use crate::error::AppResult;
 
 pub fn run(args: ConfigArgs) -> AppResult<()> {
+    if let Some(host) = args.network_allow {
+        let result =
+            persist_network_rule_at(&std::env::current_dir()?, &host, NetworkRuleTarget::Allow)?;
+        print_network_rule_result(&result);
+        return Ok(());
+    }
+    if let Some(host) = args.network_deny {
+        let result =
+            persist_network_rule_at(&std::env::current_dir()?, &host, NetworkRuleTarget::Deny)?;
+        print_network_rule_result(&result);
+        return Ok(());
+    }
+
     if args.init {
         let path = init_config_at(&std::env::current_dir()?, args.force)?;
         println!("initialized config: {}", path.display());
@@ -21,6 +35,38 @@ pub fn run(args: ConfigArgs) -> AppResult<()> {
         );
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkRuleTarget {
+    Allow,
+    Deny,
+}
+
+impl NetworkRuleTarget {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Allow => "network.allow",
+            Self::Deny => "network.deny",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NetworkRuleResult {
+    path: std::path::PathBuf,
+    key: &'static str,
+    host: String,
+    changed: bool,
+}
+
+fn print_network_rule_result(result: &NetworkRuleResult) {
+    if result.changed {
+        println!("{}: added {}", result.key, result.host);
+    } else {
+        println!("{}: {} already present", result.key, result.host);
+    }
+    println!("config: {}", result.path.display());
 }
 
 fn print_config(config: &AppConfig) {
@@ -129,6 +175,160 @@ pub(crate) fn init_config_at(root: &std::path::Path, force: bool) -> AppResult<s
     }
 
     Ok(config_path)
+}
+
+fn persist_network_rule_at(
+    root: &std::path::Path,
+    host: &str,
+    target: NetworkRuleTarget,
+) -> AppResult<NetworkRuleResult> {
+    let host = normalize_network_rule(host)?;
+    let default_config = AppConfig::default();
+    let path = root.join(default_config.workspace.config_path());
+    if !path.exists() {
+        init_config_at(root, false)?;
+    }
+
+    let content = std::fs::read_to_string(&path)?;
+    let mut allow = read_string_list_key(&content, "network.allow");
+    let mut deny = read_string_list_key(&content, "network.deny");
+    let changed = match target {
+        NetworkRuleTarget::Allow => insert_sorted_unique(&mut allow, &host),
+        NetworkRuleTarget::Deny => insert_sorted_unique(&mut deny, &host),
+    };
+
+    if target == NetworkRuleTarget::Allow {
+        let mut future = crate::config::types::NetworkConfig::default();
+        future.allow = allow.clone();
+        future.deny = deny.clone();
+        if decide(&future, &host) == NetworkDecision::Deny {
+            return Err(app_error(format!(
+                "network.deny already matches `{host}`; remove the deny rule before adding an allow rule"
+            )));
+        }
+    }
+
+    if changed {
+        let values = match target {
+            NetworkRuleTarget::Allow => &allow,
+            NetworkRuleTarget::Deny => &deny,
+        };
+        let updated = replace_or_append_string_list_key(&content, target.key(), values);
+        std::fs::write(&path, updated)?;
+    }
+
+    Ok(NetworkRuleResult {
+        path,
+        key: target.key(),
+        host,
+        changed,
+    })
+}
+
+fn insert_sorted_unique(values: &mut Vec<String>, value: &str) -> bool {
+    if values.iter().any(|existing| existing == value) {
+        return false;
+    }
+    values.push(value.to_string());
+    values.sort();
+    true
+}
+
+fn normalize_network_rule(host: &str) -> AppResult<String> {
+    let normalized = normalize_host(host);
+    if normalized.is_empty()
+        || normalized.contains('/')
+        || normalized.contains('\\')
+        || normalized.contains(',')
+        || normalized.contains('"')
+        || normalized.contains('\'')
+        || normalized.chars().any(char::is_whitespace)
+    {
+        return Err(app_error(
+            "network host rule must be a host, .subdomain suffix, or *.subdomain suffix",
+        ));
+    }
+    Ok(normalized)
+}
+
+fn read_string_list_key(content: &str, key: &str) -> Vec<String> {
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix(key) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(value) = rest.strip_prefix('=') else {
+            continue;
+        };
+        return parse_string_list_literal(value.trim());
+    }
+    Vec::new()
+}
+
+fn parse_string_list_literal(value: &str) -> Vec<String> {
+    let Some(start) = value.find('[') else {
+        return Vec::new();
+    };
+    let Some(end) = value[start + 1..].find(']') else {
+        return Vec::new();
+    };
+    let body = &value[start + 1..start + 1 + end];
+    let mut values = Vec::new();
+    let mut current = String::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in body.chars() {
+        if !in_string {
+            if ch == '"' {
+                in_string = true;
+                current.clear();
+            }
+            continue;
+        }
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => {
+                in_string = false;
+                values.push(current.clone());
+            }
+            _ => current.push(ch),
+        }
+    }
+    values
+}
+
+fn replace_or_append_string_list_key(content: &str, key: &str, values: &[String]) -> String {
+    let rendered = format!("{key} = {}", render_string_list(values));
+    let mut replaced = false;
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if !replaced
+            && trimmed
+                .strip_prefix(key)
+                .is_some_and(|rest| rest.trim_start().starts_with('='))
+        {
+            lines.push(rendered.clone());
+            replaced = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !replaced {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(rendered);
+    }
+    let mut updated = lines.join("\n");
+    updated.push('\n');
+    updated
 }
 
 fn render_default_config(config: &AppConfig) -> String {
@@ -300,6 +500,40 @@ mod tests {
         init_config_at(&root, true).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("DeepSeekCode project configuration"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persist_network_allow_adds_normalized_host_to_config() {
+        let root = temp_root("network-allow");
+        init_config_at(&root, false).unwrap();
+
+        let result =
+            persist_network_rule_at(&root, "*.Example.com", NetworkRuleTarget::Allow).unwrap();
+
+        assert!(result.changed);
+        assert_eq!(result.host, ".example.com");
+        let content = std::fs::read_to_string(root.join(".dscode/config.toml")).unwrap();
+        assert!(content.contains(r#"network.allow = [".example.com"]"#));
+
+        let second =
+            persist_network_rule_at(&root, ".example.com", NetworkRuleTarget::Allow).unwrap();
+        assert!(!second.changed);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persist_network_allow_refuses_matching_deny_rule() {
+        let root = temp_root("network-deny-wins");
+        init_config_at(&root, false).unwrap();
+        persist_network_rule_at(&root, ".example.com", NetworkRuleTarget::Deny).unwrap();
+
+        let error = persist_network_rule_at(&root, "api.example.com", NetworkRuleTarget::Allow)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("network.deny already matches"));
 
         let _ = std::fs::remove_dir_all(root);
     }

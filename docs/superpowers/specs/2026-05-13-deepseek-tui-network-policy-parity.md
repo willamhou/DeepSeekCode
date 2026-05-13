@@ -60,6 +60,9 @@ policy for normal external domains and no network decision audit trail.
 - Added a hidden per-invocation approval marker that the registry injects after
   an approved `kind = "network"` request; web tools never expose this marker in
   their public schema.
+- Added `deepseek config network allow <host>` and
+  `deepseek config network deny <host>` to persist host decisions back into the
+  project `.dscode/config.toml`.
 - Added best-effort audit logging through the same validation point.
 - Added default config rendering for the network policy fields.
 - Updated README, runtime docs, and the DeepSeek-TUI parity plan.
@@ -72,6 +75,8 @@ policy for normal external domains and no network decision audit trail.
 - `cargo test fetch_url_respects_network_policy_deny --lib` passed.
 - `cargo test fetch_url_appends_network_audit_line --lib` passed.
 - `cargo test permission_request_for_reports_network_prompt --lib` passed.
+- `cargo test config --lib` covers config parsing and persisted network
+  allow/deny mutations.
 - `cargo test fetch_url_prompt_policy_requires_approval_unless_marked --lib`
   passed.
 - `cargo test web_run_open_exposes_links_and_click_fetches_target --lib`
@@ -85,5 +90,6 @@ policy for normal external domains and no network decision audit trail.
 
 - Direct web tool execution outside AgentLoop/registry approval remains
   fail-closed for `prompt` mode.
-- Approved network prompts are per tool invocation; DeepSeekCode does not yet
-  persist per-host "always allow" decisions back into config.
+- Approved network prompts are still per tool invocation inside the approval
+  modal; operators can persist "always allow" decisions with
+  `deepseek config network allow <host>`.
