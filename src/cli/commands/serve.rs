@@ -49,7 +49,7 @@ use crate::tools::search_text::{GrepFilesTool, SearchTextTool};
 use crate::tools::tool_output::RetrieveToolResultTool;
 use crate::tools::types::{Tool, ToolInput};
 use crate::tools::validate_data::ValidateDataTool;
-use crate::tools::web::{FetchUrlTool, FinanceTool, WebSearchTool};
+use crate::tools::web::{FetchUrlTool, FinanceTool, WebRunTool, WebSearchTool};
 use crate::ui::stream::NoopStreamEvents;
 use crate::util::cwd::CwdGuard;
 use crate::util::json::{
@@ -731,6 +731,7 @@ fn execute_mcp_tool(
         "grep_files" => GrepFilesTool.execute(input)?,
         "file_search" => FileSearchTool.execute(input)?,
         "web_search" => WebSearchTool.execute(input)?,
+        "web_run" => WebRunTool.execute(input)?,
         "fetch_url" => FetchUrlTool.execute(input)?,
         "finance" => FinanceTool.execute(input)?,
         "git_status" => GitStatusTool.execute(input)?,
@@ -2629,6 +2630,47 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
                     (
                         "timeout_ms",
                         number_property("Timeout milliseconds, default 15000."),
+                    ),
+                ],
+                &[],
+            ),
+        ),
+        mcp_tool_definition(
+            "web_run",
+            "DeepSeek-TUI-style aggregate web wrapper for search_query, open, click, find, finance, image_query, and cached-PDF screenshot actions.",
+            mcp_schema(
+                vec![
+                    (
+                        "search_query",
+                        string_property("JSON object or array of search actions with q/query."),
+                    ),
+                    (
+                        "open",
+                        string_property("JSON object/array or direct URL to fetch/open."),
+                    ),
+                    (
+                        "click",
+                        string_property("JSON object or array with ref_id and id/link_id."),
+                    ),
+                    (
+                        "find",
+                        string_property("JSON object or array with ref_id/url and pattern."),
+                    ),
+                    (
+                        "finance",
+                        string_property("JSON object or array with ticker/symbol."),
+                    ),
+                    (
+                        "image_query",
+                        string_property("JSON object or array of image search actions with q/query."),
+                    ),
+                    (
+                        "screenshot",
+                        string_property("JSON object or array with cached PDF ref_id and pageno."),
+                    ),
+                    (
+                        "response_length",
+                        string_property("short, medium, or long page window length."),
                     ),
                 ],
                 &[],
@@ -4771,7 +4813,7 @@ fn acp_tool_kind(name: &str) -> &'static str {
         "write_file" | "edit_file" | "fim_edit" | "apply_patch" | "revert_turn" => "edit",
         "delete_file" => "delete",
         "copy_file" | "move_file" => "move",
-        "search_text" | "grep_files" | "file_search" | "web_search" => "search",
+        "search_text" | "grep_files" | "file_search" | "web_search" | "web_run" => "search",
         "fetch_url" | "finance" => "fetch",
         "run_shell"
         | "run_tests"
@@ -7186,6 +7228,7 @@ mod tests {
         assert!(rendered.contains(r#""name":"grep_files""#));
         assert!(rendered.contains(r#""name":"file_search""#));
         assert!(rendered.contains(r#""name":"web_search""#));
+        assert!(rendered.contains(r#""name":"web_run""#));
         assert!(rendered.contains(r#""name":"fetch_url""#));
         assert!(rendered.contains(r#""name":"finance""#));
         assert!(rendered.contains(r#""name":"git_status""#));
@@ -7336,6 +7379,22 @@ mod tests {
         assert!(text.contains(r#""chunks""#));
         assert!(text.contains(r#""coverage":{"chunks":2"#));
         assert!(text.contains(r#""include_text":false"#));
+    }
+
+    #[test]
+    fn mcp_tools_call_executes_web_run_without_network_for_unsupported_actions() {
+        let state = mcp_state("mcp-web-run");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":37,"method":"tools/call","params":{"name":"web_run","arguments":{"weather":[{"location":"San Francisco"}]}}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("meta.tool=web_run"));
+        assert!(rendered.contains("meta.unsupported_actions=weather"));
+        assert!(rendered.contains("Unsupported web_run actions in this slice: weather"));
+        assert!(rendered.contains(r#""isError":false"#));
     }
 
     #[test]
@@ -8758,6 +8817,7 @@ mod tests {
         assert!(rendered.contains(r#""name":"grep_files""#));
         assert!(rendered.contains(r#""name":"file_search""#));
         assert!(rendered.contains(r#""name":"web_search""#));
+        assert!(rendered.contains(r#""name":"web_run""#));
         assert!(rendered.contains(r#""name":"fetch_url""#));
         assert!(rendered.contains(r#""name":"git_status""#));
         assert!(rendered.contains(r#""name":"project_map""#));

@@ -11,9 +11,10 @@ The Phase G2 parity plan understated and partially misstated the current
 stopping at `run_shell`, `apply_patch`, `write_file`, `delete_file`,
 `copy_file`, and `move_file`, even though `edit_file`, `revert_turn`,
 `github_comment`, and `github_close_issue` are already wired through durable
-runtime approvals. It also listed `web_run` as MCP-visible in this section,
-while the MCP stdio server exposes narrower first-class read-only web/market
-tools.
+runtime approvals. At the time of this audit it also listed `web_run` as
+MCP-visible in this section, while the MCP stdio server exposed narrower
+first-class read-only web/market tools; a follow-up slice now exposes `web_run`
+through MCP/ACP.
 
 ## Spec
 

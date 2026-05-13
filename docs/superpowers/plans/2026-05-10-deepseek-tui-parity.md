@@ -477,9 +477,10 @@ Landed first slice:
   and `resources/read`
 - read-only workspace tools exposed through MCP: `list_files`, `list_dir`,
   `read_file`, `retrieve_tool_result`, `search_text`, `grep_files`,
-  `file_search`, `web_search`, `fetch_url`, `finance`, `git_status`,
-  `git_diff`, `project_map`, `validate_data`, `git_log`, `git_show`,
-  `git_blame`, `github_issue_context`, `github_pr_context`, and `diagnostics`
+  `file_search`, `web_run`, `web_search`, `fetch_url`, `finance`,
+  `git_status`, `git_diff`, `project_map`, `validate_data`, `git_log`,
+  `git_show`, `git_blame`, `github_issue_context`, `github_pr_context`, and
+  `diagnostics`
 - code-executing MCP side-effect tools exposed only with trusted side effects or
   durable approvals: `run_tests`, `run_shell`
 - DeepSeek-TUI-compatible MCP shell-session tools: read-only
@@ -573,6 +574,9 @@ Landed first slice:
   `session/tools/call`; read-only tools run from the ACP session workspace, and
   side-effect tools appear only for loaded runtime-thread sessions where they
   reuse durable `permission_request` / `permission_response` approval events
+- MCP and ACP read-only tool bridges now expose the DeepSeek-TUI-compatible
+  aggregate `web_run` wrapper in addition to the narrower `web_search`,
+  `fetch_url`, and `finance` tools
 - ACP loaded-session tool calls now create an assistant runtime turn with
   `tool_call` and `tool_result` items, and side-effect permission requests are
   linked to that same turn for auditability
