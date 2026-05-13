@@ -1322,8 +1322,9 @@ or fails, it falls back to a local compiler/type-check command:
 deepseek diagnostics
 deepseek diagnostics --changed
 deepseek diagnostics src/lib.rs src/repl/slash.rs
+deepseek diagnostics --json --changed
 deepseek diagnostics --watch --changed
-deepseek diagnostics --watch --interval-ms 750 src/lib.rs
+deepseek diagnostics --watch --json --interval-ms 750 src/lib.rs
 ```
 
 The current fallback engines are:
@@ -1350,8 +1351,17 @@ edits. `deepseek diagnostics --watch` keeps the CLI process alive and reuses one
 warmed stdio LSP session across ticks for concrete file paths, sending
 `didChange` on subsequent checks. Both paths fall back to compiler checks
 whenever the warmed LSP session is unavailable or times out. The generated
-systemd/launchd service set can run `deepseek diagnostics --watch --changed` as
-an always-on local diagnostics worker for the workspace.
+systemd/launchd service set runs `deepseek diagnostics --watch --changed
+--json` as an always-on local diagnostics worker for the workspace.
+
+`deepseek diagnostics --json` emits one structured JSON object with schema
+`deepseek.diagnostics.report.v1`. `deepseek diagnostics --watch --json` emits
+one newline-delimited JSON object per tick with schema
+`deepseek.diagnostics.daemon_tick.v1`, including `cwd`, `watch`, `tick`,
+`changed`, `skipped`, `files`, and `report`. When `--changed` finds no files,
+the JSON output still emits a tick with `skipped: true`, an empty `files` array,
+and `report: null`, so supervisors can distinguish idle ticks from process
+failures.
 
 HTTP runtime clients can call the runtime-hosted diagnostics broker:
 
@@ -1442,8 +1452,10 @@ Current boundaries are explicit:
 - `deepseek diagnostics --watch`, the generated diagnostics service template,
   agent-loop post-edit diagnostics, and `serve --http` `/v1/diagnostics` reuse
   warmed stdio LSP sessions inside their owning process. Cross-process
-  diagnostics now goes through the HTTP runtime broker; a dedicated standalone
-  diagnostics daemon protocol is still future work.
+  diagnostics can go through the HTTP runtime broker or consume the
+  newline-delimited `deepseek.diagnostics.daemon_tick.v1` protocol from
+  `deepseek diagnostics --watch --json`. The standalone CLI protocol is
+  intentionally stdout-based and does not yet expose a separate socket server.
 
 ## Durable Runtime Roadmap
 

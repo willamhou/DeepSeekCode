@@ -39,7 +39,7 @@ This repository is an active workbench, not a polished hosted product.
 - HTTP runtime with health, session, thread, task, event, usage, diagnostics,
   automation, and SSE stream endpoints
 - ACP stdio adapter for editor clients, including durable session list/load
-- LSP-backed and fallback diagnostics runners
+- LSP-backed and fallback diagnostics runners with JSON/JSONL watch output
 - Git rollback snapshots for TUI-started turns
 - MCP client inventory/tooling/prompts/resources/templates/config CRUD, a full-width TUI MCP manager
   screen plus scrollable discovery detail panel, MCP stdio server mode with `mcp add-self` registration

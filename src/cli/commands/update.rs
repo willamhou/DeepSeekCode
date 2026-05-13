@@ -382,7 +382,7 @@ deepseek agents service --kind launchd --out ./services --workdir "$PWD" --bin "
 
 The generated set runs the HTTP runtime (`deepseek serve --http`), the durable
 task daemon (`deepseek agents daemon --json`), and the diagnostics watch worker
-(`deepseek diagnostics --watch --changed`). Review the generated
+(`deepseek diagnostics --watch --changed --json`). Review the generated
 WorkingDirectory, bind address, poll interval, and budget before installing the
 files with systemd or launchd.
 "#

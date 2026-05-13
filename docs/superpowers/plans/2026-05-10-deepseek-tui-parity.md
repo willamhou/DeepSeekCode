@@ -363,7 +363,11 @@ Landed first slice:
 
 - `src/language/diagnostics.rs` adds a diagnostics runner that prefers stdio LSP `textDocument/publishDiagnostics` for opened files when the language server is available, then falls back to compiler/type-check commands
 - `deepseek diagnostics [--changed] [paths...]` exposes manual diagnostics for Rust, TypeScript, JavaScript, Python, and Go workspaces
-- `deepseek diagnostics --watch` keeps a warmed stdio LSP session alive inside the watcher process, and `deepseek agents service` renders a diagnostics watch supervisor for local always-on use
+- `deepseek diagnostics --json` emits `deepseek.diagnostics.report.v1`,
+  while `deepseek diagnostics --watch --json` emits newline-delimited
+  `deepseek.diagnostics.daemon_tick.v1` records for standalone supervisor
+  consumption
+- `deepseek diagnostics --watch` keeps a warmed stdio LSP session alive inside the watcher process, and `deepseek agents service` renders a JSON diagnostics watch supervisor for local always-on use
 - agent registry exposes a read-only `diagnostics` tool, and OpenAI/Anthropic tool schemas include it
 - `diagnostics.post_edit = true` enables opt-in post-edit diagnostics appended to successful `apply_patch` tool results
 - `serve --http` exposes `/v1/diagnostics` as a runtime diagnostics broker
@@ -384,8 +388,6 @@ Landed first slice:
 
 Remaining:
 
-- dedicated standalone diagnostics daemon protocol beyond the HTTP runtime
-  broker
 - side-git/worktree snapshot strategy for richer non-regular-file fidelity
 - richer restore UX in the future TUI
 

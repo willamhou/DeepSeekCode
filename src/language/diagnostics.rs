@@ -1,10 +1,12 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+use crate::util::json::JsonValue;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiagnosticStatus {
@@ -36,6 +38,50 @@ pub struct DiagnosticReport {
     pub stdout: String,
     pub stderr: String,
     pub note: Option<String>,
+}
+
+impl DiagnosticReport {
+    pub fn to_json_value(&self) -> JsonValue {
+        json_object([
+            ("language", JsonValue::String(self.language.clone())),
+            ("engine", JsonValue::String(self.engine.clone())),
+            ("lsp_server", JsonValue::String(self.lsp_server.clone())),
+            ("lsp_available", JsonValue::Bool(self.lsp_available)),
+            ("command", JsonValue::String(self.command.clone())),
+            ("cwd", JsonValue::String(self.cwd.clone())),
+            (
+                "checked_files",
+                JsonValue::Array(
+                    self.checked_files
+                        .iter()
+                        .cloned()
+                        .map(JsonValue::String)
+                        .collect(),
+                ),
+            ),
+            (
+                "status",
+                JsonValue::String(self.status.as_str().to_string()),
+            ),
+            ("stdout", JsonValue::String(self.stdout.clone())),
+            ("stderr", JsonValue::String(self.stderr.clone())),
+            (
+                "note",
+                self.note
+                    .clone()
+                    .map(JsonValue::String)
+                    .unwrap_or(JsonValue::Null),
+            ),
+        ])
+    }
+}
+
+fn json_object<const N: usize>(items: [(&str, JsonValue); N]) -> JsonValue {
+    let mut map = BTreeMap::new();
+    for (key, value) in items {
+        map.insert(key.to_string(), value);
+    }
+    JsonValue::Object(map)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

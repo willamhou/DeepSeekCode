@@ -476,6 +476,7 @@ pub struct DiagnosticsArgs {
     pub changed: bool,
     pub watch: bool,
     pub once: bool,
+    pub json: bool,
     pub interval_ms: u64,
     pub paths: Vec<String>,
 }
@@ -1431,6 +1432,7 @@ fn parse_diagnostics_args(args: Vec<String>) -> Result<DiagnosticsArgs, String> 
     let mut changed = false;
     let mut watch = false;
     let mut once = false;
+    let mut json = false;
     let mut interval_ms = 1_000_u64;
     let mut paths = Vec::new();
     let mut index = 0;
@@ -1448,6 +1450,10 @@ fn parse_diagnostics_args(args: Vec<String>) -> Result<DiagnosticsArgs, String> 
                 once = true;
                 index += 1;
             }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
             "--interval-ms" if index + 1 < args.len() => {
                 interval_ms = args[index + 1]
                     .parse::<u64>()
@@ -1463,7 +1469,7 @@ fn parse_diagnostics_args(args: Vec<String>) -> Result<DiagnosticsArgs, String> 
             }
             other if other.starts_with('-') => {
                 return Err(format!(
-                    "unknown flag for `diagnostics`: {other}; expected --changed|--watch|--once|--interval-ms"
+                    "unknown flag for `diagnostics`: {other}; expected --changed|--watch|--once|--json|--interval-ms"
                 ));
             }
             value => {
@@ -1476,6 +1482,7 @@ fn parse_diagnostics_args(args: Vec<String>) -> Result<DiagnosticsArgs, String> 
         changed,
         watch,
         once,
+        json,
         interval_ms,
         paths,
     })
@@ -2411,6 +2418,7 @@ mod tests {
                 changed: true,
                 watch: false,
                 once: false,
+                json: false,
                 interval_ms: 1000,
                 ref paths,
             })) if paths == &vec!["src/lib.rs".to_string()]
@@ -2431,9 +2439,28 @@ mod tests {
                 changed: false,
                 watch: true,
                 once: true,
+                json: false,
                 interval_ms: 250,
                 ref paths,
             })) if paths == &vec!["src/main.rs".to_string()]
+        ));
+
+        let json = Cli::from_argv(vec![
+            "diagnostics".to_string(),
+            "--json".to_string(),
+            "--changed".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            json.command,
+            Some(Command::Diagnostics(DiagnosticsArgs {
+                changed: true,
+                watch: false,
+                once: false,
+                json: true,
+                interval_ms: 1000,
+                ref paths,
+            })) if paths.is_empty()
         ));
     }
 

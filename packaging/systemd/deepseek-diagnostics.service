@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=__WORKDIR__
-ExecStart=/usr/bin/env __DEEPSEEK_BIN__ diagnostics --watch --changed --interval-ms __INTERVAL_MS__
+ExecStart=/usr/bin/env __DEEPSEEK_BIN__ diagnostics --watch --changed --interval-ms __INTERVAL_MS__ --json
 Restart=on-failure
 RestartSec=5
 

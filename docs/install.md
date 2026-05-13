@@ -139,8 +139,8 @@ deepseek agents service --kind launchd --out ./services --workdir "$PWD" --bin "
 Linux 用户通常把 `services/systemd/*.service` 安装到
 `~/.config/systemd/user/`，macOS 用户把 `services/launchd/*.plist` 安装到
 `~/Library/LaunchAgents/`。生成内容包括 `serve --http`、`agents daemon --json`
-和 `diagnostics --watch --changed`；命令只生成文件，不会自动 enable、load 或
-start。
+和 `diagnostics --watch --changed --json`；命令只生成文件，不会自动 enable、
+load 或 start。
 
 ## Homebrew
 
@@ -388,7 +388,7 @@ curl http://127.0.0.1:8765/runtime
 - `deepseek update install-package` / `deepseek update rollback`：安装本地 release package 或回滚到备份 binary
 - `deepseek agents run-task <task-id>`：认领并执行 pending durable runtime task，写回同一 thread 的 turns/items/usage/status
 - `deepseek agents daemon [--interval-ms 1000] [--budget N]`：本地轮询 `.dscode/runtime`，触发到期 automation、执行 thread-linked pending task，并自动追加 non-destructive compaction summary
-- `deepseek diagnostics [--changed] [paths...]` / `deepseek diagnostics --watch ...`：运行本地语言诊断；watch 模式会在同一进程内复用 warmed stdio LSP session，失败时回退到 compiler/type-check checker；`deepseek agents service` 可为 `diagnostics --watch --changed` 生成常驻 worker 模板
+- `deepseek diagnostics [--changed] [--json] [paths...]` / `deepseek diagnostics --watch --json ...`：运行本地语言诊断；watch 模式会在同一进程内复用 warmed stdio LSP session，失败时回退到 compiler/type-check checker；JSON 模式输出 `deepseek.diagnostics.report.v1` 或 newline-delimited `deepseek.diagnostics.daemon_tick.v1`；`deepseek agents service` 可为 `diagnostics --watch --changed --json` 生成常驻 worker 模板
 - `deepseek restore snapshot [label]` / `list` / `show <id>` / `revert-turn <id> [--apply]`：管理 rollback snapshots（tracked diff + untracked regular files）
 - `deepseek serve --http`：启动本地 runtime skeleton，提供 `/health` 与 `/runtime`
 - `deepseek mcp init|add|add-self|get|remove|enable|disable|validate|list|doctor|tools|prompts|resources|resource-templates|call|prompt|resource`：管理、校验、枚举或手动调用 MCP server tools/prompts/resources

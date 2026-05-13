@@ -5335,39 +5335,7 @@ fn diagnostics_response(state: &RuntimeHttpState, body: &str) -> AppResult<HttpR
 }
 
 fn diagnostic_report_to_json(report: &crate::language::diagnostics::DiagnosticReport) -> JsonValue {
-    json_object([
-        ("language", JsonValue::String(report.language.clone())),
-        ("engine", JsonValue::String(report.engine.clone())),
-        ("lsp_server", JsonValue::String(report.lsp_server.clone())),
-        ("lsp_available", JsonValue::Bool(report.lsp_available)),
-        ("command", JsonValue::String(report.command.clone())),
-        ("cwd", JsonValue::String(report.cwd.clone())),
-        (
-            "checked_files",
-            json_array(
-                report
-                    .checked_files
-                    .iter()
-                    .cloned()
-                    .map(JsonValue::String)
-                    .collect(),
-            ),
-        ),
-        (
-            "status",
-            JsonValue::String(report.status.as_str().to_string()),
-        ),
-        ("stdout", JsonValue::String(report.stdout.clone())),
-        ("stderr", JsonValue::String(report.stderr.clone())),
-        (
-            "note",
-            report
-                .note
-                .clone()
-                .map(JsonValue::String)
-                .unwrap_or(JsonValue::Null),
-        ),
-    ])
+    report.to_json_value()
 }
 
 fn list_sessions_response(store: &RuntimeStore, request_target: &str) -> AppResult<HttpResponse> {

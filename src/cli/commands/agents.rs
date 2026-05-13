@@ -457,7 +457,7 @@ After=network.target\n\
 [Service]\n\
 Type=simple\n\
 WorkingDirectory={workdir}\n\
-ExecStart=/usr/bin/env {bin} diagnostics --watch --changed --interval-ms {interval_ms}\n\
+ExecStart=/usr/bin/env {bin} diagnostics --watch --changed --interval-ms {interval_ms} --json\n\
 Restart=on-failure\n\
 RestartSec=5\n\
 \n\
@@ -521,6 +521,7 @@ fn launchd_diagnostics_service(config: &ServiceTemplateConfig) -> String {
             "--changed".to_string(),
             "--interval-ms".to_string(),
             config.interval_ms.to_string(),
+            "--json".to_string(),
         ],
         "/tmp/deepseek-diagnostics.out.log",
         "/tmp/deepseek-diagnostics.err.log",
@@ -1392,7 +1393,7 @@ mod tests {
             .contains("agents daemon --interval-ms 750 --budget 6 --json"));
         assert!(templates[2]
             .body
-            .contains("diagnostics --watch --changed --interval-ms 750"));
+            .contains("diagnostics --watch --changed --interval-ms 750 --json"));
         assert!(templates[3]
             .body
             .contains("<string>com.deepseek.runtime</string>"));
@@ -1402,6 +1403,7 @@ mod tests {
         assert!(templates[5]
             .body
             .contains("<string>com.deepseek.diagnostics</string>"));
+        assert!(templates[5].body.contains("<string>--json</string>"));
     }
 
     #[test]
