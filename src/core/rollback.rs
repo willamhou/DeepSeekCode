@@ -7,7 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{app_error, AppResult};
 use crate::util::json::{
-    json_as_array, json_as_string, json_as_u64, json_value_to_string, parse_root_object, JsonValue,
+    json_as_array, json_as_object, json_as_string, json_as_u64, json_value_to_string,
+    parse_root_object, JsonValue,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,9 +25,16 @@ pub struct SnapshotRecord {
     pub unstaged_patch_bytes: u64,
     pub untracked_bytes: u64,
     pub untracked_files: Vec<String>,
+    pub untracked_symlinks: Vec<UntrackedSymlinkRecord>,
     pub tracked_only: bool,
     pub runtime_thread_id: Option<String>,
     pub runtime_turn_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UntrackedSymlinkRecord {
+    pub path: String,
+    pub target: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,9 +98,13 @@ impl RollbackStore {
         fs::write(dir.join("diff.patch"), &patch)?;
         fs::write(dir.join("staged.patch"), &staged_patch)?;
         fs::write(dir.join("unstaged.patch"), &unstaged_patch)?;
-        let (untracked_files, untracked_bytes) =
-            copy_untracked_files_to_snapshot(Path::new(&git_root), &dir, &untracked_candidates)?;
-        let tracked_only = untracked_files.is_empty();
+        let (untracked_files, untracked_symlinks, untracked_bytes) =
+            capture_untracked_entries_to_snapshot(
+                Path::new(&git_root),
+                &dir,
+                &untracked_candidates,
+            )?;
+        let tracked_only = untracked_files.is_empty() && untracked_symlinks.is_empty();
         let record = SnapshotRecord {
             id,
             label: if label.trim().is_empty() {
@@ -110,6 +122,7 @@ impl RollbackStore {
             unstaged_patch_bytes: unstaged_patch.len() as u64,
             untracked_bytes,
             untracked_files,
+            untracked_symlinks,
             tracked_only,
             runtime_thread_id: None,
             runtime_turn_id: None,
@@ -254,7 +267,12 @@ impl RollbackStore {
                     }
                 }
             }
-            restore_untracked_files(root, &snapshot_dir, &record.untracked_files)?;
+            restore_untracked_entries(
+                root,
+                &snapshot_dir,
+                &record.untracked_files,
+                &record.untracked_symlinks,
+            )?;
         }
         let mut changed_files = if apply {
             git_changed_files(root)?
@@ -263,6 +281,12 @@ impl RollbackStore {
         };
         if apply {
             changed_files.extend(record.untracked_files.iter().cloned());
+            changed_files.extend(
+                record
+                    .untracked_symlinks
+                    .iter()
+                    .map(|entry| entry.path.clone()),
+            );
             normalize_file_list(&mut changed_files);
         }
         Ok(RestorePlan {
@@ -358,7 +382,24 @@ pub fn snapshot_to_json(record: &SnapshotRecord) -> JsonValue {
                 .collect(),
         ),
     );
+    value.insert(
+        "untracked_symlinks".to_string(),
+        JsonValue::Array(
+            record
+                .untracked_symlinks
+                .iter()
+                .map(untracked_symlink_to_json)
+                .collect(),
+        ),
+    );
     JsonValue::Object(value)
+}
+
+fn untracked_symlink_to_json(record: &UntrackedSymlinkRecord) -> JsonValue {
+    JsonValue::Object(object([
+        ("path", JsonValue::String(record.path.clone())),
+        ("target", JsonValue::String(record.target.clone())),
+    ]))
 }
 
 fn parse_snapshot_record(root: &BTreeMap<String, JsonValue>) -> AppResult<SnapshotRecord> {
@@ -375,6 +416,7 @@ fn parse_snapshot_record(root: &BTreeMap<String, JsonValue>) -> AppResult<Snapsh
         unstaged_patch_bytes: optional_u64(root, "unstaged_patch_bytes")?,
         untracked_bytes: optional_u64(root, "untracked_bytes")?,
         untracked_files: optional_string_array(root, "untracked_files")?,
+        untracked_symlinks: optional_untracked_symlinks(root)?,
         tracked_only: matches!(root.get("tracked_only"), Some(JsonValue::Bool(true))),
         runtime_thread_id: optional_safe_string(root, "runtime_thread_id")?,
         runtime_turn_id: optional_safe_string(root, "runtime_turn_id")?,
@@ -568,12 +610,13 @@ fn store_root_relative_prefix(git_root: &Path, store_root: &Path) -> Option<Stri
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
-fn copy_untracked_files_to_snapshot(
+fn capture_untracked_entries_to_snapshot(
     git_root: &Path,
     snapshot_dir: &Path,
     files: &[String],
-) -> AppResult<(Vec<String>, u64)> {
-    let mut captured = Vec::new();
+) -> AppResult<(Vec<String>, Vec<UntrackedSymlinkRecord>, u64)> {
+    let mut captured_files = Vec::new();
+    let mut captured_symlinks = Vec::new();
     let mut total_bytes = 0;
     for file in files {
         let relative = safe_relative_path(file)?;
@@ -583,28 +626,46 @@ fn copy_untracked_files_to_snapshot(
                 "failed to inspect untracked file `{file}`: {error}"
             ))
         })?;
-        if !metadata.file_type().is_file() {
-            continue;
+        let file_type = metadata.file_type();
+        if file_type.is_file() {
+            let target = snapshot_dir.join("untracked").join(&relative);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            total_bytes += fs::copy(&source, &target).map_err(|error| {
+                app_error(format!(
+                    "failed to snapshot untracked file `{file}`: {error}"
+                ))
+            })?;
+            captured_files.push(file.clone());
+        } else if file_type.is_symlink() {
+            #[cfg(unix)]
+            {
+                let target = fs::read_link(&source).map_err(|error| {
+                    app_error(format!(
+                        "failed to read untracked symlink `{file}`: {error}"
+                    ))
+                })?;
+                let target = target.to_string_lossy().into_owned();
+                total_bytes += target.len() as u64;
+                captured_symlinks.push(UntrackedSymlinkRecord {
+                    path: file.clone(),
+                    target,
+                });
+            }
         }
-        let target = snapshot_dir.join("untracked").join(&relative);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        total_bytes += fs::copy(&source, &target).map_err(|error| {
-            app_error(format!(
-                "failed to snapshot untracked file `{file}`: {error}"
-            ))
-        })?;
-        captured.push(file.clone());
     }
-    normalize_file_list(&mut captured);
-    Ok((captured, total_bytes))
+    normalize_file_list(&mut captured_files);
+    captured_symlinks.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.target.cmp(&b.target)));
+    captured_symlinks.dedup_by(|a, b| a.path == b.path && a.target == b.target);
+    Ok((captured_files, captured_symlinks, total_bytes))
 }
 
-fn restore_untracked_files(
+fn restore_untracked_entries(
     git_root: &Path,
     snapshot_dir: &Path,
     files: &[String],
+    symlinks: &[UntrackedSymlinkRecord],
 ) -> AppResult<()> {
     for file in files {
         let relative = safe_relative_path(file)?;
@@ -618,13 +679,63 @@ fn restore_untracked_files(
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
+        remove_existing_restore_target(&target)?;
         fs::copy(&source, &target).map_err(|error| {
             app_error(format!(
                 "failed to restore untracked file `{file}`: {error}"
             ))
         })?;
     }
+    for symlink in symlinks {
+        let relative = safe_relative_path(&symlink.path)?;
+        let target = git_root.join(&relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        remove_existing_restore_target(&target)?;
+        create_symlink(&symlink.target, &target).map_err(|error| {
+            app_error(format!(
+                "failed to restore untracked symlink `{}`: {error}",
+                symlink.path
+            ))
+        })?;
+    }
     Ok(())
+}
+
+fn remove_existing_restore_target(target: &Path) -> AppResult<()> {
+    match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+            Err(app_error(format!(
+                "cannot restore untracked entry over directory `{}`",
+                target.display()
+            )))
+        }
+        Ok(_) => fs::remove_file(target).map_err(|error| {
+            app_error(format!(
+                "failed to remove existing restore target `{}`: {error}",
+                target.display()
+            ))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(app_error(format!(
+            "failed to inspect restore target `{}`: {error}",
+            target.display()
+        ))),
+    }
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &str, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn create_symlink(_target: &str, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlink restore is only supported on Unix",
+    ))
 }
 
 fn safe_relative_path(path: &str) -> AppResult<PathBuf> {
@@ -696,6 +807,29 @@ fn optional_string_array(root: &BTreeMap<String, JsonValue>, key: &str) -> AppRe
         items.push(value.to_string());
     }
     normalize_file_list(&mut items);
+    Ok(items)
+}
+
+fn optional_untracked_symlinks(
+    root: &BTreeMap<String, JsonValue>,
+) -> AppResult<Vec<UntrackedSymlinkRecord>> {
+    let Some(value) = root.get("untracked_symlinks") else {
+        return Ok(Vec::new());
+    };
+    let array = json_as_array(value)
+        .ok_or_else(|| app_error("rollback manifest `untracked_symlinks` must be an array"))?;
+    let mut items = Vec::with_capacity(array.len());
+    for item in array {
+        let object = json_as_object(item).ok_or_else(|| {
+            app_error("rollback manifest `untracked_symlinks` must contain objects")
+        })?;
+        let path = required_string(object, "path")?;
+        let target = required_string(object, "target")?;
+        safe_relative_path(&path)?;
+        items.push(UntrackedSymlinkRecord { path, target });
+    }
+    items.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.target.cmp(&b.target)));
+    items.dedup_by(|a, b| a.path == b.path && a.target == b.target);
     Ok(items)
 }
 
@@ -919,6 +1053,80 @@ mod tests {
         let loaded = store.load_snapshot(&snapshot.id).unwrap();
         assert_eq!(loaded.untracked_files, snapshot.untracked_files);
         assert_eq!(loaded.untracked_bytes, snapshot.untracked_bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_restore_round_trip_untracked_symlinks() {
+        let repo = temp_root("symlink");
+        fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init"]);
+        fs::write(repo.join("src.txt"), "base\n").unwrap();
+        run_git(&repo, &["add", "src.txt"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+
+        std::os::unix::fs::symlink("missing-target.txt", repo.join("link.txt")).unwrap();
+        let store = RollbackStore::new(repo.join(".dscode/rollback"));
+        let snapshot = store
+            .create_snapshot(&repo, "capture symlink".to_string())
+            .unwrap();
+
+        assert!(!snapshot.tracked_only);
+        assert!(snapshot.untracked_files.is_empty());
+        assert_eq!(
+            snapshot.untracked_symlinks,
+            vec![UntrackedSymlinkRecord {
+                path: "link.txt".to_string(),
+                target: "missing-target.txt".to_string(),
+            }]
+        );
+        assert!(snapshot.untracked_bytes > 0);
+
+        fs::remove_file(repo.join("link.txt")).unwrap();
+        fs::write(repo.join("link.txt"), "later file\n").unwrap();
+        let plan = store.restore_snapshot(&snapshot.id, true).unwrap();
+
+        assert_eq!(
+            fs::read_link(repo.join("link.txt")).unwrap(),
+            PathBuf::from("missing-target.txt")
+        );
+        assert_eq!(plan.changed_files, vec!["link.txt".to_string()]);
+
+        let loaded = store.load_snapshot(&snapshot.id).unwrap();
+        assert_eq!(loaded.untracked_symlinks, snapshot.untracked_symlinks);
+        assert_eq!(loaded.untracked_bytes, snapshot.untracked_bytes);
+    }
+
+    #[test]
+    fn legacy_snapshot_manifest_without_symlinks_still_parses() {
+        let manifest = r#"{
+            "id":"snapshot-legacy",
+            "label":"legacy",
+            "created_at":"epoch+1",
+            "workspace":".",
+            "git_root":".",
+            "git_head":"abc123",
+            "status_bytes":0,
+            "patch_bytes":0,
+            "tracked_only":true,
+            "untracked_files":[]
+        }"#;
+        let record = parse_snapshot_record(&parse_root_object(manifest).unwrap()).unwrap();
+
+        assert_eq!(record.id, "snapshot-legacy");
+        assert!(record.untracked_files.is_empty());
+        assert!(record.untracked_symlinks.is_empty());
     }
 
     #[test]
