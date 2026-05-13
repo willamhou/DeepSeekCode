@@ -38,5 +38,4 @@ commands that can inspect live RLM state without starting a model worker.
 
 ## Remaining
 
-Stateful RLM lifecycle CLI wrappers, TUI/ACP subscription polish, and richer
-daemon packaging remain open.
+TUI/ACP subscription polish and daemon package/service UX remain open.

@@ -37,8 +37,8 @@ This repository is an active workbench, not a polished hosted product.
   automations under `.dscode/runtime/`
 - `deepseek tui` terminal workbench with Plan / Agent / YOLO modes
 - Background agent tasks and daemon runner
-- Read-only RLM daemon lifecycle CLI commands for status, event replay, and
-  long-poll waits
+- RLM daemon lifecycle CLI commands for status, event replay, long-poll waits,
+  cancellation, recovery, stopping, and manual run/drain controls
 - HTTP runtime with health, session, thread, task, event, usage, diagnostics,
   automation, and SSE stream endpoints
 - ACP stdio adapter for editor clients, including durable session list/load

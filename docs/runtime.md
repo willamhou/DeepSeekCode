@@ -1473,8 +1473,12 @@ now first runs safe all-session live RLM recovery, which requeues/fails stale
 running turns while preserving live-owned turns unless forced, then runs one
 queued live RLM turn per tick through the same worker path. Forced
 cross-process worker interruption now exists as an explicit `force=true`
-operator action on `rlm_process_cancel`; stateful RLM daemon lifecycle CLI
-wrappers remain future work.
+operator action on `rlm_process_cancel`. The same stateful lifecycle controls
+are available from the terminal as `deepseek agents rlm-cancel`,
+`deepseek agents rlm-recover`, `deepseek agents rlm-stop`,
+`deepseek agents rlm-run-next`, and `deepseek agents rlm-drain`; `--json`
+returns the exact tool-output contract while the default output is a concise
+operator summary. Daemon package/service UX remains future work.
 `rlm_process_events session_id=<id> cursor=<seq>` replays parsed
 `.dscode/rlm-daemon/<session_id>/events.jsonl` records with `seq` greater than
 the cursor and returns `next_cursor` for clients that want deterministic live

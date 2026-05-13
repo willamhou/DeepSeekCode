@@ -548,7 +548,9 @@ Remaining:
   owner liveness, queue/running counts, and recommended next commands; terminal
   operators can now call the same read-only lifecycle surface through
   `deepseek agents rlm-status`, `deepseek agents rlm-events`, and
-  `deepseek agents rlm-wait`
+  `deepseek agents rlm-wait`; stateful lifecycle controls are also available as
+  `deepseek agents rlm-cancel`, `rlm-recover`, `rlm-stop`, `rlm-run-next`, and
+  `rlm-drain`
 - Review remote PR context signals now exist: `review` parses
   `github_pr_context` JSON to report requested changes, failing/cancelled status
   checks, and missing `include_diff=true` context before optional semantic

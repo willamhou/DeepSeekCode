@@ -5,8 +5,9 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cli::app::{
-    AgentsAction, AgentsRlmEventsArgs, AgentsRlmStatusArgs, AgentsRlmWaitArgs, AgentsServiceArgs,
-    AgentsServiceKind,
+    AgentsAction, AgentsRlmCancelArgs, AgentsRlmDrainArgs, AgentsRlmEventsArgs,
+    AgentsRlmRecoverArgs, AgentsRlmRunNextArgs, AgentsRlmStatusArgs, AgentsRlmStopArgs,
+    AgentsRlmWaitArgs, AgentsServiceArgs, AgentsServiceKind,
 };
 use crate::config::load::load_or_default;
 use crate::config::types::AppConfig;
@@ -29,8 +30,8 @@ use crate::tools::dispatch_subagent::{
     active_agent_thread_path, agent_threads_dir, thread_file_path, validate_thread_id,
 };
 use crate::tools::rlm::{
-    rlm_live_session_ids_by_runtime_thread, RlmLiveEventsTool, RlmLiveRecoverTool,
-    RlmLiveRunNextTool, RlmLiveStatusTool, RlmLiveWaitTool,
+    rlm_live_session_ids_by_runtime_thread, RlmLiveCancelTool, RlmLiveDrainTool, RlmLiveEventsTool,
+    RlmLiveRecoverTool, RlmLiveRunNextTool, RlmLiveStatusTool, RlmLiveStopTool, RlmLiveWaitTool,
 };
 use crate::tools::types::{Tool, ToolInput};
 use crate::util::json::{
@@ -54,6 +55,11 @@ pub fn run(action: AgentsAction) -> AppResult<()> {
         AgentsAction::RlmStatus(args) => run_rlm_status(config, args),
         AgentsAction::RlmEvents(args) => run_rlm_events(config, args),
         AgentsAction::RlmWait(args) => run_rlm_wait(config, args),
+        AgentsAction::RlmCancel(args) => run_rlm_cancel(config, args),
+        AgentsAction::RlmRecover(args) => run_rlm_recover(config, args),
+        AgentsAction::RlmStop(args) => run_rlm_stop(config, args),
+        AgentsAction::RlmRunNext(args) => run_rlm_run_next(config, args),
+        AgentsAction::RlmDrain(args) => run_rlm_drain(config, args),
         AgentsAction::Service(args) => render_agent_services(args),
         AgentsAction::Threads => list_threads(&config.workspace.config_dir),
         AgentsAction::ShowThread { id } => show_thread(&config.workspace.config_dir, &id),
@@ -335,6 +341,44 @@ fn run_rlm_wait(config: AppConfig, args: AgentsRlmWaitArgs) -> AppResult<()> {
     Ok(())
 }
 
+fn run_rlm_cancel(config: AppConfig, args: AgentsRlmCancelArgs) -> AppResult<()> {
+    let output = RlmLiveCancelTool { config }.execute(rlm_cancel_tool_input(&args))?;
+    print_rlm_cli_output(&output.summary, args.json);
+    Ok(())
+}
+
+fn run_rlm_recover(config: AppConfig, args: AgentsRlmRecoverArgs) -> AppResult<()> {
+    let output = RlmLiveRecoverTool { config }.execute(rlm_recover_tool_input(&args))?;
+    print_rlm_cli_output(&output.summary, args.json);
+    Ok(())
+}
+
+fn run_rlm_stop(config: AppConfig, args: AgentsRlmStopArgs) -> AppResult<()> {
+    let output = RlmLiveStopTool { config }.execute(rlm_stop_tool_input(&args))?;
+    print_rlm_cli_output(&output.summary, args.json);
+    Ok(())
+}
+
+fn run_rlm_run_next(config: AppConfig, args: AgentsRlmRunNextArgs) -> AppResult<()> {
+    let output = RlmLiveRunNextTool {
+        config,
+        parent_depth: 0,
+    }
+    .execute(rlm_run_next_tool_input(&args))?;
+    print_rlm_cli_output(&output.summary, args.json);
+    Ok(())
+}
+
+fn run_rlm_drain(config: AppConfig, args: AgentsRlmDrainArgs) -> AppResult<()> {
+    let output = RlmLiveDrainTool {
+        config,
+        parent_depth: 0,
+    }
+    .execute(rlm_drain_tool_input(&args))?;
+    print_rlm_cli_output(&output.summary, args.json);
+    Ok(())
+}
+
 fn rlm_status_tool_input(args: &AgentsRlmStatusArgs) -> ToolInput {
     let mut input = ToolInput::new();
     if let Some(session_id) = &args.session_id {
@@ -374,6 +418,79 @@ fn rlm_wait_tool_input(args: &AgentsRlmWaitArgs) -> ToolInput {
     input
 }
 
+fn rlm_cancel_tool_input(args: &AgentsRlmCancelArgs) -> ToolInput {
+    let mut input = ToolInput::new().with_arg("session_id", args.session_id.clone());
+    if let Some(task_id) = &args.task_id {
+        input = input.with_arg("task_id", task_id.clone());
+    }
+    if args.all {
+        input = input.with_arg("all", "true");
+    }
+    if args.force {
+        input = input.with_arg("force", "true");
+    }
+    if let Some(reason) = &args.reason {
+        input = input.with_arg("reason", reason.clone());
+    }
+    input
+}
+
+fn rlm_recover_tool_input(args: &AgentsRlmRecoverArgs) -> ToolInput {
+    let mut input = ToolInput::new();
+    if let Some(session_id) = &args.session_id {
+        input = input.with_arg("session_id", session_id.clone());
+    }
+    if args.all {
+        input = input.with_arg("all", "true");
+    }
+    if let Some(mode) = &args.mode {
+        input = input.with_arg("mode", mode.clone());
+    }
+    if args.dry_run {
+        input = input.with_arg("dry_run", "true");
+    }
+    if args.force {
+        input = input.with_arg("force", "true");
+    }
+    if let Some(limit) = args.limit {
+        input = input.with_arg("limit", limit.to_string());
+    }
+    if let Some(reason) = &args.reason {
+        input = input.with_arg("reason", reason.clone());
+    }
+    input
+}
+
+fn rlm_stop_tool_input(args: &AgentsRlmStopArgs) -> ToolInput {
+    let mut input = ToolInput::new().with_arg("session_id", args.session_id.clone());
+    if let Some(reason) = &args.reason {
+        input = input.with_arg("reason", reason.clone());
+    }
+    input
+}
+
+fn rlm_run_next_tool_input(args: &AgentsRlmRunNextArgs) -> ToolInput {
+    let mut input = ToolInput::new().with_arg("session_id", args.session_id.clone());
+    if let Some(task_id) = &args.task_id {
+        input = input.with_arg("task_id", task_id.clone());
+    }
+    if args.dry_run {
+        input = input.with_arg("dry_run", "true");
+    }
+    input
+}
+
+fn rlm_drain_tool_input(args: &AgentsRlmDrainArgs) -> ToolInput {
+    let mut input = ToolInput::new().with_arg("session_id", args.session_id.clone());
+    if let Some(max_turns) = args.max_turns {
+        input = input.with_arg("max_turns", max_turns.to_string());
+    }
+    if args.dry_run {
+        input = input.with_arg("dry_run", "true");
+    }
+    input
+}
+
 fn print_rlm_cli_output(summary: &str, json: bool) {
     if json {
         println!("{summary}");
@@ -387,7 +504,12 @@ fn print_rlm_cli_output(summary: &str, json: bool) {
         println!("{summary}");
         return;
     };
-    if let Some(sessions) = root.get("sessions").and_then(json_as_array) {
+    if root.get("totals").is_some() {
+        let sessions = root
+            .get("sessions")
+            .and_then(json_as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         println!("RLM live sessions: {}", sessions.len());
         for session in sessions.iter().take(20) {
             print_rlm_status_line(session);
@@ -420,7 +542,82 @@ fn print_rlm_cli_output(summary: &str, json: bool) {
         }
         return;
     }
+    if root.get("cancelled_count").is_some()
+        || root.get("recovered_count").is_some()
+        || root.get("selected_count").is_some()
+        || root.get("ran_count").is_some()
+        || root.get("task_id").is_some()
+    {
+        print_rlm_action_summary(root);
+        return;
+    }
     print_rlm_status_line(&value);
+}
+
+fn print_rlm_action_summary(root: &std::collections::BTreeMap<String, JsonValue>) {
+    let session_id = root
+        .get("session_id")
+        .and_then(json_as_string)
+        .unwrap_or("-");
+    let dry_run = rlm_cli_scalar(root.get("dry_run"));
+    if root.get("status").and_then(json_as_string) == Some("stopped") {
+        println!(
+            "RLM stop {session_id}: cancelled={} queued={} reason={}",
+            rlm_cli_scalar(root.get("cancelled_count")),
+            rlm_cli_scalar(root.get("queued_turns")),
+            rlm_cli_scalar(root.get("reason"))
+        );
+    } else if root.get("task_id").is_some() && root.get("status").is_some() {
+        println!(
+            "RLM run-next {session_id}: task={} status={} queued={}",
+            rlm_cli_scalar(root.get("task_id")),
+            rlm_cli_scalar(root.get("status")),
+            rlm_cli_scalar(root.get("queued_turns"))
+        );
+    } else if root.get("cancelled_count").is_some() {
+        println!(
+            "RLM cancel {session_id}: cancelled={} active_owner_cancelled={} interrupted={} queued={}",
+            rlm_cli_scalar(root.get("cancelled_count")),
+            rlm_cli_scalar(root.get("active_owner_cancelled")),
+            rlm_cli_scalar(root.get("interrupted")),
+            rlm_cli_scalar(root.get("queued_turns"))
+        );
+    } else if root.get("recovered_count").is_some() {
+        println!(
+            "RLM recover {session_id}: recovered={} mode={} dry_run={} force={} queued={}",
+            rlm_cli_scalar(root.get("recovered_count")),
+            rlm_cli_scalar(root.get("mode")),
+            dry_run,
+            rlm_cli_scalar(root.get("force")),
+            rlm_cli_scalar(root.get("queued_turns"))
+        );
+    } else if root.get("selected_count").is_some() {
+        println!(
+            "RLM drain {session_id}: selected={} max_turns={} dry_run={}",
+            rlm_cli_scalar(root.get("selected_count")),
+            rlm_cli_scalar(root.get("max_turns")),
+            dry_run
+        );
+    } else if root.get("ran_count").is_some() {
+        println!(
+            "RLM drain {session_id}: ran={} queued={} dry_run={}",
+            rlm_cli_scalar(root.get("ran_count")),
+            rlm_cli_scalar(root.get("queued_turns")),
+            dry_run
+        );
+    }
+    if let Some(actions) = root.get("actions").and_then(json_as_array) {
+        for action in actions.iter().take(5) {
+            if let Some(action) = json_as_object(action) {
+                println!(
+                    "- task={} action={} reason={}",
+                    rlm_cli_scalar(action.get("task_id")),
+                    rlm_cli_scalar(action.get("action")),
+                    rlm_cli_scalar(action.get("reason"))
+                );
+            }
+        }
+    }
 }
 
 fn print_rlm_status_line(value: &JsonValue) {
@@ -1960,6 +2157,67 @@ mod tests {
         assert_eq!(wait.get("limit"), Some("4"));
         assert_eq!(wait.get("timeout_ms"), Some("2500"));
         assert_eq!(wait.get("poll_interval_ms"), Some("50"));
+    }
+
+    #[test]
+    fn rlm_cli_stateful_lifecycle_args_build_tool_inputs() {
+        let cancel = rlm_cancel_tool_input(&AgentsRlmCancelArgs {
+            session_id: "live.1".to_string(),
+            task_id: Some("task-1".to_string()),
+            all: false,
+            force: true,
+            reason: Some("operator stop".to_string()),
+            json: true,
+        });
+        assert_eq!(cancel.get("session_id"), Some("live.1"));
+        assert_eq!(cancel.get("task_id"), Some("task-1"));
+        assert_eq!(cancel.get("force"), Some("true"));
+        assert_eq!(cancel.get("reason"), Some("operator stop"));
+
+        let recover = rlm_recover_tool_input(&AgentsRlmRecoverArgs {
+            session_id: None,
+            all: true,
+            mode: Some("fail".to_string()),
+            dry_run: true,
+            force: true,
+            limit: Some(8),
+            reason: Some("takeover".to_string()),
+            json: false,
+        });
+        assert_eq!(recover.get("all"), Some("true"));
+        assert_eq!(recover.get("mode"), Some("fail"));
+        assert_eq!(recover.get("dry_run"), Some("true"));
+        assert_eq!(recover.get("force"), Some("true"));
+        assert_eq!(recover.get("limit"), Some("8"));
+        assert_eq!(recover.get("reason"), Some("takeover"));
+
+        let stop = rlm_stop_tool_input(&AgentsRlmStopArgs {
+            session_id: "live.1".to_string(),
+            reason: Some("done".to_string()),
+            json: false,
+        });
+        assert_eq!(stop.get("session_id"), Some("live.1"));
+        assert_eq!(stop.get("reason"), Some("done"));
+
+        let run_next = rlm_run_next_tool_input(&AgentsRlmRunNextArgs {
+            session_id: "live.1".to_string(),
+            task_id: Some("task-2".to_string()),
+            dry_run: true,
+            json: false,
+        });
+        assert_eq!(run_next.get("session_id"), Some("live.1"));
+        assert_eq!(run_next.get("task_id"), Some("task-2"));
+        assert_eq!(run_next.get("dry_run"), Some("true"));
+
+        let drain = rlm_drain_tool_input(&AgentsRlmDrainArgs {
+            session_id: "live.1".to_string(),
+            max_turns: Some(4),
+            dry_run: true,
+            json: true,
+        });
+        assert_eq!(drain.get("session_id"), Some("live.1"));
+        assert_eq!(drain.get("max_turns"), Some("4"));
+        assert_eq!(drain.get("dry_run"), Some("true"));
     }
 
     #[test]

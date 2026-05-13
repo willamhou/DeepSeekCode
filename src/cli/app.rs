@@ -476,6 +476,11 @@ pub enum AgentsAction {
     RlmStatus(AgentsRlmStatusArgs),
     RlmEvents(AgentsRlmEventsArgs),
     RlmWait(AgentsRlmWaitArgs),
+    RlmCancel(AgentsRlmCancelArgs),
+    RlmRecover(AgentsRlmRecoverArgs),
+    RlmStop(AgentsRlmStopArgs),
+    RlmRunNext(AgentsRlmRunNextArgs),
+    RlmDrain(AgentsRlmDrainArgs),
     Service(AgentsServiceArgs),
     Threads,
     ShowThread {
@@ -510,6 +515,51 @@ pub struct AgentsRlmWaitArgs {
     pub limit: Option<usize>,
     pub timeout_ms: Option<u64>,
     pub poll_interval_ms: Option<u64>,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentsRlmCancelArgs {
+    pub session_id: String,
+    pub task_id: Option<String>,
+    pub all: bool,
+    pub force: bool,
+    pub reason: Option<String>,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentsRlmRecoverArgs {
+    pub session_id: Option<String>,
+    pub all: bool,
+    pub mode: Option<String>,
+    pub dry_run: bool,
+    pub force: bool,
+    pub limit: Option<usize>,
+    pub reason: Option<String>,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentsRlmStopArgs {
+    pub session_id: String,
+    pub reason: Option<String>,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentsRlmRunNextArgs {
+    pub session_id: String,
+    pub task_id: Option<String>,
+    pub dry_run: bool,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentsRlmDrainArgs {
+    pub session_id: String,
+    pub max_turns: Option<usize>,
+    pub dry_run: bool,
     pub json: bool,
 }
 
@@ -1767,6 +1817,11 @@ fn parse_agents_subcommand(args: Vec<String>) -> Result<AgentsAction, String> {
         "rlm-status" => parse_agents_rlm_status_args(args.into_iter().skip(1).collect()),
         "rlm-events" => parse_agents_rlm_events_args(args.into_iter().skip(1).collect()),
         "rlm-wait" => parse_agents_rlm_wait_args(args.into_iter().skip(1).collect()),
+        "rlm-cancel" => parse_agents_rlm_cancel_args(args.into_iter().skip(1).collect()),
+        "rlm-recover" => parse_agents_rlm_recover_args(args.into_iter().skip(1).collect()),
+        "rlm-stop" => parse_agents_rlm_stop_args(args.into_iter().skip(1).collect()),
+        "rlm-run-next" => parse_agents_rlm_run_next_args(args.into_iter().skip(1).collect()),
+        "rlm-drain" => parse_agents_rlm_drain_args(args.into_iter().skip(1).collect()),
         "service" => parse_agents_service_args(args.into_iter().skip(1).collect()),
         "threads" => {
             if args.len() > 1 {
@@ -1803,7 +1858,7 @@ fn parse_agents_subcommand(args: Vec<String>) -> Result<AgentsAction, String> {
             Ok(AgentsAction::ClearThread)
         }
         other => Err(format!(
-            "unknown agents sub-action `{other}`; expected list|show|validate|run-task|daemon|rlm-status|rlm-events|rlm-wait|service|threads|show-thread|switch|current|clear-current"
+            "unknown agents sub-action `{other}`; expected list|show|validate|run-task|daemon|rlm-status|rlm-events|rlm-wait|rlm-cancel|rlm-recover|rlm-stop|rlm-run-next|rlm-drain|service|threads|show-thread|switch|current|clear-current"
         )),
     }
 }
@@ -2063,6 +2118,278 @@ fn parse_agents_rlm_wait_args(args: Vec<String>) -> Result<AgentsAction, String>
         limit,
         timeout_ms,
         poll_interval_ms,
+        json,
+    }))
+}
+
+fn parse_agents_rlm_cancel_args(args: Vec<String>) -> Result<AgentsAction, String> {
+    let mut positionals = Vec::new();
+    let mut all = false;
+    let mut force = false;
+    let mut reason = None;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--all" => {
+                all = true;
+                index += 1;
+            }
+            "--force" => {
+                force = true;
+                index += 1;
+            }
+            "--reason" if index + 1 < args.len() => {
+                reason = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--reason" => return Err("agents rlm-cancel --reason requires a value".to_string()),
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown flag for `agents rlm-cancel`: {value}; expected --all|--force|--reason|--json"
+                ));
+            }
+            value => {
+                if positionals.len() >= 2 {
+                    return Err(
+                        "agents rlm-cancel accepts a session id and optional task id".to_string(),
+                    );
+                }
+                positionals.push(value.to_string());
+                index += 1;
+            }
+        }
+    }
+    let session_id = positionals
+        .first()
+        .cloned()
+        .ok_or_else(|| "agents rlm-cancel requires a session id".to_string())?;
+    let task_id = positionals.get(1).cloned();
+    if task_id.is_none() && !all {
+        return Err("agents rlm-cancel requires a task id or --all".to_string());
+    }
+    Ok(AgentsAction::RlmCancel(AgentsRlmCancelArgs {
+        session_id,
+        task_id,
+        all,
+        force,
+        reason,
+        json,
+    }))
+}
+
+fn parse_agents_rlm_recover_args(args: Vec<String>) -> Result<AgentsAction, String> {
+    let mut session_id = None;
+    let mut all = false;
+    let mut mode = None;
+    let mut dry_run = false;
+    let mut force = false;
+    let mut limit = None;
+    let mut reason = None;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--all" => {
+                all = true;
+                index += 1;
+            }
+            "--mode" if index + 1 < args.len() => {
+                let value = args[index + 1].as_str();
+                if !matches!(value, "requeue" | "fail") {
+                    return Err("agents rlm-recover --mode must be `requeue` or `fail`".to_string());
+                }
+                mode = Some(value.to_string());
+                index += 2;
+            }
+            "--mode" => return Err("agents rlm-recover --mode requires a value".to_string()),
+            "--dry-run" => {
+                dry_run = true;
+                index += 1;
+            }
+            "--force" => {
+                force = true;
+                index += 1;
+            }
+            "--limit" if index + 1 < args.len() => {
+                limit = Some(
+                    args[index + 1]
+                        .parse::<usize>()
+                        .map_err(|_| "agents rlm-recover --limit must be a number".to_string())?,
+                );
+                index += 2;
+            }
+            "--limit" => return Err("agents rlm-recover --limit requires a value".to_string()),
+            "--reason" if index + 1 < args.len() => {
+                reason = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--reason" => return Err("agents rlm-recover --reason requires a value".to_string()),
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown flag for `agents rlm-recover`: {value}; expected --all|--mode|--dry-run|--force|--limit|--reason|--json"
+                ));
+            }
+            value => {
+                if session_id.is_some() {
+                    return Err("agents rlm-recover accepts at most one session id".to_string());
+                }
+                session_id = Some(value.to_string());
+                index += 1;
+            }
+        }
+    }
+    if session_id.is_none() && !all {
+        return Err("agents rlm-recover requires a session id or --all".to_string());
+    }
+    Ok(AgentsAction::RlmRecover(AgentsRlmRecoverArgs {
+        session_id,
+        all,
+        mode,
+        dry_run,
+        force,
+        limit,
+        reason,
+        json,
+    }))
+}
+
+fn parse_agents_rlm_stop_args(args: Vec<String>) -> Result<AgentsAction, String> {
+    let mut session_id = None;
+    let mut reason = None;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--reason" if index + 1 < args.len() => {
+                reason = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--reason" => return Err("agents rlm-stop --reason requires a value".to_string()),
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown flag for `agents rlm-stop`: {value}; expected --reason|--json"
+                ));
+            }
+            value => {
+                if session_id.is_some() {
+                    return Err("agents rlm-stop accepts exactly one session id".to_string());
+                }
+                session_id = Some(value.to_string());
+                index += 1;
+            }
+        }
+    }
+    let session_id =
+        session_id.ok_or_else(|| "agents rlm-stop requires a session id".to_string())?;
+    Ok(AgentsAction::RlmStop(AgentsRlmStopArgs {
+        session_id,
+        reason,
+        json,
+    }))
+}
+
+fn parse_agents_rlm_run_next_args(args: Vec<String>) -> Result<AgentsAction, String> {
+    let mut positionals = Vec::new();
+    let mut dry_run = false;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--dry-run" => {
+                dry_run = true;
+                index += 1;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown flag for `agents rlm-run-next`: {value}; expected --dry-run|--json"
+                ));
+            }
+            value => {
+                if positionals.len() >= 2 {
+                    return Err(
+                        "agents rlm-run-next accepts a session id and optional task id".to_string(),
+                    );
+                }
+                positionals.push(value.to_string());
+                index += 1;
+            }
+        }
+    }
+    let session_id = positionals
+        .first()
+        .cloned()
+        .ok_or_else(|| "agents rlm-run-next requires a session id".to_string())?;
+    Ok(AgentsAction::RlmRunNext(AgentsRlmRunNextArgs {
+        session_id,
+        task_id: positionals.get(1).cloned(),
+        dry_run,
+        json,
+    }))
+}
+
+fn parse_agents_rlm_drain_args(args: Vec<String>) -> Result<AgentsAction, String> {
+    let mut session_id = None;
+    let mut max_turns = None;
+    let mut dry_run = false;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--max-turns" if index + 1 < args.len() => {
+                max_turns =
+                    Some(args[index + 1].parse::<usize>().map_err(|_| {
+                        "agents rlm-drain --max-turns must be a number".to_string()
+                    })?);
+                index += 2;
+            }
+            "--max-turns" => {
+                return Err("agents rlm-drain --max-turns requires a value".to_string());
+            }
+            "--dry-run" => {
+                dry_run = true;
+                index += 1;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown flag for `agents rlm-drain`: {value}; expected --max-turns|--dry-run|--json"
+                ));
+            }
+            value => {
+                if session_id.is_some() {
+                    return Err("agents rlm-drain accepts exactly one session id".to_string());
+                }
+                session_id = Some(value.to_string());
+                index += 1;
+            }
+        }
+    }
+    let session_id =
+        session_id.ok_or_else(|| "agents rlm-drain requires a session id".to_string())?;
+    Ok(AgentsAction::RlmDrain(AgentsRlmDrainArgs {
+        session_id,
+        max_turns,
+        dry_run,
         json,
     }))
 }
@@ -3584,6 +3911,112 @@ mod tests {
                 limit: None,
                 timeout_ms: Some(2500),
                 poll_interval_ms: Some(50),
+                json: true,
+            }))) if session_id == "live.1"
+        ));
+
+        let rlm_cancel = Cli::from_argv(vec![
+            "agents".to_string(),
+            "rlm-cancel".to_string(),
+            "live.1".to_string(),
+            "task-1".to_string(),
+            "--force".to_string(),
+            "--reason".to_string(),
+            "operator stop".to_string(),
+            "--json".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            rlm_cancel.command,
+            Some(Command::Agents(AgentsAction::RlmCancel(AgentsRlmCancelArgs {
+                ref session_id,
+                task_id: Some(ref task_id),
+                all: false,
+                force: true,
+                reason: Some(ref reason),
+                json: true,
+            }))) if session_id == "live.1" && task_id == "task-1" && reason == "operator stop"
+        ));
+
+        let rlm_recover = Cli::from_argv(vec![
+            "agents".to_string(),
+            "rlm-recover".to_string(),
+            "--all".to_string(),
+            "--mode".to_string(),
+            "fail".to_string(),
+            "--dry-run".to_string(),
+            "--force".to_string(),
+            "--limit".to_string(),
+            "8".to_string(),
+            "--reason".to_string(),
+            "takeover".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            rlm_recover.command,
+            Some(Command::Agents(AgentsAction::RlmRecover(AgentsRlmRecoverArgs {
+                session_id: None,
+                all: true,
+                mode: Some(ref mode),
+                dry_run: true,
+                force: true,
+                limit: Some(8),
+                reason: Some(ref reason),
+                json: false,
+            }))) if mode == "fail" && reason == "takeover"
+        ));
+
+        let rlm_stop = Cli::from_argv(vec![
+            "agents".to_string(),
+            "rlm-stop".to_string(),
+            "live.1".to_string(),
+            "--reason".to_string(),
+            "done".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            rlm_stop.command,
+            Some(Command::Agents(AgentsAction::RlmStop(AgentsRlmStopArgs {
+                ref session_id,
+                reason: Some(ref reason),
+                json: false,
+            }))) if session_id == "live.1" && reason == "done"
+        ));
+
+        let rlm_run_next = Cli::from_argv(vec![
+            "agents".to_string(),
+            "rlm-run-next".to_string(),
+            "live.1".to_string(),
+            "task-2".to_string(),
+            "--dry-run".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            rlm_run_next.command,
+            Some(Command::Agents(AgentsAction::RlmRunNext(AgentsRlmRunNextArgs {
+                ref session_id,
+                task_id: Some(ref task_id),
+                dry_run: true,
+                json: false,
+            }))) if session_id == "live.1" && task_id == "task-2"
+        ));
+
+        let rlm_drain = Cli::from_argv(vec![
+            "agents".to_string(),
+            "rlm-drain".to_string(),
+            "live.1".to_string(),
+            "--max-turns".to_string(),
+            "4".to_string(),
+            "--dry-run".to_string(),
+            "--json".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            rlm_drain.command,
+            Some(Command::Agents(AgentsAction::RlmDrain(AgentsRlmDrainArgs {
+                ref session_id,
+                max_turns: Some(4),
+                dry_run: true,
                 json: true,
             }))) if session_id == "live.1"
         ));
