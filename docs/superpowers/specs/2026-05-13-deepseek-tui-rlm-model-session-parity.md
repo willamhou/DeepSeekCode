@@ -25,6 +25,8 @@ long-input requests.
   size, output summary, and update time to the session.
 - Later calls with the same `session_id` inject the most recent bounded session
   summaries into the child-agent prompt before the new long input.
+- A later continuation slice lets existing non-empty sessions accept
+  `task + session_id` without a new `file_path` or `content`.
 - `reset=true` clears the loaded session before the current call.
 - Session history is bounded to avoid unbounded prompt and disk growth.
 
@@ -35,6 +37,8 @@ long-input requests.
 - Added metadata lines to session-backed outputs:
   - `meta.rlm_session_id=<id>`
   - `meta.rlm_session_turns=<count>`
+- A later continuation slice treats no-new-input calls against non-empty
+  sessions as "session context only" process turns.
 - Updated DeepSeek model tool schemas so OpenAI/Anthropic tool definitions
   expose `session_id` and `reset`.
 - Updated runtime and parity docs to record the narrowed gap.

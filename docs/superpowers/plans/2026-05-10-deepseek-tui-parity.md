@@ -457,7 +457,9 @@ Remaining:
   entrypoint; this currently reuses the bounded child-agent process adapter,
   and optional `session_id` / `reset` fields persist prior process summaries
   under `.dscode/rlm-model/` so later calls receive durable process-style
-  context while the full live model REPL/daemon loop remains future work
+  context; existing non-empty sessions can also be continued with
+  `task + session_id` and no new `file_path` / `content`, while the full live
+  model REPL/daemon loop remains future work
 - RLM batch helper now exists: `rlm_batch` maps shared `context` plus up to 16
   `questions` onto parallel bounded child-agent analyses, matching the
   `llm_query_batched` / `rlm_query_batched` usage pattern without a Python REPL

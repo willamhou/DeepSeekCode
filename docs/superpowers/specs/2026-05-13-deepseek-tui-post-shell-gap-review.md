@@ -34,9 +34,9 @@ web, review, RLM helper, and request-user-input surfaces landed.
 4. RLM parity covers model-running one-shot/batch tools, chunk/map-reduce/
    recursive planners, restricted Python helpers, stateful Python sessions,
    persistent Python REPL processes, durable `rlm_process` model-session
-   context plus `rlm_process_sessions` inventory, and MCP/ACP exposure. The
-   remaining RLM gap is a true live model-backed RLM REPL/daemon rather than
-   persisted child-agent summaries.
+   context plus session-only continuation, `rlm_process_sessions` inventory,
+   and MCP/ACP exposure. The remaining RLM gap is a true live model-backed RLM
+   REPL/daemon rather than persisted child-agent summaries.
 5. Remote PR review/comment workflows have deterministic planners, guarded
    mutation tools, failure recovery, and readiness checks. Remaining validation
    depends on external live GitHub fixtures with explicit write authorization.
@@ -55,9 +55,9 @@ explicit external resources. Shell cancel has since narrowed to best-effort
 detached process-group cancellation; detached stdin has since narrowed to Unix
 FIFO control for new jobs; `tty=true` has since narrowed to a Unix `script` PTY
 backend; initial PTY geometry has since narrowed to `tty_rows` plus `tty_cols`;
-RLM process semantics have since narrowed to durable model-session context.
-Live PTY resize/replay/supervisor takeover and a true live model daemon remain
-open.
+RLM process semantics have since narrowed to durable model-session context plus
+session-only continuation. Live PTY resize/replay/supervisor takeover and a
+true live model daemon remain open.
 
 ## Next Candidate Specs
 

@@ -658,7 +658,6 @@ impl RlmTool {
             .map(str::trim)
             .filter(|value| !value.is_empty());
         let reset_session = parse_bool_arg(input.get("reset"));
-        let process_input = load_rlm_process_input(&input)?;
         let mut session = match session_id {
             Some(session_id) => {
                 validate_rlm_model_session_id(session_id)?;
@@ -670,6 +669,7 @@ impl RlmTool {
             }
             None => None,
         };
+        let process_input = load_rlm_process_input_or_session_context(&input, session.as_ref())?;
         let child_task =
             render_rlm_process_task_with_session(task, &process_input, session.as_ref());
         let child_input = ToolInput::new()
@@ -1212,6 +1212,43 @@ fn load_rlm_process_input(input: &ToolInput) -> AppResult<RlmProcessInput> {
             })
         }
     }
+}
+
+fn load_rlm_process_input_or_session_context(
+    input: &ToolInput,
+    session: Option<&RlmModelSession>,
+) -> AppResult<RlmProcessInput> {
+    match load_rlm_process_input(input) {
+        Ok(input) => Ok(input),
+        Err(error) if !rlm_process_has_input_source(input) => {
+            let Some(session) = session else {
+                return Err(error);
+            };
+            if session.turns.is_empty() {
+                return Err(tool_failure(
+                    "rlm_process session-only continuation requires an existing session with prior turns or a new file_path/content input",
+                ));
+            }
+            Ok(RlmProcessInput {
+                label: "session context only".to_string(),
+                content: "No new long input was provided. Continue from the prior RLM session context above.".to_string(),
+                char_count: 0,
+                line_count: 0,
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn rlm_process_has_input_source(input: &ToolInput) -> bool {
+    input
+        .get("file_path")
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+        || input
+            .get("content")
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
 }
 
 fn load_rlm_process_file(raw_path: &str) -> AppResult<RlmProcessInput> {
@@ -2595,6 +2632,53 @@ mod tests {
         let reset = read_rlm_model_session(&config, "analysis.1", true).unwrap();
         assert!(reset.turns.is_empty());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rlm_process_session_only_continuation_uses_prior_context() {
+        let input = RlmProcessInput {
+            label: "inline content".to_string(),
+            content: "alpha\nbeta".to_string(),
+            char_count: 10,
+            line_count: 2,
+        };
+        let mut session = empty_rlm_model_session("analysis.1");
+        append_rlm_model_session_turn(&mut session, "summarize alpha", &input, "alpha result");
+
+        let continuation = load_rlm_process_input_or_session_context(
+            &ToolInput::new().with_arg("task", "continue analysis"),
+            Some(&session),
+        )
+        .unwrap();
+        assert_eq!(continuation.label, "session context only");
+        assert_eq!(continuation.char_count, 0);
+        assert!(continuation.content.contains("No new long input"));
+
+        let task = render_rlm_process_task_with_session(
+            "continue analysis",
+            &continuation,
+            Some(&session),
+        );
+        assert!(task.contains("Prior RLM session context"));
+        assert!(task.contains("summarize alpha"));
+        assert!(task.contains("alpha result"));
+        assert!(task.contains("Input source: session context only"));
+
+        let empty_session = empty_rlm_model_session("analysis.2");
+        assert!(load_rlm_process_input_or_session_context(
+            &ToolInput::new().with_arg("task", "continue analysis"),
+            Some(&empty_session)
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("session-only continuation requires an existing session"));
+        assert!(load_rlm_process_input_or_session_context(
+            &ToolInput::new().with_arg("task", "continue analysis"),
+            None
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("file_path"));
     }
 
     #[test]

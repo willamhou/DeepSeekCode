@@ -3552,11 +3552,31 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
                         ("context", string_property("Context for lightweight RLM analysis.")),
                         ("question", string_property("Question for context mode.")),
                         ("task", string_property("Long-input RLM objective.")),
-                        ("file_path", string_property("Workspace-relative long-input file.")),
-                        ("content", string_property("Inline long input.")),
+                        (
+                            "file_path",
+                            string_property(
+                                "Workspace-relative long-input file; optional when session_id continues an existing session.",
+                            ),
+                        ),
+                        (
+                            "content",
+                            string_property(
+                                "Inline long input; optional when session_id continues an existing session.",
+                            ),
+                        ),
                         ("strategy", string_property("Optional strategy label.")),
                         ("steps", string_property("Child step budget.")),
                         ("max_depth", string_property("Alias for steps.")),
+                        (
+                            "session_id",
+                            string_property(
+                                "Optional durable RLM model session id; with task and no file_path/content, continues an existing non-empty session.",
+                            ),
+                        ),
+                        (
+                            "reset",
+                            string_property("Set true with session_id to clear session context before this call."),
+                        ),
                     ],
                     &[],
                 ),

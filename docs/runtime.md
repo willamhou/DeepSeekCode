@@ -1342,7 +1342,10 @@ DeepSeek-TUI-compatible long-input process entrypoint. It uses the same bounded
 child-agent adapter and accepts optional `session_id` / `reset` fields; when a
 session is provided, prior process summaries are stored under
 `.dscode/rlm-model/` and injected into later calls as process-style context.
-This is durable session context, not a full live model REPL loop.
+After a session has at least one stored turn, `rlm_process task=<...>
+session_id=<id>` can continue from that prior context without a new
+`file_path` or `content`. This is durable session continuation, not a full live
+model REPL loop.
 `rlm_batch` / `rlm_query_batched` /
 `llm_query_batched` map shared context plus up to 16 questions onto parallel
 child analyses.
