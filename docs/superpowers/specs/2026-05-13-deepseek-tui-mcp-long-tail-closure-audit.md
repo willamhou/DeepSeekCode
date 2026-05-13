@@ -40,9 +40,12 @@ tools are not currently DeepSeek-TUI server-surface blockers:
 
 ## Remaining
 
-The Phase G2 compatibility remainder is now the ACP transport behavior: true
+The original Phase G2 compatibility remainder was ACP transport behavior: true
 process-level stdout/stderr streaming while tools are still executing, beyond
-the bounded post-execution output progress chunks that already landed.
+bounded post-execution output progress chunks. A later ACP live shell streaming
+slice landed opt-in `stream=true` / `follow=true` updates for `exec_shell` and
+`task_shell_start`, so this audit no longer carries an open MCP/ACP server
+surface blocker.
 
 ## Verification
 

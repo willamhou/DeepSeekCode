@@ -26,7 +26,9 @@ tool as a non-blocking summary instead of pausing until the user answers.
 
 ## 非目标
 
-- Free-form "Other" text entry remains out of scope.
+- Free-form "Other" text entry was out of scope for this slice; a later TUI
+  modal slice added short Other answers submitted through the same durable
+  response event.
 - This slice does not change the existing non-runtime CLI fallback summary.
 - This slice does not add a new HTTP endpoint beyond the existing runtime
   event append endpoint.

@@ -27,7 +27,9 @@ event for external clients or a future blocking agent bridge.
 
 - This slice does not yet block/resume the agent loop inside
   `request_user_input`.
-- This slice does not implement free-form "Other" text entry.
+- This slice did not implement free-form "Other" text entry; a later TUI modal
+  slice added short Other answers submitted through the same durable response
+  event.
 - This slice does not add a multi-process waiter for tool execution.
 
 ## 验收标准

@@ -332,8 +332,11 @@ Landed first slice:
 
 Remaining:
 
-- review the next DeepSeek-TUI gap cluster after the Phase D TUI interaction
-  slices
+- post-shell review found no open first-order TUI interaction gaps; remaining
+  work is now in harder cross-process/platform/external buckets: full shell
+  stdin/cancel takeover after owner-process exit, side-git/platform restore
+  fidelity beyond the Unix special files already captured, model-backed
+  long-lived RLM process semantics, and external live PR/release fixtures
 
 ### Phase E: DeepSeek-Native Product UX
 
