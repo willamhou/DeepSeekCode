@@ -1124,7 +1124,10 @@ review pass. Remote PR review first gathers context with
 review pipeline can inspect the PR diff without fetching GitHub data itself.
 When the context includes PR JSON, `review` also reports remote review blockers
 such as requested changes, failing/cancelled status checks, and missing
-`include_diff=true` context.
+`include_diff=true` context. The offline planner has an explicit remote PR
+review route: when `github_pr_context` and `review` are both available, PR review
+tasks gather `github_pr_context include_diff=true` first and then run `review`
+over the gathered context.
 Agent-visible skill tooling includes DeepSeek-TUI-compatible `load_skill`.
 DeepSeekCode maps that tool onto its existing TOML skill registry: repo skills
 and the configured `workspace.user_skills_dir` are searched with user skills

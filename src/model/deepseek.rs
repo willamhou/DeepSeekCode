@@ -288,6 +288,9 @@ impl DeepSeekClient {
         let child_file_path = next_child_file_path(&input.observations);
         let child_search_query = child_followup_query(&input.observations);
         let edit_request = derive_edit_request(&task);
+        let github_pr_context_request = derive_github_pr_context_request(&task);
+        let latest_github_pr_context =
+            latest_successful_tool_summary(&input.observations, "github_pr_context");
         let successful_apply_patch_count =
             successful_tool_call_count(&input.observations, "apply_patch");
         let git_diff_call_count = tool_call_count(&input.observations, "git_diff");
@@ -395,6 +398,57 @@ impl DeepSeekClient {
                         .with_arg("steps", "2"),
                 },
             };
+        }
+
+        if edit_request.is_none() && task_requests_remote_pr_review(&task_lower) {
+            if let Some(pr_request) = github_pr_context_request.as_ref() {
+                if tool_available("github_pr_context")
+                    && !used_tools.contains("github_pr_context")
+                    && !observations_include_pr_review_signal(&input.observations)
+                {
+                    let mut tool_input = ToolInput::new()
+                        .with_arg("number", pr_request.number.clone())
+                        .with_arg("include_diff", "true");
+                    if let Some(repo) = pr_request.repo.as_ref() {
+                        tool_input = tool_input.with_arg("repo", repo.clone());
+                    }
+                    return ModelResponse {
+                        message: format!(
+                            "{} planner is gathering GitHub PR context with the patch diff before review.",
+                            model_name
+                        ),
+                        action: ModelAction::CallTool {
+                            tool_name: "github_pr_context".to_string(),
+                            input: tool_input,
+                        },
+                    };
+                }
+            }
+            if tool_available("review") && !used_tools.contains("review") {
+                if let Some(context) = latest_github_pr_context {
+                    return ModelResponse {
+                        message: format!(
+                            "{} planner is running structured review over the gathered GitHub PR context.",
+                            model_name
+                        ),
+                        action: ModelAction::CallTool {
+                            tool_name: "review".to_string(),
+                            input: ToolInput::new()
+                                .with_arg("target", "github_pr_context")
+                                .with_arg("github_context", context.to_string()),
+                        },
+                    };
+                }
+            }
+            if succeeded_tools.contains("review") {
+                return ModelResponse {
+                    message: format!(
+                        "{} offline planner completed the structured PR review pass.",
+                        model_name
+                    ),
+                    action: ModelAction::Finish,
+                };
+            }
         }
 
         if edit_request.is_none() {
@@ -1768,9 +1822,22 @@ fn observations_include_pr_review_signal(
     observations: &[crate::model::protocol::Observation],
 ) -> bool {
     observations.iter().any(|observation| {
-        matches!(observation.tool_name.as_str(), "git_diff" | "list_files")
-            && !observation.is_failure()
+        matches!(
+            observation.tool_name.as_str(),
+            "git_diff" | "list_files" | "github_pr_context" | "review"
+        ) && !observation.is_failure()
     })
+}
+
+fn latest_successful_tool_summary<'a>(
+    observations: &'a [crate::model::protocol::Observation],
+    tool_name: &str,
+) -> Option<&'a str> {
+    observations
+        .iter()
+        .rev()
+        .find(|observation| observation.tool_name == tool_name && !observation.is_failure())
+        .map(|observation| observation.summary.as_str())
 }
 
 fn observations_include_pr_or_ci_signal(
@@ -2219,6 +2286,107 @@ fn task_looks_like_pr_workflow(task_lower: &str) -> bool {
         || task_lower.contains("review feedback")
         || task_lower.contains("failed ci")
         || task_lower.contains("ci job")
+}
+
+fn task_requests_remote_pr_review(task_lower: &str) -> bool {
+    (task_lower.contains("review pull request")
+        || task_lower.contains("review pr")
+        || (task_lower.contains("pull request") && task_lower.contains("review")))
+        && !task_lower.contains("review feedback")
+        && !task_lower.contains("address review")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GithubPrContextRequest {
+    number: String,
+    repo: Option<String>,
+}
+
+fn derive_github_pr_context_request(task: &str) -> Option<GithubPrContextRequest> {
+    if let Some(request) = parse_github_pr_url_from_text(task) {
+        return Some(request);
+    }
+    let number = first_hash_number(task)?;
+    Some(GithubPrContextRequest {
+        number,
+        repo: first_github_repo_token(task),
+    })
+}
+
+fn parse_github_pr_url_from_text(task: &str) -> Option<GithubPrContextRequest> {
+    let start = task.find("https://github.com/")?;
+    let tail = &task[start + "https://github.com/".len()..];
+    let token = tail
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|ch: char| matches!(ch, ')' | ']' | ',' | '.' | ';' | '\'' | '"'));
+    let mut parts = token.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    let kind = parts.next()?;
+    let number = parts
+        .next()
+        .unwrap_or("")
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("");
+    if kind != "pull" || owner.is_empty() || repo.is_empty() || number.is_empty() {
+        return None;
+    }
+    if !number.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some(GithubPrContextRequest {
+        number: number.to_string(),
+        repo: Some(format!("{owner}/{repo}")),
+    })
+}
+
+fn first_hash_number(task: &str) -> Option<String> {
+    for (index, ch) in task.char_indices() {
+        if ch != '#' {
+            continue;
+        }
+        let digits = task[index + 1..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        if !digits.is_empty() {
+            return Some(digits);
+        }
+    }
+    None
+}
+
+fn first_github_repo_token(task: &str) -> Option<String> {
+    task.split_whitespace()
+        .map(|token| {
+            token.trim_matches(|ch: char| {
+                matches!(
+                    ch,
+                    '(' | ')' | '[' | ']' | '{' | '}' | ',' | '.' | ';' | ':' | '\'' | '"'
+                )
+            })
+        })
+        .find(|token| {
+            let mut parts = token.split('/');
+            let Some(owner) = parts.next() else {
+                return false;
+            };
+            let Some(repo) = parts.next() else {
+                return false;
+            };
+            parts.next().is_none() && valid_github_repo_part(owner) && valid_github_repo_part(repo)
+        })
+        .map(str::to_string)
+}
+
+fn valid_github_repo_part(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
 fn query_looks_code_like(query: &str) -> bool {
@@ -4003,9 +4171,10 @@ fn is_supported_quote_delimiter(bytes: &[u8], index: usize, byte: u8) -> bool {
 mod tests {
     use super::{
         anthropic_tool_fields, api_flavor, build_anthropic_tools, build_openai_tools,
-        child_files_from_summary, derive_edit_request, derive_search_query, last_patched_file_path,
-        openai_tool_fields, parse_anthropic_messages, parse_anthropic_usage,
-        parse_openai_chat_completion, parse_openai_usage, ApiFlavor, DeepSeekClient, ReasoningTier,
+        child_files_from_summary, derive_edit_request, derive_github_pr_context_request,
+        derive_search_query, last_patched_file_path, openai_tool_fields, parse_anthropic_messages,
+        parse_anthropic_usage, parse_openai_chat_completion, parse_openai_usage, ApiFlavor,
+        DeepSeekClient, GithubPrContextRequest, ReasoningTier,
     };
     use crate::config::types::ModelConfig;
     use crate::model::client::ModelClient;
@@ -5672,6 +5841,144 @@ mod tests {
         )
         .expect("expected query");
         assert_eq!(query, "Route benchmark command");
+    }
+
+    #[test]
+    fn derive_github_pr_context_request_reads_number_repo_and_urls() {
+        assert_eq!(
+            derive_github_pr_context_request(
+                "Review pull request #42 'Route benchmark command' on owner/repo."
+            ),
+            Some(GithubPrContextRequest {
+                number: "42".to_string(),
+                repo: Some("owner/repo".to_string()),
+            })
+        );
+        assert_eq!(
+            derive_github_pr_context_request(
+                "Review https://github.com/acme/widgets/pull/77 before merge."
+            ),
+            Some(GithubPrContextRequest {
+                number: "77".to_string(),
+                repo: Some("acme/widgets".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn offline_planner_fetches_remote_pr_context_before_review() {
+        let request = ModelRequest {
+            system_prompt: String::new(),
+            task: "Review pull request #42 'Route benchmark command' on owner/repo. Highlight correctness risks.".to_string(),
+            image_inputs: Vec::new(),
+            profile_name: "rust".to_string(),
+            profile_hints: Vec::new(),
+            primary_file: None,
+            suggested_test_command: None,
+            available_tools: vec![
+                "github_pr_context".to_string(),
+                "review".to_string(),
+                "read_file".to_string(),
+            ],
+            observations: Vec::new(),
+            todos: Vec::new(),
+            planning_mode: false,
+            recent_steps: Vec::new(),
+        };
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "github_pr_context");
+                assert_eq!(input.get("number"), Some("42"));
+                assert_eq!(input.get("repo"), Some("owner/repo"));
+                assert_eq!(input.get("include_diff"), Some("true"));
+            }
+            ModelAction::Finish => panic!("expected github_pr_context tool call"),
+        }
+    }
+
+    #[test]
+    fn offline_planner_reviews_gathered_remote_pr_context() {
+        let context = "meta.kind=pr\n\
+meta.number=42\n\
+PR #42: Route benchmark command\n\
+json:\n\
+{\"number\":42,\"title\":\"Route benchmark command\",\"reviewDecision\":\"CHANGES_REQUESTED\"}\n\
+diff:\n\
+diff --git a/src/cli/app.rs b/src/cli/app.rs\n\
+--- a/src/cli/app.rs\n\
++++ b/src/cli/app.rs\n\
+@@ -1,2 +1,3 @@\n\
++pub fn route_benchmark_subcommand() {}\n";
+        let request = ModelRequest {
+            system_prompt: String::new(),
+            task: "Review pull request #42 'Route benchmark command' on owner/repo. Highlight correctness risks.".to_string(),
+            image_inputs: Vec::new(),
+            profile_name: "rust".to_string(),
+            profile_hints: Vec::new(),
+            primary_file: None,
+            suggested_test_command: None,
+            available_tools: vec![
+                "github_pr_context".to_string(),
+                "review".to_string(),
+                "read_file".to_string(),
+            ],
+            observations: vec![Observation::ok("github_pr_context", context)],
+            todos: Vec::new(),
+            planning_mode: false,
+            recent_steps: Vec::new(),
+        };
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "review");
+                assert_eq!(input.get("target"), Some("github_pr_context"));
+                assert_eq!(input.get("github_context"), Some(context));
+            }
+            ModelAction::Finish => panic!("expected review tool call"),
+        }
+    }
+
+    #[test]
+    fn offline_planner_finishes_after_remote_pr_review_tool() {
+        let request = ModelRequest {
+            system_prompt: String::new(),
+            task: "Review pull request #42 'Route benchmark command' on owner/repo. Highlight correctness risks.".to_string(),
+            image_inputs: Vec::new(),
+            profile_name: "rust".to_string(),
+            profile_hints: Vec::new(),
+            primary_file: None,
+            suggested_test_command: None,
+            available_tools: vec![
+                "github_pr_context".to_string(),
+                "review".to_string(),
+                "read_file".to_string(),
+            ],
+            observations: vec![
+                Observation::ok("github_pr_context", "meta.kind=pr\nmeta.number=42\n"),
+                Observation::ok(
+                    "review",
+                    "{\"issues\":[{\"title\":\"GitHub PR has requested changes\"}]}",
+                ),
+            ],
+            todos: Vec::new(),
+            planning_mode: false,
+            recent_steps: Vec::new(),
+        };
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        assert!(matches!(response.action, ModelAction::Finish));
     }
 
     #[test]

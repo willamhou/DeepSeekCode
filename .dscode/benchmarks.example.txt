@@ -154,6 +154,19 @@ notes = "Seeded PR review flow over a small Rust CLI diff"
 seed_observations = "git_diff:ok:diff --git a/src/cli/app.rs b/src/cli/app.rs\n@@\n-        Some(\"benchmark\") => route_benchmark_subcommand(),\n+        Some(\"bench\") => route_benchmark_subcommand(),\n         Some(\"doctor\") => \"doctor\",\n || list_files:ok:src/cli/app.rs\nsrc/main.rs"
 budget = 4
 
+name = "seeded-pr-context-review-signals"
+task = "Review pull request #42 'Route benchmark command' on owner/repo. Highlight correctness risks, security concerns, and status blockers."
+category = "pr_workflow"
+workdir = "fixtures/rust-cli-mini"
+notes = "Seeded github_pr_context should route through review and surface PR blocker metadata"
+seed_observations = "github_pr_context:ok:meta.kind=pr\nmeta.number=42\nmeta.state=OPEN\nPR #42: Route benchmark command\njson:\n{\"number\":42,\"title\":\"Route benchmark command\",\"reviewDecision\":\"CHANGES_REQUESTED\",\"statusCheckRollup\":[{\"name\":\"unit-tests\",\"conclusion\":\"FAILURE\"}]}\ndiff:\ndiff --git a/src/cli/app.rs b/src/cli/app.rs\n--- a/src/cli/app.rs\n+++ b/src/cli/app.rs\n@@ -1,2 +1,4 @@\n+pub fn route_benchmark_subcommand() {}\n"
+budget = 2
+expect_tool = "review"
+expect_tool_sequence = ["review"]
+expect_tool_output_contains = "review:GitHub PR has requested changes"
+max_failed_tools = 0
+max_tool_calls = 1
+
 name = "seeded-pr-ci-lint"
 task = "CI job `lint-rust` (run #556) on PR #42 failed at step `cargo clippy`. Reproduce locally, fix the root cause, and rerun the failing check. Failed log tail follows."
 category = "pr_workflow"

@@ -474,6 +474,10 @@ Remaining:
   `github_pr_context` JSON to report requested changes, failing/cancelled status
   checks, and missing `include_diff=true` context before optional semantic
   review delegation
+- Remote PR review loop planning now exists: the offline planner routes PR
+  review tasks through `github_pr_context include_diff=true` and then `review`
+  over that gathered context, with a seeded benchmark fixture covering blocker
+  metadata
 - Remaining: richer recursive helper API and stronger live end-to-end semantic
   review fixtures / remote PR comment/retry loops
 
