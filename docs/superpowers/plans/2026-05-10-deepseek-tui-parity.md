@@ -480,7 +480,9 @@ Landed first slice:
   `file_search`, `web_run`, `web_search`, `fetch_url`, `finance`,
   `git_status`, `git_diff`, `project_map`, `validate_data`, `git_log`,
   `git_show`, `git_blame`, `github_issue_context`, `github_pr_context`, and
-  `diagnostics`
+  `diagnostics`; local read-only helpers exposed through MCP:
+  `review`, `recall_archive`, `tool_search_tool_regex`, and
+  `tool_search_tool_bm25`
 - code-executing MCP side-effect tools exposed only with trusted side effects or
   durable approvals: `run_tests`, `run_shell`
 - DeepSeek-TUI-compatible MCP shell-session tools: read-only
@@ -577,6 +579,9 @@ Landed first slice:
 - MCP and ACP read-only tool bridges now expose the DeepSeek-TUI-compatible
   aggregate `web_run` wrapper in addition to the narrower `web_search`,
   `fetch_url`, and `finance` tools
+- MCP and ACP read-only tool bridges now expose agent-compatible local helper
+  tools `review`, `recall_archive`, `tool_search_tool_regex`, and
+  `tool_search_tool_bm25`
 - ACP loaded-session tool calls now create an assistant runtime turn with
   `tool_call` and `tool_result` items, and side-effect permission requests are
   linked to that same turn for auditability

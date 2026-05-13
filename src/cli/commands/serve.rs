@@ -38,7 +38,9 @@ use crate::tools::github::{
 use crate::tools::list_files::{ListDirTool, ListFilesTool};
 use crate::tools::project_map::ProjectMapTool;
 use crate::tools::read_file::ReadFileTool;
+use crate::tools::recall_archive::RecallArchiveTool;
 use crate::tools::revert_turn::RevertTurnTool;
+use crate::tools::review::ReviewTool;
 use crate::tools::rlm::{
     RlmBatchTool, RlmChunkPlanTool, RlmMapReducePlanTool, RlmPythonSessionTool,
     RlmPythonSessionsTool, RlmPythonTool, RlmTool,
@@ -47,6 +49,7 @@ use crate::tools::run_shell::{is_safe_shell_command, RunShellTool};
 use crate::tools::run_tests::{render_run_tests_command, RunTestsTool};
 use crate::tools::search_text::{GrepFilesTool, SearchTextTool};
 use crate::tools::tool_output::RetrieveToolResultTool;
+use crate::tools::tool_search::{ToolSearchMode, ToolSearchTool};
 use crate::tools::types::{Tool, ToolInput};
 use crate::tools::validate_data::ValidateDataTool;
 use crate::tools::web::{FetchUrlTool, FinanceTool, WebRunTool, WebSearchTool};
@@ -743,6 +746,18 @@ fn execute_mcp_tool(
         "git_blame" => GitBlameTool.execute(input)?,
         "github_issue_context" => GithubIssueContextTool.execute(input)?,
         "github_pr_context" => GithubPrContextTool.execute(input)?,
+        "review" => ReviewTool::default().execute(input)?,
+        "recall_archive" => RecallArchiveTool::new(&state.config).execute(input)?,
+        "tool_search_tool_regex" => ToolSearchTool {
+            tool_name: "tool_search_tool_regex",
+            mode: ToolSearchMode::Regex,
+        }
+        .execute(input)?,
+        "tool_search_tool_bm25" => ToolSearchTool {
+            tool_name: "tool_search_tool_bm25",
+            mode: ToolSearchMode::Bm25,
+        }
+        .execute(input)?,
         "exec_shell_list" => ExecShellListTool.execute(input)?,
         "exec_shell_show" => ExecShellShowTool.execute(input)?,
         "exec_shell_wait" => ExecShellWaitTool {
@@ -2892,6 +2907,57 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
             ),
         ),
         mcp_tool_definition(
+            "review",
+            "Run deterministic local code review over a workspace file, git diff, or github_pr_context output.",
+            mcp_schema(
+                vec![
+                    ("target", string_property("Workspace file path, diff, staged, or github_pr_context.")),
+                    ("kind", string_property("Optional source kind such as file or diff.")),
+                    ("cwd", string_property("Workspace directory, default MCP workspace.")),
+                    ("context", string_property("Inline github_pr_context output.")),
+                    ("github_context", string_property("Alias for context.")),
+                    ("pr_context", string_property("Alias for context.")),
+                    ("staged", string_property("Set true to review staged diff.")),
+                    ("max_chars", number_property("Maximum source characters.")),
+                ],
+                &["target"],
+            ),
+        ),
+        mcp_tool_definition(
+            "recall_archive",
+            "Search durable runtime threads, turns, and items for prior context.",
+            mcp_schema(
+                vec![
+                    ("query", string_property("Search query.")),
+                    ("thread_id", string_property("Optional runtime thread id.")),
+                    ("max_results", number_property("Maximum hits, default 3.")),
+                ],
+                &["query"],
+            ),
+        ),
+        mcp_tool_definition(
+            "tool_search_tool_regex",
+            "Search the static DeepSeekCode tool catalog with a lightweight regex-like pattern.",
+            mcp_schema(
+                vec![
+                    ("query", string_property("Regex-like search pattern.")),
+                    ("limit", number_property("Maximum tool references.")),
+                ],
+                &["query"],
+            ),
+        ),
+        mcp_tool_definition(
+            "tool_search_tool_bm25",
+            "Rank static DeepSeekCode tools by local term matching over names, descriptions, and schemas.",
+            mcp_schema(
+                vec![
+                    ("query", string_property("Search terms.")),
+                    ("limit", number_property("Maximum tool references.")),
+                ],
+                &["query"],
+            ),
+        ),
+        mcp_tool_definition(
             "exec_shell_list",
             "List in-process background shell jobs.",
             mcp_schema(Vec::new(), &[]),
@@ -4809,11 +4875,19 @@ fn acp_tool_kind(name: &str) -> &'static str {
         | "runtime_list_tasks"
         | "runtime_read_task"
         | "runtime_list_agents"
-        | "runtime_agent_result" => "read",
+        | "runtime_agent_result"
+        | "review"
+        | "recall_archive" => "read",
         "write_file" | "edit_file" | "fim_edit" | "apply_patch" | "revert_turn" => "edit",
         "delete_file" => "delete",
         "copy_file" | "move_file" => "move",
-        "search_text" | "grep_files" | "file_search" | "web_search" | "web_run" => "search",
+        "search_text"
+        | "grep_files"
+        | "file_search"
+        | "web_search"
+        | "web_run"
+        | "tool_search_tool_regex"
+        | "tool_search_tool_bm25" => "search",
         "fetch_url" | "finance" => "fetch",
         "run_shell"
         | "run_tests"
@@ -7239,6 +7313,10 @@ mod tests {
         assert!(rendered.contains(r#""name":"git_blame""#));
         assert!(rendered.contains(r#""name":"github_issue_context""#));
         assert!(rendered.contains(r#""name":"github_pr_context""#));
+        assert!(rendered.contains(r#""name":"review""#));
+        assert!(rendered.contains(r#""name":"recall_archive""#));
+        assert!(rendered.contains(r#""name":"tool_search_tool_regex""#));
+        assert!(rendered.contains(r#""name":"tool_search_tool_bm25""#));
         assert!(rendered.contains(r#""name":"exec_shell_list""#));
         assert!(rendered.contains(r#""name":"exec_shell_show""#));
         assert!(rendered.contains(r#""name":"exec_shell_wait""#));
@@ -7395,6 +7473,67 @@ mod tests {
         assert!(rendered.contains("meta.unsupported_actions=weather"));
         assert!(rendered.contains("Unsupported web_run actions in this slice: weather"));
         assert!(rendered.contains(r#""isError":false"#));
+    }
+
+    #[test]
+    fn mcp_tools_call_executes_read_only_helper_tools() {
+        let state = mcp_state("mcp-read-only-helpers");
+        fs::write(
+            state.workspace.join("src.rs"),
+            "pub fn risky(value: Option<String>) -> String {\n    value.unwrap()\n}\n",
+        )
+        .unwrap();
+        let runtime_store =
+            RuntimeStore::new(PathBuf::from(&state.config.workspace.config_dir).join("runtime"));
+        let session = runtime_store
+            .create_session(
+                "Recall session".to_string(),
+                state.workspace.display().to_string(),
+            )
+            .unwrap();
+        let thread = runtime_store
+            .create_thread_for_session(
+                &session.id,
+                "Recall thread".to_string(),
+                state.workspace.display().to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        runtime_store
+            .append_turn(
+                &thread.id,
+                "assistant".to_string(),
+                "needle archive context".to_string(),
+            )
+            .unwrap();
+
+        let review_response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":38,"method":"tools/call","params":{"name":"review","arguments":{"target":"src.rs"}}}"#,
+            &state,
+        )
+        .unwrap();
+        let review_text = mcp_response_text(&review_response);
+        assert!(review_text.contains("Reviewed file target `src.rs`"));
+        assert!(review_text.contains("panic-prone error handling"));
+
+        let recall_response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":39,"method":"tools/call","params":{"name":"recall_archive","arguments":{"query":"needle","max_results":1}}}"#,
+            &state,
+        )
+        .unwrap();
+        let recall_text = mcp_response_text(&recall_response);
+        assert!(recall_text.contains(r#""messages_scanned":1"#));
+        assert!(recall_text.contains("needle archive context"));
+
+        let tool_search_response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"tool_search_tool_bm25","arguments":{"query":"market quote","limit":3}}}"#,
+            &state,
+        )
+        .unwrap();
+        let tool_search_text = mcp_response_text(&tool_search_response);
+        assert!(tool_search_text.contains(r#""tool":"tool_search_tool_bm25""#));
+        assert!(tool_search_text.contains(r#""tool_name":"finance""#));
     }
 
     #[test]
@@ -8824,6 +8963,10 @@ mod tests {
         assert!(rendered.contains(r#""name":"validate_data""#));
         assert!(rendered.contains(r#""name":"github_issue_context""#));
         assert!(rendered.contains(r#""name":"github_pr_context""#));
+        assert!(rendered.contains(r#""name":"review""#));
+        assert!(rendered.contains(r#""name":"recall_archive""#));
+        assert!(rendered.contains(r#""name":"tool_search_tool_regex""#));
+        assert!(rendered.contains(r#""name":"tool_search_tool_bm25""#));
         assert!(rendered.contains(r#""name":"rlm_chunk_plan""#));
         assert!(rendered.contains(r#""name":"rlm_map_reduce_plan""#));
         assert!(rendered.contains(r#""name":"rlm_python""#));

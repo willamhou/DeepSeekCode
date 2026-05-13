@@ -314,6 +314,10 @@ Exposed tools:
 | `notify` | Fire a single terminal attention signal for long-running task completion or user attention |
 | `github_issue_context` | Read GitHub issue metadata, body, labels, assignees, and optional comments through `gh` |
 | `github_pr_context` | Read GitHub PR metadata, comments, reviews, checks, files, and optional patch diff through `gh` |
+| `review` | Run deterministic local code review over a workspace file, git diff, or supplied GitHub PR context |
+| `recall_archive` | Search durable runtime threads, turns, and items for prior context |
+| `tool_search_tool_regex` | Search the static DeepSeekCode tool catalog with a lightweight regex-like pattern |
+| `tool_search_tool_bm25` | Rank static DeepSeekCode tools by local term matching over names, descriptions, and schemas |
 | `diagnostics` | Run workspace or path-scoped diagnostics |
 | `run_tests` | Hidden by default; exposed with trusted `DSCODE_MCP_ENABLE_SIDE_EFFECTS=1` or durable runtime approvals, and runs supported test commands through the existing shell approval path |
 | `run_shell` | Hidden by default; exposed with trusted `DSCODE_MCP_ENABLE_SIDE_EFFECTS=1` or durable runtime approvals, and still limited by the existing safe-command allowlist |
