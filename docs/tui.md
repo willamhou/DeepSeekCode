@@ -36,6 +36,7 @@ Current surfaces:
 - context inspection with `context` / `/context` and `ctx` / `/ctx`, showing
   active-thread context window, compaction strategy, token/cache telemetry, and
   reasoning replay state
+- slash quit aliases with `exit` / `/exit`, `quit` / `/quit`, and `q` / `/q`
 - composer draft stash: `Ctrl+S` parks the current draft, and
   `stash list|pop|clear` / `/stash list|pop|clear` manage parked drafts
 - session rename from the command palette or slash-style composer command with
@@ -268,6 +269,7 @@ Command palette commands currently implemented:
 | `verbose`, `/verbose` | Toggle whether live reasoning text is rendered in full in the transcript |
 | `verbose on|off|show`, `/verbose on|off|show` | Enable, disable, or inspect verbose transcript mode |
 | `context`, `/context`, `ctx`, `/ctx` | Show active-thread context window, token/cache, item, and reasoning replay state |
+| `exit`, `/exit`, `quit`, `/quit`, `q`, `/q` | Quit the TUI workbench |
 | `mode`, `/mode` | Show current mode and mode-switching commands in the right-side detail panel |
 | `mode agent|plan|yolo|1|2|3`, `/mode agent|plan|yolo|1|2|3` | Switch Plan / Agent / YOLO mode |
 | `mode plan`, `plan` | Switch to Plan mode |

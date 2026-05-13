@@ -1026,6 +1026,21 @@ fn parse_tui_context_command(line: &str) -> Option<Result<(), String>> {
     }
 }
 
+fn parse_tui_exit_command(line: &str) -> Option<Result<(), String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/exit")
+        .or_else(|| strip_tui_command_prefix(trimmed, "exit"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "/quit"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "quit"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "/q"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "q"))?;
+    if rest.trim().is_empty() {
+        Some(Ok(()))
+    } else {
+        Some(Err("usage: exit, quit, q, /exit, /quit, or /q".to_string()))
+    }
+}
+
 fn parse_tui_tokens_command(line: &str) -> Option<Result<(), String>> {
     let trimmed = line.trim();
     let rest = strip_tui_command_prefix(trimmed, "/tokens")
@@ -1560,6 +1575,13 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         description: "Show command bar items and status-line shortcuts.",
     },
     TuiHelpCommandInfo {
+        category: "Workbench",
+        name: "exit",
+        aliases: &["quit", "q"],
+        usage: "/exit",
+        description: "Quit the TUI workbench.",
+    },
+    TuiHelpCommandInfo {
         category: "Runtime",
         name: "verbose",
         aliases: &[],
@@ -1735,6 +1757,9 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "theme light",
     "theme grayscale",
     "theme system",
+    "exit",
+    "quit",
+    "q",
     "plan",
     "agent",
     "yolo",
@@ -1959,6 +1984,9 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/theme light",
     "/theme grayscale",
     "/theme system",
+    "/exit",
+    "/quit",
+    "/q",
     "/model",
     "/model auto",
     "/model deepseek-v4-flash",
@@ -4154,6 +4182,15 @@ impl TuiApp {
                     self.status = "remembering composer note".to_string();
                     return true;
                 }
+                if let Some(command) = parse_tui_exit_command(&content) {
+                    match command {
+                        Ok(()) => return false,
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = composer_memory_command(&content) {
                     match command {
                         Ok(command) => {
@@ -4493,6 +4530,15 @@ impl TuiApp {
                 let command = self.command_query.trim().to_string();
                 self.show_command_palette = false;
                 self.record_command_history(&command);
+                if let Some(command) = parse_tui_exit_command(&command) {
+                    match command {
+                        Ok(()) => return false,
+                        Err(message) => {
+                            self.status = message;
+                            return true;
+                        }
+                    }
+                }
                 self.execute_palette_command(&command);
             }
             KeyCode::Backspace => {
@@ -10526,6 +10572,30 @@ mod tests {
 
         assert!(app.handle_mouse_event(left_click(4, 1)));
         assert_eq!(app.mode, TuiMode::Plan);
+    }
+
+    #[test]
+    fn exit_command_quits_from_palette_and_composer() {
+        let mut app = TuiApp::new(Vec::new());
+
+        assert!(app.handle_key(KeyCode::Char(':')));
+        for ch in "exit".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(!app.handle_key(KeyCode::Enter));
+
+        let mut app = TuiApp::new(Vec::new());
+        app.composer_focused = true;
+        app.composer = "/quit".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(!app.handle_key(KeyCode::Enter));
+
+        let mut app = TuiApp::new(Vec::new());
+        app.composer_focused = true;
+        app.composer = "/exit now".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        assert_eq!(app.status, "usage: exit, quit, q, /exit, /quit, or /q");
     }
 
     #[test]
