@@ -73,7 +73,7 @@ live RLM streaming/cancellation/recovery remain open.
   backend.
 - True live model-backed RLM REPL/daemon implementation now has a design spec:
   `2026-05-13-deepseek-tui-rlm-live-daemon-design.md`. The next executable
-  slice should be live-session manifest/inventory support or
-  runtime-thread-backed turn queueing.
+  slice should be runtime-thread-backed turn queueing because live-session
+  manifest/inventory support has landed.
 - Platform restore strategy for device nodes and Windows symlink semantics.
 - Live GitHub write-fixture harness behind an explicit opt-in test repository.

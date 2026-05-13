@@ -180,5 +180,6 @@ Future implementation should add these gates:
 
 Do not rename the existing bounded child-agent `rlm_process` implementation as a
 live daemon. It is already useful and should remain the default until a real
-live worker exists. The next executable RLM slice should start with live-session
-manifest/inventory support or runtime-thread-backed turn queueing.
+live worker exists. The next executable RLM slice should start with
+runtime-thread-backed turn queueing; live-session manifest/inventory support is
+already implemented as the first slice.
