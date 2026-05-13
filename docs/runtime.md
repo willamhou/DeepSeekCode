@@ -357,6 +357,7 @@ Exposed tools:
 | `move_file` | Hidden by default; exposed only with durable runtime approvals and moves one regular file between safe relative paths under the MCP workspace |
 | `revert_turn` | Hidden by default; exposed only with durable runtime approvals and restores files from rollback snapshots |
 | `github_comment` | Hidden by default; exposed only with durable runtime approvals and posts evidence-backed GitHub issue/PR comments through `gh` |
+| `github_pr_review_comment` | Hidden by default; exposed only with durable runtime approvals and posts evidence-backed inline PR review comments through `gh api` |
 | `github_close_issue` | Hidden by default; exposed only with durable runtime approvals and closes completed GitHub issues through `gh` after structured evidence |
 | `runtime_health` | Return MCP server health metadata |
 | `runtime_list_sessions` | List durable runtime sessions |
@@ -1134,8 +1135,11 @@ over the gathered context. If the task asks to draft or prepare a PR comment and
 JSON plus optional PR context into Markdown body text, evidence JSON, and a
 dry-run `github_comment` input. If the task explicitly says to post, publish,
 leave, add, submit, or send the comment, the planner can pass that prepared
-input to the guarded `github_comment` write tool with `dry_run=false`; the
-normal write-approval path still controls whether the GitHub mutation runs.
+input to the guarded `github_comment` write tool with `dry_run=false`; when the
+task explicitly asks for inline/line/file/diff comments and the comment plan has
+line-level findings plus a PR head commit SHA, the planner can instead pass the
+prepared batch to the guarded `github_pr_review_comment` tool. The normal
+write-approval path still controls whether any GitHub mutation runs.
 Agent-visible skill tooling includes DeepSeek-TUI-compatible `load_skill`.
 DeepSeekCode maps that tool onto its existing TOML skill registry: repo skills
 and the configured `workspace.user_skills_dir` are searched with user skills
@@ -1222,20 +1226,22 @@ Agent-visible GitHub context tools include DeepSeek-TUI-compatible
 through argv, accept optional `repo` / `repository` scoping, and keep output
 bounded with `max_chars`; PR context can include a bounded `gh pr diff --patch`
 excerpt with `include_diff=true`.
-GitHub mutation tools `github_comment` and `github_close_issue` require write
-approval. Comments require a non-empty evidence JSON object; issue closure also
-requires acceptance criteria plus `files_changed`, `tests_run`, and
-`final_status` evidence, and refuses dirty worktrees unless `allow_dirty=true`.
-For PR review comments, `pr_review_comment_plan` can prepare the body and
-evidence without invoking `gh`; callers can then pass its dry-run
-`github_comment_input` through the normal approval-gated mutation path when they
-explicitly want to post. The offline planner performs that handoff only for
-explicit post/publish/leave/add/submit/send wording; draft and prepare tasks stop
-at the read-only plan. If the guarded `github_comment` attempt fails or is
-denied, the planner does not blindly resend the same mutation. It rebuilds a
-fresh `pr_review_comment_plan` with the previous comment error recorded in the
-comment body and evidence, leaving the next retry to an explicit follow-up and
-approval.
+GitHub mutation tools `github_comment`, `github_pr_review_comment`, and
+`github_close_issue` require write approval. Comments require a non-empty
+evidence JSON object; inline PR review comments also require a PR number,
+line-level comments with `path`, `line`, and `body`, plus a PR head `commit_id`
+or per-comment `commit_id`. Issue closure also requires acceptance criteria plus
+`files_changed`, `tests_run`, and `final_status` evidence, and refuses dirty
+worktrees unless `allow_dirty=true`. For PR review comments,
+`pr_review_comment_plan` can prepare the top-level body, evidence, dry-run
+`github_comment_input`, and, when enough line-level context exists, a dry-run
+`github_pr_review_comment_input` without invoking `gh`. The offline planner
+performs write handoff only for explicit post/publish/leave/add/submit/send
+wording; draft and prepare tasks stop at the read-only plan. If a guarded
+`github_comment` or `github_pr_review_comment` attempt fails or is denied, the
+planner does not blindly resend the same mutation. It rebuilds a fresh
+`pr_review_comment_plan` with the previous comment error recorded in the comment
+body and evidence, leaving the next retry to an explicit follow-up and approval.
 
 Agent runs also expose DeepSeek-TUI-compatible `revert_turn`. It restores
 workspace files from rollback snapshots by `snapshot_id`, `checkpoint_id`,

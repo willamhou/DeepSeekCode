@@ -143,9 +143,9 @@ Landed first slice:
   landed as read-only tools)
 - GitHub read-only context (`github_issue_context` and `github_pr_context`)
   landed as agent/MCP/ACP-visible `gh`-backed tools
-- GitHub guarded mutations (`github_comment` and `github_close_issue`) landed
-  as evidence-gated tools and as MCP/ACP write tools only under durable
-  approvals
+- GitHub guarded mutations (`github_comment`, `github_pr_review_comment`, and
+  `github_close_issue`) landed as evidence-gated tools and as MCP/ACP write
+  tools only under durable approvals
 - `git_diff` now accepts DeepSeek-TUI-style `path`, `cached`, `unified`, and
   `max_chars` controls
 - DeepSeek-TUI read-only search aliases (`list_dir`, `grep_files`, and
@@ -491,11 +491,17 @@ Remaining:
   planner hands the comment plan to `github_comment` with `dry_run=false`, still
   relying on the existing write-approval path before any GitHub mutation runs
 - PR comment failure recovery now exists: if the guarded `github_comment`
-  attempt fails or is denied, the planner rebuilds a fresh
-  `pr_review_comment_plan` with the previous comment error recorded in body and
-  evidence, instead of blindly re-sending the same GitHub mutation
+  or `github_pr_review_comment` attempt fails or is denied, the planner rebuilds
+  a fresh `pr_review_comment_plan` with the previous comment error recorded in
+  body and evidence, instead of blindly re-sending the same GitHub mutation
+- Inline PR review-comment posting now exists: `github_pr_review_comment`
+  posts evidence-backed line-level review comments through `gh api` after write
+  approval, `pr_review_comment_plan` emits dry-run inline comment input when PR
+  context includes a head commit SHA and findings have `path` + `line`, and the
+  offline planner routes explicit inline/line/file/diff comment requests to that
+  guarded tool
 - Remaining: stronger live end-to-end semantic review fixtures / remote PR
-  live retry fixtures and inline review-comment posting
+  live retry fixtures
 
 ### Phase G2: MCP Server Mode
 
@@ -583,9 +589,10 @@ Landed first slice:
   regular file between safe relative paths under the MCP workspace, rejects path
   escapes/directories/symlink sources and existing destinations, and records the
   approval decision before mutating files
-- MCP `revert_turn`, `github_comment`, and `github_close_issue` are now exposed
-  only in durable approval mode, routing rollback restore and GitHub write
-  actions through runtime permission requests before executing
+- MCP `revert_turn`, `github_comment`, `github_pr_review_comment`, and
+  `github_close_issue` are now exposed only in durable approval mode, routing
+  rollback restore and GitHub write actions through runtime permission requests
+  before executing
 - focused unit tests cover initialize, tool listing, `read_file`, and runtime
   session listing; resource tests cover listing and reading runtime thread JSON;
   stdio smoke validates real `deepseek serve --mcp` output

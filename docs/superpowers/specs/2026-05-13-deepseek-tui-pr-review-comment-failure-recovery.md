@@ -39,5 +39,7 @@ after write failures without blindly repeating GitHub mutations.
 - `/home/willamhou/.cargo/bin/cargo test pr_comment --lib`
 - `/home/willamhou/.cargo/bin/cargo test pr_review_comment_plan --lib`
 
-Live GitHub posting fixtures, inline review comments, and policy-specific UI
-retry prompts remain future work.
+Live GitHub posting fixtures and policy-specific UI retry prompts remain future
+work. A later inline PR review-comment slice added line-level posting through
+`github_pr_review_comment` and reuses this recovery path after denied inline
+comment attempts.

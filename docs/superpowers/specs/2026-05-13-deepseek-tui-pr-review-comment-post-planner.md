@@ -38,5 +38,6 @@ the guarded GitHub mutation path without bypassing approval.
 - `/home/willamhou/.cargo/bin/cargo test remote_pr --lib`
 
 Follow-up work added failure recovery by rebuilding the comment plan with the
-previous error recorded in evidence. Live GitHub posting fixtures and inline
-review-comment posting remain follow-up work.
+previous error recorded in evidence. A later inline PR review-comment slice added
+line-level posting through `github_pr_review_comment`; live GitHub posting
+fixtures remain follow-up work.

@@ -300,6 +300,10 @@ impl DeepSeekClient {
             latest_successful_tool_summary(&input.observations, "pr_review_comment_plan");
         let last_failed_github_comment =
             last_failed_tool_summary(&input.observations, "github_comment");
+        let last_failed_github_pr_review_comment =
+            last_failed_tool_summary(&input.observations, "github_pr_review_comment");
+        let last_failed_pr_comment_write =
+            last_failed_github_comment.or(last_failed_github_pr_review_comment);
         let pr_review_comment_plan_call_count =
             tool_call_count(&input.observations, "pr_review_comment_plan");
         let successful_apply_patch_count =
@@ -481,7 +485,30 @@ impl DeepSeekClient {
                 }
             }
             if succeeded_tools.contains("pr_review_comment_plan")
+                && task_requests_remote_pr_inline_comment_post(&task_lower)
+                && tool_available("github_pr_review_comment")
+                && !used_tools.contains("github_pr_review_comment")
+            {
+                if let Some(plan) = latest_pr_review_comment_plan {
+                    if let Some(tool_input) =
+                        github_pr_review_comment_input_from_pr_review_comment_plan(plan, false)
+                    {
+                        return ModelResponse {
+                            message: format!(
+                                "{} planner is posting prepared inline PR review comments through the guarded GitHub write tool.",
+                                model_name
+                            ),
+                            action: ModelAction::CallTool {
+                                tool_name: "github_pr_review_comment".to_string(),
+                                input: tool_input,
+                            },
+                        };
+                    }
+                }
+            }
+            if succeeded_tools.contains("pr_review_comment_plan")
                 && task_requests_remote_pr_comment_post(&task_lower)
+                && !task_requests_remote_pr_inline_comment_post(&task_lower)
                 && tool_available("github_comment")
                 && !used_tools.contains("github_comment")
             {
@@ -502,7 +529,7 @@ impl DeepSeekClient {
                     }
                 }
             }
-            if let Some(comment_error) = last_failed_github_comment {
+            if let Some(comment_error) = last_failed_pr_comment_write {
                 if task_requests_remote_pr_comment_post(&task_lower)
                     && tool_available("pr_review_comment_plan")
                     && pr_review_comment_plan_call_count < 2
@@ -537,6 +564,15 @@ impl DeepSeekClient {
                 return ModelResponse {
                     message: format!(
                         "{} offline planner completed the guarded PR review comment step.",
+                        model_name
+                    ),
+                    action: ModelAction::Finish,
+                };
+            }
+            if succeeded_tools.contains("github_pr_review_comment") {
+                return ModelResponse {
+                    message: format!(
+                        "{} offline planner completed the guarded inline PR review comment step.",
                         model_name
                     ),
                     action: ModelAction::Finish,
@@ -2437,6 +2473,14 @@ fn task_requests_remote_pr_comment_post(task_lower: &str) -> bool {
             || task_lower.contains("send comment"))
 }
 
+fn task_requests_remote_pr_inline_comment_post(task_lower: &str) -> bool {
+    task_requests_remote_pr_comment_post(task_lower)
+        && (task_lower.contains("inline")
+            || task_lower.contains("line comment")
+            || task_lower.contains("file comment")
+            || task_lower.contains("diff comment"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GithubPrContextRequest {
     number: String,
@@ -2515,6 +2559,49 @@ fn github_comment_input_from_pr_review_comment_plan(
         .with_arg("body", body.to_string())
         .with_arg("evidence", evidence)
         .with_arg("dry_run", if dry_run { "true" } else { "false" });
+    if let Some(repo) = input_object
+        .get("repo")
+        .and_then(json_as_string)
+        .or_else(|| root.get("repo").and_then(json_as_string))
+    {
+        tool_input = tool_input.with_arg("repo", repo.to_string());
+    }
+    Some(tool_input)
+}
+
+fn github_pr_review_comment_input_from_pr_review_comment_plan(
+    plan: &str,
+    dry_run: bool,
+) -> Option<ToolInput> {
+    let root = parse_root_object(plan).ok()?;
+    let input_object = root
+        .get("github_pr_review_comment_input")
+        .and_then(json_as_object)?;
+    let number = input_object
+        .get("number")
+        .and_then(json_as_string)
+        .or_else(|| root.get("number").and_then(json_as_string))?;
+    let evidence = input_object
+        .get("evidence")
+        .or_else(|| root.get("evidence"))
+        .map(json_string_or_serialized)?;
+    let comments = input_object
+        .get("comments")
+        .map(json_string_or_serialized)
+        .or_else(|| root.get("comments").map(json_string_or_serialized))?;
+    let mut tool_input = ToolInput::new()
+        .with_arg("number", number.to_string())
+        .with_arg("comments", comments)
+        .with_arg("evidence", evidence)
+        .with_arg("dry_run", if dry_run { "true" } else { "false" });
+    if let Some(commit_id) = input_object
+        .get("commit_id")
+        .and_then(json_as_string)
+        .or_else(|| input_object.get("head_sha").and_then(json_as_string))
+        .or_else(|| input_object.get("sha").and_then(json_as_string))
+    {
+        tool_input = tool_input.with_arg("commit_id", commit_id.to_string());
+    }
     if let Some(repo) = input_object
         .get("repo")
         .and_then(json_as_string)
@@ -2885,8 +2972,8 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
     },
     StaticToolSpec {
         name: "pr_review_comment_plan",
-        description: "Turn structured review JSON plus optional github_pr_context output into a read-only GitHub PR comment plan containing Markdown body text, evidence JSON, and a dry-run github_comment input.",
-        properties_json: r#"{"review_output":{"type":"string","description":"JSON output from the review tool."},"review_json":{"type":"string","description":"Alias for review_output."},"review":{"type":"string","description":"Alias for review_output."},"github_context":{"type":"string","description":"Optional github_pr_context output used to infer PR number and repository."},"pr_context":{"type":"string","description":"Alias for github_context."},"context":{"type":"string","description":"Alias for github_context."},"number":{"type":"string","description":"Optional PR number when not present in context."},"pr":{"type":"string","description":"Alias for number."},"repo":{"type":"string","description":"Optional owner/repo for the suggested github_comment input."},"repository":{"type":"string","description":"Alias for repo."},"max_issues":{"type":"string","description":"Maximum findings to render in the comment, default 8 and max 20."}}"#,
+        description: "Turn structured review JSON plus optional github_pr_context output into a read-only GitHub PR comment plan containing Markdown body text, evidence JSON, dry-run github_comment input, and dry-run inline review-comment input when line-level findings and PR head SHA are available.",
+        properties_json: r#"{"review_output":{"type":"string","description":"JSON output from the review tool."},"review_json":{"type":"string","description":"Alias for review_output."},"review":{"type":"string","description":"Alias for review_output."},"github_context":{"type":"string","description":"Optional github_pr_context output used to infer PR number, repository, and head commit."},"pr_context":{"type":"string","description":"Alias for github_context."},"context":{"type":"string","description":"Alias for github_context."},"number":{"type":"string","description":"Optional PR number when not present in context."},"pr":{"type":"string","description":"Alias for number."},"repo":{"type":"string","description":"Optional owner/repo for suggested GitHub inputs."},"repository":{"type":"string","description":"Alias for repo."},"commit_id":{"type":"string","description":"Optional PR head commit SHA for inline review comments."},"head_sha":{"type":"string","description":"Alias for commit_id."},"sha":{"type":"string","description":"Alias for commit_id."},"max_issues":{"type":"string","description":"Maximum findings to render in the comment, default 8 and max 20."}}"#,
         required_json: r#"["review_output"]"#,
     },
     StaticToolSpec {
@@ -3074,6 +3161,12 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
         description: "Post an evidence-backed GitHub issue or PR comment using the gh CLI. Requires write approval.",
         properties_json: r#"{"target":{"type":"string","description":"Comment target: issue or pr."},"number":{"type":"string","description":"Issue or PR number."},"body":{"type":"string","description":"Comment body to post."},"evidence":{"type":"string","description":"JSON object with supporting evidence for the comment."},"repo":{"type":"string","description":"Optional owner/repo for gh -R."},"repository":{"type":"string","description":"Alias for repo."},"dry_run":{"type":"string","description":"Set true to validate without posting."}}"#,
         required_json: r#"["target","number","body","evidence"]"#,
+    },
+    StaticToolSpec {
+        name: "github_pr_review_comment",
+        description: "Post evidence-backed inline GitHub PR review comments on changed file lines using gh api. Requires write approval.",
+        properties_json: r#"{"number":{"type":"string","description":"PR number."},"pr":{"type":"string","description":"Alias for number."},"comments":{"type":"string","description":"JSON array of inline comments with path, line, body, optional side/start_line/start_side/commit_id."},"path":{"type":"string","description":"Single inline comment file path when comments is omitted."},"line":{"type":"string","description":"Single inline comment line when comments is omitted."},"body":{"type":"string","description":"Single inline comment body when comments is omitted."},"commit_id":{"type":"string","description":"PR head commit SHA for the review comment."},"head_sha":{"type":"string","description":"Alias for commit_id."},"sha":{"type":"string","description":"Alias for commit_id."},"side":{"type":"string","description":"Diff side, RIGHT by default or LEFT."},"evidence":{"type":"string","description":"JSON object with supporting evidence for the inline comments."},"repo":{"type":"string","description":"Optional owner/repo for gh api endpoint."},"repository":{"type":"string","description":"Alias for repo."},"dry_run":{"type":"string","description":"Set true to validate without posting."}}"#,
+        required_json: r#"["number","evidence"]"#,
     },
     StaticToolSpec {
         name: "github_close_issue",
@@ -4841,18 +4934,23 @@ mod tests {
     fn build_tool_specs_include_github_write_tools() {
         let openai = build_openai_tools(&[
             "github_comment".to_string(),
+            "github_pr_review_comment".to_string(),
             "github_close_issue".to_string(),
         ]);
         assert!(openai.contains("\"name\":\"github_comment\""));
+        assert!(openai.contains("\"name\":\"github_pr_review_comment\""));
         assert!(openai.contains("\"name\":\"github_close_issue\""));
         assert!(openai.contains("\"evidence\""));
+        assert!(openai.contains("\"comments\""));
         assert!(openai.contains("\"acceptance_criteria\""));
 
         let anthropic = build_anthropic_tools(&[
             "github_comment".to_string(),
+            "github_pr_review_comment".to_string(),
             "github_close_issue".to_string(),
         ]);
         assert!(anthropic.contains("\"name\":\"github_comment\""));
+        assert!(anthropic.contains("\"name\":\"github_pr_review_comment\""));
         assert!(anthropic.contains("\"name\":\"github_close_issue\""));
         assert!(anthropic.contains("\"input_schema\""));
     }
@@ -6333,6 +6431,107 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 );
             }
             ModelAction::Finish => panic!("expected guarded github_comment tool call"),
+        }
+    }
+
+    #[test]
+    fn offline_planner_posts_prepared_inline_pr_review_comments_when_explicit() {
+        let comment_plan = r###"{"evidence":{"tool":"review","issue_count":1},"github_comment_input":{"target":"pr","number":"42","body":"draft","evidence":"{\"tool\":\"review\",\"issue_count\":1}","dry_run":"true","repo":"owner/repo"},"github_pr_review_comment_input":{"number":"42","commit_id":"abc123","comments":[{"path":"src/lib.rs","line":12,"body":"warning: check this","side":"RIGHT"}],"evidence":"{\"tool\":\"review\",\"issue_count\":1}","dry_run":"true","repo":"owner/repo"}}"###;
+        let request = ModelRequest {
+            system_prompt: String::new(),
+            task: "Review pull request #42 on owner/repo and post inline review comments with the findings."
+                .to_string(),
+            image_inputs: Vec::new(),
+            profile_name: "rust".to_string(),
+            profile_hints: Vec::new(),
+            primary_file: None,
+            suggested_test_command: None,
+            available_tools: vec![
+                "github_pr_context".to_string(),
+                "review".to_string(),
+                "pr_review_comment_plan".to_string(),
+                "github_comment".to_string(),
+                "github_pr_review_comment".to_string(),
+            ],
+            observations: vec![
+                Observation::ok("github_pr_context", "meta.kind=pr\nmeta.number=42\n"),
+                Observation::ok("review", "{\"issues\":[]}"),
+                Observation::ok("pr_review_comment_plan", comment_plan),
+            ],
+            todos: Vec::new(),
+            planning_mode: false,
+            recent_steps: Vec::new(),
+        };
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "github_pr_review_comment");
+                assert_eq!(input.get("number"), Some("42"));
+                assert_eq!(input.get("repo"), Some("owner/repo"));
+                assert_eq!(input.get("commit_id"), Some("abc123"));
+                assert_eq!(input.get("dry_run"), Some("false"));
+                assert!(input
+                    .get("comments")
+                    .unwrap_or_default()
+                    .contains("src/lib.rs"));
+                assert_eq!(
+                    input.get("evidence"),
+                    Some("{\"tool\":\"review\",\"issue_count\":1}")
+                );
+            }
+            ModelAction::Finish => panic!("expected guarded github_pr_review_comment tool call"),
+        }
+    }
+
+    #[test]
+    fn offline_planner_replans_after_failed_inline_pr_review_comment_post() {
+        let context = "meta.kind=pr\nmeta.number=42\n";
+        let review_output = "{\"issues\":[{\"severity\":\"info\",\"title\":\"public API change\",\"path\":\"src/lib.rs\",\"line\":12}],\"source\":{\"kind\":\"github_pr_diff\",\"target\":\"github_pr_context\",\"truncated\":false}}";
+        let comment_plan = r###"{"evidence":{"tool":"review","issue_count":1},"github_pr_review_comment_input":{"number":"42","commit_id":"abc123","comments":[{"path":"src/lib.rs","line":12,"body":"warning: check this"}],"evidence":"{\"tool\":\"review\",\"issue_count\":1}","dry_run":"true","repo":"owner/repo"}}"###;
+        let request = ModelRequest {
+            system_prompt: String::new(),
+            task: "Review pull request #42 on owner/repo and post inline review comments with the findings."
+                .to_string(),
+            image_inputs: Vec::new(),
+            profile_name: "rust".to_string(),
+            profile_hints: Vec::new(),
+            primary_file: None,
+            suggested_test_command: None,
+            available_tools: vec![
+                "github_pr_context".to_string(),
+                "review".to_string(),
+                "pr_review_comment_plan".to_string(),
+                "github_pr_review_comment".to_string(),
+            ],
+            observations: vec![
+                Observation::ok("github_pr_context", context),
+                Observation::ok("review", review_output),
+                Observation::ok("pr_review_comment_plan", comment_plan),
+                Observation::failed("github_pr_review_comment", "line is not part of the diff"),
+            ],
+            todos: Vec::new(),
+            planning_mode: false,
+            recent_steps: Vec::new(),
+        };
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "pr_review_comment_plan");
+                assert_eq!(input.get("review_output"), Some(review_output));
+                assert_eq!(
+                    input.get("comment_error"),
+                    Some("line is not part of the diff")
+                );
+            }
+            ModelAction::Finish => panic!("expected pr_review_comment_plan retry tool call"),
         }
     }
 

@@ -35,6 +35,7 @@ use crate::tools::git_diff::{GitDiffTool, GitStatusTool};
 use crate::tools::git_history::{GitBlameTool, GitLogTool, GitShowTool};
 use crate::tools::github::{
     GithubCloseIssueTool, GithubCommentTool, GithubIssueContextTool, GithubPrContextTool,
+    GithubPrReviewCommentTool,
 };
 use crate::tools::list_files::{ListDirTool, ListFilesTool};
 use crate::tools::notes::{NoteTool, RememberTool};
@@ -847,6 +848,14 @@ fn execute_mcp_tool(
             }
             return execute_mcp_github_comment(input, state);
         }
+        "github_pr_review_comment" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `github_pr_review_comment` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_github_pr_review_comment(input, state);
+        }
         "github_close_issue" => {
             if !mcp_write_tools_enabled(state) {
                 return Err(app_error(
@@ -1573,6 +1582,29 @@ fn execute_mcp_github_comment(input: ToolInput, state: &McpStdioState) -> AppRes
     Ok(GithubCommentTool.execute(input)?.summary)
 }
 
+fn execute_mcp_github_pr_review_comment(
+    input: ToolInput,
+    state: &McpStdioState,
+) -> AppResult<String> {
+    let Some(thread_id) = state.approval_thread_id.as_deref() else {
+        return Err(app_error(
+            "MCP write tool `github_pr_review_comment` is disabled; durable runtime approvals are required",
+        ));
+    };
+    if state.approval.require_write_confirmation && !env_flag("DSCODE_AUTO_APPROVE_WRITES") {
+        let approval = state.store.append_permission_request(
+            thread_id,
+            state.approval_turn_id.as_deref(),
+            "github_pr_review_comment".to_string(),
+            "write".to_string(),
+            mcp_github_pr_review_comment_target(&input),
+            input.args.clone(),
+        )?;
+        wait_for_mcp_permission_response(state, thread_id, &approval, "github_pr_review_comment")?;
+    }
+    Ok(GithubPrReviewCommentTool.execute(input)?.summary)
+}
+
 fn execute_mcp_github_close_issue(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
     let Some(thread_id) = state.approval_thread_id.as_deref() else {
         return Err(app_error(
@@ -2135,6 +2167,22 @@ fn mcp_github_comment_target(input: &ToolInput) -> String {
         .map(|value| format!(" in {value}"))
         .unwrap_or_default();
     format!("github {target} #{number} comment{repo}")
+}
+
+fn mcp_github_pr_review_comment_target(input: &ToolInput) -> String {
+    let number = input
+        .get("number")
+        .or_else(|| input.get("pr"))
+        .or_else(|| input.get("ref"))
+        .unwrap_or("?");
+    let path = input.get("path").unwrap_or("inline");
+    let line = input.get("line").unwrap_or("?");
+    let repo = input
+        .get("repo")
+        .or_else(|| input.get("repository"))
+        .map(|value| format!(" in {value}"))
+        .unwrap_or_default();
+    format!("github pr #{number} inline comment {path}:{line}{repo}")
 }
 
 fn mcp_github_close_issue_target(input: &ToolInput) -> String {
@@ -3084,7 +3132,7 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
         ),
         mcp_tool_definition(
             "pr_review_comment_plan",
-            "Create a read-only GitHub PR review comment plan from review JSON and optional github_pr_context output.",
+            "Create a read-only GitHub PR review comment plan from review JSON and optional github_pr_context output, including inline review-comment inputs when possible.",
             mcp_schema(
                 vec![
                     ("review_output", string_property("JSON output from the review tool.")),
@@ -3100,6 +3148,12 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
                     ("pr", string_property("Alias for number.")),
                     ("repo", string_property("Optional owner/repo for GitHub.")),
                     ("repository", string_property("Alias for repo.")),
+                    (
+                        "commit_id",
+                        string_property("Optional PR head commit SHA for inline review comments."),
+                    ),
+                    ("head_sha", string_property("Alias for commit_id.")),
+                    ("sha", string_property("Alias for commit_id.")),
                     ("max_issues", number_property("Maximum findings to render.")),
                 ],
                 &["review_output"],
@@ -3639,6 +3693,47 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
                     ("dry_run", string_property("Set true to validate only.")),
                 ],
                 &["target", "number", "body", "evidence"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "github_pr_review_comment",
+            "Post evidence-backed inline GitHub PR review comments through gh api. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("number", string_property("PR number.")),
+                    ("pr", string_property("Alias for number.")),
+                    (
+                        "comments",
+                        string_property("JSON array of inline comments with path, line, body, optional side/start_line/start_side/commit_id."),
+                    ),
+                    (
+                        "path",
+                        string_property("Single inline comment file path when comments is omitted."),
+                    ),
+                    (
+                        "line",
+                        string_property("Single inline comment line when comments is omitted."),
+                    ),
+                    (
+                        "body",
+                        string_property("Single inline comment body when comments is omitted."),
+                    ),
+                    (
+                        "commit_id",
+                        string_property("PR head commit SHA for the review comment."),
+                    ),
+                    ("head_sha", string_property("Alias for commit_id.")),
+                    ("sha", string_property("Alias for commit_id.")),
+                    ("side", string_property("Diff side, RIGHT by default or LEFT.")),
+                    (
+                        "evidence",
+                        string_property("JSON object with supporting evidence."),
+                    ),
+                    ("repo", string_property("Optional owner/repo for gh api.")),
+                    ("repository", string_property("Alias for repo.")),
+                    ("dry_run", string_property("Set true to validate only.")),
+                ],
+                &["number", "evidence"],
             ),
         ));
         tools.push(mcp_tool_definition(
@@ -8584,6 +8679,7 @@ shell_allowlist = ["cargo test"]
         assert!(!rendered.contains(r#""name":"move_file""#));
         assert!(!rendered.contains(r#""name":"revert_turn""#));
         assert!(!rendered.contains(r#""name":"github_comment""#));
+        assert!(!rendered.contains(r#""name":"github_pr_review_comment""#));
         assert!(!rendered.contains(r#""name":"github_close_issue""#));
         assert!(!rendered.contains(r#""name":"runtime_create_task""#));
         assert!(!rendered.contains(r#""name":"runtime_cancel_task""#));
@@ -8641,6 +8737,7 @@ shell_allowlist = ["cargo test"]
         assert!(!rendered.contains(r#""name":"move_file""#));
         assert!(!rendered.contains(r#""name":"revert_turn""#));
         assert!(!rendered.contains(r#""name":"github_comment""#));
+        assert!(!rendered.contains(r#""name":"github_pr_review_comment""#));
         assert!(!rendered.contains(r#""name":"github_close_issue""#));
         assert!(!rendered.contains(r#""name":"runtime_create_task""#));
         assert!(!rendered.contains(r#""name":"runtime_cancel_task""#));
@@ -8673,6 +8770,7 @@ shell_allowlist = ["cargo test"]
         assert!(rendered.contains(r#""name":"move_file""#));
         assert!(rendered.contains(r#""name":"revert_turn""#));
         assert!(rendered.contains(r#""name":"github_comment""#));
+        assert!(rendered.contains(r#""name":"github_pr_review_comment""#));
         assert!(rendered.contains(r#""name":"github_close_issue""#));
         assert!(rendered.contains(r#""name":"runtime_create_task""#));
         assert!(rendered.contains(r#""name":"runtime_cancel_task""#));
@@ -8799,6 +8897,23 @@ shell_allowlist = ["cargo test"]
         let rendered = json_value_to_string(&response);
 
         assert!(rendered.contains("Dry run: would comment on pr #7"));
+        assert!(rendered.contains(r#""isError":false"#));
+    }
+
+    #[test]
+    fn mcp_tools_call_executes_github_pr_review_comment_after_runtime_approval() {
+        let state = mcp_state_with_durable_approvals("mcp-github-inline-comment-approval");
+        let responder = spawn_mcp_permission_responder(
+            state.store.clone(),
+            state.approval_thread_id.clone().unwrap(),
+            "approved",
+        );
+        let request = r#"{"jsonrpc":"2.0","id":113,"method":"tools/call","params":{"name":"github_pr_review_comment","arguments":{"number":"7","commit_id":"abc123","comments":[{"path":"src/lib.rs","line":12,"body":"check this"}],"evidence":{"tool":"review","issue_count":1},"dry_run":true}}}"#;
+        let response = mcp_response_for_message(request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("would post 1 inline review comment(s) on PR #7"));
         assert!(rendered.contains(r#""isError":false"#));
     }
 
@@ -9892,6 +10007,7 @@ shell_allowlist = ["cargo test"]
         assert!(!rendered.contains(r#""name":"write_file""#));
         assert!(!rendered.contains(r#""name":"edit_file""#));
         assert!(!rendered.contains(r#""name":"github_comment""#));
+        assert!(!rendered.contains(r#""name":"github_pr_review_comment""#));
         assert!(!rendered.contains(r#""name":"github_close_issue""#));
     }
 

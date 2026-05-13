@@ -99,6 +99,7 @@ impl Tool for PrReviewCommentPlanTool {
             .filter(|value| !value.is_empty());
         let pr_number = comment_pr_number(&input, pr_context);
         let repo = comment_repo(&input, pr_context);
+        let commit_id = comment_pr_commit_id(&input, pr_context);
         let body = render_pr_review_comment_body(
             &issues,
             &suggestions,
@@ -110,6 +111,14 @@ impl Tool for PrReviewCommentPlanTool {
             pr_review_comment_evidence(&root, &issues, source.as_ref(), max_issues, comment_error);
         let github_input =
             pr_review_comment_github_input(pr_number.as_deref(), repo.as_deref(), &body, &evidence);
+        let inline_github_input = pr_review_inline_github_input(
+            pr_number.as_deref(),
+            repo.as_deref(),
+            commit_id.as_deref(),
+            &issues,
+            &evidence,
+            max_issues,
+        );
 
         let mut fields = vec![
             (
@@ -134,6 +143,9 @@ impl Tool for PrReviewCommentPlanTool {
         }
         if let Some(input) = github_input {
             fields.push(("github_comment_input", input));
+        }
+        if let Some(input) = inline_github_input {
+            fields.push(("github_pr_review_comment_input", input));
         }
 
         Ok(ToolOutput {
@@ -1028,6 +1040,62 @@ fn pr_review_comment_github_input(
     Some(comment_json_object(fields))
 }
 
+fn pr_review_inline_github_input(
+    number: Option<&str>,
+    repo: Option<&str>,
+    commit_id: Option<&str>,
+    issues: &[CommentIssue],
+    evidence: &JsonValue,
+    max_issues: usize,
+) -> Option<JsonValue> {
+    let number = number?;
+    let commit_id = commit_id?;
+    let comments = issues
+        .iter()
+        .take(max_issues)
+        .filter_map(inline_comment_from_issue)
+        .collect::<Vec<_>>();
+    if comments.is_empty() {
+        return None;
+    }
+    let mut fields = vec![
+        ("number", JsonValue::String(number.to_string())),
+        ("commit_id", JsonValue::String(commit_id.to_string())),
+        ("comments", JsonValue::Array(comments)),
+        (
+            "evidence",
+            JsonValue::String(json_value_to_string(evidence)),
+        ),
+        ("dry_run", JsonValue::String("true".to_string())),
+    ];
+    if let Some(repo) = repo {
+        fields.push(("repo", JsonValue::String(repo.to_string())));
+    }
+    Some(comment_json_object(fields))
+}
+
+fn inline_comment_from_issue(issue: &CommentIssue) -> Option<JsonValue> {
+    let path = issue.path.as_deref()?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let line = issue.line?;
+    let mut body = String::new();
+    body.push_str(&issue.severity);
+    body.push_str(": ");
+    body.push_str(&compact_text(&issue.title, 120));
+    if !issue.description.trim().is_empty() {
+        body.push_str(" - ");
+        body.push_str(&compact_text(&issue.description, 220));
+    }
+    Some(comment_json_object(vec![
+        ("path", JsonValue::String(path.to_string())),
+        ("line", JsonValue::Number(line.to_string())),
+        ("body", JsonValue::String(body)),
+        ("side", JsonValue::String("RIGHT".to_string())),
+    ]))
+}
+
 fn comment_pr_number(input: &ToolInput, pr_context: Option<&str>) -> Option<String> {
     input
         .get("number")
@@ -1047,6 +1115,17 @@ fn comment_repo(input: &ToolInput, pr_context: Option<&str>) -> Option<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .or_else(|| pr_context.and_then(pr_context_repo))
+}
+
+fn comment_pr_commit_id(input: &ToolInput, pr_context: Option<&str>) -> Option<String> {
+    input
+        .get("commit_id")
+        .or_else(|| input.get("head_sha"))
+        .or_else(|| input.get("sha"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| pr_context.and_then(pr_context_head_sha))
 }
 
 fn pr_context_number(context: &str) -> Option<String> {
@@ -1076,6 +1155,16 @@ fn pr_context_repo(context: &str) -> Option<String> {
     let root = parse_root_object(json).ok()?;
     let url = root.get("url").and_then(json_as_string)?;
     github_repo_from_pr_url(url)
+}
+
+fn pr_context_head_sha(context: &str) -> Option<String> {
+    let json = github_pr_context_json(context)?;
+    let root = parse_root_object(json).ok()?;
+    root.get("headRefOid")
+        .and_then(json_as_string)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn github_repo_from_pr_url(url: &str) -> Option<String> {
@@ -1581,7 +1670,7 @@ json:\n\
 meta.number=42\n\
 PR #42: Add API\n\
 json:\n\
-{\"number\":42,\"url\":\"https://github.com/acme/widgets/pull/42\"}\n";
+{\"number\":42,\"url\":\"https://github.com/acme/widgets/pull/42\",\"headRefOid\":\"abc123\"}\n";
 
         let output = PrReviewCommentPlanTool
             .execute(
@@ -1599,6 +1688,11 @@ json:\n\
             .summary
             .contains("warning: GitHub PR status checks failing"));
         assert!(output.summary.contains(r#""github_comment_input""#));
+        assert!(output
+            .summary
+            .contains(r#""github_pr_review_comment_input""#));
+        assert!(output.summary.contains(r#""commit_id":"abc123""#));
+        assert!(output.summary.contains(r#""path":"src/lib.rs""#));
         assert!(output.summary.contains(r#""dry_run":"true""#));
     }
 

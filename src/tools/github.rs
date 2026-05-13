@@ -3,7 +3,8 @@ use std::process::Command;
 use crate::error::{app_error, AppResult};
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
 use crate::util::json::{
-    json_as_array, json_as_string, json_as_u64, parse_json_value, parse_root_object, JsonValue,
+    json_as_array, json_as_object, json_as_string, json_as_u64, parse_json_value,
+    parse_root_object, JsonValue,
 };
 
 const DEFAULT_MAX_CHARS: usize = 20_000;
@@ -14,6 +15,7 @@ const HARD_DIFF_CHARS: usize = 100_000;
 pub struct GithubPrContextTool;
 pub struct GithubIssueContextTool;
 pub struct GithubCommentTool;
+pub struct GithubPrReviewCommentTool;
 pub struct GithubCloseIssueTool;
 
 impl Tool for GithubPrContextTool {
@@ -190,6 +192,70 @@ impl Tool for GithubCommentTool {
     }
 }
 
+impl Tool for GithubPrReviewCommentTool {
+    fn name(&self) -> &str {
+        "github_pr_review_comment"
+    }
+
+    fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
+        let number = required_reference(&input, "github_pr_review_comment")?;
+        validate_positive_number(&number, "number")?;
+        validate_nonempty_object_arg(&input, "evidence", "github_pr_review_comment")?;
+        let comments = pr_review_comment_specs_from_input(&input)?;
+        if comments.is_empty() {
+            return Err(app_error(
+                "github_pr_review_comment requires at least one inline comment",
+            ));
+        }
+        if bool_arg(&input, "dry_run", false) {
+            return Ok(ToolOutput {
+                summary: format!(
+                    "Dry run: would post {} inline review comment(s) on PR #{}.",
+                    comments.len(),
+                    number
+                ),
+            });
+        }
+
+        let endpoint = github_pr_review_comments_endpoint(&input, &number);
+        for comment in &comments {
+            let mut args = vec![
+                "api".to_string(),
+                "--method".to_string(),
+                "POST".to_string(),
+                endpoint.clone(),
+                "-f".to_string(),
+                format!("body={}", comment.body),
+                "-f".to_string(),
+                format!("commit_id={}", comment.commit_id),
+                "-f".to_string(),
+                format!("path={}", comment.path),
+                "-F".to_string(),
+                format!("line={}", comment.line),
+                "-f".to_string(),
+                format!("side={}", comment.side),
+            ];
+            if let Some(start_line) = comment.start_line {
+                args.push("-F".to_string());
+                args.push(format!("start_line={start_line}"));
+            }
+            if let Some(start_side) = comment.start_side.as_ref() {
+                args.push("-f".to_string());
+                args.push(format!("start_side={start_side}"));
+            }
+            run_gh(&args)?;
+        }
+
+        Ok(ToolOutput {
+            summary: format!(
+                "meta.kind=github_pr_review_comment\nmeta.number={number}\nmeta.comment_count={}\nPosted {} inline review comment(s) on PR #{number}.",
+                comments.len(),
+                comments.len()
+            ),
+        })
+    }
+}
+
 impl Tool for GithubCloseIssueTool {
     fn name(&self) -> &str {
         "github_close_issue"
@@ -333,6 +399,210 @@ fn validate_close_issue_evidence(input: &ToolInput) -> AppResult<()> {
         ));
     }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct PrReviewCommentSpec {
+    path: String,
+    line: u64,
+    body: String,
+    commit_id: String,
+    side: String,
+    start_line: Option<u64>,
+    start_side: Option<String>,
+}
+
+fn pr_review_comment_specs_from_input(input: &ToolInput) -> AppResult<Vec<PrReviewCommentSpec>> {
+    let default_commit_id = optional_commit_id_arg(input);
+    if let Some(raw) = input
+        .get("comments")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let value = parse_json_value(raw).map_err(|error| {
+            app_error(format!(
+                "github_pr_review_comment requires `comments` JSON array: {error}"
+            ))
+        })?;
+        let JsonValue::Array(items) = value else {
+            return Err(app_error(
+                "github_pr_review_comment requires `comments` JSON array",
+            ));
+        };
+        let mut comments = Vec::new();
+        for (index, item) in items.iter().enumerate() {
+            let object = json_as_object(item).ok_or_else(|| {
+                app_error(format!(
+                    "github_pr_review_comment comments[{index}] must be an object"
+                ))
+            })?;
+            comments.push(pr_review_comment_spec_from_object(
+                object,
+                default_commit_id.as_deref(),
+                index,
+            )?);
+        }
+        return Ok(comments);
+    }
+
+    Ok(vec![PrReviewCommentSpec {
+        path: required_arg(input, "path", "github_pr_review_comment")?,
+        line: parse_positive_u64_arg(
+            required_arg(input, "line", "github_pr_review_comment")?.as_str(),
+            "line",
+        )?,
+        body: required_arg(input, "body", "github_pr_review_comment")?,
+        commit_id: default_commit_id
+            .ok_or_else(|| app_error("github_pr_review_comment requires `commit_id`"))?,
+        side: review_comment_side(input.get("side"), "side")?,
+        start_line: optional_positive_u64_arg(input.get("start_line"), "start_line")?,
+        start_side: optional_review_comment_side(input.get("start_side"), "start_side")?,
+    }])
+}
+
+fn pr_review_comment_spec_from_object(
+    object: &std::collections::BTreeMap<String, JsonValue>,
+    default_commit_id: Option<&str>,
+    index: usize,
+) -> AppResult<PrReviewCommentSpec> {
+    let label = |key: &str| format!("comments[{index}].{key}");
+    let path = json_object_string_arg(object, "path").ok_or_else(|| {
+        app_error(format!(
+            "github_pr_review_comment requires `{}`",
+            label("path")
+        ))
+    })?;
+    let line = json_object_u64_arg(object, "line")
+        .ok_or_else(|| {
+            app_error(format!(
+                "github_pr_review_comment requires `{}`",
+                label("line")
+            ))
+        })
+        .and_then(|value| validate_positive_u64(value, &label("line")))?;
+    let body = json_object_string_arg(object, "body").ok_or_else(|| {
+        app_error(format!(
+            "github_pr_review_comment requires `{}`",
+            label("body")
+        ))
+    })?;
+    let commit_id = json_object_string_arg(object, "commit_id")
+        .or_else(|| json_object_string_arg(object, "head_sha"))
+        .or_else(|| json_object_string_arg(object, "sha"))
+        .or_else(|| default_commit_id.map(str::to_string))
+        .ok_or_else(|| {
+            app_error(format!(
+                "github_pr_review_comment requires `{}` or top-level `commit_id`",
+                label("commit_id")
+            ))
+        })?;
+    Ok(PrReviewCommentSpec {
+        path,
+        line,
+        body,
+        commit_id,
+        side: review_comment_side(json_object_string_ref(object, "side"), &label("side"))?,
+        start_line: json_object_u64_arg(object, "start_line")
+            .map(|value| validate_positive_u64(value, &label("start_line")))
+            .transpose()?,
+        start_side: optional_review_comment_side(
+            json_object_string_ref(object, "start_side"),
+            &label("start_side"),
+        )?,
+    })
+}
+
+fn optional_commit_id_arg(input: &ToolInput) -> Option<String> {
+    input
+        .get("commit_id")
+        .or_else(|| input.get("head_sha"))
+        .or_else(|| input.get("sha"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn parse_positive_u64_arg(value: &str, key: &str) -> AppResult<u64> {
+    let parsed = value
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| app_error(format!("{key} must be a positive integer")))?;
+    validate_positive_u64(parsed, key)
+}
+
+fn validate_positive_u64(value: u64, key: &str) -> AppResult<u64> {
+    if value == 0 {
+        return Err(app_error(format!("{key} must be a positive integer")));
+    }
+    Ok(value)
+}
+
+fn optional_positive_u64_arg(value: Option<&str>, key: &str) -> AppResult<Option<u64>> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| parse_positive_u64_arg(value, key))
+        .transpose()
+}
+
+fn review_comment_side(value: Option<&str>, key: &str) -> AppResult<String> {
+    let side = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("RIGHT")
+        .to_ascii_uppercase();
+    if side != "RIGHT" && side != "LEFT" {
+        return Err(app_error(format!("{key} must be RIGHT or LEFT")));
+    }
+    Ok(side)
+}
+
+fn optional_review_comment_side(value: Option<&str>, key: &str) -> AppResult<Option<String>> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| review_comment_side(Some(value), key))
+        .transpose()
+}
+
+fn json_object_string_arg(
+    object: &std::collections::BTreeMap<String, JsonValue>,
+    key: &str,
+) -> Option<String> {
+    json_object_string_ref(object, key).map(str::to_string)
+}
+
+fn json_object_string_ref<'a>(
+    object: &'a std::collections::BTreeMap<String, JsonValue>,
+    key: &str,
+) -> Option<&'a str> {
+    object
+        .get(key)
+        .and_then(json_as_string)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn json_object_u64_arg(
+    object: &std::collections::BTreeMap<String, JsonValue>,
+    key: &str,
+) -> Option<u64> {
+    object.get(key).and_then(|value| match value {
+        JsonValue::Number(text) | JsonValue::String(text) => text.trim().parse::<u64>().ok(),
+        _ => None,
+    })
+}
+
+fn github_pr_review_comments_endpoint(input: &ToolInput, number: &str) -> String {
+    if let Some(repo) = input
+        .get("repo")
+        .or_else(|| input.get("repository"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return format!("repos/{repo}/pulls/{number}/comments");
+    }
+    format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments")
 }
 
 fn require_nonempty_json_array_field(
@@ -481,6 +751,14 @@ if [ "$1" = "pr" ] && [ "$2" = "comment" ]; then
   printf '%s\n' 'commented pr'
   exit 0
 fi
+if [ "$1" = "api" ] && [ "$2" = "--method" ] && [ "$3" = "POST" ]; then
+  case "$4" in
+    repos/*/pulls/7/comments)
+      printf '%s\n' '{"id":123,"path":"src/lib.rs","line":12}'
+      exit 0
+      ;;
+  esac
+fi
 if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
   printf '%s\n' '{"number":9,"title":"Bug report","state":"OPEN","author":{"login":"octo"},"labels":[{"name":"bug"}],"assignees":[],"milestone":null,"body":"issue body","comments":[{"body":"comment"}],"url":"https://github.com/o/r/issues/9","createdAt":"2026-05-13T00:00:00Z","updatedAt":"2026-05-13T00:00:00Z"}'
   exit 0
@@ -579,6 +857,56 @@ exit 2
         assert!(output.summary.contains("meta.kind=github_comment"));
         assert!(output.summary.contains("meta.target=pr"));
         assert!(output.summary.contains("Commented on pr #7"));
+    }
+
+    #[test]
+    fn github_pr_review_comment_dry_run_validates_batch_without_gh() {
+        let output = GithubPrReviewCommentTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("number", "7")
+                    .with_arg("commit_id", "abc123")
+                    .with_arg(
+                        "comments",
+                        r#"[{"path":"src/lib.rs","line":12,"body":"check this"}]"#,
+                    )
+                    .with_arg("evidence", r#"{"tool":"review","issue_count":1}"#)
+                    .with_arg("dry_run", "true"),
+            )
+            .unwrap();
+
+        assert!(output
+            .summary
+            .contains("would post 1 inline review comment(s) on PR #7"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn github_pr_review_comment_posts_inline_comment_with_fake_gh() {
+        let _guard = env_lock();
+        let gh = fake_gh();
+        std::env::set_var("DSCODE_GH_BIN", &gh);
+        let output = GithubPrReviewCommentTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("number", "7")
+                    .with_arg("repo", "o/r")
+                    .with_arg("path", "src/lib.rs")
+                    .with_arg("line", "12")
+                    .with_arg("body", "check this")
+                    .with_arg("commit_id", "abc123")
+                    .with_arg("evidence", r#"{"tool":"review","issue_count":1}"#),
+            )
+            .unwrap();
+        std::env::remove_var("DSCODE_GH_BIN");
+
+        assert!(output
+            .summary
+            .contains("meta.kind=github_pr_review_comment"));
+        assert!(output.summary.contains("meta.comment_count=1"));
+        assert!(output
+            .summary
+            .contains("Posted 1 inline review comment(s) on PR #7"));
     }
 
     #[test]

@@ -22,6 +22,7 @@ use crate::tools::git_diff::{GitDiffTool, GitStatusTool};
 use crate::tools::git_history::{GitBlameTool, GitLogTool, GitShowTool};
 use crate::tools::github::{
     GithubCloseIssueTool, GithubCommentTool, GithubIssueContextTool, GithubPrContextTool,
+    GithubPrReviewCommentTool,
 };
 use crate::tools::list_files::{ListDirTool, ListFilesTool};
 use crate::tools::mcp::{
@@ -336,7 +337,9 @@ impl ToolRegistry {
             });
         }
 
-        if (name == "github_comment" || name == "github_close_issue")
+        if (name == "github_comment"
+            || name == "github_pr_review_comment"
+            || name == "github_close_issue")
             && policy.require_write_confirmation
             && !policy.auto_approve_writes
         {
@@ -573,6 +576,11 @@ fn describe_github_write_target(name: &str, input: &ToolInput) -> String {
         "github_comment" => {
             let target = input.get("target").unwrap_or("issue/pr");
             format!("github {target} #{number} comment{repo}")
+        }
+        "github_pr_review_comment" => {
+            let path = input.get("path").unwrap_or("inline");
+            let line = input.get("line").unwrap_or("?");
+            format!("github pr #{number} inline comment {path}:{line}{repo}")
         }
         "github_close_issue" => format!("github issue #{number} close{repo}"),
         _ => format!("github write #{number}{repo}"),
@@ -855,6 +863,7 @@ pub fn default_registry_with_context(
         Box::new(GithubIssueContextTool),
         Box::new(GithubPrContextTool),
         Box::new(GithubCommentTool),
+        Box::new(GithubPrReviewCommentTool),
         Box::new(GithubCloseIssueTool),
         Box::new(TodoWriteTool {
             list: todos.clone(),
@@ -1157,6 +1166,7 @@ done
         assert!(names.contains(&"github_issue_context"));
         assert!(names.contains(&"github_pr_context"));
         assert!(names.contains(&"github_comment"));
+        assert!(names.contains(&"github_pr_review_comment"));
         assert!(names.contains(&"github_close_issue"));
         assert!(names.contains(&"diagnostics"));
     }
@@ -1403,6 +1413,26 @@ done
             .unwrap();
         assert_eq!(github.kind, "write");
         assert_eq!(github.target, "github pr #7 comment in owner/repo");
+
+        let inline_github = registry
+            .permission_request_for(
+                "github_pr_review_comment",
+                &ToolInput::new()
+                    .with_arg("number", "7")
+                    .with_arg("path", "src/lib.rs")
+                    .with_arg("line", "12")
+                    .with_arg("repo", "owner/repo"),
+                &ExecutionPolicy {
+                    allowed_tools: vec!["github_pr_review_comment".to_string()],
+                    ..deny_writes_policy()
+                },
+            )
+            .unwrap();
+        assert_eq!(inline_github.kind, "write");
+        assert_eq!(
+            inline_github.target,
+            "github pr #7 inline comment src/lib.rs:12 in owner/repo"
+        );
 
         let task = registry
             .permission_request_for(
