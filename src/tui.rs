@@ -466,6 +466,7 @@ pub enum TuiMcpDetailKind {
     Status,
     Tokens,
     Cost,
+    Skills,
     Rollback,
     Reasoning,
     ComposerStash,
@@ -486,6 +487,7 @@ impl TuiMcpDetailKind {
             Self::Status => "status",
             Self::Tokens => "tokens",
             Self::Cost => "cost",
+            Self::Skills => "skills",
             Self::Rollback => "rollback",
             Self::Reasoning => "reasoning",
             Self::ComposerStash => "stash",
@@ -506,6 +508,7 @@ impl TuiMcpDetailKind {
             Self::Status => "Status",
             Self::Tokens => "Tokens",
             Self::Cost => "Cost",
+            Self::Skills => "Skills",
             Self::Rollback => "Rollback",
             Self::Reasoning => "Reasoning",
             Self::ComposerStash => "Composer Stash",
@@ -526,6 +529,7 @@ impl TuiMcpDetailKind {
             Self::Status => Self::Manager,
             Self::Tokens => Self::Manager,
             Self::Cost => Self::Manager,
+            Self::Skills => Self::Manager,
             Self::Rollback => Self::Manager,
             Self::Reasoning => Self::Manager,
             Self::ComposerStash => Self::Manager,
@@ -546,6 +550,7 @@ impl TuiMcpDetailKind {
             Self::Status => Self::Manager,
             Self::Tokens => Self::Manager,
             Self::Cost => Self::Manager,
+            Self::Skills => Self::Manager,
             Self::Rollback => Self::Manager,
             Self::Reasoning => Self::Manager,
             Self::ComposerStash => Self::Manager,
@@ -682,6 +687,12 @@ pub enum TuiNetworkCommand {
     Default { value: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuiSkillsCommand {
+    List { prefix: Option<String> },
+    Show { name: String },
+}
+
 fn parse_tui_stash_command(line: &str) -> Option<Result<TuiComposerStashCommand, String>> {
     let trimmed = line.trim();
     let rest = strip_tui_command_prefix(trimmed, "/stash")
@@ -758,6 +769,42 @@ fn parse_tui_cost_command(line: &str) -> Option<Result<(), String>> {
     }
 }
 
+fn parse_tui_skills_command(line: &str) -> Option<Result<TuiSkillsCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/skills")
+        .or_else(|| strip_tui_command_prefix(trimmed, "skills"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] => Some(Ok(TuiSkillsCommand::List { prefix: None })),
+        ["remote" | "--remote" | "sync" | "--sync"] => Some(Err(
+            "remote skill registry sync is not supported in the TUI; manage configured TOML skills on disk"
+                .to_string(),
+        )),
+        [prefix] if !prefix.starts_with('-') => Some(Ok(TuiSkillsCommand::List {
+            prefix: Some((*prefix).to_string()),
+        })),
+        _ => Some(Err("usage: skills [prefix] or /skills [prefix]".to_string())),
+    }
+}
+
+fn parse_tui_skill_command(line: &str) -> Option<Result<TuiSkillsCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/skill")
+        .or_else(|| strip_tui_command_prefix(trimmed, "skill"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] => Some(Err("usage: skill <name> or /skill <name>".to_string())),
+        ["install" | "update" | "uninstall" | "trust", ..] => Some(Err(
+            "skill install/update/uninstall/trust is not supported in the TUI; edit configured TOML skill files"
+                .to_string(),
+        )),
+        [name] if !name.starts_with('-') => Some(Ok(TuiSkillsCommand::Show {
+            name: (*name).to_string(),
+        })),
+        _ => Some(Err("usage: skill <name> or /skill <name>".to_string())),
+    }
+}
+
 fn strip_tui_command_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
     let rest = value.strip_prefix(prefix)?;
     if rest.is_empty() || rest.starts_with(char::is_whitespace) {
@@ -829,6 +876,9 @@ pub enum TuiAction {
     Network {
         workspace: String,
         command: TuiNetworkCommand,
+    },
+    Skills {
+        command: TuiSkillsCommand,
     },
     RespondApproval {
         thread_id: String,
@@ -1048,6 +1098,8 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "status",
     "tokens",
     "cost",
+    "skills",
+    "skill ",
     "automations",
     "automation trigger",
     "compact",
@@ -1568,6 +1620,13 @@ impl TuiApp {
         self.mcp_manager_drag_anchor_key = None;
         self.mcp_remove_confirmation = None;
         self.rollback_apply_confirmation = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mcp_detail_for_test(&self) -> Option<(TuiMcpDetailKind, &str)> {
+        self.mcp_detail
+            .as_ref()
+            .map(|(kind, detail)| (*kind, detail.as_str()))
     }
 
     pub fn set_mcp_manager(&mut self, detail: impl Into<String>) {
@@ -3334,6 +3393,21 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) =
+                    parse_tui_skills_command(&content).or_else(|| parse_tui_skill_command(&content))
+                {
+                    match command {
+                        Ok(command) => {
+                            self.request_skills_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(title) = parse_tui_rename_command(&content) {
                     match title {
                         Ok(title) => {
@@ -3596,6 +3670,19 @@ impl TuiApp {
             match command {
                 Ok(()) => {
                     self.show_cost_detail();
+                }
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) =
+            parse_tui_skills_command(command).or_else(|| parse_tui_skill_command(command))
+        {
+            match command {
+                Ok(command) => {
+                    self.request_skills_command(command);
                 }
                 Err(message) => {
                     self.status = message;
@@ -4874,6 +4961,11 @@ impl TuiApp {
             command,
         });
         self.status = format!("network command queued: {workspace}");
+    }
+
+    fn request_skills_command(&mut self, command: TuiSkillsCommand) {
+        self.pending_actions.push(TuiAction::Skills { command });
+        self.status = "skills command queued".to_string();
     }
 
     fn show_status_detail(&mut self) {
@@ -9953,6 +10045,31 @@ mod tests {
     }
 
     #[test]
+    fn command_palette_requests_skills_actions() {
+        let mut app = TuiApp::new(Vec::new());
+
+        run_palette_command(&mut app, "skills pr");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Skills {
+                command: TuiSkillsCommand::List {
+                    prefix: Some("pr".to_string()),
+                },
+            }]
+        );
+
+        run_palette_command(&mut app, "skill pr-review");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Skills {
+                command: TuiSkillsCommand::Show {
+                    name: "pr-review".to_string(),
+                },
+            }]
+        );
+    }
+
+    #[test]
     fn command_palette_requests_mcp_server_mutations() {
         let mut app = TuiApp::new(Vec::new());
 
@@ -10186,6 +10303,34 @@ mod tests {
                 workspace: ".".to_string(),
                 command: TuiNetworkCommand::Deny {
                     host: "telemetry.example.com".to_string(),
+                },
+            }]
+        );
+
+        for ch in "/skills pr".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Skills {
+                command: TuiSkillsCommand::List {
+                    prefix: Some("pr".to_string()),
+                },
+            }]
+        );
+
+        for ch in "/skill pr-review".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Skills {
+                command: TuiSkillsCommand::Show {
+                    name: "pr-review".to_string(),
                 },
             }]
         );

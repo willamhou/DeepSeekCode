@@ -42,6 +42,10 @@ use crate::core::runtime::{
 };
 use crate::error::{app_error, AppResult};
 use crate::repl::slash::load_custom_slash_command_from_config;
+use crate::skills::paths::resolve_repo_skills_dir;
+use crate::skills::registry::SkillRegistry;
+use crate::skills::schema::SkillSpec;
+use crate::skills::tilde::expand_tilde;
 use crate::tools::exec_shell::{
     run_trusted_background_shell, ExecShellAttachTool, ExecShellCancelTool, ExecShellInteractTool,
     ExecShellListTool, ExecShellResizeTool, ExecShellShowTool, ExecShellSupervisorStatusTool,
@@ -51,8 +55,8 @@ use crate::tools::types::{Tool, ToolInput};
 use crate::tui::{
     render_once, run_interactive, run_interactive_with_refresh_actions_and_live, TuiAction, TuiApp,
     TuiApprovalRequest, TuiAutomationRecord, TuiItem, TuiLiveEvent, TuiMcpConfigScope,
-    TuiMcpDetailKind, TuiMemoryCommand, TuiNetworkCommand, TuiSession, TuiTaskRecord, TuiThread,
-    TuiUsageSummary, TuiUserInputRequest,
+    TuiMcpDetailKind, TuiMemoryCommand, TuiNetworkCommand, TuiSession, TuiSkillsCommand,
+    TuiTaskRecord, TuiThread, TuiUsageSummary, TuiUserInputRequest,
 };
 use crate::ui::stream::StreamEvents;
 use crate::util::json::{
@@ -613,6 +617,9 @@ fn handle_tui_http_action(
         TuiAction::Network { .. } => {
             app.set_status("network commands require local file-backed TUI".to_string());
         }
+        TuiAction::Skills { .. } => {
+            app.set_status("skills commands require local file-backed TUI".to_string());
+        }
         TuiAction::RespondApproval {
             thread_id,
             turn_id,
@@ -1155,11 +1162,150 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Status => Err(app_error("status details are not MCP details")),
         TuiMcpDetailKind::Tokens => Err(app_error("token details are not MCP details")),
         TuiMcpDetailKind::Cost => Err(app_error("cost details are not MCP details")),
+        TuiMcpDetailKind::Skills => Err(app_error("skill details are not MCP details")),
         TuiMcpDetailKind::Rollback => Err(app_error("rollback details are not MCP details")),
         TuiMcpDetailKind::Reasoning => Err(app_error("reasoning details are not MCP details")),
         TuiMcpDetailKind::ComposerStash => {
             Err(app_error("composer stash details are not MCP details"))
         }
+    }
+}
+
+fn format_skills_summary(config: &AppConfig, command: &TuiSkillsCommand) -> AppResult<String> {
+    let repo_dir = resolve_repo_skills_dir();
+    let user_dir = expand_tilde(&config.workspace.user_skills_dir);
+    let search_dirs = [repo_dir.as_path(), user_dir.as_path()];
+    let (registry, stats) = SkillRegistry::load_dirs(&search_dirs)?;
+    let searched = stats
+        .by_path
+        .iter()
+        .map(|(path, count)| format!("- {}: {} skill(s)", path.display(), count))
+        .collect::<Vec<_>>()
+        .join("\n");
+    match command {
+        TuiSkillsCommand::List { prefix } => {
+            let mut skills = registry.iter().collect::<Vec<_>>();
+            if let Some(prefix) = prefix.as_deref() {
+                let prefix = prefix.to_ascii_lowercase();
+                skills.retain(|skill| skill.name.to_ascii_lowercase().starts_with(&prefix));
+            }
+            let mut detail = match prefix {
+                Some(prefix) => format!(
+                    "Available skills matching `{prefix}` ({} of {})\n\n",
+                    skills.len(),
+                    stats.total
+                ),
+                None => format!("Available skills ({})\n\n", stats.total),
+            };
+            if skills.is_empty() {
+                detail.push_str("No matching skills found.\n");
+            } else {
+                for skill in skills {
+                    detail.push_str(&format!(
+                        "- {}: {}\n",
+                        skill.name,
+                        empty_as_placeholder(&skill.description)
+                    ));
+                }
+            }
+            detail.push_str("\nSearch paths:\n");
+            detail.push_str(if searched.is_empty() {
+                "- none"
+            } else {
+                &searched
+            });
+            if !stats.overridden.is_empty() {
+                detail.push_str("\n\nOverrides:\n");
+                detail.push_str(&stats.overridden.join(", "));
+            }
+            detail.push_str("\n\nUse skill <name> to inspect a skill.");
+            Ok(detail)
+        }
+        TuiSkillsCommand::Show { name } => {
+            let Some(skill) = registry.find(name) else {
+                let available = registry
+                    .iter()
+                    .map(|skill| skill.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut detail = format!("Skill `{name}` not found.\n\n");
+                detail.push_str("Available skills: ");
+                detail.push_str(if available.is_empty() {
+                    "none"
+                } else {
+                    &available
+                });
+                detail.push_str("\n\nSearch paths:\n");
+                detail.push_str(if searched.is_empty() {
+                    "- none"
+                } else {
+                    &searched
+                });
+                return Ok(detail);
+            };
+            Ok(format_skill_detail(skill, &searched))
+        }
+    }
+}
+
+fn format_skill_detail(skill: &SkillSpec, searched: &str) -> String {
+    let mut detail = format!("# Skill: {}\n\n", skill.name);
+    detail.push_str("Description: ");
+    detail.push_str(empty_as_placeholder(&skill.description));
+    detail.push_str("\n\n");
+    push_skill_list(&mut detail, "Allowed tools", &skill.allowed_tools);
+    push_skill_list(&mut detail, "Triggers", &skill.triggers);
+    push_skill_list(&mut detail, "Suggested steps", &skill.suggested_steps);
+    push_skill_list(&mut detail, "References", &skill.references);
+    detail.push_str("Policy:\n");
+    detail.push_str(&format!(
+        "- require_write_confirmation: {}\n",
+        skill.policy.require_write_confirmation
+    ));
+    detail.push_str(&format!(
+        "- require_shell_confirmation: {}\n",
+        skill.policy.require_shell_confirmation
+    ));
+    push_skill_list(
+        &mut detail,
+        "Shell allowlist",
+        &skill.policy.shell_allowlist,
+    );
+    if !skill.system_append.trim().is_empty() {
+        detail.push_str("\nSystem append:\n");
+        detail.push_str(skill.system_append.trim());
+        detail.push('\n');
+    }
+    detail.push_str("\nSearch paths:\n");
+    detail.push_str(if searched.is_empty() {
+        "- none"
+    } else {
+        searched
+    });
+    detail
+}
+
+fn push_skill_list(out: &mut String, label: &str, values: &[String]) {
+    out.push_str(label);
+    out.push_str(":\n");
+    if values.is_empty() {
+        out.push_str("- none\n\n");
+        return;
+    }
+    for value in values {
+        out.push_str("- ");
+        out.push_str(value);
+        out.push('\n');
+    }
+    out.push('\n');
+}
+
+fn empty_as_placeholder(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "(none)"
+    } else {
+        trimmed
     }
 }
 
@@ -1331,6 +1477,27 @@ fn handle_tui_action_with_live(
                 format_network_policy_summary(&summary),
             );
             app.set_status(status);
+        }
+        TuiAction::Skills { command } => {
+            let fallback_config;
+            let config = match config {
+                Some(config) => config,
+                None => {
+                    fallback_config = AppConfig::default();
+                    &fallback_config
+                }
+            };
+            let detail = format_skills_summary(config, &command)?;
+            app.set_mcp_detail(TuiMcpDetailKind::Skills, detail);
+            app.set_status(match command {
+                TuiSkillsCommand::List {
+                    prefix: Some(prefix),
+                } => {
+                    format!("skills listed with prefix: {prefix}")
+                }
+                TuiSkillsCommand::List { prefix: None } => "skills listed".to_string(),
+                TuiSkillsCommand::Show { name } => format!("skill shown: {name}"),
+            });
         }
         TuiAction::RespondApproval {
             thread_id,
@@ -4010,6 +4177,25 @@ mod tests {
     }
 
     #[test]
+    fn handle_tui_http_action_rejects_skills_commands_as_local_only() {
+        let client = RuntimeHttpClient::from_url("http://127.0.0.1:9").unwrap();
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_http_action(
+            &client,
+            &mut app,
+            TuiAction::Skills {
+                command: TuiSkillsCommand::List { prefix: None },
+            },
+        )
+        .unwrap();
+
+        assert!(render_once(&app, 120, 36)
+            .unwrap()
+            .contains("skills commands require local file-backed TUI"));
+    }
+
+    #[test]
     fn handle_tui_http_action_cancels_remote_task() {
         let store = temp_store("http-task-cancel-action");
         let session = store
@@ -4546,6 +4732,71 @@ mod tests {
         let output = render_once(&app, 120, 36).unwrap();
         assert!(output.contains("network default set: prompt"));
         assert!(output.contains("network.default = prompt"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handle_tui_action_lists_and_shows_skills() {
+        let root = temp_root("skills-action");
+        let store = RuntimeStore::new(root.join("runtime"));
+        let user_skills = root.join("user-skills");
+        fs::create_dir_all(&user_skills).unwrap();
+        fs::write(
+            user_skills.join("pr-review.toml"),
+            r#"name = "pr-review"
+description = "Review pull request changes"
+allowed_tools = ["read_file", "git_diff"]
+system_append = "Review carefully."
+suggested_steps = ["inspect diff"]
+triggers = ["review"]
+references = ["docs/review.md"]
+
+[policy]
+require_write_confirmation = true
+require_shell_confirmation = true
+shell_allowlist = ["git diff"]
+"#,
+        )
+        .unwrap();
+        let mut config = temp_config(&root);
+        config.workspace.user_skills_dir = user_skills.display().to_string();
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::Skills {
+                command: TuiSkillsCommand::List {
+                    prefix: Some("pr".to_string()),
+                },
+            },
+        )
+        .unwrap();
+
+        let output = render_once(&app, 120, 36).unwrap();
+        assert!(output.contains("Available skills matching `pr`"));
+        assert!(output.contains("pr-review"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::Skills {
+                command: TuiSkillsCommand::Show {
+                    name: "pr-review".to_string(),
+                },
+            },
+        )
+        .unwrap();
+
+        let (_, detail) = app.mcp_detail_for_test().expect("skill detail");
+        assert!(detail.contains("# Skill: pr-review"));
+        assert!(detail.contains("Review pull request changes"));
+        assert!(detail.contains("Allowed tools"));
+        assert!(detail.contains("git_diff"));
+        assert!(detail.contains("require_write_confirmation: true"));
 
         let _ = std::fs::remove_dir_all(root);
     }
