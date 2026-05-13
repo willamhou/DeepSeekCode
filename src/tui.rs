@@ -77,6 +77,15 @@ impl TuiMode {
             Self::Yolo => 2,
         }
     }
+
+    fn from_command_arg(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "plan" | "2" => Some(Self::Plan),
+            "agent" | "1" => Some(Self::Agent),
+            "yolo" | "3" => Some(Self::Yolo),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -485,6 +494,7 @@ pub enum TuiMcpDetailKind {
     Feedback,
     Links,
     Home,
+    Mode,
     Rollback,
     Reasoning,
     ComposerStash,
@@ -512,6 +522,7 @@ impl TuiMcpDetailKind {
             Self::Feedback => "feedback",
             Self::Links => "links",
             Self::Home => "home",
+            Self::Mode => "mode",
             Self::Rollback => "rollback",
             Self::Reasoning => "reasoning",
             Self::ComposerStash => "stash",
@@ -539,6 +550,7 @@ impl TuiMcpDetailKind {
             Self::Feedback => "Feedback",
             Self::Links => "Links",
             Self::Home => "Home",
+            Self::Mode => "Mode",
             Self::Rollback => "Rollback",
             Self::Reasoning => "Reasoning",
             Self::ComposerStash => "Composer Stash",
@@ -566,6 +578,7 @@ impl TuiMcpDetailKind {
             Self::Feedback => Self::Manager,
             Self::Links => Self::Manager,
             Self::Home => Self::Manager,
+            Self::Mode => Self::Manager,
             Self::Rollback => Self::Manager,
             Self::Reasoning => Self::Manager,
             Self::ComposerStash => Self::Manager,
@@ -593,6 +606,7 @@ impl TuiMcpDetailKind {
             Self::Feedback => Self::Manager,
             Self::Links => Self::Manager,
             Self::Home => Self::Manager,
+            Self::Mode => Self::Manager,
             Self::Rollback => Self::Manager,
             Self::Reasoning => Self::Manager,
             Self::ComposerStash => Self::Manager,
@@ -736,6 +750,12 @@ pub enum TuiModelCommand {
     Set { model: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiModeCommand {
+    Show,
+    Set(TuiMode),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiProviderCommand {
     Show,
@@ -860,6 +880,25 @@ fn parse_tui_cache_command(line: &str) -> Option<Result<TuiCacheCommand, String>
         },
         _ => Some(Err(
             "usage: cache [count|inspect|warmup] or /cache [count|inspect|warmup]".to_string(),
+        )),
+    }
+}
+
+fn parse_tui_mode_command(line: &str) -> Option<Result<TuiModeCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/mode")
+        .or_else(|| strip_tui_command_prefix(trimmed, "mode"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] | ["show" | "list" | "help" | "--help" | "-h"] => Some(Ok(TuiModeCommand::Show)),
+        [value] => match TuiMode::from_command_arg(value) {
+            Some(mode) => Some(Ok(TuiModeCommand::Set(mode))),
+            None => Some(Err(
+                "usage: mode [agent|plan|yolo|1|2|3] or /mode [agent|plan|yolo|1|2|3]".to_string(),
+            )),
+        },
+        _ => Some(Err(
+            "usage: mode [agent|plan|yolo|1|2|3] or /mode [agent|plan|yolo|1|2|3]".to_string(),
         )),
     }
 }
@@ -1243,6 +1282,9 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "mode plan",
     "mode agent",
     "mode yolo",
+    "mode 1",
+    "mode 2",
+    "mode 3",
     "plan",
     "agent",
     "yolo",
@@ -1425,6 +1467,13 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/cache",
     "/cache inspect",
     "/cache warmup",
+    "/mode",
+    "/mode agent",
+    "/mode plan",
+    "/mode yolo",
+    "/mode 1",
+    "/mode 2",
+    "/mode 3",
     "/model",
     "/model auto",
     "/model deepseek-v4-flash",
@@ -3712,6 +3761,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_mode_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.handle_mode_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = parse_tui_model_command(&content) {
                     match command {
                         Ok(command) => {
@@ -4105,6 +4167,17 @@ impl TuiApp {
             match command {
                 Ok(command) => {
                     self.show_cache_detail(command);
+                }
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_mode_command(command) {
+            match command {
+                Ok(command) => {
+                    self.handle_mode_command(command);
                 }
                 Err(message) => {
                     self.status = message;
@@ -5503,6 +5576,48 @@ impl TuiApp {
         let detail = self.render_home_detail();
         self.set_mcp_detail(TuiMcpDetailKind::Home, detail);
         self.status = "home dashboard shown".to_string();
+    }
+
+    fn handle_mode_command(&mut self, command: TuiModeCommand) {
+        match command {
+            TuiModeCommand::Show => self.show_mode_detail(),
+            TuiModeCommand::Set(mode) => {
+                self.mode = mode;
+                self.status = format!("mode set: {}", self.mode.title());
+            }
+        }
+    }
+
+    fn show_mode_detail(&mut self) {
+        let detail = self.render_mode_detail();
+        self.set_mcp_detail(TuiMcpDetailKind::Mode, detail);
+        self.status = "mode options shown".to_string();
+    }
+
+    fn render_mode_detail(&self) -> String {
+        let mut detail = String::new();
+        let _ = writeln!(detail, "DeepSeekCode Mode");
+        let _ = writeln!(detail, "=================");
+        let _ = writeln!(detail);
+        push_status_row(&mut detail, "Current:", self.mode.title());
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Commands");
+        let _ = writeln!(detail, "--------");
+        let _ = writeln!(
+            detail,
+            "- /mode agent  Switch to Agent mode (alias: /mode 1)"
+        );
+        let _ = writeln!(
+            detail,
+            "- /mode plan   Switch to Plan mode (alias: /mode 2)"
+        );
+        let _ = writeln!(
+            detail,
+            "- /mode yolo   Switch to YOLO mode (alias: /mode 3)"
+        );
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Keyboard: Tab cycles modes; p/a/y choose directly.");
+        detail
     }
 
     fn show_status_detail(&mut self) {
@@ -9245,6 +9360,33 @@ mod tests {
 
         assert!(app.handle_mouse_event(left_click(4, 1)));
         assert_eq!(app.mode, TuiMode::Plan);
+    }
+
+    #[test]
+    fn mode_command_shows_and_switches_modes() {
+        let mut app = TuiApp::new(Vec::new());
+
+        run_palette_command(&mut app, "/mode");
+
+        assert_eq!(app.status, "mode options shown");
+        let (kind, detail) = app.mcp_detail.as_ref().expect("mode detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Mode);
+        assert!(detail.contains("DeepSeekCode Mode"));
+        assert!(detail.contains("/mode agent"));
+
+        run_palette_command(&mut app, "mode 1");
+
+        assert_eq!(app.mode, TuiMode::Agent);
+        assert_eq!(app.status, "mode set: Agent");
+
+        app.composer_focused = true;
+        app.composer = "/mode 3".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(app.mode, TuiMode::Yolo);
+        assert_eq!(app.status, "mode set: YOLO");
+        assert_eq!(app.composer, "");
     }
 
     #[test]
