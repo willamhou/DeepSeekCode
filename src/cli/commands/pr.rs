@@ -3,16 +3,29 @@ use crate::config::load::load_or_default;
 use crate::config::types::AppConfig;
 use crate::core::context::TaskContext;
 use crate::core::loop_runtime::{AgentLoop, AgentLoopOptions};
-use crate::error::AppResult;
+use crate::error::{app_error, AppResult};
 use crate::integrations::github::{
-    ensure_gh_auth, fetch_first_failed_job, fetch_pr, parse_pr_ref, post_pr_comment,
-    require_on_branch, worktree_is_clean, CiFailure, PrContext,
+    current_branch, ensure_gh_auth, fetch_first_failed_job, fetch_pr, fetch_repo_permissions,
+    parse_pr_ref, post_pr_comment, require_on_branch, worktree_is_clean, CiFailure, PrContext,
+    RepoPermissions,
 };
 use crate::model::protocol::Observation;
 
 pub fn run(action: PrAction) -> AppResult<()> {
-    let config = load_or_default()?;
-    warn_if_offline_planner(&config);
+    match action {
+        PrAction::LiveStatus {
+            reference,
+            require_write,
+        } => run_live_status(&reference, require_write),
+        action => {
+            let config = load_or_default()?;
+            warn_if_offline_planner(&config);
+            run_model_backed_action(config, action)
+        }
+    }
+}
+
+fn run_model_backed_action(config: AppConfig, action: PrAction) -> AppResult<()> {
     match action {
         PrAction::Review {
             reference,
@@ -29,7 +42,191 @@ pub fn run(action: PrAction) -> AppResult<()> {
             commit,
             benchmark_gate,
         } => run_patch(config, &reference, commit, benchmark_gate),
+        PrAction::LiveStatus { .. } => unreachable!("handled before loading model config"),
     }
+}
+
+fn run_live_status(reference: &str, require_write: bool) -> AppResult<()> {
+    ensure_gh_auth()?;
+    let pr_ref = parse_pr_ref(reference)?;
+    let pr = fetch_pr(&pr_ref)?;
+    let permissions = fetch_repo_permissions(&pr.repo)?;
+    let report = build_live_status_report(&pr, &permissions, current_branch(), require_write);
+
+    println!("DeepSeekCode PR live status");
+    println!("  target: {}#{}", pr.repo, pr.number);
+    println!("  title: {}", pr.title);
+    println!("  branch: {}", pr.branch);
+    println!("  changed_files: {}", pr.changed_files.len());
+    println!("  diff_bytes: {}", pr.diff.len());
+    for check in &report.checks {
+        println!(
+            "  {}: {} ({})",
+            check.name,
+            check.status.label(),
+            check.detail
+        );
+    }
+    println!("  not_ready: {}", report.not_ready_count());
+    if report.not_ready_count() == 0 {
+        println!("  next: live remote PR fixture prerequisites are available");
+    } else {
+        println!("  next: resolve blocked checks before running a write-capable live fixture");
+    }
+
+    if require_write && report.not_ready_count() > 0 {
+        return Err(app_error(format!(
+            "PR live status is not ready: {} check(s) are blocked",
+            report.not_ready_count()
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrLiveStatusReport {
+    checks: Vec<PrLiveStatusCheck>,
+}
+
+impl PrLiveStatusReport {
+    fn not_ready_count(&self) -> usize {
+        self.checks
+            .iter()
+            .filter(|check| !check.status.is_ready())
+            .count()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrLiveStatusCheck {
+    name: &'static str,
+    status: PrLiveStatus,
+    detail: String,
+}
+
+impl PrLiveStatusCheck {
+    fn ready(name: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            name,
+            status: PrLiveStatus::Ready,
+            detail: detail.into(),
+        }
+    }
+
+    fn blocked(name: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            name,
+            status: PrLiveStatus::Blocked,
+            detail: detail.into(),
+        }
+    }
+
+    fn skipped(name: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            name,
+            status: PrLiveStatus::Skipped,
+            detail: detail.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrLiveStatus {
+    Ready,
+    Blocked,
+    Skipped,
+}
+
+impl PrLiveStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Blocked => "blocked",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    fn is_ready(self) -> bool {
+        !matches!(self, Self::Blocked)
+    }
+}
+
+fn build_live_status_report(
+    pr: &PrContext,
+    permissions: &RepoPermissions,
+    current_branch: Option<String>,
+    require_write: bool,
+) -> PrLiveStatusReport {
+    let mut checks = Vec::new();
+    checks.push(if pr.diff.trim().is_empty() {
+        PrLiveStatusCheck::blocked(
+            "pr_diff",
+            "PR diff is empty or unavailable; remote review fixtures need include_diff context",
+        )
+    } else {
+        PrLiveStatusCheck::ready(
+            "pr_diff",
+            format!("diff loaded ({} byte(s))", pr.diff.len()),
+        )
+    });
+    checks.push(if pr.changed_files.is_empty() {
+        PrLiveStatusCheck::blocked(
+            "changed_files",
+            "PR changed file list is empty; inline review fixtures need file paths",
+        )
+    } else {
+        PrLiveStatusCheck::ready(
+            "changed_files",
+            format!("{} changed file(s) visible", pr.changed_files.len()),
+        )
+    });
+    checks.push(match current_branch {
+        Some(branch) if branch == pr.branch => {
+            PrLiveStatusCheck::ready("branch", format!("current branch matches `{}`", pr.branch))
+        }
+        Some(branch) => PrLiveStatusCheck::skipped(
+            "branch",
+            format!(
+                "current branch `{branch}` does not match PR head `{}`; read-only review is still possible",
+                pr.branch
+            ),
+        ),
+        None => PrLiveStatusCheck::skipped(
+            "branch",
+            "current git branch could not be determined; read-only review is still possible",
+        ),
+    });
+    checks.push(if permissions.pull {
+        PrLiveStatusCheck::ready(
+            "repo_read",
+            "authenticated user can read repository metadata",
+        )
+    } else {
+        PrLiveStatusCheck::blocked(
+            "repo_read",
+            "repository permissions do not report pull access",
+        )
+    });
+    if require_write {
+        checks.push(if permissions.can_write_pr_comments() {
+            PrLiveStatusCheck::ready(
+                "repo_write",
+                "repository permissions report push/maintain/admin access for write fixtures",
+            )
+        } else {
+            PrLiveStatusCheck::blocked(
+                "repo_write",
+                "repository permissions do not report push/maintain/admin access; guarded GitHub comment fixtures may fail",
+            )
+        });
+    } else {
+        checks.push(PrLiveStatusCheck::skipped(
+            "repo_write",
+            "pass --require-write to require write-capable repository permissions",
+        ));
+    }
+
+    PrLiveStatusReport { checks }
 }
 
 fn warn_if_offline_planner(config: &AppConfig) {
@@ -292,5 +489,82 @@ mod tests {
         let text = build_patch_task_text(&fixture_pr(9, "Tighten retry loop"));
         assert!(text.contains("#9"));
         assert!(text.contains("Tighten retry loop"));
+    }
+
+    #[test]
+    fn live_status_reports_readiness_without_write_requirement() {
+        let mut pr = fixture_pr(42, "Route benchmark command");
+        pr.diff = "diff --git a/src/cli/app.rs b/src/cli/app.rs".to_string();
+        pr.changed_files = vec!["src/cli/app.rs".to_string()];
+        let report = build_live_status_report(
+            &pr,
+            &RepoPermissions {
+                pull: true,
+                push: false,
+                maintain: false,
+                admin: false,
+            },
+            Some("feature/other".to_string()),
+            false,
+        );
+
+        assert_eq!(status_of(&report, "pr_diff"), PrLiveStatus::Ready);
+        assert_eq!(status_of(&report, "changed_files"), PrLiveStatus::Ready);
+        assert_eq!(status_of(&report, "branch"), PrLiveStatus::Skipped);
+        assert_eq!(status_of(&report, "repo_read"), PrLiveStatus::Ready);
+        assert_eq!(status_of(&report, "repo_write"), PrLiveStatus::Skipped);
+        assert_eq!(report.not_ready_count(), 0);
+    }
+
+    #[test]
+    fn live_status_blocks_when_write_required_without_repo_write_permission() {
+        let mut pr = fixture_pr(42, "Route benchmark command");
+        pr.diff = "diff --git a/src/cli/app.rs b/src/cli/app.rs".to_string();
+        pr.changed_files = vec!["src/cli/app.rs".to_string()];
+        let report = build_live_status_report(
+            &pr,
+            &RepoPermissions {
+                pull: true,
+                push: false,
+                maintain: false,
+                admin: false,
+            },
+            Some("feat/x".to_string()),
+            true,
+        );
+
+        assert_eq!(status_of(&report, "branch"), PrLiveStatus::Ready);
+        assert_eq!(status_of(&report, "repo_write"), PrLiveStatus::Blocked);
+        assert_eq!(report.not_ready_count(), 1);
+    }
+
+    #[test]
+    fn live_status_blocks_missing_diff_or_changed_files() {
+        let pr = fixture_pr(42, "Empty diff");
+        let report = build_live_status_report(
+            &pr,
+            &RepoPermissions {
+                pull: true,
+                push: true,
+                maintain: false,
+                admin: false,
+            },
+            Some("feat/x".to_string()),
+            true,
+        );
+
+        assert_eq!(status_of(&report, "pr_diff"), PrLiveStatus::Blocked);
+        assert_eq!(status_of(&report, "changed_files"), PrLiveStatus::Blocked);
+        assert_eq!(status_of(&report, "repo_write"), PrLiveStatus::Ready);
+        assert_eq!(report.not_ready_count(), 2);
+    }
+
+    fn status_of(report: &PrLiveStatusReport, name: &str) -> PrLiveStatus {
+        report
+            .checks
+            .iter()
+            .find(|check| check.name == name)
+            .unwrap_or_else(|| panic!("missing check {name}"))
+            .status
     }
 }

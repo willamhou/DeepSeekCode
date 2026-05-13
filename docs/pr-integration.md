@@ -1,7 +1,7 @@
 # PR / CI Integration
 
 `deepseek pr` is a subcommand group for working with GitHub pull requests via the
-`gh` CLI. Three actions are supported in v1.
+`gh` CLI.
 
 `dscode pr` remains supported as a compatibility alias, but the primary command
 spelling is `deepseek pr`.
@@ -13,6 +13,21 @@ spelling is `deepseek pr`.
 - `deepseek doctor` should show `gh auth: ok` in the `[github]` section
 
 ## Commands
+
+### `deepseek pr live-status <pr>`
+
+Check whether a real PR is usable for live PR review and retry fixtures without
+posting comments or mutating the worktree.
+
+```
+deepseek pr live-status owner/repo#42
+deepseek pr live-status https://github.com/.../pull/42 --require-write
+```
+
+The command verifies `gh` authentication, PR metadata, changed files, PR diff
+availability, repository read permission, and current-branch alignment. With
+`--require-write`, it also requires repo permissions that conservatively imply
+write-capable guarded PR comment fixtures (`push`, `maintain`, or `admin`).
 
 ### `deepseek pr review <pr>`
 
@@ -87,6 +102,6 @@ All three commands inherit the existing approval pipeline:
 - GitHub-only (`gh` CLI). GitLab / Gitea support is not planned for v1.
 - `--push` is not implemented; `--commit` stops at a local commit.
 - `--max-attempts` is not implemented; rerun `deepseek pr fix` for another round.
-- Inline review comments are not implemented; `--post` posts one summary comment.
-- `pr review --post` body is a pointer to the terminal trace, not the full
-  review markdown. Capturing planner output into the comment is a v2 item.
+- `pr review --post` posts one summary comment. Agent-driven inline review
+  comments are available through the guarded `github_pr_review_comment` tool
+  when durable approvals are enabled, not through `deepseek pr review --post`.

@@ -145,6 +145,20 @@ pub struct CiFailure {
     pub failed_step: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoPermissions {
+    pub pull: bool,
+    pub push: bool,
+    pub maintain: bool,
+    pub admin: bool,
+}
+
+impl RepoPermissions {
+    pub fn can_write_pr_comments(&self) -> bool {
+        self.push || self.maintain || self.admin
+    }
+}
+
 pub fn parse_first_failed_check(
     body: &str,
     job_filter: Option<&str>,
@@ -273,6 +287,30 @@ pub fn fetch_pr(reference: &PrRef) -> AppResult<PrContext> {
     let diff = run_gh(&["pr", "diff", &pr_ref_arg(reference)])?;
     context.diff = diff;
     Ok(context)
+}
+
+pub fn fetch_repo_permissions(repo: &str) -> AppResult<RepoPermissions> {
+    let body = run_gh(&["api", &format!("repos/{repo}")])?;
+    parse_repo_permissions_json(&body)
+}
+
+pub fn parse_repo_permissions_json(body: &str) -> AppResult<RepoPermissions> {
+    let root = parse_root_object(body)?;
+    let permissions = root
+        .get("permissions")
+        .and_then(json_as_object)
+        .ok_or_else(|| app_error("repo view: missing `permissions` object"))?;
+
+    Ok(RepoPermissions {
+        pull: json_bool_field(permissions, "pull"),
+        push: json_bool_field(permissions, "push"),
+        maintain: json_bool_field(permissions, "maintain"),
+        admin: json_bool_field(permissions, "admin"),
+    })
+}
+
+fn json_bool_field(map: &std::collections::BTreeMap<String, JsonValue>, key: &str) -> bool {
+    matches!(map.get(key), Some(JsonValue::Bool(true)))
 }
 
 pub fn fetch_first_failed_job(
@@ -561,6 +599,31 @@ mod tests {
     fn parse_run_jobs_errors_when_job_name_missing() {
         let body = r#"{"jobs": []}"#;
         assert!(parse_failed_job_from_run(body, "test").is_err());
+    }
+
+    #[test]
+    fn parse_repo_permissions_extracts_comment_write_signal() {
+        let body = r#"{
+            "full_name": "owner/repo",
+            "permissions": {
+                "pull": true,
+                "push": false,
+                "maintain": true,
+                "admin": false
+            }
+        }"#;
+        let permissions = parse_repo_permissions_json(body).unwrap();
+        assert!(permissions.pull);
+        assert!(!permissions.push);
+        assert!(permissions.maintain);
+        assert!(!permissions.admin);
+        assert!(permissions.can_write_pr_comments());
+    }
+
+    #[test]
+    fn parse_repo_permissions_requires_permissions_object() {
+        let error = parse_repo_permissions_json(r#"{"full_name":"owner/repo"}"#).unwrap_err();
+        assert!(error.to_string().contains("permissions"));
     }
 
     #[test]

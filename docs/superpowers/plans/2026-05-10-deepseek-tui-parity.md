@@ -508,6 +508,11 @@ Remaining:
   `fixture-pr-inline-comment-failure-recovery-plan` covers failed
   `github_pr_review_comment` recovery back into `pr_review_comment_plan` with
   the previous API/policy error preserved in the next plan input and output
+- Live remote PR readiness is now checkable without mutation:
+  `deepseek pr live-status <pr>` verifies `gh` auth, PR metadata/diff,
+  changed files, branch alignment, and repo permissions; `--require-write`
+  conservatively gates guarded comment fixtures on repo write-capable
+  permissions
 - Remaining: real GitHub permission/API live fixtures for remote PR retry,
   which require an external test repository and explicit write authorization
 

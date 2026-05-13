@@ -19,6 +19,10 @@ pub enum PrAction {
         post: bool,
         out: Option<String>,
     },
+    LiveStatus {
+        reference: String,
+        require_write: bool,
+    },
     Fix {
         reference: String,
         job: Option<String>,
@@ -177,7 +181,7 @@ pub fn parse_pr_subcommand(args: Vec<String>) -> Result<PrAction, String> {
     let mut iter = args.into_iter();
     let action = iter
         .next()
-        .ok_or_else(|| "pr requires a sub-action: review|fix|patch".to_string())?;
+        .ok_or_else(|| "pr requires a sub-action: review|live-status|fix|patch".to_string())?;
     let reference = iter
         .next()
         .ok_or_else(|| format!("pr {action} requires a PR reference"))?;
@@ -207,6 +211,27 @@ pub fn parse_pr_subcommand(args: Vec<String>) -> Result<PrAction, String> {
                 reference,
                 post,
                 out,
+            })
+        }
+        "live-status" => {
+            let mut require_write = false;
+            let mut index = 0;
+            while index < rest.len() {
+                match rest[index].as_str() {
+                    "--require-write" => {
+                        require_write = true;
+                        index += 1;
+                    }
+                    other => {
+                        return Err(format!(
+                            "unknown flag for `pr live-status`: {other}; expected --require-write"
+                        ));
+                    }
+                }
+            }
+            Ok(PrAction::LiveStatus {
+                reference,
+                require_write,
             })
         }
         "fix" => {
@@ -260,7 +285,7 @@ pub fn parse_pr_subcommand(args: Vec<String>) -> Result<PrAction, String> {
             })
         }
         other => Err(format!(
-            "unknown pr sub-action `{other}`; expected review|fix|patch"
+            "unknown pr sub-action `{other}`; expected review|live-status|fix|patch"
         )),
     }
 }
@@ -2905,6 +2930,26 @@ mod tests {
                 assert!(benchmark_gate);
             }
             _ => panic!("expected fix"),
+        }
+    }
+
+    #[test]
+    fn parses_pr_live_status_with_require_write_flag() {
+        let parsed = parse_pr_subcommand(vec![
+            "live-status".to_string(),
+            "owner/repo#42".to_string(),
+            "--require-write".to_string(),
+        ])
+        .unwrap();
+        match parsed {
+            PrAction::LiveStatus {
+                reference,
+                require_write,
+            } => {
+                assert_eq!(reference, "owner/repo#42");
+                assert!(require_write);
+            }
+            _ => panic!("expected pr live-status args"),
         }
     }
 
