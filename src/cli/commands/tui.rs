@@ -1192,6 +1192,7 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Model => Err(app_error("model details are not MCP details")),
         TuiMcpDetailKind::Provider => Err(app_error("provider details are not MCP details")),
         TuiMcpDetailKind::Skills => Err(app_error("skill details are not MCP details")),
+        TuiMcpDetailKind::Feedback => Err(app_error("feedback details are not MCP details")),
         TuiMcpDetailKind::Rollback => Err(app_error("rollback details are not MCP details")),
         TuiMcpDetailKind::Reasoning => Err(app_error("reasoning details are not MCP details")),
         TuiMcpDetailKind::ComposerStash => {

@@ -418,6 +418,10 @@ Landed first slice:
   plus command-palette `skills` / `skill`, listing and inspecting
   DeepSeekCode's configured repo/user TOML skill registry in the detail panel
   without adding remote install/sync mutation paths
+- TUI now supports DeepSeek-TUI-style `/feedback [bug|feature|security]` plus
+  command-palette `feedback`, rendering repository feedback targets and
+  security-policy links in the detail panel without attempting to launch a GUI
+  browser from the terminal
 - AgentLoop cancellation now propagates into cancel-aware model/tool execution; `run_shell` starts commands in a process group and kills that group when a durable cancel event is observed, while remote model streams and blocked model process-pipe reads stop through cancel-aware polling
 - deterministic `--once` snapshot path for CI/release smoke tests
 

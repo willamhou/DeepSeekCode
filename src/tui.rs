@@ -33,6 +33,13 @@ use crate::util::json::{
 };
 
 const USER_INPUT_OTHER_MAX_CHARS: usize = 200;
+const DEEPSEEK_CODE_REPO_URL: &str = "https://github.com/willamhou/DeepSeekCode";
+const DEEPSEEK_CODE_BUG_URL: &str =
+    "https://github.com/willamhou/DeepSeekCode/issues/new?labels=bug";
+const DEEPSEEK_CODE_FEATURE_URL: &str =
+    "https://github.com/willamhou/DeepSeekCode/issues/new?labels=enhancement";
+const DEEPSEEK_CODE_SECURITY_URL: &str =
+    "https://github.com/willamhou/DeepSeekCode/security/policy";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TuiMode {
@@ -470,6 +477,7 @@ pub enum TuiMcpDetailKind {
     Model,
     Provider,
     Skills,
+    Feedback,
     Rollback,
     Reasoning,
     ComposerStash,
@@ -494,6 +502,7 @@ impl TuiMcpDetailKind {
             Self::Model => "model",
             Self::Provider => "provider",
             Self::Skills => "skills",
+            Self::Feedback => "feedback",
             Self::Rollback => "rollback",
             Self::Reasoning => "reasoning",
             Self::ComposerStash => "stash",
@@ -518,6 +527,7 @@ impl TuiMcpDetailKind {
             Self::Model => "Model",
             Self::Provider => "Provider",
             Self::Skills => "Skills",
+            Self::Feedback => "Feedback",
             Self::Rollback => "Rollback",
             Self::Reasoning => "Reasoning",
             Self::ComposerStash => "Composer Stash",
@@ -542,6 +552,7 @@ impl TuiMcpDetailKind {
             Self::Model => Self::Manager,
             Self::Provider => Self::Manager,
             Self::Skills => Self::Manager,
+            Self::Feedback => Self::Manager,
             Self::Rollback => Self::Manager,
             Self::Reasoning => Self::Manager,
             Self::ComposerStash => Self::Manager,
@@ -566,6 +577,7 @@ impl TuiMcpDetailKind {
             Self::Model => Self::Manager,
             Self::Provider => Self::Manager,
             Self::Skills => Self::Manager,
+            Self::Feedback => Self::Manager,
             Self::Rollback => Self::Manager,
             Self::Reasoning => Self::Manager,
             Self::ComposerStash => Self::Manager,
@@ -723,6 +735,14 @@ pub enum TuiProviderCommand {
 pub enum TuiSkillsCommand {
     List { prefix: Option<String> },
     Show { name: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiFeedbackCommand {
+    Show,
+    Bug,
+    Feature,
+    Security,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -914,6 +934,25 @@ fn parse_tui_skill_command(line: &str) -> Option<Result<TuiSkillsCommand, String
             name: (*name).to_string(),
         })),
         _ => Some(Err("usage: skill <name> or /skill <name>".to_string())),
+    }
+}
+
+fn parse_tui_feedback_command(line: &str) -> Option<Result<TuiFeedbackCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/feedback")
+        .or_else(|| strip_tui_command_prefix(trimmed, "feedback"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] | ["help" | "--help" | "-h"] => Some(Ok(TuiFeedbackCommand::Show)),
+        ["1" | "bug" | "bug-report" | "bug_report"] => Some(Ok(TuiFeedbackCommand::Bug)),
+        ["2" | "feature" | "feature-request" | "feature_request" | "enhancement"] => {
+            Some(Ok(TuiFeedbackCommand::Feature))
+        }
+        ["3" | "security" | "vulnerability" | "private"] => Some(Ok(TuiFeedbackCommand::Security)),
+        _ => Some(Err(
+            "usage: feedback [bug|feature|security] or /feedback [bug|feature|security]"
+                .to_string(),
+        )),
     }
 }
 
@@ -1234,6 +1273,10 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "provider ollama",
     "skills",
     "skill ",
+    "feedback",
+    "feedback bug",
+    "feedback feature",
+    "feedback security",
     "automations",
     "automation trigger",
     "compact",
@@ -1340,6 +1383,10 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/provider ollama",
     "/skills",
     "/skill ",
+    "/feedback",
+    "/feedback bug",
+    "/feedback feature",
+    "/feedback security",
     "/rename ",
     "/init",
 ];
@@ -3645,6 +3692,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_feedback_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.show_feedback_detail(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(title) = parse_tui_rename_command(&content) {
                     match title {
                         Ok(title) => {
@@ -3993,6 +4053,17 @@ impl TuiApp {
             match command {
                 Ok(command) => {
                     self.request_skills_command(command);
+                }
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_feedback_command(command) {
+            match command {
+                Ok(command) => {
+                    self.show_feedback_detail(command);
                 }
                 Err(message) => {
                     self.status = message;
@@ -5300,6 +5371,17 @@ impl TuiApp {
     fn request_skills_command(&mut self, command: TuiSkillsCommand) {
         self.pending_actions.push(TuiAction::Skills { command });
         self.status = "skills command queued".to_string();
+    }
+
+    fn show_feedback_detail(&mut self, command: TuiFeedbackCommand) {
+        let detail = render_feedback_detail(command);
+        self.set_mcp_detail(TuiMcpDetailKind::Feedback, detail);
+        self.status = match command {
+            TuiFeedbackCommand::Show => "feedback options shown".to_string(),
+            TuiFeedbackCommand::Bug => "feedback bug link shown".to_string(),
+            TuiFeedbackCommand::Feature => "feedback feature link shown".to_string(),
+            TuiFeedbackCommand::Security => "feedback security link shown".to_string(),
+        };
     }
 
     fn show_status_detail(&mut self) {
@@ -7833,6 +7915,51 @@ fn context_strategy(latest_total_tokens: u64) -> &'static str {
         500_000.. => "monitor",
         _ => "normal",
     }
+}
+
+fn render_feedback_detail(command: TuiFeedbackCommand) -> String {
+    let mut detail = String::new();
+    let _ = writeln!(detail, "DeepSeekCode Feedback");
+    let _ = writeln!(detail, "=====================");
+    let _ = writeln!(detail);
+    let _ = writeln!(detail, "Repository: {DEEPSEEK_CODE_REPO_URL}");
+    let _ = writeln!(detail);
+    match command {
+        TuiFeedbackCommand::Show => {
+            let _ = writeln!(detail, "Choose a feedback target:");
+            let _ = writeln!(detail, "- feedback bug       {DEEPSEEK_CODE_BUG_URL}");
+            let _ = writeln!(detail, "- feedback feature   {DEEPSEEK_CODE_FEATURE_URL}");
+            let _ = writeln!(detail, "- feedback security  {DEEPSEEK_CODE_SECURITY_URL}");
+        }
+        TuiFeedbackCommand::Bug => {
+            let _ = writeln!(detail, "Bug report");
+            let _ = writeln!(detail, "{DEEPSEEK_CODE_BUG_URL}");
+            let _ = writeln!(detail);
+            let _ = writeln!(
+                detail,
+                "Include reproduction steps, expected behavior, actual behavior, and version/context."
+            );
+        }
+        TuiFeedbackCommand::Feature => {
+            let _ = writeln!(detail, "Feature request");
+            let _ = writeln!(detail, "{DEEPSEEK_CODE_FEATURE_URL}");
+            let _ = writeln!(detail);
+            let _ = writeln!(
+                detail,
+                "Describe the workflow, why existing behavior is insufficient, and what success looks like."
+            );
+        }
+        TuiFeedbackCommand::Security => {
+            let _ = writeln!(detail, "Security report");
+            let _ = writeln!(detail, "{DEEPSEEK_CODE_SECURITY_URL}");
+            let _ = writeln!(detail);
+            let _ = writeln!(
+                detail,
+                "Review the security policy before sending vulnerability details. Avoid public issue text for sensitive reports."
+            );
+        }
+    }
+    detail
 }
 
 fn format_cache_hit_rate(cache_hit: u64, cache_miss: u64) -> String {
@@ -10757,6 +10884,27 @@ mod tests {
                 },
             }]
         );
+    }
+
+    #[test]
+    fn feedback_command_renders_links() {
+        let mut app = TuiApp::new(Vec::new());
+
+        run_palette_command(&mut app, "feedback");
+
+        assert_eq!(app.status, "feedback options shown");
+        let (kind, detail) = app.mcp_detail.as_ref().expect("feedback detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Feedback);
+        assert!(detail.contains("DeepSeekCode Feedback"));
+        assert!(detail.contains("feedback bug"));
+        assert!(detail.contains(DEEPSEEK_CODE_FEATURE_URL));
+
+        run_palette_command(&mut app, "/feedback security");
+
+        assert_eq!(app.status, "feedback security link shown");
+        let (_, detail) = app.mcp_detail.as_ref().expect("security detail");
+        assert!(detail.contains("Security report"));
+        assert!(detail.contains(DEEPSEEK_CODE_SECURITY_URL));
     }
 
     #[test]
