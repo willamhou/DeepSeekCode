@@ -3598,6 +3598,10 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
                             "reset",
                             string_property("Set true with session_id to clear session context before this call."),
                         ),
+                        (
+                            "live",
+                            string_property("Set true with session_id to enqueue a live RLM daemon turn instead of running the bounded child-agent call immediately."),
+                        ),
                     ],
                     &[],
                 ),

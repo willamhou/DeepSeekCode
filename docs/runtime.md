@@ -1400,7 +1400,11 @@ reports normalized live-daemon manifests from
 `.dscode/rlm-daemon/<session_id>/manifest.json`, including daemon status,
 runtime thread id, queued turn count, active turn id, and last error. This is a
 read-only inventory surface for the live RLM daemon design; it does not start a
-daemon or enqueue model work.
+daemon. `rlm_process live=true session_id=<id>` creates or reuses a live
+session runtime thread, enqueues a pending `rlm_process` runtime task, writes
+the live manifest, and appends a `turn_queued` event without spending model
+tokens. It is queueing only; a live worker that claims turns, streams model
+deltas, handles cancellation, and records completion remains future work.
 This gives the model DeepSeek-TUI-style Recursive Language Model entrypoints for
 synthesis/classification tasks with both file-backed and optional process-backed
 Python helper state. MCP server mode exposes the local RLM planning helpers

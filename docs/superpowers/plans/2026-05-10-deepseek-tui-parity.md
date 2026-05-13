@@ -510,8 +510,10 @@ Remaining:
   child model, so durable long-input RLM sessions are discoverable before
   continuing or resetting them; `include_live=true` also surfaces normalized
   `.dscode/rlm-daemon/<session_id>/manifest.json` live-session records so the
-  live RLM daemon roadmap has a model-visible inventory layer before turn
-  queueing lands
+  live RLM daemon roadmap has a model-visible inventory layer; `rlm_process
+  live=true session_id=<id>` now creates or reuses a live-session runtime
+  thread and enqueues pending `rlm_process` runtime tasks without running a
+  model worker yet
 - Review remote PR context signals now exist: `review` parses
   `github_pr_context` JSON to report requested changes, failing/cancelled status
   checks, and missing `include_diff=true` context before optional semantic

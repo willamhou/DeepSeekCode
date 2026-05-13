@@ -148,6 +148,8 @@ resumption.
    - create/reuse runtime thread per live RLM session
    - enqueue turns
    - persist `events.jsonl`
+   - status: implemented by
+     `2026-05-13-deepseek-tui-rlm-live-turn-queue.md`
 3. Tool routing:
    - `rlm_process live=true`
    - `rlm_process_wait`

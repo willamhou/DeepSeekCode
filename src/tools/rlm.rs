@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::types::AppConfig;
+use crate::core::runtime::RuntimeStore;
 use crate::error::{tool_failure, AppResult};
 use crate::tools::dispatch_subagent::{DispatchSubagentTool, DispatchSubagentsTool};
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
@@ -658,6 +659,9 @@ impl RlmTool {
             .map(str::trim)
             .filter(|value| !value.is_empty());
         let reset_session = parse_bool_arg(input.get("reset"));
+        if parse_bool_arg(input.get("live")) {
+            return self.enqueue_live_process_turn(&input, task, session_id, reset_session);
+        }
         let mut session = match session_id {
             Some(session_id) => {
                 validate_rlm_model_session_id(session_id)?;
@@ -691,6 +695,122 @@ impl RlmTool {
             );
         }
         Ok(output)
+    }
+
+    fn enqueue_live_process_turn(
+        &self,
+        input: &ToolInput,
+        task: &str,
+        session_id: Option<&str>,
+        reset_session: bool,
+    ) -> AppResult<ToolOutput> {
+        let session_id = session_id
+            .ok_or_else(|| tool_failure("rlm_process live=true requires non-empty `session_id`"))?;
+        validate_rlm_model_session_id(session_id)?;
+        let manifest_path = rlm_live_session_manifest_path(&self.config, session_id);
+        let live_exists = manifest_path.exists() && !reset_session;
+        if !rlm_process_has_input_source(input) && !live_exists {
+            return Err(tool_failure(
+                "rlm_process live=true requires file_path/content for a new live session or an existing live session_id",
+            ));
+        }
+        let process_input = if rlm_process_has_input_source(input) {
+            load_rlm_process_input(input)?
+        } else {
+            RlmProcessInput {
+                label: "live session context only".to_string(),
+                content: String::new(),
+                char_count: 0,
+                line_count: 0,
+            }
+        };
+        let store = rlm_runtime_store(&self.config);
+        let model = input
+            .get("model")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&self.config.model.model)
+            .to_string();
+        let mode = input
+            .get("mode")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("agent")
+            .to_string();
+        let workspace = input
+            .get("cwd")
+            .or_else(|| input.get("workspace"))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(default_rlm_workspace);
+        let existing = if live_exists {
+            read_rlm_live_session_manifest(&manifest_path, session_id).ok()
+        } else {
+            None
+        };
+        let existing_thread_id = existing
+            .as_ref()
+            .and_then(|manifest| rlm_live_manifest_string_field(manifest, "runtime_thread_id"));
+        let thread = match existing_thread_id
+            .as_deref()
+            .and_then(|thread_id| store.load_thread(thread_id).ok())
+        {
+            Some(thread) => thread,
+            None => store.create_thread(
+                format!("RLM live session {session_id}"),
+                workspace.clone(),
+                model.clone(),
+                mode,
+            )?,
+        };
+        let summary = format!(
+            "RLM live turn: {task}\ninput: {}\ninput_chars: {}\ninput_lines: {}",
+            process_input.label, process_input.char_count, process_input.line_count
+        );
+        let runtime_task = store.create_task(
+            thread.session_id.as_deref(),
+            Some(&thread.id),
+            None,
+            "rlm_process".to_string(),
+            "pending".to_string(),
+            summary,
+        )?;
+        let previous_queued = existing
+            .as_ref()
+            .and_then(|manifest| rlm_live_manifest_u64_field(manifest, "queued_turns"))
+            .unwrap_or(0);
+        let queued_turns = previous_queued.saturating_add(1);
+        write_rlm_live_session_manifest(
+            &self.config,
+            session_id,
+            "idle",
+            &thread.id,
+            thread.session_id.as_deref(),
+            None,
+            queued_turns,
+            &thread.model,
+            &thread.workspace,
+            existing
+                .as_ref()
+                .and_then(|manifest| rlm_live_manifest_string_field(manifest, "created_at"))
+                .as_deref(),
+        )?;
+        append_rlm_live_session_event(
+            &self.config,
+            session_id,
+            "turn_queued",
+            &thread.id,
+            &runtime_task.id,
+            task,
+            &process_input.label,
+        )?;
+        Ok(ToolOutput {
+            summary: format!(
+                "meta.rlm_live=true\nmeta.rlm_session_id={session_id}\nmeta.rlm_runtime_thread_id={}\nmeta.rlm_turn_id={}\nmeta.rlm_status=queued\nmeta.rlm_queued_turns={queued_turns}\nstatus: queued\ninput: {}\n",
+                thread.id, runtime_task.id, process_input.label
+            ),
+        })
     }
 }
 
@@ -1711,6 +1831,114 @@ fn read_rlm_live_session_manifest(path: &Path, session_id: &str) -> AppResult<Js
     ])))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn write_rlm_live_session_manifest(
+    config: &AppConfig,
+    session_id: &str,
+    status: &str,
+    runtime_thread_id: &str,
+    runtime_session_id: Option<&str>,
+    active_turn_id: Option<&str>,
+    queued_turns: u64,
+    model: &str,
+    workspace: &str,
+    created_at: Option<&str>,
+) -> AppResult<()> {
+    let path = rlm_live_session_manifest_path(config, session_id);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            tool_failure(format!("rlm live session manifest mkdir failed: {error}"))
+        })?;
+    }
+    let now = rlm_epoch_label();
+    let created_at = created_at.unwrap_or(&now);
+    let manifest = JsonValue::Object(BTreeMap::from([
+        (
+            "kind".to_string(),
+            JsonValue::String("deepseek.rlm.live_session.v1".to_string()),
+        ),
+        (
+            "session_id".to_string(),
+            JsonValue::String(session_id.to_string()),
+        ),
+        ("status".to_string(), JsonValue::String(status.to_string())),
+        ("daemon_pid".to_string(), JsonValue::Null),
+        ("daemon_epoch".to_string(), JsonValue::Null),
+        (
+            "runtime_thread_id".to_string(),
+            JsonValue::String(runtime_thread_id.to_string()),
+        ),
+        (
+            "runtime_session_id".to_string(),
+            runtime_session_id
+                .map(|value| JsonValue::String(value.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "active_turn_id".to_string(),
+            active_turn_id
+                .map(|value| JsonValue::String(value.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "queued_turns".to_string(),
+            JsonValue::Number(queued_turns.to_string()),
+        ),
+        ("model".to_string(), JsonValue::String(model.to_string())),
+        (
+            "workspace".to_string(),
+            JsonValue::String(workspace.to_string()),
+        ),
+        (
+            "created_at".to_string(),
+            JsonValue::String(created_at.to_string()),
+        ),
+        ("updated_at".to_string(), JsonValue::String(now)),
+        ("last_error".to_string(), JsonValue::Null),
+    ]));
+    fs::write(path, json_value_to_string(&manifest)).map_err(|error| {
+        tool_failure(format!("rlm live session manifest write failed: {error}"))
+    })?;
+    Ok(())
+}
+
+fn append_rlm_live_session_event(
+    config: &AppConfig,
+    session_id: &str,
+    kind: &str,
+    runtime_thread_id: &str,
+    task_id: &str,
+    task: &str,
+    input_label: &str,
+) -> AppResult<()> {
+    let path = rlm_live_session_event_log_path(config, session_id);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            tool_failure(format!("rlm live session event mkdir failed: {error}"))
+        })?;
+    }
+    let seq = fs::read_to_string(&path)
+        .map(|content| content.lines().count() as u64 + 1)
+        .unwrap_or(1);
+    let event = format!(
+        "{{\"seq\":{},\"created_at\":\"{}\",\"kind\":\"{}\",\"runtime_thread_id\":\"{}\",\"task_id\":\"{}\",\"task\":\"{}\",\"input\":\"{}\"}}\n",
+        seq,
+        json_escape(&rlm_epoch_label()),
+        json_escape(kind),
+        json_escape(runtime_thread_id),
+        json_escape(task_id),
+        json_escape(task),
+        json_escape(input_label)
+    );
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(event.as_bytes()))
+        .map_err(|error| tool_failure(format!("rlm live session event write failed: {error}")))?;
+    Ok(())
+}
+
 fn render_rlm_live_session_list_entry(
     session_id: &str,
     path: &Path,
@@ -1773,6 +2001,36 @@ fn list_rlm_live_session_manifest_entries(config: &AppConfig) -> AppResult<Vec<(
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(entries)
+}
+
+fn rlm_live_session_event_log_path(config: &AppConfig, session_id: &str) -> PathBuf {
+    rlm_live_sessions_dir(config)
+        .join(session_id)
+        .join("events.jsonl")
+}
+
+fn rlm_live_manifest_string_field(manifest: &JsonValue, key: &str) -> Option<String> {
+    let JsonValue::Object(root) = manifest else {
+        return None;
+    };
+    root.get(key).and_then(json_as_string).map(str::to_string)
+}
+
+fn rlm_live_manifest_u64_field(manifest: &JsonValue, key: &str) -> Option<u64> {
+    let JsonValue::Object(root) = manifest else {
+        return None;
+    };
+    root.get(key).and_then(json_as_u64)
+}
+
+fn rlm_runtime_store(config: &AppConfig) -> RuntimeStore {
+    RuntimeStore::new(PathBuf::from(&config.workspace.config_dir).join("runtime"))
+}
+
+fn default_rlm_workspace() -> String {
+    std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| ".".to_string())
 }
 
 fn optional_string_json(root: &BTreeMap<String, JsonValue>, key: &str) -> JsonValue {
@@ -3059,6 +3317,84 @@ mod tests {
             .summary
             .contains(r#""kind":"deepseek.rlm.live_session.v1""#));
         assert!(shown.summary.contains(r#""model":"deepseek-coder""#));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rlm_process_live_enqueues_runtime_turn_and_manifest() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = cwd.join("target").join(format!(
+            "dscode-rlm-live-queue-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut config = AppConfig::default();
+        config.workspace.config_dir = root.join(".dscode").display().to_string();
+        let tool = RlmTool {
+            tool_name: "rlm_process",
+            config: config.clone(),
+            parent_depth: 0,
+        };
+
+        let first = tool
+            .execute(
+                ToolInput::new()
+                    .with_arg("task", "summarize alpha")
+                    .with_arg("content", "alpha")
+                    .with_arg("session_id", "live.queue")
+                    .with_arg("live", "true")
+                    .with_arg("cwd", root.display().to_string()),
+            )
+            .unwrap();
+        assert!(first.summary.contains("meta.rlm_live=true"));
+        assert!(first.summary.contains("meta.rlm_status=queued"));
+        assert!(first.summary.contains("meta.rlm_queued_turns=1"));
+
+        let manifest_path = rlm_live_session_manifest_path(&config, "live.queue");
+        let manifest = read_rlm_live_session_manifest(&manifest_path, "live.queue").unwrap();
+        let thread_id = rlm_live_manifest_string_field(&manifest, "runtime_thread_id").unwrap();
+        assert_eq!(
+            rlm_live_manifest_u64_field(&manifest, "queued_turns"),
+            Some(1)
+        );
+        assert_eq!(
+            rlm_live_manifest_string_field(&manifest, "workspace").as_deref(),
+            Some(root.display().to_string().as_str())
+        );
+
+        let second = tool
+            .execute(
+                ToolInput::new()
+                    .with_arg("task", "continue from live context")
+                    .with_arg("session_id", "live.queue")
+                    .with_arg("live", "true"),
+            )
+            .unwrap();
+        assert!(second.summary.contains("meta.rlm_queued_turns=2"));
+        assert!(second.summary.contains("live session context only"));
+
+        let updated = read_rlm_live_session_manifest(&manifest_path, "live.queue").unwrap();
+        assert_eq!(
+            rlm_live_manifest_string_field(&updated, "runtime_thread_id").as_deref(),
+            Some(thread_id.as_str())
+        );
+        assert_eq!(
+            rlm_live_manifest_u64_field(&updated, "queued_turns"),
+            Some(2)
+        );
+        let store = rlm_runtime_store(&config);
+        let tasks = store.list_tasks(None, Some(&thread_id), 10).unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks.iter().all(|task| task.kind == "rlm_process"));
+        assert!(tasks.iter().all(|task| task.status == "pending"));
+        let events =
+            fs::read_to_string(rlm_live_session_event_log_path(&config, "live.queue")).unwrap();
+        assert!(events.contains(r#""kind":"turn_queued""#));
+        assert!(events.contains(r#""seq":1"#));
+        assert!(events.contains(r#""seq":2"#));
         let _ = fs::remove_dir_all(root);
     }
 
