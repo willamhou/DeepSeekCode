@@ -572,6 +572,7 @@ pub enum TuiMcpDetailKind {
     Settings,
     Theme,
     StatusLine,
+    Verbose,
     Rollback,
     Reasoning,
     ComposerStash,
@@ -604,6 +605,7 @@ impl TuiMcpDetailKind {
             Self::Settings => "settings",
             Self::Theme => "theme",
             Self::StatusLine => "statusline",
+            Self::Verbose => "verbose",
             Self::Rollback => "rollback",
             Self::Reasoning => "reasoning",
             Self::ComposerStash => "stash",
@@ -636,6 +638,7 @@ impl TuiMcpDetailKind {
             Self::Settings => "Settings",
             Self::Theme => "Theme",
             Self::StatusLine => "Statusline",
+            Self::Verbose => "Verbose Transcript",
             Self::Rollback => "Rollback",
             Self::Reasoning => "Reasoning",
             Self::ComposerStash => "Composer Stash",
@@ -668,6 +671,7 @@ impl TuiMcpDetailKind {
             Self::Settings => Self::Manager,
             Self::Theme => Self::Manager,
             Self::StatusLine => Self::Manager,
+            Self::Verbose => Self::Manager,
             Self::Rollback => Self::Manager,
             Self::Reasoning => Self::Manager,
             Self::ComposerStash => Self::Manager,
@@ -700,6 +704,7 @@ impl TuiMcpDetailKind {
             Self::Settings => Self::Manager,
             Self::Theme => Self::Manager,
             Self::StatusLine => Self::Manager,
+            Self::Verbose => Self::Manager,
             Self::Rollback => Self::Manager,
             Self::Reasoning => Self::Manager,
             Self::ComposerStash => Self::Manager,
@@ -862,6 +867,13 @@ pub enum TuiThemeCommand {
     Set(TuiTheme),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiVerboseCommand {
+    Show,
+    Toggle,
+    Set(bool),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiProviderCommand {
     Show,
@@ -976,6 +988,22 @@ fn parse_tui_statusline_command(line: &str) -> Option<Result<(), String>> {
         [] | ["show" | "help" | "--help" | "-h"] => Some(Ok(())),
         _ => Some(Err(
             "usage: statusline, statusline show, /statusline, or /statusline show".to_string(),
+        )),
+    }
+}
+
+fn parse_tui_verbose_command(line: &str) -> Option<Result<TuiVerboseCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/verbose")
+        .or_else(|| strip_tui_command_prefix(trimmed, "verbose"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] | ["toggle"] => Some(Ok(TuiVerboseCommand::Toggle)),
+        ["show" | "status" | "help" | "--help" | "-h"] => Some(Ok(TuiVerboseCommand::Show)),
+        ["on" | "true" | "1" | "yes"] => Some(Ok(TuiVerboseCommand::Set(true))),
+        ["off" | "false" | "0" | "no"] => Some(Ok(TuiVerboseCommand::Set(false))),
+        _ => Some(Err(
+            "usage: verbose [on|off|toggle|show] or /verbose [on|off|toggle|show]".to_string(),
         )),
     }
 }
@@ -1515,6 +1543,13 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
     },
     TuiHelpCommandInfo {
         category: "Runtime",
+        name: "verbose",
+        aliases: &[],
+        usage: "/verbose [on|off|toggle|show]",
+        description: "Toggle full reasoning text in the live transcript.",
+    },
+    TuiHelpCommandInfo {
+        category: "Runtime",
         name: "status",
         aliases: &[],
         usage: "/status",
@@ -1738,6 +1773,10 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "status",
     "statusline",
     "statusline show",
+    "verbose",
+    "verbose on",
+    "verbose off",
+    "verbose show",
     "tokens",
     "cost",
     "cache",
@@ -1869,6 +1908,10 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/status",
     "/statusline",
     "/statusline show",
+    "/verbose",
+    "/verbose on",
+    "/verbose off",
+    "/verbose show",
     "/tokens",
     "/cost",
     "/cache",
@@ -2105,6 +2148,7 @@ pub struct TuiApp {
     composer_stash: Vec<ComposerStashEntry>,
     composer_stash_path: Option<PathBuf>,
     transcript_scroll: usize,
+    verbose_transcript: bool,
     reasoning_replay_limit: usize,
     reasoning_replay_pinned_turn_ids: BTreeSet<String>,
     reasoning_replay_preferences_path: Option<PathBuf>,
@@ -2269,6 +2313,7 @@ impl TuiApp {
             composer_stash: Vec::new(),
             composer_stash_path: None,
             transcript_scroll: 0,
+            verbose_transcript: false,
             reasoning_replay_limit: DEFAULT_TUI_REASONING_REPLAY_LIMIT,
             reasoning_replay_pinned_turn_ids: BTreeSet::new(),
             reasoning_replay_preferences_path: None,
@@ -3490,15 +3535,7 @@ impl TuiApp {
             } else {
                 items
                     .iter()
-                    .map(|item| {
-                        let role = item.role.as_deref().unwrap_or(item.item_type.as_str());
-                        format!(
-                            "{} [{}]: {}",
-                            role,
-                            item.status,
-                            clip_line(&item.content, 120)
-                        )
-                    })
+                    .flat_map(|item| format_transcript_item_lines(item, self.verbose_transcript))
                     .collect()
             };
             (transcript, item_count, item_progress_lines)
@@ -4163,6 +4200,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_verbose_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.handle_verbose_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = parse_tui_tokens_command(&content) {
                     match command {
                         Ok(()) => {
@@ -4623,6 +4673,17 @@ impl TuiApp {
             match command {
                 Ok(()) => {
                     self.show_statusline_detail();
+                }
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_verbose_command(command) {
+            match command {
+                Ok(command) => {
+                    self.handle_verbose_command(command);
                 }
                 Err(message) => {
                     self.status = message;
@@ -6128,6 +6189,11 @@ impl TuiApp {
         let _ = writeln!(detail);
         push_status_row(&mut detail, "Mode:", self.mode.title());
         push_status_row(&mut detail, "Theme:", self.theme.title());
+        push_status_row(
+            &mut detail,
+            "Verbose transcript:",
+            if self.verbose_transcript { "on" } else { "off" },
+        );
         match self.selected_session() {
             Some(session) => {
                 push_status_row(&mut detail, "Workspace:", &session.workspace);
@@ -6148,6 +6214,7 @@ impl TuiApp {
         let _ = writeln!(detail, "---------------");
         let _ = writeln!(detail, "- /mode [agent|plan|yolo|1|2|3]");
         let _ = writeln!(detail, "- /theme [dark|light|grayscale|system]");
+        let _ = writeln!(detail, "- /verbose [on|off|toggle|show]");
         let _ = writeln!(detail, "- /model [name|list]");
         let _ = writeln!(detail, "- /provider [name [model]|list]");
         let _ = writeln!(detail, "- /network [list|allow|deny|remove|default]");
@@ -6285,6 +6352,78 @@ impl TuiApp {
         self.status = "statusline shown".to_string();
     }
 
+    fn handle_verbose_command(&mut self, command: TuiVerboseCommand) {
+        match command {
+            TuiVerboseCommand::Show => {
+                self.show_verbose_detail();
+            }
+            TuiVerboseCommand::Toggle => {
+                self.verbose_transcript = !self.verbose_transcript;
+                self.refresh_runtime_view();
+                self.show_verbose_detail();
+                self.status = format!(
+                    "verbose transcript {}",
+                    if self.verbose_transcript { "on" } else { "off" }
+                );
+            }
+            TuiVerboseCommand::Set(enabled) => {
+                self.verbose_transcript = enabled;
+                self.refresh_runtime_view();
+                self.show_verbose_detail();
+                self.status = format!(
+                    "verbose transcript {}",
+                    if self.verbose_transcript { "on" } else { "off" }
+                );
+            }
+        }
+    }
+
+    fn show_verbose_detail(&mut self) {
+        let detail = self.render_verbose_detail();
+        self.set_mcp_detail(TuiMcpDetailKind::Verbose, detail);
+        self.status = "verbose transcript shown".to_string();
+    }
+
+    fn render_verbose_detail(&self) -> String {
+        let mut detail = String::new();
+        let _ = writeln!(detail, "DeepSeekCode Verbose Transcript");
+        let _ = writeln!(detail, "===============================");
+        let _ = writeln!(detail);
+        push_status_row(
+            &mut detail,
+            "Current:",
+            if self.verbose_transcript { "on" } else { "off" },
+        );
+        let reasoning_count = self.active_reasoning_items().len();
+        push_status_row(
+            &mut detail,
+            "Reasoning items:",
+            &format!("{reasoning_count} active-thread item(s)"),
+        );
+        push_status_row(
+            &mut detail,
+            "Transcript:",
+            if self.verbose_transcript {
+                "full reasoning text"
+            } else {
+                "compact reasoning preview"
+            },
+        );
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Commands");
+        let _ = writeln!(detail, "--------");
+        let _ = writeln!(detail, "- /verbose          Toggle full reasoning text");
+        let _ = writeln!(detail, "- /verbose on       Render live thinking in full");
+        let _ = writeln!(detail, "- /verbose off      Keep live thinking compact");
+        let _ = writeln!(detail, "- /verbose show     Show this panel");
+        let _ = writeln!(detail);
+        let _ = writeln!(
+            detail,
+            "Detailed persisted reasoning remains available through reasoning show/search even when transcript verbosity is off."
+        );
+        detail
+    }
+
     fn render_statusline_detail(&self) -> String {
         let mut detail = String::new();
         let _ = writeln!(detail, "DeepSeekCode Statusline");
@@ -6293,6 +6432,11 @@ impl TuiApp {
         push_status_row(&mut detail, "Current status:", &self.status);
         push_status_row(&mut detail, "Mode:", self.mode.title());
         push_status_row(&mut detail, "Theme:", self.theme.title());
+        push_status_row(
+            &mut detail,
+            "Verbose transcript:",
+            if self.verbose_transcript { "on" } else { "off" },
+        );
         push_status_row(
             &mut detail,
             "Detail panel:",
@@ -6322,6 +6466,7 @@ impl TuiApp {
         );
         let _ = writeln!(detail, "- /settings    Configuration entry points");
         let _ = writeln!(detail, "- /theme       Statusline color accents");
+        let _ = writeln!(detail, "- /verbose     Transcript reasoning detail");
         let _ = writeln!(detail);
         let _ = writeln!(
             detail,
@@ -8225,6 +8370,38 @@ fn clip_line(value: &str, max_chars: usize) -> String {
         clipped.push_str("...");
     }
     clipped
+}
+
+fn format_transcript_item_lines(item: &TuiItem, verbose_transcript: bool) -> Vec<String> {
+    let role = item.role.as_deref().unwrap_or(item.item_type.as_str());
+    if item.item_type == "reasoning" && !verbose_transcript {
+        let chars = item.content.chars().count();
+        let preview = clip_line(&item.content, 72);
+        if preview.is_empty() {
+            vec![format!(
+                "{role} [{}]: thinking compact ({chars} chars; /verbose on for full text)",
+                item.status
+            )]
+        } else {
+            vec![format!(
+                "{role} [{}]: thinking compact ({chars} chars) {preview}",
+                item.status
+            )]
+        }
+    } else if item.item_type == "reasoning" {
+        let mut content_lines = item.content.lines();
+        let first = content_lines.next().unwrap_or("").trim();
+        let mut lines = vec![format!("{role} [{}]: {first}", item.status)];
+        lines.extend(content_lines.map(|line| format!("  {}", line.trim())));
+        lines
+    } else {
+        vec![format!(
+            "{} [{}]: {}",
+            role,
+            item.status,
+            clip_line(&item.content, 120)
+        )]
+    }
 }
 
 fn render_reasoning_empty_detail(
@@ -10233,6 +10410,92 @@ mod tests {
         let (kind, detail) = app.mcp_detail.as_ref().expect("composer statusline detail");
         assert_eq!(*kind, TuiMcpDetailKind::StatusLine);
         assert!(detail.contains("fixed command bar"));
+    }
+
+    #[test]
+    fn verbose_command_toggles_reasoning_transcript_detail() {
+        let reasoning = "reasoning preview starts with enough filler words before suffix padding padding padding UNIQUE_VERBOSE_SUFFIX marker";
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: ".".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: Some("turn-one".to_string()),
+                event_seq: 1,
+            }],
+            vec![
+                TuiItem {
+                    id: "item-one".to_string(),
+                    thread_id: "thread-one".to_string(),
+                    turn_id: Some("turn-one".to_string()),
+                    index: 1,
+                    item_type: "message".to_string(),
+                    role: Some("assistant".to_string()),
+                    content: "final answer".to_string(),
+                    status: "completed".to_string(),
+                },
+                TuiItem {
+                    id: "reasoning-one".to_string(),
+                    thread_id: "thread-one".to_string(),
+                    turn_id: Some("turn-one".to_string()),
+                    index: 2,
+                    item_type: "reasoning".to_string(),
+                    role: Some("assistant".to_string()),
+                    content: reasoning.to_string(),
+                    status: "running".to_string(),
+                },
+            ],
+        );
+
+        assert!(!app.verbose_transcript);
+        assert!(app
+            .transcript
+            .iter()
+            .any(|line| line.contains("thinking compact")));
+        assert!(!app
+            .transcript
+            .iter()
+            .any(|line| line.contains("UNIQUE_VERBOSE_SUFFIX")));
+
+        run_palette_command(&mut app, "verbose on");
+
+        assert!(app.verbose_transcript);
+        assert_eq!(app.status, "verbose transcript on");
+        assert!(app
+            .transcript
+            .iter()
+            .any(|line| line.contains("UNIQUE_VERBOSE_SUFFIX")));
+        let (kind, detail) = app.mcp_detail.as_ref().expect("verbose detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Verbose);
+        assert!(detail.contains("DeepSeekCode Verbose Transcript"));
+        assert!(detail.contains("Current:"));
+
+        app.composer_focused = true;
+        app.composer = "/verbose off".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert!(!app.verbose_transcript);
+        assert_eq!(app.status, "verbose transcript off");
+        assert_eq!(app.composer, "");
+        assert!(app
+            .transcript
+            .iter()
+            .any(|line| line.contains("thinking compact")));
+        assert!(!app
+            .transcript
+            .iter()
+            .any(|line| line.contains("UNIQUE_VERBOSE_SUFFIX")));
     }
 
     #[test]

@@ -444,6 +444,9 @@ Landed first slice:
   sidebar, command bar, and command palette rendering
 - TUI now supports DeepSeek-TUI-style `/statusline`, rendering current command
   bar items, shortcuts, and related status/config commands in the detail panel
+- TUI now supports DeepSeek-TUI-style `/verbose [on|off]`, keeping reasoning
+  transcript entries compact by default while allowing full live thinking text
+  through command-palette or composer toggles
 - AgentLoop cancellation now propagates into cancel-aware model/tool execution; `run_shell` starts commands in a process group and kills that group when a durable cancel event is observed, while remote model streams and blocked model process-pipe reads stop through cancel-aware polling
 - deterministic `--once` snapshot path for CI/release smoke tests
 
