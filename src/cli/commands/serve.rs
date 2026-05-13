@@ -4003,6 +4003,9 @@ fn run_acp_stdio(args: ServeAcpArgs) -> AppResult<()> {
         if line.trim().is_empty() {
             continue;
         }
+        if acp_try_streaming_tool_call(&line, &mut state, &mut stdout)? {
+            continue;
+        }
         match acp_dispatch_for_message(&line, &mut state) {
             AcpDispatch::Responses(responses) => {
                 write_json_responses(&mut stdout, responses)?;
@@ -4024,6 +4027,60 @@ fn write_json_responses<W: Write>(writer: &mut W, responses: Vec<JsonValue>) -> 
         writer.flush()?;
     }
     Ok(())
+}
+
+fn acp_try_streaming_tool_call<W: Write>(
+    message: &str,
+    state: &mut AcpStdioState,
+    writer: &mut W,
+) -> AppResult<bool> {
+    let Ok(root) = parse_root_object(message) else {
+        return Ok(false);
+    };
+    if root.get("jsonrpc").and_then(json_as_string) != Some("2.0") {
+        return Ok(false);
+    }
+    if root.get("method").and_then(json_as_string) != Some("session/tools/call") {
+        return Ok(false);
+    }
+    let params = root
+        .get("params")
+        .and_then(json_as_object)
+        .cloned()
+        .unwrap_or_default();
+    let Some(name) = params.get("name").and_then(json_as_string) else {
+        return Ok(false);
+    };
+    if !matches!(name, "exec_shell" | "task_shell_start") {
+        return Ok(false);
+    }
+    let arguments = params.get("arguments").and_then(json_as_object);
+    if !acp_json_truthy(arguments.and_then(|args| args.get("stream")))
+        && !acp_json_truthy(arguments.and_then(|args| args.get("follow")))
+    {
+        return Ok(false);
+    }
+
+    let response_id = root.get("id").cloned().unwrap_or(JsonValue::Null);
+    match acp_stream_shell_tool_call(response_id.clone(), &params, state, writer) {
+        Ok(()) => Ok(true),
+        Err((code, message)) => {
+            write_json_responses(
+                writer,
+                vec![jsonrpc_error_response(response_id, code, &message)],
+            )?;
+            Ok(true)
+        }
+    }
+}
+
+fn acp_json_truthy(value: Option<&JsonValue>) -> bool {
+    match value {
+        Some(JsonValue::Bool(value)) => *value,
+        Some(JsonValue::Number(value)) => value != "0",
+        Some(JsonValue::String(value)) => truthy_str(value),
+        _ => false,
+    }
 }
 
 fn acp_dispatch_for_message(message: &str, state: &mut AcpStdioState) -> AcpDispatch {
@@ -4545,6 +4602,315 @@ fn acp_session_tools_call_recorded(
         call_item_id: Some(call_item.id),
         result_item_id: Some(result_item.id),
     })
+}
+
+fn acp_stream_shell_tool_call<W: Write>(
+    response_id: JsonValue,
+    params: &BTreeMap<String, JsonValue>,
+    state: &AcpStdioState,
+    writer: &mut W,
+) -> Result<(), (i64, String)> {
+    let session_id = acp_session_id_from_params(params)?.to_string();
+    let session = acp_session_from_params(params, state)?;
+    let name = acp_tool_name_from_params(params)?.to_string();
+    let mut arguments = match params.get("arguments") {
+        Some(value) => json_as_object(value)
+            .ok_or_else(|| (-32602, "arguments must be an object".to_string()))?
+            .clone(),
+        None => BTreeMap::new(),
+    };
+    if name == "exec_shell" {
+        arguments.insert("background".to_string(), JsonValue::Bool(true));
+    }
+
+    let tool_call_id = acp_next_tool_call_id();
+    let mut turn_id = None;
+    let mut call_item_id = None;
+    if let Some(thread_id) = session.runtime_thread_id.as_deref() {
+        let turn = state
+            .store
+            .append_turn(
+                thread_id,
+                "assistant".to_string(),
+                format!("ACP streaming tool call `{name}` running"),
+            )
+            .map_err(|error| (-32603, error.to_string()))?;
+        let call_item = state
+            .store
+            .append_item(
+                thread_id,
+                Some(&turn.id),
+                "tool_call".to_string(),
+                Some("assistant".to_string()),
+                acp_tool_call_content(&name, &arguments),
+                "running".to_string(),
+            )
+            .map_err(|error| (-32603, error.to_string()))?;
+        turn_id = Some(turn.id);
+        call_item_id = Some(call_item.id);
+    }
+
+    let running = AcpToolCallOutcome {
+        result: JsonValue::Null,
+        text: String::new(),
+        is_error: false,
+        turn_id: turn_id.clone(),
+        call_item_id: call_item_id.clone(),
+        result_item_id: None,
+    };
+    write_json_responses(
+        writer,
+        vec![acp_session_tool_call_update(
+            &session_id,
+            &name,
+            &tool_call_id,
+            &arguments,
+            &running,
+        )],
+    )
+    .map_err(|error| (-32603, error.to_string()))?;
+
+    let mcp_state = acp_mcp_state_for_session_turn(session, state, turn_id.clone());
+    if !mcp_side_effect_tools_enabled(&mcp_state) {
+        let outcome = acp_finish_recorded_tool_call(
+            state,
+            session,
+            &name,
+            turn_id,
+            call_item_id,
+            format!("ACP shell-session tool `{name}` requires a loaded runtime thread"),
+            true,
+        )?;
+        return acp_write_tool_call_completion(
+            response_id,
+            &session_id,
+            &name,
+            &tool_call_id,
+            outcome,
+            writer,
+        );
+    }
+    let start_input =
+        mcp_input_with_workspace_defaults(&name, tool_input_from_json(&arguments), &mcp_state);
+    let start_result = execute_mcp_shell_tool(&name, start_input, &mcp_state);
+    let start_text = match start_result {
+        Ok(text) => text,
+        Err(error) => {
+            let outcome = acp_finish_recorded_tool_call(
+                state,
+                session,
+                &name,
+                turn_id,
+                call_item_id,
+                error.to_string(),
+                true,
+            )?;
+            return acp_write_tool_call_completion(
+                response_id,
+                &session_id,
+                &name,
+                &tool_call_id,
+                outcome,
+                writer,
+            );
+        }
+    };
+
+    let Some(task_id) = acp_extract_task_id(&start_text) else {
+        let outcome = acp_finish_recorded_tool_call(
+            state,
+            session,
+            &name,
+            turn_id,
+            call_item_id,
+            start_text,
+            false,
+        )?;
+        return acp_write_tool_call_completion(
+            response_id,
+            &session_id,
+            &name,
+            &tool_call_id,
+            outcome,
+            writer,
+        );
+    };
+
+    let wait_tool_name = if name == "task_shell_start" {
+        "task_shell_wait"
+    } else {
+        "exec_shell_wait"
+    };
+    let timeout_ms = acp_stream_timeout_ms(&arguments);
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut progress_count = 0_usize;
+    let latest_delta = loop {
+        let wait_input = ToolInput::new()
+            .with_arg("task_id", task_id.clone())
+            .with_arg("wait", "false")
+            .with_arg("timeout_ms", "1");
+        let delta = ExecShellWaitTool {
+            tool_name: wait_tool_name,
+        }
+        .execute(wait_input)
+        .map_err(|error| (-32603, error.to_string()))?
+        .summary;
+        if acp_shell_delta_has_output(&delta) {
+            progress_count += 1;
+            write_json_responses(
+                writer,
+                vec![acp_session_tool_progress_update(
+                    &session_id,
+                    &name,
+                    &tool_call_id,
+                    &running,
+                    delta.clone(),
+                    progress_count,
+                    progress_count,
+                    false,
+                )],
+            )
+            .map_err(|error| (-32603, error.to_string()))?;
+        }
+        let running_status = acp_shell_status(&delta).is_some_and(|status| status == "running");
+        if !running_status || Instant::now() >= deadline {
+            break delta;
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+
+    let snapshot = ExecShellShowTool
+        .execute(ToolInput::new().with_arg("task_id", task_id))
+        .map(|output| output.summary)
+        .unwrap_or(latest_delta);
+    let final_text = format!("{start_text}\n\n{snapshot}");
+    let is_error = acp_shell_status(&final_text).is_some_and(|status| status == "failed");
+    let outcome = acp_finish_recorded_tool_call(
+        state,
+        session,
+        &name,
+        turn_id,
+        call_item_id,
+        final_text,
+        is_error,
+    )?;
+    acp_write_tool_call_completion(
+        response_id,
+        &session_id,
+        &name,
+        &tool_call_id,
+        outcome,
+        writer,
+    )
+}
+
+fn acp_finish_recorded_tool_call(
+    state: &AcpStdioState,
+    session: &AcpSession,
+    name: &str,
+    turn_id: Option<String>,
+    call_item_id: Option<String>,
+    text: String,
+    is_error: bool,
+) -> Result<AcpToolCallOutcome, (i64, String)> {
+    let status = if is_error { "failed" } else { "completed" };
+    let mut result_item_id = None;
+    if let (Some(thread_id), Some(turn_id), Some(call_item_id)) = (
+        session.runtime_thread_id.as_deref(),
+        turn_id.as_deref(),
+        call_item_id.as_deref(),
+    ) {
+        let call_item = state
+            .store
+            .load_item(thread_id, call_item_id)
+            .map_err(|error| (-32603, error.to_string()))?;
+        state
+            .store
+            .update_item(
+                thread_id,
+                call_item_id,
+                call_item.content,
+                status.to_string(),
+            )
+            .map_err(|error| (-32603, error.to_string()))?;
+        let result_item = state
+            .store
+            .append_item(
+                thread_id,
+                Some(turn_id),
+                "tool_result".to_string(),
+                Some("tool".to_string()),
+                text.clone(),
+                status.to_string(),
+            )
+            .map_err(|error| (-32603, error.to_string()))?;
+        state
+            .store
+            .update_turn(
+                thread_id,
+                turn_id,
+                format!("ACP streaming tool call `{name}` {status}"),
+                status.to_string(),
+            )
+            .map_err(|error| (-32603, error.to_string()))?;
+        result_item_id = Some(result_item.id);
+    }
+    Ok(AcpToolCallOutcome {
+        result: mcp_tool_text_result(text.clone(), is_error),
+        text,
+        is_error,
+        turn_id,
+        call_item_id,
+        result_item_id,
+    })
+}
+
+fn acp_write_tool_call_completion<W: Write>(
+    response_id: JsonValue,
+    session_id: &str,
+    name: &str,
+    tool_call_id: &str,
+    outcome: AcpToolCallOutcome,
+    writer: &mut W,
+) -> Result<(), (i64, String)> {
+    let mut final_response = jsonrpc_success_response_without_id(outcome.result.clone());
+    add_jsonrpc_id(&mut final_response, response_id);
+    write_json_responses(
+        writer,
+        vec![
+            acp_session_tool_result_update(session_id, name, tool_call_id, &outcome),
+            final_response,
+        ],
+    )
+    .map_err(|error| (-32603, error.to_string()))
+}
+
+fn acp_extract_task_id(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("task_id: "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn acp_stream_timeout_ms(arguments: &BTreeMap<String, JsonValue>) -> u64 {
+    arguments
+        .get("stream_timeout_ms")
+        .or_else(|| arguments.get("timeout_ms"))
+        .and_then(json_as_u64)
+        .unwrap_or(5_000)
+        .clamp(1, 600_000)
+}
+
+fn acp_shell_status(text: &str) -> Option<&str> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("status: "))
+        .map(str::trim)
+        .last()
+}
+
+fn acp_shell_delta_has_output(text: &str) -> bool {
+    text.contains("stdout_delta:\n") || text.contains("stderr_delta:\n")
 }
 
 fn acp_tool_call_content(name: &str, arguments: &BTreeMap<String, JsonValue>) -> String {
@@ -9559,6 +9925,96 @@ shell_allowlist = ["cargo test"]
         assert!(rendered.contains(r#""id":33"#));
         assert!(rendered.contains("large-output-large-output"));
         assert!(rendered.contains(r#""isError":false"#));
+    }
+
+    #[test]
+    fn acp_session_tools_call_streams_shell_output_while_running() {
+        let mut state = acp_state("acp-tools-stream-shell");
+        let workspace = temp_dir("acp-tools-stream-shell-workspace");
+        let session = state
+            .store
+            .create_session(
+                "ACP stream shell".to_string(),
+                workspace.display().to_string(),
+            )
+            .unwrap();
+        let thread = state
+            .store
+            .create_thread_for_session(
+                &session.id,
+                "ACP stream shell thread".to_string(),
+                workspace.display().to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let acp_session_id = "stream-shell-session".to_string();
+        state.sessions.insert(
+            acp_session_id.clone(),
+            AcpSession {
+                cwd: workspace,
+                runtime_session_id: Some(session.id),
+                runtime_thread_id: Some(thread.id.clone()),
+            },
+        );
+        let responder =
+            spawn_mcp_permission_responder(state.store.clone(), thread.id.clone(), "approved");
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":34,"method":"session/tools/call","params":{{"sessionId":"{acp_session_id}","name":"task_shell_start","arguments":{{"command":"echo acp-stream && sleep 0.1 && echo acp-done","stream":true,"stream_timeout_ms":2000}}}}}}"#
+        );
+        let mut output = Vec::new();
+
+        let handled = acp_try_streaming_tool_call(&request, &mut state, &mut output).unwrap();
+        responder.join().unwrap();
+
+        assert!(handled);
+        let rendered = String::from_utf8(output).unwrap();
+        let lines = rendered.lines().collect::<Vec<_>>();
+        assert!(lines.len() >= 4, "{rendered}");
+        assert!(lines[0].contains(r#""sessionUpdate":"tool_call""#));
+        assert!(rendered.contains(r#""partial":true"#), "{rendered}");
+        assert!(rendered.contains("stdout_delta"), "{rendered}");
+        assert!(rendered.contains("acp-stream"), "{rendered}");
+        assert!(rendered.contains("acp-done"), "{rendered}");
+        assert!(rendered.contains(r#""id":34"#), "{rendered}");
+        let progress_index = rendered.find(r#""partial":true"#).unwrap();
+        let final_index = rendered.rfind(r#""id":34"#).unwrap();
+        assert!(progress_index < final_index, "{rendered}");
+        let items = state.store.list_items(&thread.id, None).unwrap();
+        assert!(items
+            .iter()
+            .any(|item| item.item_type == "tool_result" && item.content.contains("acp-done")));
+    }
+
+    #[test]
+    fn acp_session_tools_call_streaming_shell_requires_loaded_runtime_thread() {
+        let mut state = acp_state("acp-tools-stream-shell-gate");
+        let workspace = temp_dir("acp-tools-stream-shell-gate-workspace");
+        let acp_session_id = "stream-shell-readonly-session".to_string();
+        state.sessions.insert(
+            acp_session_id.clone(),
+            AcpSession {
+                cwd: workspace,
+                runtime_session_id: None,
+                runtime_thread_id: None,
+            },
+        );
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":35,"method":"session/tools/call","params":{{"sessionId":"{acp_session_id}","name":"task_shell_start","arguments":{{"command":"echo should-not-run","stream":true}}}}}}"#
+        );
+        let mut output = Vec::new();
+
+        let handled = acp_try_streaming_tool_call(&request, &mut state, &mut output).unwrap();
+
+        assert!(handled);
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains(r#""sessionUpdate":"tool_call""#));
+        assert!(
+            rendered.contains("requires a loaded runtime thread"),
+            "{rendered}"
+        );
+        assert!(rendered.contains(r#""isError":true"#), "{rendered}");
+        assert!(!rendered.contains("stdout_delta"), "{rendered}");
     }
 
     #[test]

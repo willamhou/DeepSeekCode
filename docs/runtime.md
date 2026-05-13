@@ -484,18 +484,23 @@ worktree when the client passes `apply=true`. When `sessionId` or `threadId` is
 provided, restore is scoped to checkpoints bound to that runtime thread.
 `session/tools/list` and `session/tools/call` expose the same workspace/runtime
 tool bridge as the MCP stdio server, scoped to the ACP session workspace.
-Read-only tools are available for any ACP session. `run_shell`, `apply_patch`,
-`write_file`, `edit_file`, `delete_file`, `copy_file`, and `move_file` are available only when the ACP session is
-loaded from a runtime thread, and they reuse that thread's durable permission
-events before mutating the workspace. Loaded-session tool calls also create an
+Read-only tools are available for any ACP session. `run_shell`, `exec_shell`,
+`task_shell_start`, `exec_shell_interact`, `exec_interact`,
+`exec_shell_cancel`, `apply_patch`, `write_file`, `edit_file`, `delete_file`,
+`copy_file`, and `move_file` are available only when the ACP session is loaded
+from a runtime thread, and they reuse that thread's durable permission events
+before mutating the workspace. Loaded-session tool calls also create an
 assistant turn with `tool_call` and `tool_result` runtime items; side-effect
 permission requests are linked to that same turn for auditability. ACP
 `session/tools/call` now emits standard-shaped `session/update` notifications
 before the final JSON-RPC result: an initial `sessionUpdate: "tool_call"` with
 `toolCallId`, title, kind, status, and `rawInput`, followed by
 bounded intermediate `sessionUpdate: "tool_call_update"` progress chunks for
-large tool outputs, then a final `tool_call_update` with the matching
-`toolCallId`, final status, complete text content, and `rawOutput`.
+large tool outputs. `exec_shell` and `task_shell_start` also support opt-in live
+stdout/stderr streaming with `stream=true` or `follow=true`; the adapter flushes
+partial `tool_call_update` deltas while the background shell job is still
+running, then sends a final `tool_call_update` with the matching `toolCallId`,
+final status, complete text content, and `rawOutput`.
 Loaded-session updates include the runtime turn/item ids under `_meta.runtime`
 so clients can align incremental UI state with the durable audit trail.
 
@@ -504,9 +509,8 @@ deepseek serve --acp
 deepseek serve --acp --workspace /path/to/workspace
 ```
 
-True process-level ACP stdout/stderr streaming while a tool is still executing
-remains future work. Use `serve --http` for the durable runtime API and
-`serve --mcp` when another client needs DeepSeekCode's tools as MCP tools.
+Use `serve --http` for the durable runtime API and `serve --mcp` when another
+client needs DeepSeekCode's tools as MCP tools.
 
 ## Durable Runtime v1
 

@@ -467,7 +467,7 @@ Remaining:
 
 ### Phase G2: MCP Server Mode
 
-Status: `started`
+Status: `completed`
 
 Landed first slice:
 
@@ -607,6 +607,10 @@ Landed first slice:
 - ACP `session/tools/call` now emits bounded intermediate `tool_call_update`
   progress chunks for large tool outputs before the final completion update,
   while preserving the existing small-output response shape
+- ACP `session/tools/call` now supports opt-in true process-level stdout/stderr
+  streaming for `exec_shell` and `task_shell_start` through `stream=true` or
+  `follow=true`, flushing partial `tool_call_update` deltas while shell jobs are
+  still running before the final completion result
 - `deepseek serve --acp --workspace <path>` starts ACP from an explicit
   workspace
 - `deepseek mcp add/get/remove/enable/disable/validate` covers common MCP
@@ -640,8 +644,8 @@ Landed first slice:
 
 Remaining:
 
-- true process-level ACP stdout/stderr streaming while tools are still
-  executing, beyond bounded post-execution output progress chunks
+- no open Phase G2 MCP/ACP parity gaps identified; continue monitoring upstream
+  MCP/ACP protocol drift and client interoperability reports
 
 ### Phase H: Packaging
 
