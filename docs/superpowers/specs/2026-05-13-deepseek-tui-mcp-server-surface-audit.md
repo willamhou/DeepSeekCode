@@ -29,8 +29,8 @@ trusted side-effect or durable approval modes. Persistent `note` and enabled
 2. Document the full approval-gated MCP write surface now available:
    `apply_patch`, `write_file`, `edit_file`, `delete_file`, `copy_file`,
    `move_file`, `revert_turn`, `github_comment`, and `github_close_issue`.
-3. Keep a true remaining gap for long-tail agent-only side-effect tools that
-   are not yet MCP-server-visible, plus the existing ACP streaming gap.
+3. Keep a true remaining gap only for transport behavior that is not yet
+   MCP/ACP-compatible, especially ACP streaming while tools are still running.
 4. Strengthen focused tests so `tools/list` asserts the full read-only surface
    and `tools/call github_close_issue` is covered through durable approvals.
 
@@ -40,8 +40,9 @@ trusted side-effect or durable approval modes. Persistent `note` and enabled
   tool surface.
 - Documented the full durable-approval MCP write surface, including
   `edit_file`, `revert_turn`, `github_comment`, and `github_close_issue`.
-- Narrowed the remaining MCP server gap to long-tail agent-only side-effect
-  tools that still need explicit MCP safety contracts.
+- Follow-up slices closed the remaining DeepSeek-TUI helper long tail with
+  explicit default/read, durable write, and model-token/network safety
+  contracts.
 - Expanded focused MCP tests for read-only `tools/list` coverage and
   `github_close_issue` durable-approval execution.
 

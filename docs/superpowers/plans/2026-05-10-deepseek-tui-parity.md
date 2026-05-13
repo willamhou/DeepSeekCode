@@ -640,8 +640,6 @@ Landed first slice:
 
 Remaining:
 
-- audit the remaining DeepSeek-TUI MCP long tail after the shell-session and
-  RLM exposure slices
 - true process-level ACP stdout/stderr streaming while tools are still
   executing, beyond bounded post-execution output progress chunks
 
