@@ -123,12 +123,17 @@ npm wrapper 位于 `npm/`，用于发布时把平台 binary 包装成 `deepseek`
 DEEPSEEK_BINARY=./target/release/deepseek node npm/bin/deepseek.js version
 node npm/scripts/stage-platform-package.js --platform linux-x64 --binary ./target/release/deepseek
 node npm/scripts/verify-platform-package.js --platform linux-x64
+deepseek update publish-status
 ```
 
 Release Matrix 会把每个平台的 release binary stage 到
 `npm/platforms/<platform>/bin`，先 smoke-run staged package binary，再打出平台
 npm tarball，并在 tag run 且配置 `NPM_TOKEN` 时先发布平台包，再发布 root wrapper
 包。
+正式发布前可以在下载 workflow artifacts 后运行
+`deepseek update publish-status --dist dist-assets --npm-dist npm-dist --strict`
+检查 npm token、平台 tarball、Homebrew tap 配置和 release `.sha256` 文件是否
+齐全。
 
 ## Runtime 服务模板
 
@@ -171,6 +176,8 @@ deepseek doctor --json
 Tag 发布时如果配置了 repository variable `HOMEBREW_TAP_REPOSITORY` 和 secret
 `HOMEBREW_TAP_TOKEN`，Release Matrix 会在 GitHub Release assets 发布后自动渲染
 并推送 tap 仓库的 `Formula/deepseek.rb`。
+`deepseek update publish-status --dist <release-assets> --strict` 会把缺少 tap
+变量或占位 checksum 识别为未 ready。
 
 ## 升级
 

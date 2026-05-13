@@ -551,6 +551,7 @@ pub enum UpdateAction {
     InstallPackage(UpdateInstallPackageArgs),
     Rollback(UpdateRollbackArgs),
     HomebrewFormula(UpdateHomebrewFormulaArgs),
+    PublishStatus(UpdatePublishStatusArgs),
 }
 
 impl Default for UpdateAction {
@@ -606,6 +607,13 @@ impl Default for UpdateHomebrewFormulaArgs {
             out: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdatePublishStatusArgs {
+    pub dist: Option<String>,
+    pub npm_dist: Option<String>,
+    pub strict: bool,
 }
 
 #[derive(Debug, Default)]
@@ -1157,9 +1165,15 @@ fn parse_update_args(args: Vec<String>) -> Result<UpdateArgs, String> {
                 )?);
                 return Ok(parsed);
             }
+            "publish-status" => {
+                parsed.action = UpdateAction::PublishStatus(parse_update_publish_status_args(
+                    args.into_iter().skip(index + 1).collect(),
+                )?);
+                return Ok(parsed);
+            }
             other => {
                 return Err(format!(
-                    "unknown update argument `{other}`; expected --check|--print-command|package|verify-install|install-package|rollback|homebrew-formula"
+                    "unknown update argument `{other}`; expected --check|--print-command|package|verify-install|install-package|rollback|homebrew-formula|publish-status"
                 ));
             }
         }
@@ -1333,6 +1347,37 @@ fn parse_update_homebrew_formula_args(
             other => {
                 return Err(format!(
                     "unknown flag for `update homebrew-formula`: {other}; expected --version|--repo|--dist|--formula|--out"
+                ));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_update_publish_status_args(args: Vec<String>) -> Result<UpdatePublishStatusArgs, String> {
+    let mut parsed = UpdatePublishStatusArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--dist" if index + 1 < args.len() => {
+                parsed.dist = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--dist" => return Err("update publish-status --dist requires a path".to_string()),
+            "--npm-dist" if index + 1 < args.len() => {
+                parsed.npm_dist = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--npm-dist" => {
+                return Err("update publish-status --npm-dist requires a path".to_string())
+            }
+            "--strict" => {
+                parsed.strict = true;
+                index += 1;
+            }
+            other => {
+                return Err(format!(
+                    "unknown flag for `update publish-status`: {other}; expected --dist|--npm-dist|--strict"
                 ));
             }
         }
@@ -3533,6 +3578,32 @@ mod tests {
                     assert_eq!(formula.out.as_deref(), Some("target/deepseek.rb"));
                 }
                 other => panic!("expected update homebrew-formula, got {other:?}"),
+            },
+            other => panic!("expected Command::Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_update_publish_status() {
+        let cli = Cli::from_argv(vec![
+            "update".to_string(),
+            "publish-status".to_string(),
+            "--dist".to_string(),
+            "dist-assets".to_string(),
+            "--npm-dist".to_string(),
+            "npm-dist".to_string(),
+            "--strict".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Update(args)) => match args.action {
+                UpdateAction::PublishStatus(status) => {
+                    assert_eq!(status.dist.as_deref(), Some("dist-assets"));
+                    assert_eq!(status.npm_dist.as_deref(), Some("npm-dist"));
+                    assert!(status.strict);
+                }
+                other => panic!("expected update publish-status, got {other:?}"),
             },
             other => panic!("expected Command::Update, got {other:?}"),
         }

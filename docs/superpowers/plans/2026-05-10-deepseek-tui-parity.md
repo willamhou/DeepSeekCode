@@ -714,6 +714,10 @@ Landed first slice:
 - Cargo registry distribution now has an explicit source-build/package-only
   decision: the release workflow skips Cargo registry publishing while
   `Cargo.toml publish = false` is present
+- `deepseek update publish-status` now audits npm/Homebrew publish readiness
+  without side effects, including token/tap config, platform npm tarballs,
+  release archives, and non-placeholder `.sha256` files when artifact
+  directories are supplied; `--strict` fails on blocked or skipped checks
 
 Remaining:
 

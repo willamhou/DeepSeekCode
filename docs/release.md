@@ -74,6 +74,7 @@ cargo package --allow-dirty
 DEEPSEEK_BINARY=./target/release/deepseek node npm/bin/deepseek.js version
 node npm/scripts/stage-platform-package.js --platform linux-x64 --binary ./target/release/deepseek
 node npm/scripts/verify-platform-package.js --platform linux-x64
+./target/release/deepseek update publish-status
 ```
 
 For the runtime contract, start `./target/release/deepseek serve --http` and
@@ -168,6 +169,28 @@ to npm.
 Each platform artifact includes a sibling `.sha256` file, for example
 `deepseek-macos-arm64.tar.gz.sha256`. The build job also creates GitHub signed
 artifact attestations for each archive and checksum file.
+
+Before relying on a tag workflow to publish npm or Homebrew, run the local
+readiness check. Without artifact directories it reports metadata and missing
+external configuration only:
+
+```bash
+deepseek update publish-status
+```
+
+After downloading release matrix assets and npm platform package artifacts, run
+the strict gate:
+
+```bash
+deepseek update publish-status \
+  --dist dist-assets \
+  --npm-dist npm-dist \
+  --strict
+```
+
+`--strict` fails when `NPM_TOKEN`/`NODE_AUTH_TOKEN`,
+`HOMEBREW_TAP_REPOSITORY`, `HOMEBREW_TAP_TOKEN`, platform release archives,
+non-placeholder `.sha256` files, or platform npm package tarballs are missing.
 
 When the workflow runs from a `v*` tag, it also creates or updates the matching
 GitHub Release and uploads every platform archive plus checksum file as release

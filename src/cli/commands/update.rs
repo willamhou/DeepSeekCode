@@ -3,7 +3,7 @@ use std::process::{Command, Output};
 
 use crate::cli::app::{
     UpdateAction, UpdateArgs, UpdateHomebrewFormulaArgs, UpdateInstallPackageArgs,
-    UpdatePackageArgs, UpdateRollbackArgs, UpdateVerifyInstallArgs,
+    UpdatePackageArgs, UpdatePublishStatusArgs, UpdateRollbackArgs, UpdateVerifyInstallArgs,
 };
 use crate::error::{app_error, AppResult};
 use crate::util::json::json_escape;
@@ -19,6 +19,7 @@ pub fn run(args: UpdateArgs) -> AppResult<()> {
         UpdateAction::InstallPackage(install_args) => run_install_package(install_args),
         UpdateAction::Rollback(rollback_args) => run_rollback(rollback_args),
         UpdateAction::HomebrewFormula(formula_args) => run_homebrew_formula(formula_args),
+        UpdateAction::PublishStatus(status_args) => run_publish_status(status_args),
     }
 }
 
@@ -41,6 +42,7 @@ fn run_status(args: UpdateArgs) -> AppResult<()> {
     );
     println!("  install_verify: deepseek update verify-install --bin <path-to-deepseek>");
     println!("  homebrew_formula: deepseek update homebrew-formula --dist <release-sha-dir>");
+    println!("  publish_status: deepseek update publish-status --dist <release-asset-dir> --npm-dist <npm-artifact-dir>");
     if args.check {
         println!("  check: update command is available");
     } else {
@@ -171,6 +173,457 @@ fn run_homebrew_formula(args: &UpdateHomebrewFormulaArgs) -> AppResult<()> {
     println!("  dist: {}", dist.display());
     println!("  formula: {}", output.display());
     Ok(())
+}
+
+fn run_publish_status(args: &UpdatePublishStatusArgs) -> AppResult<()> {
+    let report = build_publish_status_report(&repo_root(), args, &env_value)?;
+
+    println!("DeepSeekCode publish status");
+    println!("  version: {}", report.version);
+    for check in &report.checks {
+        println!(
+            "  {}: {} ({})",
+            check.name,
+            check.status.label(),
+            check.detail
+        );
+    }
+    println!("  not_ready: {}", report.not_ready_count());
+    if report.not_ready_count() == 0 {
+        println!("  next: tag release can publish npm and Homebrew when workflow gates pass");
+    } else {
+        println!("  next: configure missing secrets/assets, then rerun with --strict");
+    }
+
+    if args.strict && report.not_ready_count() > 0 {
+        return Err(app_error(format!(
+            "publish status is not ready: {} check(s) are blocked or skipped",
+            report.not_ready_count()
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublishStatusReport {
+    version: String,
+    checks: Vec<PublishStatusCheck>,
+}
+
+impl PublishStatusReport {
+    fn not_ready_count(&self) -> usize {
+        self.checks
+            .iter()
+            .filter(|check| !check.status.is_ready())
+            .count()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublishStatusCheck {
+    name: &'static str,
+    status: PublishStatus,
+    detail: String,
+}
+
+impl PublishStatusCheck {
+    fn ready(name: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            name,
+            status: PublishStatus::Ready,
+            detail: detail.into(),
+        }
+    }
+
+    fn blocked(name: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            name,
+            status: PublishStatus::Blocked,
+            detail: detail.into(),
+        }
+    }
+
+    fn skipped(name: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            name,
+            status: PublishStatus::Skipped,
+            detail: detail.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishStatus {
+    Ready,
+    Blocked,
+    Skipped,
+}
+
+impl PublishStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Blocked => "blocked",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    fn is_ready(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
+fn build_publish_status_report(
+    repo: &Path,
+    args: &UpdatePublishStatusArgs,
+    env: &impl Fn(&str) -> Option<String>,
+) -> AppResult<PublishStatusReport> {
+    let cargo_toml = std::fs::read_to_string(repo.join("Cargo.toml"))?;
+    let version = toml_string_value(&cargo_toml, "version")
+        .ok_or_else(|| app_error("Cargo.toml package version was not found"))?;
+
+    let mut checks = Vec::new();
+    checks.push(cargo_registry_status(&cargo_toml, env));
+    checks.push(npm_metadata_status(repo, &version));
+    checks.push(npm_token_status(env));
+    checks.push(npm_artifacts_status(args.npm_dist.as_deref(), &version));
+    checks.push(release_asset_status(args.dist.as_deref()));
+    checks.push(homebrew_template_status(repo, &version));
+    checks.push(homebrew_tap_status(env));
+
+    Ok(PublishStatusReport { version, checks })
+}
+
+fn cargo_registry_status(
+    cargo_toml: &str,
+    env: &impl Fn(&str) -> Option<String>,
+) -> PublishStatusCheck {
+    if toml_bool_value(cargo_toml, "publish") == Some(false) {
+        return PublishStatusCheck::ready(
+            "cargo_registry",
+            "Cargo.toml publish=false; registry distribution is source-build/package-only by policy",
+        );
+    }
+    if env("CARGO_REGISTRY_TOKEN").is_some() {
+        PublishStatusCheck::ready("cargo_registry", "CARGO_REGISTRY_TOKEN is configured")
+    } else {
+        PublishStatusCheck::skipped(
+            "cargo_registry",
+            "CARGO_REGISTRY_TOKEN is missing; Cargo publish job will skip",
+        )
+    }
+}
+
+fn npm_metadata_status(repo: &Path, version: &str) -> PublishStatusCheck {
+    match npm_metadata_failures(repo, version) {
+        Ok(failures) if failures.is_empty() => PublishStatusCheck::ready(
+            "npm_metadata",
+            "root and platform package versions/licenses match Cargo.toml",
+        ),
+        Ok(failures) => PublishStatusCheck::blocked("npm_metadata", failures.join("; ")),
+        Err(error) => PublishStatusCheck::blocked("npm_metadata", error.to_string()),
+    }
+}
+
+fn npm_token_status(env: &impl Fn(&str) -> Option<String>) -> PublishStatusCheck {
+    if env("NPM_TOKEN").is_some() || env("NODE_AUTH_TOKEN").is_some() {
+        PublishStatusCheck::ready("npm_token", "NPM_TOKEN or NODE_AUTH_TOKEN is configured")
+    } else {
+        PublishStatusCheck::blocked(
+            "npm_token",
+            "NPM_TOKEN/NODE_AUTH_TOKEN is missing; tag workflow will skip npm publish",
+        )
+    }
+}
+
+fn npm_artifacts_status(npm_dist: Option<&str>, version: &str) -> PublishStatusCheck {
+    let Some(npm_dist) = npm_dist else {
+        return PublishStatusCheck::skipped(
+            "npm_artifacts",
+            "pass --npm-dist <dir> after release matrix npm artifacts are downloaded",
+        );
+    };
+    let npm_dist = Path::new(npm_dist);
+    if !npm_dist.is_dir() {
+        return PublishStatusCheck::blocked(
+            "npm_artifacts",
+            format!("npm artifact directory not found: {}", npm_dist.display()),
+        );
+    }
+
+    let mut missing = Vec::new();
+    for platform in NPM_PLATFORMS {
+        let file = format!("deepseek-code-cli-{platform}-{version}.tgz");
+        if !npm_dist.join(&file).is_file() {
+            missing.push(file);
+        }
+    }
+    if missing.is_empty() {
+        PublishStatusCheck::ready(
+            "npm_artifacts",
+            "platform npm package tarballs are present for Linux, macOS, and Windows",
+        )
+    } else {
+        PublishStatusCheck::blocked(
+            "npm_artifacts",
+            format!(
+                "missing platform npm package tarball(s): {}",
+                missing.join(", ")
+            ),
+        )
+    }
+}
+
+fn release_asset_status(dist: Option<&str>) -> PublishStatusCheck {
+    let Some(dist) = dist else {
+        return PublishStatusCheck::skipped(
+            "release_assets",
+            "pass --dist <dir> after release archives and .sha256 files are downloaded",
+        );
+    };
+    let dist = Path::new(dist);
+    if !dist.is_dir() {
+        return PublishStatusCheck::blocked(
+            "release_assets",
+            format!("release asset directory not found: {}", dist.display()),
+        );
+    }
+
+    let expected = [
+        "deepseek-linux-x64.tar.gz",
+        "deepseek-macos-x64.tar.gz",
+        "deepseek-macos-arm64.tar.gz",
+        "deepseek-windows-x64.zip",
+    ];
+    let mut missing = Vec::new();
+    let mut invalid = Vec::new();
+    for artifact in expected {
+        if !dist.join(artifact).is_file() {
+            missing.push(artifact.to_string());
+        }
+        let sha_file = format!("{artifact}.sha256");
+        match read_sha256_file(&dist.join(&sha_file)) {
+            Ok(sha) if sha != "0".repeat(64) => {}
+            Ok(_) => invalid.push(format!("{sha_file}: placeholder zero checksum")),
+            Err(error) => invalid.push(error.to_string()),
+        }
+    }
+
+    if missing.is_empty() && invalid.is_empty() {
+        PublishStatusCheck::ready(
+            "release_assets",
+            "release archives and non-placeholder SHA-256 files are present for every platform",
+        )
+    } else {
+        let mut details = Vec::new();
+        if !missing.is_empty() {
+            details.push(format!("missing archive(s): {}", missing.join(", ")));
+        }
+        if !invalid.is_empty() {
+            details.push(format!("invalid checksum(s): {}", invalid.join("; ")));
+        }
+        PublishStatusCheck::blocked("release_assets", details.join("; "))
+    }
+}
+
+fn homebrew_template_status(repo: &Path, version: &str) -> PublishStatusCheck {
+    let path = repo.join("packaging/homebrew/deepseek.rb");
+    match std::fs::read_to_string(&path) {
+        Ok(formula) => {
+            let formula_version = ruby_string_value(&formula, "version");
+            if formula_version.as_deref() != Some(version) {
+                return PublishStatusCheck::blocked(
+                    "homebrew_formula",
+                    format!(
+                        "formula version {} does not match Cargo.toml {version}",
+                        formula_version.unwrap_or_else(|| "<missing>".to_string())
+                    ),
+                );
+            }
+            PublishStatusCheck::ready(
+                "homebrew_formula",
+                "tracked formula template matches the package version; tap publish renders real checksums from --dist",
+            )
+        }
+        Err(error) => PublishStatusCheck::blocked(
+            "homebrew_formula",
+            format!("failed to read {}: {error}", path.display()),
+        ),
+    }
+}
+
+fn homebrew_tap_status(env: &impl Fn(&str) -> Option<String>) -> PublishStatusCheck {
+    let tap = env("HOMEBREW_TAP_REPOSITORY");
+    let token = env("HOMEBREW_TAP_TOKEN");
+    match (tap, token) {
+        (Some(tap), Some(_)) if is_owner_repo(&tap) => PublishStatusCheck::ready(
+            "homebrew_tap",
+            format!("HOMEBREW_TAP_REPOSITORY is configured as {tap}"),
+        ),
+        (Some(tap), Some(_)) => PublishStatusCheck::blocked(
+            "homebrew_tap",
+            format!("HOMEBREW_TAP_REPOSITORY must use owner/name, got {tap}"),
+        ),
+        _ => PublishStatusCheck::blocked(
+            "homebrew_tap",
+            "HOMEBREW_TAP_REPOSITORY/HOMEBREW_TAP_TOKEN is missing; tag workflow will skip tap publish",
+        ),
+    }
+}
+
+const NPM_PLATFORMS: &[&str] = &["linux-x64", "macos-arm64", "macos-x64", "windows-x64"];
+
+fn npm_metadata_failures(repo: &Path, version: &str) -> AppResult<Vec<String>> {
+    let npm_root = repo.join("npm");
+    let root_package = std::fs::read_to_string(npm_root.join("package.json"))?;
+    let mut failures = Vec::new();
+
+    let root_version = json_string_value(&root_package, "version");
+    if root_version.as_deref() != Some(version) {
+        failures.push(format!(
+            "npm/package.json version {} does not match Cargo.toml {version}",
+            root_version.unwrap_or_else(|| "<missing>".to_string())
+        ));
+    }
+    if json_string_value(&root_package, "license").as_deref() != Some("SEE LICENSE IN LICENSE") {
+        failures.push("npm/package.json license should be SEE LICENSE IN LICENSE".to_string());
+    }
+    if !npm_root.join("LICENSE").is_file() {
+        failures.push("npm/LICENSE is missing".to_string());
+    }
+
+    for platform in NPM_PLATFORMS {
+        let path = npm_root
+            .join("platforms")
+            .join(platform)
+            .join("package.json");
+        let package = std::fs::read_to_string(&path)?;
+        let expected_name = format!("@deepseek-code/cli-{platform}");
+        let name = json_string_value(&package, "name");
+        if name.as_deref() != Some(expected_name.as_str()) {
+            failures.push(format!(
+                "{} name {} does not match {expected_name}",
+                path.display(),
+                name.unwrap_or_else(|| "<missing>".to_string())
+            ));
+        }
+        let package_version = json_string_value(&package, "version");
+        if package_version.as_deref() != Some(version) {
+            failures.push(format!(
+                "{expected_name} version {} does not match Cargo.toml {version}",
+                package_version.unwrap_or_else(|| "<missing>".to_string())
+            ));
+        }
+        if json_string_value(&package, "license").as_deref() != Some("SEE LICENSE IN LICENSE") {
+            failures.push(format!(
+                "{expected_name} license should be SEE LICENSE IN LICENSE"
+            ));
+        }
+        if !npm_root
+            .join("platforms")
+            .join(platform)
+            .join("LICENSE")
+            .is_file()
+        {
+            failures.push(format!("{expected_name} LICENSE file is missing"));
+        }
+
+        let optional_version = json_dependency_version(&root_package, &expected_name);
+        if optional_version.as_deref() != Some(version) {
+            failures.push(format!(
+                "npm/package.json optionalDependency {expected_name}={} does not match {version}",
+                optional_version.unwrap_or_else(|| "<missing>".to_string())
+            ));
+        }
+    }
+
+    Ok(failures)
+}
+
+fn env_value(name: &str) -> Option<String> {
+    std::env::var_os(name)
+        .map(|value| value.to_string_lossy().trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn toml_string_value(content: &str, key: &str) -> Option<String> {
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let Some((left, right)) = line.split_once('=') else {
+            continue;
+        };
+        if left.trim() == key {
+            return parse_quoted_string(right.trim());
+        }
+    }
+    None
+}
+
+fn toml_bool_value(content: &str, key: &str) -> Option<bool> {
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let Some((left, right)) = line.split_once('=') else {
+            continue;
+        };
+        if left.trim() == key {
+            return match right.trim() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+fn json_string_value(content: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let index = content.find(&needle)?;
+    let after_key = &content[index + needle.len()..];
+    let after_colon = after_key.split_once(':')?.1.trim_start();
+    parse_quoted_string(after_colon)
+}
+
+fn json_dependency_version(content: &str, name: &str) -> Option<String> {
+    let needle = format!("\"{name}\"");
+    let index = content.find(&needle)?;
+    let after_key = &content[index + needle.len()..];
+    let after_colon = after_key.split_once(':')?.1.trim_start();
+    parse_quoted_string(after_colon)
+}
+
+fn ruby_string_value(content: &str, key: &str) -> Option<String> {
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix(key) {
+            return parse_quoted_string(rest.trim_start());
+        }
+    }
+    None
+}
+
+fn parse_quoted_string(value: &str) -> Option<String> {
+    let value = value.trim_start();
+    let rest = value.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+fn is_owner_repo(value: &str) -> bool {
+    let mut parts = value.split('/');
+    let Some(owner) = parts.next() else {
+        return false;
+    };
+    let Some(repo) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none() && !owner.is_empty() && !repo.is_empty()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -795,6 +1248,99 @@ mod tests {
     }
 
     #[test]
+    fn publish_status_reports_missing_external_publish_inputs() {
+        let args = UpdatePublishStatusArgs::default();
+        let report = build_publish_status_report(&repo_root(), &args, &|_| None).unwrap();
+
+        assert_eq!(status_of(&report, "cargo_registry"), PublishStatus::Ready);
+        assert_eq!(status_of(&report, "npm_metadata"), PublishStatus::Ready);
+        assert_eq!(status_of(&report, "npm_token"), PublishStatus::Blocked);
+        assert_eq!(status_of(&report, "npm_artifacts"), PublishStatus::Skipped);
+        assert_eq!(status_of(&report, "release_assets"), PublishStatus::Skipped);
+        assert_eq!(status_of(&report, "homebrew_formula"), PublishStatus::Ready);
+        assert_eq!(status_of(&report, "homebrew_tap"), PublishStatus::Blocked);
+        assert_eq!(report.not_ready_count(), 4);
+    }
+
+    #[test]
+    fn publish_status_passes_when_publish_artifacts_and_env_are_present() {
+        let root = temp_root("publish-ready");
+        let dist = root.join("dist-assets");
+        let npm_dist = root.join("npm-dist");
+        std::fs::create_dir_all(&dist).unwrap();
+        std::fs::create_dir_all(&npm_dist).unwrap();
+
+        for (index, artifact) in [
+            "deepseek-linux-x64.tar.gz",
+            "deepseek-macos-x64.tar.gz",
+            "deepseek-macos-arm64.tar.gz",
+            "deepseek-windows-x64.zip",
+        ]
+        .iter()
+        .enumerate()
+        {
+            std::fs::write(dist.join(artifact), "archive").unwrap();
+            let sha_char = char::from(b'a' + index as u8);
+            std::fs::write(
+                dist.join(format!("{artifact}.sha256")),
+                format!("{}  {artifact}\n", sha_char.to_string().repeat(64)),
+            )
+            .unwrap();
+        }
+
+        let version = env!("CARGO_PKG_VERSION");
+        for platform in NPM_PLATFORMS {
+            std::fs::write(
+                npm_dist.join(format!("deepseek-code-cli-{platform}-{version}.tgz")),
+                "npm package",
+            )
+            .unwrap();
+        }
+
+        let args = UpdatePublishStatusArgs {
+            dist: Some(dist.display().to_string()),
+            npm_dist: Some(npm_dist.display().to_string()),
+            strict: true,
+        };
+        let report = build_publish_status_report(&repo_root(), &args, &|name| match name {
+            "NPM_TOKEN" => Some("npm-token".to_string()),
+            "HOMEBREW_TAP_REPOSITORY" => Some("owner/homebrew-tap".to_string()),
+            "HOMEBREW_TAP_TOKEN" => Some("tap-token".to_string()),
+            _ => None,
+        })
+        .unwrap();
+
+        assert_eq!(report.not_ready_count(), 0);
+        assert_eq!(status_of(&report, "release_assets"), PublishStatus::Ready);
+        assert_eq!(status_of(&report, "npm_artifacts"), PublishStatus::Ready);
+        assert_eq!(status_of(&report, "homebrew_tap"), PublishStatus::Ready);
+    }
+
+    #[test]
+    fn release_asset_status_rejects_placeholder_checksums() {
+        let root = temp_root("publish-placeholder-sha");
+        std::fs::create_dir_all(&root).unwrap();
+        for artifact in [
+            "deepseek-linux-x64.tar.gz",
+            "deepseek-macos-x64.tar.gz",
+            "deepseek-macos-arm64.tar.gz",
+            "deepseek-windows-x64.zip",
+        ] {
+            std::fs::write(root.join(artifact), "archive").unwrap();
+            std::fs::write(
+                root.join(format!("{artifact}.sha256")),
+                format!("{}  {artifact}\n", "0".repeat(64)),
+            )
+            .unwrap();
+        }
+
+        let check = release_asset_status(Some(&root.display().to_string()));
+
+        assert_eq!(check.status, PublishStatus::Blocked);
+        assert!(check.detail.contains("placeholder zero checksum"));
+    }
+
+    #[test]
     #[cfg(unix)]
     fn create_release_package_copies_binary_and_writes_scripts() {
         let root = temp_root("package");
@@ -970,5 +1516,14 @@ esac
             "deepseek-update-{name}-{}-{suffix}",
             std::process::id()
         ))
+    }
+
+    fn status_of(report: &PublishStatusReport, name: &str) -> PublishStatus {
+        report
+            .checks
+            .iter()
+            .find(|check| check.name == name)
+            .unwrap_or_else(|| panic!("missing check {name}"))
+            .status
     }
 }
