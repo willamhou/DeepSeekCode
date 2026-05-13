@@ -46,10 +46,10 @@ use crate::tools::recall_archive::RecallArchiveTool;
 use crate::tools::revert_turn::RevertTurnTool;
 use crate::tools::review::{PrReviewCommentPlanTool, ReviewTool};
 use crate::tools::rlm::{
-    RlmBatchTool, RlmChunkPlanTool, RlmLiveCancelTool, RlmLiveDrainTool, RlmLiveEventsTool,
-    RlmLiveRecoverTool, RlmLiveRunNextTool, RlmLiveStatusTool, RlmLiveStopTool, RlmLiveWaitTool,
-    RlmMapReducePlanTool, RlmModelSessionsTool, RlmPythonSessionTool, RlmPythonSessionsTool,
-    RlmPythonTool, RlmRecursivePlanTool, RlmTool,
+    rlm_live_event_values, RlmBatchTool, RlmChunkPlanTool, RlmLiveCancelTool, RlmLiveDrainTool,
+    RlmLiveEventsTool, RlmLiveRecoverTool, RlmLiveRunNextTool, RlmLiveStatusTool, RlmLiveStopTool,
+    RlmLiveWaitTool, RlmMapReducePlanTool, RlmModelSessionsTool, RlmPythonSessionTool,
+    RlmPythonSessionsTool, RlmPythonTool, RlmRecursivePlanTool, RlmTool,
 };
 use crate::tools::run_shell::{is_safe_shell_command, RunShellTool};
 use crate::tools::run_tests::{render_run_tests_command, RunTestsTool};
@@ -6117,7 +6117,7 @@ fn handle_http_stream(mut stream: TcpStream, state: &RuntimeHttpState) -> AppRes
     let mut buffer = [0_u8; 8192];
     let read = stream.read(&mut buffer)?;
     let request = String::from_utf8_lossy(&buffer[..read]);
-    if handle_sse_follow_request(&request, &mut stream, &state.store)? {
+    if handle_sse_follow_request(&request, &mut stream, state)? {
         return Ok(());
     }
     let response = response_for_request_with_state(&request, state);
@@ -6129,7 +6129,7 @@ fn handle_http_stream(mut stream: TcpStream, state: &RuntimeHttpState) -> AppRes
 fn handle_sse_follow_request(
     request: &str,
     stream: &mut TcpStream,
-    store: &RuntimeStore,
+    state: &RuntimeHttpState,
 ) -> AppResult<bool> {
     let Some(request_line) = request.lines().next() else {
         return Ok(false);
@@ -6144,12 +6144,17 @@ fn handle_sse_follow_request(
     }
     let path = request_target.split('?').next().unwrap_or(request_target);
     if path == "/v1/events/stream" {
-        return handle_global_sse_follow_request(request_target, stream, store);
+        return handle_global_sse_follow_request(request_target, stream, &state.store);
+    }
+    if rlm_live_event_stream_session_id(path).is_some() {
+        return handle_rlm_live_sse_follow_request(request_target, stream, &state.config);
     }
     let Some(thread_id) = event_stream_thread_id(path) else {
         return Ok(false);
     };
-    if let Err(error) = validate_record_id(thread_id).and_then(|_| store.load_thread(thread_id)) {
+    if let Err(error) =
+        validate_record_id(thread_id).and_then(|_| state.store.load_thread(thread_id))
+    {
         stream.write_all(error_response(error.to_string()).to_http_bytes().as_bytes())?;
         stream.flush()?;
         return Ok(true);
@@ -6173,7 +6178,7 @@ fn handle_sse_follow_request(
     let mut sent_events = 0_u64;
 
     loop {
-        let events = store.read_events(thread_id, since_seq)?;
+        let events = state.store.read_events(thread_id, since_seq)?;
         if events.is_empty() {
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 stream.write_all(b": follow timeout reached\n\n")?;
@@ -6235,6 +6240,59 @@ fn handle_global_sse_follow_request(
             stream.write_all(frame.as_bytes())?;
             stream.flush()?;
             cursor.insert(event.thread_id.clone(), event.seq);
+            sent_events = sent_events.saturating_add(1);
+            if sent_events >= max_events {
+                return Ok(true);
+            }
+        }
+    }
+}
+
+fn handle_rlm_live_sse_follow_request(
+    request_target: &str,
+    stream: &mut TcpStream,
+    config: &AppConfig,
+) -> AppResult<bool> {
+    let path = request_target.split('?').next().unwrap_or(request_target);
+    let Some(session_id) = rlm_live_event_stream_session_id(path) else {
+        return Ok(false);
+    };
+    let mut cursor = rlm_live_event_cursor_from_query(request_target);
+    let _ = rlm_live_event_values(config, session_id, cursor, 1)?;
+    stream.write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nX-Accel-Buffering: no\r\nConnection: close\r\n\r\n",
+    )?;
+    stream.flush()?;
+
+    let poll_ms = query_param_u64(request_target, "poll_ms")
+        .unwrap_or(100)
+        .clamp(SSE_MIN_POLL_MS, SSE_MAX_POLL_MS);
+    let max_events = query_param_u64(request_target, "max_events")
+        .unwrap_or(u64::MAX)
+        .max(1);
+    let deadline = query_param_u64(request_target, "max_ms")
+        .filter(|max_ms| *max_ms > 0)
+        .map(|max_ms| Instant::now() + Duration::from_millis(max_ms));
+    let mut sent_events = 0_u64;
+
+    loop {
+        let remaining_limit = max_events.saturating_sub(sent_events).min(500).max(1) as usize;
+        let (_exists, _next_cursor, events) =
+            rlm_live_event_values(config, session_id, cursor, remaining_limit)?;
+        if events.is_empty() {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                stream.write_all(b": follow timeout reached\n\n")?;
+                stream.flush()?;
+                return Ok(true);
+            }
+            thread::sleep(Duration::from_millis(poll_ms));
+            continue;
+        }
+        for event in events {
+            let frame = sse_rlm_live_event_frame(&event);
+            stream.write_all(frame.as_bytes())?;
+            stream.flush()?;
+            cursor = rlm_live_event_seq(&event).unwrap_or(cursor);
             sent_events = sent_events.saturating_add(1);
             if sent_events >= max_events {
                 return Ok(true);
@@ -6306,13 +6364,23 @@ impl HttpResponse {
 #[derive(Clone)]
 struct RuntimeHttpState {
     store: RuntimeStore,
+    config: AppConfig,
     diagnostics: Arc<RuntimeDiagnosticsBroker>,
 }
 
 impl RuntimeHttpState {
     fn new(store: RuntimeStore) -> Self {
+        let mut config = AppConfig::default();
+        if let Some(config_dir) = store.root().parent() {
+            config.workspace.config_dir = config_dir.display().to_string();
+        }
+        Self::new_with_config(store, config)
+    }
+
+    fn new_with_config(store: RuntimeStore, config: AppConfig) -> Self {
         Self {
             store,
+            config,
             diagnostics: Arc::new(RuntimeDiagnosticsBroker::new()),
         }
     }
@@ -6417,6 +6485,9 @@ fn try_response_for_request(request: &str, state: &RuntimeHttpState) -> AppResul
             usage_summary_response(&state.store, request_target, None)?
         }
         ("GET" | "HEAD", "/v1/usage") => usage_response(&state.store, request_target, None)?,
+        _ if path.starts_with("/v1/rlm/live/") => {
+            route_rlm_live_path(method, request_target, path, state)?
+        }
         _ if path.starts_with("/v1/automations/") => {
             route_automation_path(method, path, &state.store, body)?
         }
@@ -6485,6 +6556,7 @@ fn runtime_response() -> HttpResponse {
                         "/v1/tasks/{id}/pause",
                         "/v1/tasks/{id}/resume",
                         "/v1/events/stream",
+                        "/v1/rlm/live/{session_id}/events/stream",
                         "/v1/threads",
                         "/v1/threads/{id}",
                         "/v1/threads/{id}/automations",
@@ -7192,6 +7264,36 @@ fn update_task_response(
     ))
 }
 
+fn route_rlm_live_path(
+    method: &str,
+    request_target: &str,
+    path: &str,
+    state: &RuntimeHttpState,
+) -> AppResult<HttpResponse> {
+    let Some(session_id) = rlm_live_event_stream_session_id(path) else {
+        return Ok(not_found(path));
+    };
+    match method {
+        "GET" | "HEAD" => {
+            let cursor = rlm_live_event_cursor_from_query(request_target);
+            let wait_ms = query_param_u64(request_target, "wait_ms").unwrap_or(0);
+            let poll_ms = query_param_u64(request_target, "poll_ms").unwrap_or(100);
+            let limit = query_param_u64(request_target, "limit")
+                .unwrap_or(500)
+                .clamp(1, 500) as usize;
+            rlm_live_events_stream_response(
+                &state.config,
+                session_id,
+                cursor,
+                limit,
+                wait_ms,
+                poll_ms,
+            )
+        }
+        _ => Ok(not_found(path)),
+    }
+}
+
 fn route_thread_path(
     method: &str,
     request_target: &str,
@@ -7648,6 +7750,36 @@ fn global_events_stream_response(
     Ok(HttpResponse::sse(body))
 }
 
+fn rlm_live_events_stream_response(
+    config: &AppConfig,
+    session_id: &str,
+    cursor: u64,
+    limit: usize,
+    wait_ms: u64,
+    poll_ms: u64,
+) -> AppResult<HttpResponse> {
+    let mut body = String::new();
+    let events = read_rlm_live_events_with_wait(
+        config,
+        session_id,
+        cursor,
+        limit,
+        wait_ms.min(SSE_MAX_WAIT_MS),
+        poll_ms.clamp(SSE_MIN_POLL_MS, SSE_MAX_POLL_MS),
+    )?;
+    for event in events {
+        body.push_str(&sse_rlm_live_event_frame(&event));
+    }
+    if body.is_empty() {
+        if wait_ms == 0 {
+            body.push_str(": no live RLM events after cursor\n\n");
+        } else {
+            body.push_str(": no live RLM events after cursor before wait timeout\n\n");
+        }
+    }
+    Ok(HttpResponse::sse(body))
+}
+
 const SSE_MAX_WAIT_MS: u64 = 30_000;
 const SSE_MIN_POLL_MS: u64 = 10;
 const SSE_MAX_POLL_MS: u64 = 1_000;
@@ -7713,6 +7845,30 @@ fn read_global_runtime_events(
     Ok(events)
 }
 
+fn read_rlm_live_events_with_wait(
+    config: &AppConfig,
+    session_id: &str,
+    cursor: u64,
+    limit: usize,
+    wait_ms: u64,
+    poll_ms: u64,
+) -> AppResult<Vec<JsonValue>> {
+    let deadline = Instant::now() + Duration::from_millis(wait_ms);
+    loop {
+        let (_exists, _next_cursor, events) =
+            rlm_live_event_values(config, session_id, cursor, limit)?;
+        if !events.is_empty() || wait_ms == 0 {
+            return Ok(events);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(events);
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        thread::sleep(remaining.min(Duration::from_millis(poll_ms)));
+    }
+}
+
 fn event_stream_thread_id(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("/v1/threads/")?;
     let parts = rest.split('/').collect::<Vec<_>>();
@@ -7720,6 +7876,21 @@ fn event_stream_thread_id(path: &str) -> Option<&str> {
         [thread_id, "events", "stream"] => Some(thread_id),
         _ => None,
     }
+}
+
+fn rlm_live_event_stream_session_id(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/v1/rlm/live/")?;
+    let parts = rest.split('/').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [session_id, "events", "stream"] => Some(session_id),
+        _ => None,
+    }
+}
+
+fn rlm_live_event_cursor_from_query(request_target: &str) -> u64 {
+    query_param_u64(request_target, "cursor")
+        .or_else(|| query_param_u64(request_target, "since_seq"))
+        .unwrap_or(0)
 }
 
 fn sse_event_frame(event: &RuntimeEvent) -> String {
@@ -7742,6 +7913,30 @@ fn sse_event_frame_with_id(event: &RuntimeEvent, id: &str) -> String {
     frame.push_str(&json_value_to_string(&event_to_json(event)));
     frame.push_str("\n\n");
     frame
+}
+
+fn sse_rlm_live_event_frame(event: &JsonValue) -> String {
+    let seq = rlm_live_event_seq(event).unwrap_or(0);
+    let kind = rlm_live_event_kind(event).unwrap_or("rlm_event");
+    let mut frame = String::new();
+    frame.push_str("id: ");
+    frame.push_str(&seq.to_string());
+    frame.push('\n');
+    frame.push_str("event: ");
+    frame.push_str(kind);
+    frame.push('\n');
+    frame.push_str("data: ");
+    frame.push_str(&json_value_to_string(event));
+    frame.push_str("\n\n");
+    frame
+}
+
+fn rlm_live_event_seq(event: &JsonValue) -> Option<u64> {
+    json_as_object(event)?.get("seq").and_then(json_as_u64)
+}
+
+fn rlm_live_event_kind(event: &JsonValue) -> Option<&str> {
+    json_as_object(event)?.get("kind").and_then(json_as_string)
 }
 
 fn read_events_with_wait(
@@ -11925,6 +12120,47 @@ shell_allowlist = ["cargo test"]
         );
         assert!(!replay.body.contains("event: thread_created\n"));
         assert!(replay.body.contains("event: turn_recorded\n"));
+    }
+
+    #[test]
+    fn rlm_live_event_stream_endpoint_replays_sse_frames() {
+        let root = temp_dir("rlm-live-event-stream");
+        let mut config = AppConfig::default();
+        config.workspace.config_dir = root.join(".dscode").display().to_string();
+        let store = RuntimeStore::new(PathBuf::from(&config.workspace.config_dir).join("runtime"));
+        let state = RuntimeHttpState::new(store);
+        let rlm = RlmTool {
+            tool_name: "rlm_process",
+            config,
+            parent_depth: 0,
+        };
+        rlm.execute(
+            ToolInput::new()
+                .with_arg("task", "stream this live turn")
+                .with_arg("content", "alpha")
+                .with_arg("session_id", "sse.1")
+                .with_arg("live", "true"),
+        )
+        .unwrap();
+
+        let stream = response_for_request_with_state(
+            "GET /v1/rlm/live/sse.1/events/stream?cursor=0 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            &state,
+        );
+        assert_eq!(stream.status, 200);
+        assert_eq!(stream.content_type, "text/event-stream; charset=utf-8");
+        assert!(stream.body.contains("id: 1\n"));
+        assert!(stream.body.contains("event: turn_queued\n"));
+        assert!(stream.body.contains("data: {"));
+        assert!(stream.body.contains("stream this live turn"));
+
+        let replay = response_for_request_with_state(
+            "GET /v1/rlm/live/sse.1/events/stream?since_seq=1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            &state,
+        );
+        assert_eq!(replay.status, 200);
+        assert!(replay.body.contains(": no live RLM events after cursor"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -46,5 +46,5 @@ session.
 
 ## Remaining Gap
 
-DeepSeekCode still needs native push/SSE streaming polish, forced cross-process
+DeepSeekCode still needs TUI/ACP subscription polish, forced cross-process
 worker interruption, and broader daemon lifecycle status commands.

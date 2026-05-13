@@ -5380,6 +5380,25 @@ fn read_rlm_live_event_batch(
     })
 }
 
+pub fn rlm_live_event_values(
+    config: &AppConfig,
+    session_id: &str,
+    cursor: u64,
+    limit: usize,
+) -> AppResult<(bool, u64, Vec<JsonValue>)> {
+    validate_rlm_model_session_id(session_id)?;
+    let batch = read_rlm_live_event_batch(config, session_id, cursor, limit)?;
+    if batch.events_json.is_empty() {
+        return Ok((batch.exists, batch.next_cursor, Vec::new()));
+    }
+    let value = parse_json_value(&format!("[{}]", batch.events_json))
+        .map_err(|error| tool_failure(format!("rlm_process_events invalid JSON: {error}")))?;
+    let JsonValue::Array(events) = value else {
+        return Err(tool_failure("rlm_process_events expected JSON array"));
+    };
+    Ok((batch.exists, batch.next_cursor, events))
+}
+
 fn parse_bool_arg(raw: Option<&str>) -> bool {
     matches!(
         raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),

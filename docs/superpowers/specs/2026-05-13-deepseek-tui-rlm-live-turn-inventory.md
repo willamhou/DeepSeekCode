@@ -50,6 +50,6 @@ cancelled live RLM turns without reading payload files directly.
 
 ## Remaining Gap
 
-This is read-only inventory. The remaining live RLM gaps are native push/SSE
-streaming polish, forced cross-process worker interruption, and operator
+This is read-only inventory. The remaining live RLM gaps are TUI/ACP
+subscription polish, forced cross-process worker interruption, and operator
 lifecycle commands.

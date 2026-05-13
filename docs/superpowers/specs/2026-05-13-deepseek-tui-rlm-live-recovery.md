@@ -60,5 +60,5 @@ payloads, and live event log.
 
 ## Remaining Gap
 
-DeepSeekCode still needs native push/SSE streaming polish, forced cross-process
+DeepSeekCode still needs TUI/ACP subscription polish, forced cross-process
 worker interruption, and supervisor or CLI lifecycle commands.

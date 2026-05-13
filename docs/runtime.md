@@ -114,6 +114,7 @@ Endpoints:
 | `/v1/tasks/{id}/pause` | `POST` | Pause a pending task before it is claimed |
 | `/v1/tasks/{id}/resume` | `POST` | Resume a paused task back to pending |
 | `/v1/events/stream` | `GET`, `HEAD` | Aggregate SSE replay, bounded wait, or follow-mode streaming across runtime threads |
+| `/v1/rlm/live/{session_id}/events/stream` | `GET`, `HEAD` | SSE replay, bounded wait, or follow-mode streaming for one live RLM session event log |
 | `/v1/threads` | `GET`, `POST` | File-backed durable thread records |
 | `/v1/threads/{id}` | `GET`, `HEAD` | Thread detail with recorded turns and items |
 | `/v1/threads/{id}/automations` | `GET`, `POST` | Automation records for one thread |
@@ -1461,9 +1462,9 @@ up to `max_turns` queued payloads in FIFO order, with `dry_run=true` for a
 non-mutating batch preview. The existing `deepseek agents daemon` service loop
 now first runs safe all-session live RLM recovery, which requeues/fails stale
 running turns while preserving live-owned turns unless forced, then runs one
-queued live RLM turn per tick through the same worker path. Native push/SSE
-streaming, forced cross-process worker interruption, and broader RLM daemon
-lifecycle commands remain future work.
+queued live RLM turn per tick through the same worker path. Forced
+cross-process worker interruption and broader RLM daemon lifecycle commands
+remain future work.
 `rlm_process_events session_id=<id> cursor=<seq>` replays parsed
 `.dscode/rlm-daemon/<session_id>/events.jsonl` records with `seq` greater than
 the cursor and returns `next_cursor` for clients that want deterministic live
@@ -1473,8 +1474,10 @@ worker progress events (`worker_reasoning_delta`, `worker_text_delta`,
 `worker_permission_request`, and `worker_tool_result`) emitted by
 `rlm_process_run_next`.
 `rlm_process_wait` uses the same cursor contract but waits up to `timeout_ms`
-for new events before returning, giving clients a simple long-poll bridge while
-native push/SSE streaming remains future work.
+for new events before returning, giving clients a simple long-poll bridge.
+`GET /v1/rlm/live/<session_id>/events/stream` exposes the same live RLM event
+log as SSE with `cursor`/`since_seq`, `wait_ms`, `poll_ms`, and `follow=1`
+support for HTTP clients that need a native stream.
 This gives the model DeepSeek-TUI-style Recursive Language Model entrypoints for
 synthesis/classification tasks with both file-backed and optional process-backed
 Python helper state. MCP server mode exposes the local RLM planning helpers

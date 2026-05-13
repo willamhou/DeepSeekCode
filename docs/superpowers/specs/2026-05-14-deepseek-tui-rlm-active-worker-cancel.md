@@ -44,5 +44,5 @@ active live RLM worker.
 
 ## Remaining
 
-Native push/SSE streaming polish, forced cross-process worker interruption, and
+TUI/ACP subscription polish, forced cross-process worker interruption, and
 richer lifecycle commands remain open.

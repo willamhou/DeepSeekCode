@@ -519,7 +519,8 @@ Remaining:
   by cursor as the read-only polling surface and now includes worker
   reasoning/text deltas plus model/tool call/result events emitted during
   `rlm_process_run_next`;
-  `rlm_process_wait` adds cursor-based long-polling for those event logs;
+  `rlm_process_wait` adds cursor-based long-polling for those event logs, and
+  `/v1/rlm/live/<session_id>/events/stream` exposes the same log over HTTP SSE;
   `rlm_process_cancel` cancels queued pending or active running live turns,
   marks payloads cancelled when present, refreshes `queued_turns`, preserves a
   live owner while cancellation is pending, and appends `turn_cancelled` events;

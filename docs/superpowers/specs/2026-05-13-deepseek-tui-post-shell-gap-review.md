@@ -74,9 +74,9 @@ explicitly supplied; `deepseek agents daemon` now runs that safe all-session
 recovery before claiming queued live RLM turns; `rlm_process_status` now gives
 TUI/MCP/model clients a read-only lifecycle dashboard with owner, queue, stale,
 and recommended-action state.
-Live PTY resize, attachable terminal replay/supervisor takeover, RLM native
-push/SSE streaming polish, forced cross-process worker interruption, and richer
-daemon lifecycle commands remain open.
+Live PTY resize, attachable terminal replay/supervisor takeover, RLM TUI/ACP
+subscription polish, forced cross-process worker interruption, and richer daemon
+lifecycle commands remain open.
 
 ## Next Candidate Specs
 
@@ -86,9 +86,9 @@ daemon lifecycle commands remain open.
   backend.
 - True live model-backed RLM REPL/daemon implementation now has a design spec:
   `2026-05-13-deepseek-tui-rlm-live-daemon-design.md`. The next executable
-  slice should be native push/SSE streaming polish, forced cross-process worker
+  slice should be TUI/ACP subscription polish, forced cross-process worker
   interruption, or richer RLM lifecycle commands because queueing,
-  event replay/wait, worker delta/tool event logging, payload persistence,
+  event replay/wait, HTTP SSE streaming, worker delta/tool event logging, payload persistence,
   queued cancellation, single-step execution, bounded drain, all-session
   interrupted-turn recovery, and the agents-daemon worker loop plus stop
   command, owner liveness inventory, and live-owner recovery guard plus

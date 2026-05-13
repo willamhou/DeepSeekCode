@@ -47,5 +47,6 @@ start, completion, or failure events.
 
 ## Remaining Gap
 
-This is long-polling over JSONL, not a native push/SSE bridge. Service
-packaging and streaming polish remain open.
+This is long-polling over JSONL; the follow-on HTTP SSE bridge is implemented
+in `2026-05-14-deepseek-tui-rlm-http-sse-stream.md`. Service packaging and
+TUI/ACP subscription polish remain open.
