@@ -875,6 +875,21 @@ struct RlmLiveEventBatch {
     count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RlmLiveRecoveryMode {
+    Requeue,
+    Fail,
+}
+
+impl RlmLiveRecoveryMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Requeue => "requeue",
+            Self::Fail => "fail",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RlmChunk {
     index: usize,
@@ -1128,6 +1143,10 @@ pub struct RlmLiveRunNextTool {
 pub struct RlmLiveDrainTool {
     pub config: AppConfig,
     pub parent_depth: usize,
+}
+
+pub struct RlmLiveRecoverTool {
+    pub config: AppConfig,
 }
 
 impl Tool for RlmPythonSessionsTool {
@@ -1965,6 +1984,260 @@ impl Tool for RlmLiveDrainTool {
     }
 }
 
+impl Tool for RlmLiveRecoverTool {
+    fn name(&self) -> &str {
+        "rlm_process_recover"
+    }
+
+    fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
+        let session_id = input
+            .get("session_id")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| tool_failure("rlm_process_recover requires non-empty `session_id`"))?;
+        validate_rlm_model_session_id(session_id)?;
+        let mode = parse_rlm_live_recovery_mode(input.get("mode"))?;
+        let dry_run = parse_bool_arg(input.get("dry_run"));
+        let reason = input
+            .get("reason")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("recovered interrupted live RLM worker")
+            .to_string();
+
+        let manifest_path = rlm_live_session_manifest_path(&self.config, session_id);
+        let manifest = read_rlm_live_session_manifest(&manifest_path, session_id)?;
+        let runtime_thread_id = rlm_live_manifest_string_field(&manifest, "runtime_thread_id")
+            .ok_or_else(|| {
+                tool_failure("rlm_process_recover live manifest is missing runtime_thread_id")
+            })?;
+        let active_turn_id = rlm_live_manifest_string_field(&manifest, "active_turn_id");
+        let store = rlm_runtime_store(&self.config);
+        let thread = store.load_thread(&runtime_thread_id)?;
+
+        let mut candidate_ids = Vec::new();
+        if let Some(active_turn_id) = active_turn_id.as_deref() {
+            push_unique_string(&mut candidate_ids, active_turn_id);
+        }
+        for task in store.list_tasks(None, Some(&runtime_thread_id), MAX_RLM_LIVE_TASK_LIST)? {
+            if task.kind == "rlm_process" && task.status == "running" {
+                push_unique_string(&mut candidate_ids, &task.id);
+            }
+        }
+        for task_id in list_rlm_live_turn_payload_ids(&self.config, session_id)? {
+            if let Ok(payload) =
+                read_rlm_live_session_turn_payload(&self.config, session_id, &task_id)
+            {
+                if payload.runtime_thread_id == runtime_thread_id && payload.status == "running" {
+                    push_unique_string(&mut candidate_ids, &task_id);
+                }
+            }
+        }
+
+        let mut actions = Vec::new();
+        let mut recovered_count = 0usize;
+        let mut cleared_active = false;
+        for task_id in candidate_ids {
+            let task = store.load_task(&task_id).ok();
+            let payload =
+                read_rlm_live_session_turn_payload(&self.config, session_id, &task_id).ok();
+            let task_status = task
+                .as_ref()
+                .map(|task| task.status.clone())
+                .unwrap_or_else(|| "missing".to_string());
+            let payload_status = payload
+                .as_ref()
+                .map(|payload| payload.status.clone())
+                .unwrap_or_else(|| "missing".to_string());
+            let mut action = "skip";
+            let mut action_reason = reason.clone();
+
+            if payload.as_ref().is_some_and(|payload| {
+                payload.runtime_thread_id.as_str() != runtime_thread_id.as_str()
+            }) {
+                action = "skip_mismatched_thread";
+                action_reason = "payload belongs to a different runtime thread".to_string();
+            } else if task_status == "running" || payload_status == "running" {
+                if task.is_some() && payload.is_some() && mode == RlmLiveRecoveryMode::Requeue {
+                    action = "requeue";
+                    if !dry_run {
+                        if let Some(task) = &task {
+                            store.update_task(
+                                &task.id,
+                                "pending".to_string(),
+                                task.summary.clone(),
+                            )?;
+                        }
+                        update_rlm_live_session_turn_payload_status(
+                            &self.config,
+                            session_id,
+                            &task_id,
+                            "queued",
+                            vec![
+                                (
+                                    "recovered_from".to_string(),
+                                    JsonValue::String("running".to_string()),
+                                ),
+                                (
+                                    "recovery_reason".to_string(),
+                                    JsonValue::String(reason.clone()),
+                                ),
+                            ],
+                        )?;
+                        append_rlm_live_session_recovery_event(
+                            &self.config,
+                            session_id,
+                            &runtime_thread_id,
+                            &task_id,
+                            task.as_ref()
+                                .map(|task| task.summary.as_str())
+                                .or_else(|| payload.as_ref().map(|payload| payload.task.as_str()))
+                                .unwrap_or("interrupted live RLM turn"),
+                            mode.as_str(),
+                            action,
+                            &reason,
+                        )?;
+                    }
+                    recovered_count += 1;
+                } else {
+                    action = "fail";
+                    action_reason = if task.is_none() || payload.is_none() {
+                        "cannot requeue interrupted turn because task or payload is missing"
+                            .to_string()
+                    } else {
+                        reason.clone()
+                    };
+                    if !dry_run {
+                        if let Some(task) = &task {
+                            store.update_task(
+                                &task.id,
+                                "failed".to_string(),
+                                format!(
+                                    "recovery failed interrupted live RLM turn: {action_reason}"
+                                ),
+                            )?;
+                        }
+                        if payload.is_some() {
+                            update_rlm_live_session_turn_payload_status(
+                                &self.config,
+                                session_id,
+                                &task_id,
+                                "failed",
+                                vec![(
+                                    "recovery_reason".to_string(),
+                                    JsonValue::String(action_reason.clone()),
+                                )],
+                            )?;
+                        }
+                        append_rlm_live_session_recovery_event(
+                            &self.config,
+                            session_id,
+                            &runtime_thread_id,
+                            &task_id,
+                            task.as_ref()
+                                .map(|task| task.summary.as_str())
+                                .or_else(|| payload.as_ref().map(|payload| payload.task.as_str()))
+                                .unwrap_or("interrupted live RLM turn"),
+                            mode.as_str(),
+                            action,
+                            &action_reason,
+                        )?;
+                    }
+                    recovered_count += 1;
+                }
+            } else if active_turn_id.as_deref() == Some(task_id.as_str()) {
+                action = "clear_stale_active";
+                action_reason = "active_turn_id no longer points at a running turn".to_string();
+                recovered_count += 1;
+            }
+
+            if active_turn_id.as_deref() == Some(task_id.as_str()) && action != "skip" {
+                cleared_active = true;
+            }
+            actions.push(JsonValue::Object(BTreeMap::from([
+                ("task_id".to_string(), JsonValue::String(task_id)),
+                ("action".to_string(), JsonValue::String(action.to_string())),
+                (
+                    "task_status".to_string(),
+                    JsonValue::String(task_status.clone()),
+                ),
+                (
+                    "payload_status".to_string(),
+                    JsonValue::String(payload_status.clone()),
+                ),
+                ("reason".to_string(), JsonValue::String(action_reason)),
+            ])));
+        }
+
+        let queued_turns = if dry_run {
+            count_pending_live_rlm_tasks(&store, &runtime_thread_id)?
+        } else {
+            let queued_turns = count_pending_live_rlm_tasks(&store, &runtime_thread_id)?;
+            let runtime_session_id =
+                rlm_live_manifest_string_field(&manifest, "runtime_session_id")
+                    .or_else(|| thread.session_id.clone());
+            let model = rlm_live_manifest_string_field(&manifest, "model").unwrap_or(thread.model);
+            let workspace =
+                rlm_live_manifest_string_field(&manifest, "workspace").unwrap_or(thread.workspace);
+            let created_at = rlm_live_manifest_string_field(&manifest, "created_at");
+            let next_active_turn_id = if cleared_active {
+                None
+            } else {
+                active_turn_id.as_deref()
+            };
+            let status = if next_active_turn_id.is_some() {
+                "running"
+            } else {
+                "idle"
+            };
+            write_rlm_live_session_manifest(
+                &self.config,
+                session_id,
+                status,
+                &runtime_thread_id,
+                runtime_session_id.as_deref(),
+                next_active_turn_id,
+                queued_turns,
+                &model,
+                &workspace,
+                created_at.as_deref(),
+            )?;
+            queued_turns
+        };
+
+        Ok(ToolOutput {
+            summary: json_value_to_string(&JsonValue::Object(BTreeMap::from([
+                (
+                    "session_id".to_string(),
+                    JsonValue::String(session_id.to_string()),
+                ),
+                (
+                    "runtime_thread_id".to_string(),
+                    JsonValue::String(runtime_thread_id),
+                ),
+                ("dry_run".to_string(), JsonValue::Bool(dry_run)),
+                (
+                    "mode".to_string(),
+                    JsonValue::String(mode.as_str().to_string()),
+                ),
+                (
+                    "recovered_count".to_string(),
+                    JsonValue::Number(recovered_count.to_string()),
+                ),
+                (
+                    "queued_turns".to_string(),
+                    JsonValue::Number(queued_turns.to_string()),
+                ),
+                (
+                    "cleared_active".to_string(),
+                    JsonValue::Bool(!dry_run && cleared_active),
+                ),
+                ("actions".to_string(), JsonValue::Array(actions)),
+            ]))),
+        })
+    }
+}
+
 pub(crate) fn render_rlm_task(context: &str, question: &str, strategy: &str) -> String {
     format!(
         "RLM analysis task\n\
@@ -2796,6 +3069,45 @@ fn append_rlm_live_session_cancel_event(
     Ok(())
 }
 
+fn append_rlm_live_session_recovery_event(
+    config: &AppConfig,
+    session_id: &str,
+    runtime_thread_id: &str,
+    task_id: &str,
+    task_summary: &str,
+    mode: &str,
+    action: &str,
+    reason: &str,
+) -> AppResult<()> {
+    let path = rlm_live_session_event_log_path(config, session_id);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            tool_failure(format!("rlm live session event mkdir failed: {error}"))
+        })?;
+    }
+    let seq = fs::read_to_string(&path)
+        .map(|content| content.lines().count() as u64 + 1)
+        .unwrap_or(1);
+    let event = format!(
+        "{{\"seq\":{},\"created_at\":\"{}\",\"kind\":\"turn_recovered\",\"runtime_thread_id\":\"{}\",\"task_id\":\"{}\",\"task\":\"{}\",\"mode\":\"{}\",\"action\":\"{}\",\"reason\":\"{}\"}}\n",
+        seq,
+        json_escape(&rlm_epoch_label()),
+        json_escape(runtime_thread_id),
+        json_escape(task_id),
+        json_escape(task_summary),
+        json_escape(mode),
+        json_escape(action),
+        json_escape(reason)
+    );
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(event.as_bytes()))
+        .map_err(|error| tool_failure(format!("rlm live session event write failed: {error}")))?;
+    Ok(())
+}
+
 fn ensure_pending_live_rlm_task(task: &TaskRecord, runtime_thread_id: &str) -> AppResult<()> {
     if task.thread_id.as_deref() != Some(runtime_thread_id) {
         return Err(tool_failure(format!(
@@ -3156,6 +3468,30 @@ fn rlm_live_session_turn_payload_path(
 
 fn rlm_live_session_turns_dir(config: &AppConfig, session_id: &str) -> PathBuf {
     rlm_live_sessions_dir(config).join(session_id).join("turns")
+}
+
+fn list_rlm_live_turn_payload_ids(config: &AppConfig, session_id: &str) -> AppResult<Vec<String>> {
+    let turns_dir = rlm_live_session_turns_dir(config, session_id);
+    if !turns_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut ids = Vec::new();
+    for entry in fs::read_dir(&turns_dir)
+        .map_err(|error| tool_failure(format!("rlm live turns read_dir failed: {error}")))?
+    {
+        let entry = entry
+            .map_err(|error| tool_failure(format!("rlm live turns read entry failed: {error}")))?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        ids.push(stem.to_string());
+    }
+    ids.sort();
+    Ok(ids)
 }
 
 fn rlm_live_manifest_string_field(manifest: &JsonValue, key: &str) -> Option<String> {
@@ -3741,6 +4077,26 @@ fn parse_rlm_live_drain_max_turns(raw: Option<&str>) -> AppResult<usize> {
         None => 10,
     };
     Ok(value.clamp(1, 100))
+}
+
+fn parse_rlm_live_recovery_mode(raw: Option<&str>) -> AppResult<RlmLiveRecoveryMode> {
+    match raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("requeue")
+    {
+        "requeue" | "queue" | "pending" => Ok(RlmLiveRecoveryMode::Requeue),
+        "fail" | "failed" => Ok(RlmLiveRecoveryMode::Fail),
+        other => Err(tool_failure(format!(
+            "rlm_process_recover mode must be `requeue` or `fail`, got `{other}`"
+        ))),
+    }
+}
+
+fn push_unique_string(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
+    }
 }
 
 fn read_rlm_live_event_batch(
@@ -5055,6 +5411,116 @@ mod tests {
         assert_eq!(store.load_task(&second_turn).unwrap().status, "pending");
         assert_eq!(parse_rlm_live_drain_max_turns(Some("0")).unwrap(), 1);
         assert_eq!(parse_rlm_live_drain_max_turns(Some("1000")).unwrap(), 100);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rlm_process_recover_requeues_interrupted_active_turn() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = cwd.join("target").join(format!(
+            "dscode-rlm-live-recover-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut config = AppConfig::default();
+        config.workspace.config_dir = root.join(".dscode").display().to_string();
+        let rlm = RlmTool {
+            tool_name: "rlm_process",
+            config: config.clone(),
+            parent_depth: 0,
+        };
+        let queued = rlm
+            .execute(
+                ToolInput::new()
+                    .with_arg("task", "recover active turn")
+                    .with_arg("content", "recover payload")
+                    .with_arg("session_id", "recover.1")
+                    .with_arg("live", "true"),
+            )
+            .unwrap();
+        let turn_id = meta_value(&queued.summary, "meta.rlm_turn_id").unwrap();
+        let manifest_path = rlm_live_session_manifest_path(&config, "recover.1");
+        let manifest = read_rlm_live_session_manifest(&manifest_path, "recover.1").unwrap();
+        let runtime_thread_id =
+            rlm_live_manifest_string_field(&manifest, "runtime_thread_id").unwrap();
+        let runtime_session_id = rlm_live_manifest_string_field(&manifest, "runtime_session_id");
+        let store = rlm_runtime_store(&config);
+        store
+            .claim_task(&turn_id, "test-recovery-worker".to_string())
+            .unwrap();
+        update_rlm_live_session_turn_payload_status(
+            &config,
+            "recover.1",
+            &turn_id,
+            "running",
+            Vec::new(),
+        )
+        .unwrap();
+        let payload = read_rlm_live_session_turn_payload(&config, "recover.1", &turn_id).unwrap();
+        write_rlm_live_session_manifest(
+            &config,
+            "recover.1",
+            "running",
+            &runtime_thread_id,
+            runtime_session_id.as_deref(),
+            Some(&turn_id),
+            0,
+            &payload.model,
+            &payload.workspace,
+            rlm_live_manifest_string_field(&manifest, "created_at").as_deref(),
+        )
+        .unwrap();
+
+        let dry = RlmLiveRecoverTool {
+            config: config.clone(),
+        }
+        .execute(
+            ToolInput::new()
+                .with_arg("session_id", "recover.1")
+                .with_arg("dry_run", "true"),
+        )
+        .unwrap();
+        assert!(dry.summary.contains(r#""dry_run":true"#));
+        assert!(dry.summary.contains(r#""action":"requeue""#));
+        assert_eq!(store.load_task(&turn_id).unwrap().status, "running");
+
+        let output = RlmLiveRecoverTool {
+            config: config.clone(),
+        }
+        .execute(ToolInput::new().with_arg("session_id", "recover.1"))
+        .unwrap();
+        assert!(output.summary.contains(r#""mode":"requeue""#));
+        assert!(output.summary.contains(r#""recovered_count":1"#));
+        assert!(output.summary.contains(r#""queued_turns":1"#));
+        assert!(output.summary.contains(r#""cleared_active":true"#));
+        assert_eq!(store.load_task(&turn_id).unwrap().status, "pending");
+        let recovered_payload =
+            read_rlm_live_session_turn_payload(&config, "recover.1", &turn_id).unwrap();
+        assert_eq!(recovered_payload.status, "queued");
+        let updated = read_rlm_live_session_manifest(&manifest_path, "recover.1").unwrap();
+        assert_eq!(
+            rlm_live_manifest_string_field(&updated, "active_turn_id"),
+            None
+        );
+        assert_eq!(
+            rlm_live_manifest_u64_field(&updated, "queued_turns"),
+            Some(1)
+        );
+        let events = RlmLiveEventsTool {
+            config: config.clone(),
+        }
+        .execute(ToolInput::new().with_arg("session_id", "recover.1"))
+        .unwrap();
+        assert!(events.summary.contains(r#""kind":"turn_recovered""#));
+        assert!(events.summary.contains(r#""action":"requeue""#));
+        assert_eq!(
+            parse_rlm_live_recovery_mode(Some("fail")).unwrap(),
+            RlmLiveRecoveryMode::Fail
+        );
+        assert!(parse_rlm_live_recovery_mode(Some("unknown")).is_err());
         let _ = fs::remove_dir_all(root);
     }
 

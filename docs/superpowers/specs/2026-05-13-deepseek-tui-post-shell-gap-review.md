@@ -64,9 +64,10 @@ model-session context plus session-only continuation; live RLM daemon
 manifest/inventory discovery, runtime-thread-backed turn queueing, cursor event
 replay/wait, per-turn payload persistence and inventory, queued-turn
 cancellation, a single-step live RLM worker bridge, and bounded FIFO live RLM
-draining have landed. Live PTY resize, attachable terminal replay/supervisor
-takeover, resident live RLM daemon service packaging, delta streaming, active
-worker cancellation, and recovery remain open.
+draining have landed; interrupted-turn recovery for one live session has also
+landed. Live PTY resize, attachable terminal replay/supervisor takeover,
+resident live RLM daemon service packaging, delta streaming, active worker
+cancellation, and broader restart scanning remain open.
 
 ## Next Candidate Specs
 
@@ -77,8 +78,9 @@ worker cancellation, and recovery remain open.
 - True live model-backed RLM REPL/daemon implementation now has a design spec:
   `2026-05-13-deepseek-tui-rlm-live-daemon-design.md`. The next executable
   slice should be resident service-loop packaging, streaming deltas, active
-  worker cancellation, or restart recovery because queueing, event replay/wait,
-  payload persistence, queued cancellation, single-step execution, and bounded
-  drain have landed.
+  worker cancellation, or all-session restart scanning because queueing,
+  event replay/wait, payload persistence, queued cancellation, single-step
+  execution, bounded drain, and one-session interrupted-turn recovery have
+  landed.
 - Platform restore strategy for device nodes and Windows symlink semantics.
 - Live GitHub write-fixture harness behind an explicit opt-in test repository.

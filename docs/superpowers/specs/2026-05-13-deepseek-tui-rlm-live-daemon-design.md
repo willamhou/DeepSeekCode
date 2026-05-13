@@ -158,6 +158,7 @@ resumption.
    - `rlm_process live=true`
    - `rlm_process_wait`
    - `rlm_process_cancel`
+   - `rlm_process_recover`
    - `rlm_process_run_next`
    - `rlm_process_drain`
    - MCP/ACP schema updates
@@ -165,6 +166,8 @@ resumption.
      `rlm_process_events` read-only replay plus `rlm_process_wait`
      long-polling are implemented;
      `rlm_process_cancel` is implemented for queued pending turns only;
+     `rlm_process_recover` is implemented for interrupted running turns in one
+     live session;
      `rlm_process_run_next` is implemented as a single-step worker bridge;
      `rlm_process_drain` is implemented as a bounded FIFO batch worker bridge
 4. Streaming and cancellation:
@@ -177,6 +180,10 @@ resumption.
    - daemon restart scan
    - stale pid detection
    - interrupted-turn recovery records
+   - status: partial; `rlm_process_recover` can requeue or fail interrupted
+     running turns for one live session and records `turn_recovered`; daemon
+     restart scanning across all sessions and stale pid ownership checks remain
+     open
 6. Service packaging:
    - systemd/launchd templates for RLM daemon alongside runtime and diagnostics
 
@@ -198,6 +205,6 @@ Future implementation should add these gates:
 
 Do not rename the existing bounded child-agent `rlm_process` implementation as a
 live daemon. It is already useful and should remain the default until a real
-live worker exists. The next executable RLM slice should start with
-runtime-thread-backed turn queueing; live-session manifest/inventory support is
-already implemented as the first slice.
+live worker exists. The remaining executable RLM slices should focus on
+resident service-loop packaging, streaming model/tool deltas, active worker
+cancellation, stale daemon pid detection, and all-session restart scanning.

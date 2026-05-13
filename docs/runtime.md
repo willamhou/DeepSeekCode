@@ -347,6 +347,7 @@ Exposed tools:
 | `rlm_process_events` | Replay live `rlm_process` daemon event logs by cursor without running a child model |
 | `rlm_process_wait` | Wait for live `rlm_process` daemon event logs after a cursor without running a child model |
 | `rlm_process_cancel` | Hidden by default; exposed with durable runtime approvals, and cancels queued pending live `rlm_process` daemon turns |
+| `rlm_process_recover` | Hidden by default; exposed with durable runtime approvals, and requeues or fails interrupted live `rlm_process` daemon turns |
 | `rlm_process_run_next` | Hidden by default; exposed with trusted `DSCODE_MCP_ENABLE_SIDE_EFFECTS=1` or durable runtime approvals, and claims/runs one queued live `rlm_process` daemon turn |
 | `rlm_process_drain` | Hidden by default; exposed with trusted `DSCODE_MCP_ENABLE_SIDE_EFFECTS=1` or durable runtime approvals, and runs queued live `rlm_process` daemon turns in FIFO order |
 | `rlm_python_session` | Hidden by default; exposed with trusted `DSCODE_MCP_ENABLE_SIDE_EFFECTS=1` or durable runtime approvals, and writes `.dscode/rlm-python` helper state |
@@ -1419,6 +1420,12 @@ future worker can recover and execute queued turns after the CLI exits.
 live turn, marks the payload cancelled when present, appends `turn_cancelled`,
 and refreshes `queued_turns`; `all=true` cancels every queued pending turn in
 that live session. It does not cancel a turn already claimed by a future worker.
+`rlm_process_recover session_id=<id>` scans the live manifest, active turn,
+runtime tasks, and persisted payloads for interrupted `running` turns. The
+default `mode=requeue` makes recoverable interrupted turns pending/queued again,
+clears stale `active_turn_id`, refreshes `queued_turns`, and appends
+`turn_recovered`; `mode=fail` marks interrupted turns failed instead, and
+`dry_run=true` previews the recovery actions without mutating state.
 `rlm_process_run_next session_id=<id>` is the first non-daemon worker bridge: it
 claims the oldest queued payload, writes `turn_started`, runs the bounded child
 model flow, then records `turn_completed` or `turn_failed`; `dry_run=true`
@@ -1426,7 +1433,7 @@ renders the selected payload without claiming it. `rlm_process_drain` repeats
 that single-step worker path for up to `max_turns` queued payloads in FIFO
 order, with `dry_run=true` for a non-mutating batch preview. Constant background
 service packaging, model delta streaming, active worker cancellation, and
-recovery remain future work.
+broader all-session restart scanning remain future work.
 `rlm_process_events session_id=<id> cursor=<seq>` replays parsed
 `.dscode/rlm-daemon/<session_id>/events.jsonl` records with `seq` greater than
 the cursor and returns `next_cursor` for clients that want deterministic live
@@ -1444,6 +1451,8 @@ read-only `rlm_process_events`, and read-only `rlm_process_wait` by default. Sta
 durable runtime approvals because it writes `.dscode/rlm-python` state.
 `rlm_process_cancel` is hidden by default and requires durable runtime approvals
 because it updates runtime task status and writes live RLM daemon event logs.
+`rlm_process_recover` has the same durable-approval gate because it can requeue
+or fail runtime tasks and rewrites live turn payloads.
 `rlm_process_run_next` is hidden by default and requires trusted side effects or
 durable runtime approvals because it can spend model tokens and updates runtime
 state. `rlm_process_drain` has the same gating for the same reason.

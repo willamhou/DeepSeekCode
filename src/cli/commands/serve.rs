@@ -47,8 +47,9 @@ use crate::tools::revert_turn::RevertTurnTool;
 use crate::tools::review::{PrReviewCommentPlanTool, ReviewTool};
 use crate::tools::rlm::{
     RlmBatchTool, RlmChunkPlanTool, RlmLiveCancelTool, RlmLiveDrainTool, RlmLiveEventsTool,
-    RlmLiveRunNextTool, RlmLiveWaitTool, RlmMapReducePlanTool, RlmModelSessionsTool,
-    RlmPythonSessionTool, RlmPythonSessionsTool, RlmPythonTool, RlmRecursivePlanTool, RlmTool,
+    RlmLiveRecoverTool, RlmLiveRunNextTool, RlmLiveWaitTool, RlmMapReducePlanTool,
+    RlmModelSessionsTool, RlmPythonSessionTool, RlmPythonSessionsTool, RlmPythonTool,
+    RlmRecursivePlanTool, RlmTool,
 };
 use crate::tools::run_shell::{is_safe_shell_command, RunShellTool};
 use crate::tools::run_tests::{render_run_tests_command, RunTestsTool};
@@ -850,6 +851,26 @@ fn execute_mcp_tool(
             };
             request_mcp_runtime_write_approval(state, &input, "rlm_process_cancel", target)?;
             RlmLiveCancelTool {
+                config: state.config.clone(),
+            }
+            .execute(input)?
+        }
+        "rlm_process_recover" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP RLM live recovery tool `rlm_process_recover` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route runtime-state writes through approvals",
+                ));
+            }
+            let target = format!(
+                "recover live RLM session: {}",
+                input
+                    .get("session_id")
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("<missing>")
+            );
+            request_mcp_runtime_write_approval(state, &input, "rlm_process_recover", target)?;
+            RlmLiveRecoverTool {
                 config: state.config.clone(),
             }
             .execute(input)?
@@ -4032,6 +4053,19 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
             ),
         ));
         tools.push(mcp_tool_definition(
+            "rlm_process_recover",
+            "Recover interrupted live RLM daemon turns by requeueing or failing stale running turns. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("session_id", string_property("Live RLM session id.")),
+                    ("mode", string_property("Recovery mode: requeue or fail. Defaults to requeue.")),
+                    ("dry_run", string_property("Set true to preview recovery actions without mutating state.")),
+                    ("reason", string_property("Optional recovery reason.")),
+                ],
+                &["session_id"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
             "runtime_create_automation",
             "Create a durable runtime automation. Requires durable runtime approvals.",
             mcp_schema(
@@ -5876,6 +5910,7 @@ fn acp_tool_kind(name: &str) -> &'static str {
         | "rlm_process_cancel"
         | "rlm_process_run_next"
         | "rlm_process_drain"
+        | "rlm_process_recover"
         | "rlm_python"
         | "rlm_python_session" => "execute",
         "rlm"
@@ -8352,6 +8387,7 @@ mod tests {
         assert!(!rendered.contains(r#""name":"exec_shell_cancel""#));
         assert!(!rendered.contains(r#""name":"rlm_python_session""#));
         assert!(!rendered.contains(r#""name":"rlm_process_cancel""#));
+        assert!(!rendered.contains(r#""name":"rlm_process_recover""#));
         assert!(!rendered.contains(r#""name":"rlm_process_run_next""#));
         assert!(!rendered.contains(r#""name":"rlm_process_drain""#));
         assert!(!rendered.contains(r#""name":"rlm""#));
@@ -8960,6 +8996,7 @@ shell_allowlist = ["cargo test"]
         assert!(!rendered.contains(r#""name":"runtime_create_task""#));
         assert!(!rendered.contains(r#""name":"runtime_cancel_task""#));
         assert!(!rendered.contains(r#""name":"rlm_process_cancel""#));
+        assert!(!rendered.contains(r#""name":"rlm_process_recover""#));
         assert!(!rendered.contains(r#""name":"runtime_create_automation""#));
         assert!(!rendered.contains(r#""name":"runtime_update_automation""#));
         assert!(!rendered.contains(r#""name":"runtime_pause_automation""#));
@@ -9023,6 +9060,7 @@ shell_allowlist = ["cargo test"]
         assert!(!rendered.contains(r#""name":"runtime_create_task""#));
         assert!(!rendered.contains(r#""name":"runtime_cancel_task""#));
         assert!(!rendered.contains(r#""name":"rlm_process_cancel""#));
+        assert!(!rendered.contains(r#""name":"rlm_process_recover""#));
         assert!(!rendered.contains(r#""name":"runtime_create_automation""#));
         assert!(!rendered.contains(r#""name":"runtime_update_automation""#));
         assert!(!rendered.contains(r#""name":"runtime_pause_automation""#));
@@ -9057,6 +9095,7 @@ shell_allowlist = ["cargo test"]
         assert!(rendered.contains(r#""name":"runtime_create_task""#));
         assert!(rendered.contains(r#""name":"runtime_cancel_task""#));
         assert!(rendered.contains(r#""name":"rlm_process_cancel""#));
+        assert!(rendered.contains(r#""name":"rlm_process_recover""#));
         assert!(rendered.contains(r#""name":"runtime_create_automation""#));
         assert!(rendered.contains(r#""name":"runtime_update_automation""#));
         assert!(rendered.contains(r#""name":"runtime_pause_automation""#));
@@ -10292,6 +10331,7 @@ shell_allowlist = ["cargo test"]
         assert!(!rendered.contains(r#""name":"image_analyze""#));
         assert!(!rendered.contains(r#""name":"rlm_python_session""#));
         assert!(!rendered.contains(r#""name":"rlm_process_cancel""#));
+        assert!(!rendered.contains(r#""name":"rlm_process_recover""#));
         assert!(!rendered.contains(r#""name":"rlm_process_run_next""#));
         assert!(!rendered.contains(r#""name":"rlm_process_drain""#));
         assert!(!rendered.contains(r#""name":"apply_patch""#));
