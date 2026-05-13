@@ -1431,7 +1431,10 @@ runtime tasks, and persisted payloads for interrupted `running` turns. The
 default `mode=requeue` makes recoverable interrupted turns pending/queued again,
 clears stale `active_turn_id`, refreshes `queued_turns`, and appends
 `turn_recovered`; `mode=fail` marks interrupted turns failed instead, and
-`dry_run=true` previews the recovery actions without mutating state.
+`dry_run=true` previews the recovery actions without mutating state. If the
+manifest has a live daemon owner pid that still exists, recovery skips running
+turns by default to avoid clobbering an active worker; pass `force=true` only
+when the operator has confirmed the owner should be overridden.
 `rlm_process_recover all=true` scans all live session manifests up to `limit`,
 so a restarted supervisor can repair interrupted turns across the workspace.
 `rlm_process_stop session_id=<id>` stops an idle live session, cancels queued

@@ -68,7 +68,9 @@ draining have landed; interrupted-turn recovery across live session manifests
 has also landed; the existing `agents daemon` service loop now runs one queued
 live RLM turn per tick; idle live RLM sessions can now be stopped explicitly.
 Live RLM worker ownership now stamps daemon pid/epoch into running manifests
-and inventory reports best-effort owner liveness plus stale-owner status.
+and inventory reports best-effort owner liveness plus stale-owner status;
+manual recovery now preserves live-owned running turns unless `force=true` is
+explicitly supplied.
 Live PTY resize, attachable terminal replay/supervisor takeover, RLM delta
 streaming, active worker cancellation, automatic stale-owner recovery
 orchestration, and broader RLM daemon lifecycle status commands remain open.
@@ -86,7 +88,7 @@ orchestration, and broader RLM daemon lifecycle status commands remain open.
   queueing,
   event replay/wait, payload persistence, queued cancellation, single-step
   execution, bounded drain, all-session interrupted-turn recovery, and the
-  agents-daemon worker loop plus stop command and owner liveness inventory have
-  landed.
+  agents-daemon worker loop plus stop command, owner liveness inventory, and
+  live-owner recovery guard have landed.
 - Platform restore strategy for device nodes and Windows symlink semantics.
 - Live GitHub write-fixture harness behind an explicit opt-in test repository.

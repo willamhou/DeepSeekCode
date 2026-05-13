@@ -188,7 +188,8 @@ resumption.
      running turns for one session or all live manifests and records
      `turn_recovered`; `rlm_process_sessions include_live=true` now reports
      `daemon_alive`, `daemon_stale`, and `daemon_owner` from the live manifest
-     pid/epoch, while automatic stale-owner recovery orchestration remains open
+     pid/epoch; recovery skips live-owned running turns unless `force=true` is
+     supplied, while automatic stale-owner recovery orchestration remains open
 6. Service packaging:
    - systemd/launchd templates for RLM daemon alongside runtime and diagnostics
    - status: partial; `deepseek agents daemon` now runs one queued live RLM

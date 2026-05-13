@@ -2017,6 +2017,7 @@ impl Tool for RlmLiveRecoverTool {
     fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
         let mode = parse_rlm_live_recovery_mode(input.get("mode"))?;
         let dry_run = parse_bool_arg(input.get("dry_run"));
+        let force = parse_bool_arg(input.get("force"));
         let recover_all = parse_bool_arg(input.get("all"));
         let session_id = input
             .get("session_id")
@@ -2041,10 +2042,12 @@ impl Tool for RlmLiveRecoverTool {
             {
                 scanned_count += 1;
                 let dry_run_value = if dry_run { "true" } else { "false" };
+                let force_value = if force { "true" } else { "false" };
                 let recover_input = ToolInput::new()
                     .with_arg("session_id", session_id.clone())
                     .with_arg("mode", mode.as_str())
                     .with_arg("dry_run", dry_run_value)
+                    .with_arg("force", force_value)
                     .with_arg("reason", reason.clone());
                 match self.execute(recover_input) {
                     Ok(output) => match parse_json_value(&output.summary) {
@@ -2078,6 +2081,7 @@ impl Tool for RlmLiveRecoverTool {
                 summary: json_value_to_string(&JsonValue::Object(BTreeMap::from([
                     ("all".to_string(), JsonValue::Bool(true)),
                     ("dry_run".to_string(), JsonValue::Bool(dry_run)),
+                    ("force".to_string(), JsonValue::Bool(force)),
                     (
                         "mode".to_string(),
                         JsonValue::String(mode.as_str().to_string()),
@@ -2102,6 +2106,7 @@ impl Tool for RlmLiveRecoverTool {
         validate_rlm_model_session_id(session_id)?;
         let manifest_path = rlm_live_session_manifest_path(&self.config, session_id);
         let manifest = read_rlm_live_session_manifest(&manifest_path, session_id)?;
+        let daemon_owner = rlm_live_daemon_owner_status_from_manifest(&manifest);
         let runtime_thread_id = rlm_live_manifest_string_field(&manifest, "runtime_thread_id")
             .ok_or_else(|| {
                 tool_failure("rlm_process_recover live manifest is missing runtime_thread_id")
@@ -2152,6 +2157,18 @@ impl Tool for RlmLiveRecoverTool {
             }) {
                 action = "skip_mismatched_thread";
                 action_reason = "payload belongs to a different runtime thread".to_string();
+            } else if !force
+                && (task_status == "running" || payload_status == "running")
+                && daemon_owner.alive == Some(true)
+            {
+                action = "skip_live_owner_alive";
+                action_reason = format!(
+                    "daemon owner pid {} is still alive; pass force=true to recover anyway",
+                    daemon_owner
+                        .pid
+                        .map(|pid| pid.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                );
             } else if task_status == "running" || payload_status == "running" {
                 if task.is_some() && payload.is_some() && mode == RlmLiveRecoveryMode::Requeue {
                     action = "requeue";
@@ -2246,7 +2263,7 @@ impl Tool for RlmLiveRecoverTool {
                 recovered_count += 1;
             }
 
-            if active_turn_id.as_deref() == Some(task_id.as_str()) && action != "skip" {
+            if active_turn_id.as_deref() == Some(task_id.as_str()) && !action.starts_with("skip") {
                 cleared_active = true;
             }
             actions.push(JsonValue::Object(BTreeMap::from([
@@ -2285,18 +2302,36 @@ impl Tool for RlmLiveRecoverTool {
             } else {
                 "idle"
             };
-            write_rlm_live_session_manifest(
-                &self.config,
-                session_id,
-                status,
-                &runtime_thread_id,
-                runtime_session_id.as_deref(),
-                next_active_turn_id,
-                queued_turns,
-                &model,
-                &workspace,
-                created_at.as_deref(),
-            )?;
+            if next_active_turn_id.is_some() && daemon_owner.alive == Some(true) && !force {
+                let daemon_epoch = rlm_live_manifest_string_field(&manifest, "daemon_epoch");
+                write_rlm_live_session_manifest_with_daemon(
+                    &self.config,
+                    session_id,
+                    status,
+                    &runtime_thread_id,
+                    runtime_session_id.as_deref(),
+                    next_active_turn_id,
+                    queued_turns,
+                    &model,
+                    &workspace,
+                    created_at.as_deref(),
+                    daemon_owner.pid,
+                    daemon_epoch.as_deref(),
+                )?;
+            } else {
+                write_rlm_live_session_manifest(
+                    &self.config,
+                    session_id,
+                    status,
+                    &runtime_thread_id,
+                    runtime_session_id.as_deref(),
+                    next_active_turn_id,
+                    queued_turns,
+                    &model,
+                    &workspace,
+                    created_at.as_deref(),
+                )?;
+            }
             queued_turns
         };
 
@@ -2311,6 +2346,18 @@ impl Tool for RlmLiveRecoverTool {
                     JsonValue::String(runtime_thread_id),
                 ),
                 ("dry_run".to_string(), JsonValue::Bool(dry_run)),
+                ("force".to_string(), JsonValue::Bool(force)),
+                (
+                    "daemon_alive".to_string(),
+                    daemon_owner
+                        .alive
+                        .map(JsonValue::Bool)
+                        .unwrap_or(JsonValue::Null),
+                ),
+                (
+                    "daemon_stale".to_string(),
+                    JsonValue::Bool(daemon_owner.stale),
+                ),
                 (
                     "mode".to_string(),
                     JsonValue::String(mode.as_str().to_string()),
@@ -3853,6 +3900,18 @@ fn rlm_live_daemon_owner_status(root: &BTreeMap<String, JsonValue>) -> RlmLiveDa
         stale,
         owner,
     }
+}
+
+fn rlm_live_daemon_owner_status_from_manifest(manifest: &JsonValue) -> RlmLiveDaemonOwner {
+    let JsonValue::Object(root) = manifest else {
+        return RlmLiveDaemonOwner {
+            pid: None,
+            alive: None,
+            stale: false,
+            owner: "none",
+        };
+    };
+    rlm_live_daemon_owner_status(root)
 }
 
 fn rlm_process_is_alive(pid: u64) -> bool {
@@ -5983,6 +6042,118 @@ mod tests {
             RlmLiveRecoveryMode::Fail
         );
         assert!(parse_rlm_live_recovery_mode(Some("unknown")).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rlm_process_recover_skips_live_daemon_owner_unless_forced() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = cwd.join("target").join(format!(
+            "dscode-rlm-live-recover-owner-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut config = AppConfig::default();
+        config.workspace.config_dir = root.join(".dscode").display().to_string();
+        let rlm = RlmTool {
+            tool_name: "rlm_process",
+            config: config.clone(),
+            parent_depth: 0,
+        };
+        let queued = rlm
+            .execute(
+                ToolInput::new()
+                    .with_arg("task", "recover owned turn")
+                    .with_arg("content", "owned payload")
+                    .with_arg("session_id", "recover.owner")
+                    .with_arg("live", "true"),
+            )
+            .unwrap();
+        let turn_id = meta_value(&queued.summary, "meta.rlm_turn_id").unwrap();
+        let manifest_path = rlm_live_session_manifest_path(&config, "recover.owner");
+        let manifest = read_rlm_live_session_manifest(&manifest_path, "recover.owner").unwrap();
+        let runtime_thread_id =
+            rlm_live_manifest_string_field(&manifest, "runtime_thread_id").unwrap();
+        let runtime_session_id = rlm_live_manifest_string_field(&manifest, "runtime_session_id");
+        let store = rlm_runtime_store(&config);
+        store
+            .claim_task(&turn_id, "test-owned-worker".to_string())
+            .unwrap();
+        update_rlm_live_session_turn_payload_status(
+            &config,
+            "recover.owner",
+            &turn_id,
+            "running",
+            Vec::new(),
+        )
+        .unwrap();
+        let payload =
+            read_rlm_live_session_turn_payload(&config, "recover.owner", &turn_id).unwrap();
+        write_rlm_live_session_manifest_with_daemon(
+            &config,
+            "recover.owner",
+            "running",
+            &runtime_thread_id,
+            runtime_session_id.as_deref(),
+            Some(&turn_id),
+            0,
+            &payload.model,
+            &payload.workspace,
+            rlm_live_manifest_string_field(&manifest, "created_at").as_deref(),
+            Some(std::process::id() as u64),
+            Some("epoch+owned"),
+        )
+        .unwrap();
+
+        let skipped = RlmLiveRecoverTool {
+            config: config.clone(),
+        }
+        .execute(ToolInput::new().with_arg("session_id", "recover.owner"))
+        .unwrap();
+        assert!(skipped.summary.contains(r#""force":false"#));
+        assert!(skipped.summary.contains(r#""daemon_alive":true"#));
+        assert!(skipped.summary.contains(r#""recovered_count":0"#));
+        assert!(skipped
+            .summary
+            .contains(r#""action":"skip_live_owner_alive""#));
+        assert_eq!(store.load_task(&turn_id).unwrap().status, "running");
+        let still_running =
+            read_rlm_live_session_manifest(&manifest_path, "recover.owner").unwrap();
+        assert_eq!(
+            rlm_live_manifest_u64_field(&still_running, "daemon_pid"),
+            Some(std::process::id() as u64)
+        );
+        assert_eq!(
+            rlm_live_manifest_string_field(&still_running, "active_turn_id").as_deref(),
+            Some(turn_id.as_str())
+        );
+
+        let forced = RlmLiveRecoverTool {
+            config: config.clone(),
+        }
+        .execute(
+            ToolInput::new()
+                .with_arg("session_id", "recover.owner")
+                .with_arg("force", "true"),
+        )
+        .unwrap();
+        assert!(forced.summary.contains(r#""force":true"#));
+        assert!(forced.summary.contains(r#""recovered_count":1"#));
+        assert!(forced.summary.contains(r#""action":"requeue""#));
+        assert_eq!(store.load_task(&turn_id).unwrap().status, "pending");
+        let forced_manifest =
+            read_rlm_live_session_manifest(&manifest_path, "recover.owner").unwrap();
+        assert_eq!(
+            rlm_live_manifest_string_field(&forced_manifest, "active_turn_id"),
+            None
+        );
+        assert_eq!(
+            rlm_live_manifest_u64_field(&forced_manifest, "daemon_pid"),
+            None
+        );
         let _ = fs::remove_dir_all(root);
     }
 

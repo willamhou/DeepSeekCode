@@ -4074,7 +4074,7 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
         ));
         tools.push(mcp_tool_definition(
             "rlm_process_recover",
-            "Recover interrupted live RLM daemon turns by requeueing or failing stale running turns. Requires durable runtime approvals.",
+            "Recover interrupted live RLM daemon turns by requeueing or failing stale running turns, skipping turns owned by a live daemon pid unless force=true. Requires durable runtime approvals.",
             mcp_schema(
                 vec![
                     ("session_id", string_property("Live RLM session id. Optional when all=true.")),
@@ -4082,6 +4082,7 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
                     ("limit", string_property("Maximum live sessions to scan when all=true.")),
                     ("mode", string_property("Recovery mode: requeue or fail. Defaults to requeue.")),
                     ("dry_run", string_property("Set true to preview recovery actions without mutating state.")),
+                    ("force", string_property("Set true to recover even when daemon_pid is still alive.")),
                     ("reason", string_property("Optional recovery reason.")),
                 ],
                 &[],
