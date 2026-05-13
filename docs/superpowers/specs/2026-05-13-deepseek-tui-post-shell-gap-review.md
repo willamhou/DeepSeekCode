@@ -70,10 +70,11 @@ live RLM turn per tick; idle live RLM sessions can now be stopped explicitly.
 Live RLM worker ownership now stamps daemon pid/epoch into running manifests
 and inventory reports best-effort owner liveness plus stale-owner status;
 manual recovery now preserves live-owned running turns unless `force=true` is
-explicitly supplied.
+explicitly supplied; `deepseek agents daemon` now runs that safe all-session
+recovery before claiming queued live RLM turns.
 Live PTY resize, attachable terminal replay/supervisor takeover, RLM delta
-streaming, active worker cancellation, automatic stale-owner recovery
-orchestration, and broader RLM daemon lifecycle status commands remain open.
+streaming, active worker cancellation, and broader RLM daemon lifecycle status
+commands remain open.
 
 ## Next Candidate Specs
 
@@ -83,12 +84,11 @@ orchestration, and broader RLM daemon lifecycle status commands remain open.
   backend.
 - True live model-backed RLM REPL/daemon implementation now has a design spec:
   `2026-05-13-deepseek-tui-rlm-live-daemon-design.md`. The next executable
-  slice should be streaming deltas, active worker cancellation, automatic stale
-  owner recovery orchestration, or broader RLM lifecycle status commands because
-  queueing,
+  slice should be streaming deltas, active worker cancellation, or broader RLM
+  lifecycle status commands because queueing,
   event replay/wait, payload persistence, queued cancellation, single-step
   execution, bounded drain, all-session interrupted-turn recovery, and the
   agents-daemon worker loop plus stop command, owner liveness inventory, and
-  live-owner recovery guard have landed.
+  live-owner recovery guard plus daemon-tick stale recovery have landed.
 - Platform restore strategy for device nodes and Windows symlink semantics.
 - Live GitHub write-fixture harness behind an explicit opt-in test repository.

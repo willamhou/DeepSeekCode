@@ -25,9 +25,11 @@ use crate::model::protocol::{ModelAction, ModelRequest, ObservationStatus};
 use crate::tools::dispatch_subagent::{
     active_agent_thread_path, agent_threads_dir, thread_file_path, validate_thread_id,
 };
-use crate::tools::rlm::{rlm_live_session_ids_by_runtime_thread, RlmLiveRunNextTool};
+use crate::tools::rlm::{
+    rlm_live_session_ids_by_runtime_thread, RlmLiveRecoverTool, RlmLiveRunNextTool,
+};
 use crate::tools::types::{Tool, ToolInput};
-use crate::util::json::{json_as_object, json_as_string, parse_json_value};
+use crate::util::json::{json_as_object, json_as_string, json_as_u64, parse_json_value};
 use crate::util::json::{json_value_to_string, JsonValue};
 
 pub fn run(action: AgentsAction) -> AppResult<()> {
@@ -242,10 +244,12 @@ struct RuntimeDaemonTick {
     triggered_automations: usize,
     executed_tasks: usize,
     executed_rlm_turns: usize,
+    recovered_rlm_turns: usize,
     compacted_threads: usize,
     failed_automations: usize,
     failed_tasks: usize,
     failed_rlm_turns: usize,
+    failed_rlm_recoveries: usize,
     failed_compactions: usize,
 }
 
@@ -274,21 +278,25 @@ fn run_runtime_daemon(
         } else if tick.triggered_automations > 0
             || tick.executed_tasks > 0
             || tick.executed_rlm_turns > 0
+            || tick.recovered_rlm_turns > 0
             || tick.compacted_threads > 0
             || tick.failed_automations > 0
             || tick.failed_tasks > 0
             || tick.failed_rlm_turns > 0
+            || tick.failed_rlm_recoveries > 0
             || tick.failed_compactions > 0
         {
             println!(
-                "daemon tick: triggered={} executed={} rlm_executed={} compacted={} automation_errors={} task_errors={} rlm_errors={} compaction_errors={}",
+                "daemon tick: triggered={} executed={} rlm_executed={} rlm_recovered={} compacted={} automation_errors={} task_errors={} rlm_errors={} rlm_recovery_errors={} compaction_errors={}",
                 tick.triggered_automations,
                 tick.executed_tasks,
                 tick.executed_rlm_turns,
+                tick.recovered_rlm_turns,
                 tick.compacted_threads,
                 tick.failed_automations,
                 tick.failed_tasks,
                 tick.failed_rlm_turns,
+                tick.failed_rlm_recoveries,
                 tick.failed_compactions
             );
         }
@@ -654,6 +662,7 @@ fn run_runtime_daemon_tick(
         }
     }
 
+    run_runtime_daemon_rlm_recovery(config, json, &mut tick)?;
     run_runtime_daemon_rlm_live_turn(config, store, json, &mut tick)?;
 
     let mut pending = store
@@ -693,6 +702,58 @@ fn run_runtime_daemon_tick(
     run_runtime_daemon_compactions(config, store, json, &mut tick)?;
 
     Ok(tick)
+}
+
+fn run_runtime_daemon_rlm_recovery(
+    config: &AppConfig,
+    json: bool,
+    tick: &mut RuntimeDaemonTick,
+) -> AppResult<()> {
+    let output = RlmLiveRecoverTool {
+        config: config.clone(),
+    }
+    .execute(
+        ToolInput::new()
+            .with_arg("all", "true")
+            .with_arg("reason", "runtime daemon stale live RLM owner recovery"),
+    );
+    match output {
+        Ok(output) => {
+            let recovered_count = parse_json_value(&output.summary)
+                .ok()
+                .and_then(|value| match value {
+                    JsonValue::Object(root) => root.get("recovered_count").and_then(json_as_u64),
+                    _ => None,
+                })
+                .unwrap_or(0) as usize;
+            tick.recovered_rlm_turns += recovered_count;
+            if json && recovered_count > 0 {
+                println!(
+                    "{}",
+                    json_value_to_string(&daemon_rlm_recovery_event(
+                        recovered_count,
+                        Some(&output.summary),
+                    ))
+                );
+            }
+        }
+        Err(error) => {
+            tick.failed_rlm_recoveries += 1;
+            if json {
+                println!(
+                    "{}",
+                    json_value_to_string(&daemon_error_event(
+                        "rlm_recovery_failed",
+                        "all",
+                        &error.to_string(),
+                    ))
+                );
+            } else {
+                eprintln!("live RLM recovery failed: {error}");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn run_runtime_daemon_rlm_live_turn(
@@ -1334,6 +1395,10 @@ fn daemon_tick_event(tick: &RuntimeDaemonTick) -> JsonValue {
         JsonValue::Number(tick.executed_rlm_turns.to_string()),
     );
     root.insert(
+        "recovered_rlm_turns".to_string(),
+        JsonValue::Number(tick.recovered_rlm_turns.to_string()),
+    );
+    root.insert(
         "compacted_threads".to_string(),
         JsonValue::Number(tick.compacted_threads.to_string()),
     );
@@ -1350,8 +1415,31 @@ fn daemon_tick_event(tick: &RuntimeDaemonTick) -> JsonValue {
         JsonValue::Number(tick.failed_rlm_turns.to_string()),
     );
     root.insert(
+        "failed_rlm_recoveries".to_string(),
+        JsonValue::Number(tick.failed_rlm_recoveries.to_string()),
+    );
+    root.insert(
         "failed_compactions".to_string(),
         JsonValue::Number(tick.failed_compactions.to_string()),
+    );
+    JsonValue::Object(root)
+}
+
+fn daemon_rlm_recovery_event(recovered_count: usize, summary: Option<&str>) -> JsonValue {
+    let mut root = std::collections::BTreeMap::new();
+    root.insert(
+        "type".to_string(),
+        JsonValue::String("rlm_recovery_completed".to_string()),
+    );
+    root.insert(
+        "recovered_count".to_string(),
+        JsonValue::Number(recovered_count.to_string()),
+    );
+    root.insert(
+        "summary".to_string(),
+        summary
+            .map(|value| JsonValue::String(value.to_string()))
+            .unwrap_or(JsonValue::Null),
     );
     JsonValue::Object(root)
 }
@@ -2117,6 +2205,67 @@ mod tests {
         .execute(ToolInput::new().with_arg("session_id", "daemon.rlm"))
         .unwrap();
         assert!(events.summary.contains(r#""kind":"turn_started""#));
+        assert!(events.summary.contains(r#""kind":"turn_completed""#));
+    }
+
+    #[test]
+    fn runtime_daemon_tick_recovers_stale_live_rlm_owner_before_running_queue() {
+        let root = temp_root("runtime-daemon-rlm-stale-owner");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("README.md"), "hello stale rlm owner\n").unwrap();
+        let config_dir = root.join(".dscode");
+        let mut config = AppConfig::default();
+        config.workspace.config_dir = config_dir.display().to_string();
+        config.workspace.session_dir = config_dir.join("sessions").display().to_string();
+        config.model.api_key_env = "DSCODE_TEST_NO_KEY".to_string();
+        let store = RuntimeStore::new(config_dir.join("runtime"));
+        let queued = crate::tools::rlm::RlmTool {
+            tool_name: "rlm_process",
+            config: config.clone(),
+            parent_depth: 0,
+        }
+        .execute(
+            ToolInput::new()
+                .with_arg("task", "recover stale daemon owner payload")
+                .with_arg("content", "stale owner payload")
+                .with_arg("session_id", "daemon.stale")
+                .with_arg("live", "true")
+                .with_arg("cwd", workspace.display().to_string()),
+        )
+        .unwrap();
+        let turn_id = meta_value(&queued.summary, "meta.rlm_turn_id").unwrap();
+        let thread_id = meta_value(&queued.summary, "meta.rlm_runtime_thread_id").unwrap();
+        store
+            .claim_task(&turn_id, "test-stale-owner".to_string())
+            .unwrap();
+        let manifest_dir = config_dir.join("rlm-daemon").join("daemon.stale");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::write(
+            manifest_dir.join("manifest.json"),
+            format!(
+                r#"{{"session_id":"daemon.stale","status":"running","daemon_pid":{},"daemon_epoch":"epoch+stale","runtime_thread_id":"{}","runtime_session_id":null,"active_turn_id":"{}","queued_turns":0,"model":"deepseek-coder","workspace":"{}","created_at":"epoch+1","updated_at":"epoch+2","last_error":null}}"#,
+                i32::MAX as u64 + 1,
+                thread_id,
+                turn_id,
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let tick = run_runtime_daemon_tick(&config, &store, Some(1), true).unwrap();
+
+        assert_eq!(tick.recovered_rlm_turns, 1);
+        assert_eq!(tick.executed_rlm_turns, 1);
+        assert_eq!(tick.failed_rlm_recoveries, 0);
+        let updated = store.load_task(&turn_id).unwrap();
+        assert_eq!(updated.status, "completed");
+        let events = crate::tools::rlm::RlmLiveEventsTool {
+            config: config.clone(),
+        }
+        .execute(ToolInput::new().with_arg("session_id", "daemon.stale"))
+        .unwrap();
+        assert!(events.summary.contains(r#""kind":"turn_recovered""#));
         assert!(events.summary.contains(r#""kind":"turn_completed""#));
     }
 

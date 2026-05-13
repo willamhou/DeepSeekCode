@@ -1450,9 +1450,11 @@ reports `daemon_stale=true` when a `running` manifest points at a dead or
 invalid owner pid. `rlm_process_drain` repeats that single-step worker path for
 up to `max_turns` queued payloads in FIFO order, with `dry_run=true` for a
 non-mutating batch preview. The existing `deepseek agents daemon` service loop
-now runs one queued live RLM turn per tick through the same worker path. Model
-delta streaming, active worker cancellation, and broader RLM daemon lifecycle
-commands remain future work.
+now first runs safe all-session live RLM recovery, which requeues/fails stale
+running turns while preserving live-owned turns unless forced, then runs one
+queued live RLM turn per tick through the same worker path. Model delta
+streaming, active worker cancellation, and broader RLM daemon lifecycle commands
+remain future work.
 `rlm_process_events session_id=<id> cursor=<seq>` replays parsed
 `.dscode/rlm-daemon/<session_id>/events.jsonl` records with `seq` greater than
 the cursor and returns `next_cursor` for clients that want deterministic live

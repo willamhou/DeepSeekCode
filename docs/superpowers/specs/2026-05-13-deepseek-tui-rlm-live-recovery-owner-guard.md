@@ -35,6 +35,7 @@ clobber a worker that is still running.
 
 ## Remaining
 
-The next RLM lifecycle slice should automate stale-owner recovery from the
-runtime daemon or add broader lifecycle status commands. Model/tool delta
-streaming and cooperative active worker cancellation remain separate gaps.
+Daemon-tick stale-owner recovery is implemented in
+`2026-05-13-deepseek-tui-rlm-live-daemon-auto-recover.md`. Broader lifecycle
+status commands, model/tool delta streaming, and cooperative active worker
+cancellation remain separate gaps.

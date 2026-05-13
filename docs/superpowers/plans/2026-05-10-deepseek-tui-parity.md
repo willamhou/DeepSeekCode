@@ -535,7 +535,9 @@ Remaining:
   turn is running, and `rlm_process_sessions include_live=true` reports
   `daemon_alive`, `daemon_stale`, and `daemon_owner` so dead owners are visible
   before recovery; `rlm_process_recover` also skips live-owned running turns
-  unless `force=true` is supplied
+  unless `force=true` is supplied; `deepseek agents daemon` now runs safe
+  all-session live RLM recovery before claiming one queued live RLM turn per
+  tick
 - Review remote PR context signals now exist: `review` parses
   `github_pr_context` JSON to report requested changes, failing/cancelled status
   checks, and missing `include_diff=true` context before optional semantic

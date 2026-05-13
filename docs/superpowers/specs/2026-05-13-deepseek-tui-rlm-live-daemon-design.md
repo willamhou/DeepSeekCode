@@ -189,7 +189,8 @@ resumption.
      `turn_recovered`; `rlm_process_sessions include_live=true` now reports
      `daemon_alive`, `daemon_stale`, and `daemon_owner` from the live manifest
      pid/epoch; recovery skips live-owned running turns unless `force=true` is
-     supplied, while automatic stale-owner recovery orchestration remains open
+     supplied; `deepseek agents daemon` now runs safe all-session recovery at
+     the start of each tick before claiming queued live RLM turns
 6. Service packaging:
    - systemd/launchd templates for RLM daemon alongside runtime and diagnostics
    - status: partial; `deepseek agents daemon` now runs one queued live RLM
@@ -217,5 +218,5 @@ Future implementation should add these gates:
 Do not rename the existing bounded child-agent `rlm_process` implementation as a
 live daemon. It is already useful and should remain the default until a real
 live worker exists. The remaining executable RLM slices should focus on
-streaming model/tool deltas, active worker cancellation, automatic stale-owner
-recovery orchestration, and explicit lifecycle commands.
+streaming model/tool deltas, active worker cancellation, and explicit lifecycle
+commands.
