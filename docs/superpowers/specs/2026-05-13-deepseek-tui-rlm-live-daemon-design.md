@@ -152,15 +152,17 @@ resumption.
      `2026-05-13-deepseek-tui-rlm-live-turn-queue.md`
 3. Tool routing:
    - `rlm_process live=true`
+   - `rlm_process_cancel`
    - `rlm_process_wait`
    - MCP/ACP schema updates
    - status: partial; `rlm_process live=true` queueing and
-     `rlm_process_events` read-only replay are implemented
+     `rlm_process_events` read-only replay are implemented;
+     `rlm_process_cancel` is implemented for queued pending turns only
 4. Streaming and cancellation:
    - `rlm_process_events`
    - active turn cancellation via runtime cancel events
-   - status: partial; event-log replay is implemented, worker streaming and
-     cancellation remain open
+   - status: partial; event-log replay and queued-turn cancellation are
+     implemented; worker streaming and active worker cancellation remain open
 5. Recovery:
    - daemon restart scan
    - stale pid detection

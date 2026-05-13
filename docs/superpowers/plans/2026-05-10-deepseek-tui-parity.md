@@ -514,7 +514,10 @@ Remaining:
   live=true session_id=<id>` now creates or reuses a live-session runtime
   thread and enqueues pending `rlm_process` runtime tasks without running a
   model worker yet; `rlm_process_events` replays queued live-session event logs
-  by cursor as the read-only polling surface before worker streaming lands
+  by cursor as the read-only polling surface before worker streaming lands;
+  `rlm_process_cancel` cancels queued pending live turns, refreshes
+  `queued_turns`, and appends `turn_cancelled` events without claiming active
+  worker cancellation support
 - Review remote PR context signals now exist: `review` parses
   `github_pr_context` JSON to report requested changes, failing/cancelled status
   checks, and missing `include_diff=true` context before optional semantic

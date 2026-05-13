@@ -61,10 +61,10 @@ durable shell replay has since narrowed to byte-offset stdout/stderr slices;
 shell ownership diagnostics now persist stable child pid, owner pid, and process
 group metadata; RLM process semantics have since narrowed to durable
 model-session context plus session-only continuation; live RLM daemon
-manifest/inventory discovery, runtime-thread-backed turn queueing, and cursor
-event replay have landed. Live PTY resize, attachable terminal
+manifest/inventory discovery, runtime-thread-backed turn queueing, cursor
+event replay, and queued-turn cancellation have landed. Live PTY resize, attachable terminal
 replay/supervisor takeover, and live RLM worker execution, delta streaming,
-cancellation, and recovery remain open.
+active worker cancellation, and recovery remain open.
 
 ## Next Candidate Specs
 

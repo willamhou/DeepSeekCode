@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::types::AppConfig;
-use crate::core::runtime::RuntimeStore;
+use crate::core::runtime::{RuntimeStore, TaskRecord};
 use crate::error::{tool_failure, AppResult};
 use crate::tools::dispatch_subagent::{DispatchSubagentTool, DispatchSubagentsTool};
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
@@ -31,6 +31,7 @@ const MAX_RLM_PYTHON_TIMEOUT_MS: u64 = 5_000;
 const MAX_RLM_MODEL_SESSION_TURNS: usize = 20;
 const MAX_RLM_MODEL_SESSION_CONTEXT_TURNS: usize = 6;
 const MAX_RLM_MODEL_SESSION_SUMMARY_CHARS: usize = 12_000;
+const MAX_RLM_LIVE_TASK_LIST: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RlmPythonInterpreter {
@@ -1076,6 +1077,10 @@ pub struct RlmLiveEventsTool {
     pub config: AppConfig,
 }
 
+pub struct RlmLiveCancelTool {
+    pub config: AppConfig,
+}
+
 impl Tool for RlmPythonSessionsTool {
     fn name(&self) -> &str {
         "rlm_python_sessions"
@@ -1421,6 +1426,120 @@ impl Tool for RlmLiveEventsTool {
                 events,
                 limit
             ),
+        })
+    }
+}
+
+impl Tool for RlmLiveCancelTool {
+    fn name(&self) -> &str {
+        "rlm_process_cancel"
+    }
+
+    fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
+        let session_id = input
+            .get("session_id")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| tool_failure("rlm_process_cancel requires non-empty `session_id`"))?;
+        validate_rlm_model_session_id(session_id)?;
+        let target_task_id = input
+            .get("task_id")
+            .or_else(|| input.get("turn_id"))
+            .or_else(|| input.get("id"))
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let cancel_all = parse_bool_arg(input.get("all"));
+        if target_task_id.is_none() && !cancel_all {
+            return Err(tool_failure(
+                "rlm_process_cancel requires `task_id`/`turn_id` or `all=true`",
+            ));
+        }
+        let reason = input
+            .get("reason")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("cancelled by rlm_process_cancel")
+            .to_string();
+        let manifest_path = rlm_live_session_manifest_path(&self.config, session_id);
+        let manifest = read_rlm_live_session_manifest(&manifest_path, session_id)?;
+        let runtime_thread_id = rlm_live_manifest_string_field(&manifest, "runtime_thread_id")
+            .ok_or_else(|| {
+                tool_failure("rlm_process_cancel live manifest is missing runtime_thread_id")
+            })?;
+        let store = rlm_runtime_store(&self.config);
+        let thread = store.load_thread(&runtime_thread_id)?;
+        let candidates = if let Some(task_id) = target_task_id {
+            let task = store.load_task(task_id)?;
+            ensure_cancellable_live_rlm_task(&task, &runtime_thread_id)?;
+            vec![task]
+        } else {
+            store
+                .list_tasks(None, Some(&runtime_thread_id), MAX_RLM_LIVE_TASK_LIST)?
+                .into_iter()
+                .filter(|task| is_pending_live_rlm_task(task, &runtime_thread_id))
+                .collect()
+        };
+        let mut cancelled = Vec::new();
+        for task in candidates {
+            let original_summary = task.summary.clone();
+            let (updated, _event) = store.cancel_task(&task.id, reason.clone())?;
+            append_rlm_live_session_cancel_event(
+                &self.config,
+                session_id,
+                &runtime_thread_id,
+                &updated.id,
+                &original_summary,
+                &reason,
+            )?;
+            cancelled.push(rlm_live_cancelled_task_json(&updated, &original_summary));
+        }
+        let queued_turns = count_pending_live_rlm_tasks(&store, &runtime_thread_id)?;
+        let active_turn_id = rlm_live_manifest_string_field(&manifest, "active_turn_id");
+        let status = if active_turn_id.is_some() {
+            "running"
+        } else {
+            "idle"
+        };
+        let runtime_session_id = rlm_live_manifest_string_field(&manifest, "runtime_session_id")
+            .or_else(|| thread.session_id.clone());
+        let model =
+            rlm_live_manifest_string_field(&manifest, "model").unwrap_or_else(|| thread.model);
+        let workspace = rlm_live_manifest_string_field(&manifest, "workspace")
+            .unwrap_or_else(|| thread.workspace);
+        let created_at = rlm_live_manifest_string_field(&manifest, "created_at");
+        write_rlm_live_session_manifest(
+            &self.config,
+            session_id,
+            status,
+            &runtime_thread_id,
+            runtime_session_id.as_deref(),
+            active_turn_id.as_deref(),
+            queued_turns,
+            &model,
+            &workspace,
+            created_at.as_deref(),
+        )?;
+        Ok(ToolOutput {
+            summary: json_value_to_string(&JsonValue::Object(BTreeMap::from([
+                (
+                    "session_id".to_string(),
+                    JsonValue::String(session_id.to_string()),
+                ),
+                (
+                    "runtime_thread_id".to_string(),
+                    JsonValue::String(runtime_thread_id),
+                ),
+                (
+                    "cancelled_count".to_string(),
+                    JsonValue::Number(cancelled.len().to_string()),
+                ),
+                (
+                    "queued_turns".to_string(),
+                    JsonValue::Number(queued_turns.to_string()),
+                ),
+                ("reason".to_string(), JsonValue::String(reason)),
+                ("cancelled".to_string(), JsonValue::Array(cancelled)),
+            ]))),
         })
     }
 }
@@ -2013,6 +2132,93 @@ fn append_rlm_live_session_event(
         .and_then(|mut file| file.write_all(event.as_bytes()))
         .map_err(|error| tool_failure(format!("rlm live session event write failed: {error}")))?;
     Ok(())
+}
+
+fn append_rlm_live_session_cancel_event(
+    config: &AppConfig,
+    session_id: &str,
+    runtime_thread_id: &str,
+    task_id: &str,
+    task_summary: &str,
+    reason: &str,
+) -> AppResult<()> {
+    let path = rlm_live_session_event_log_path(config, session_id);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            tool_failure(format!("rlm live session event mkdir failed: {error}"))
+        })?;
+    }
+    let seq = fs::read_to_string(&path)
+        .map(|content| content.lines().count() as u64 + 1)
+        .unwrap_or(1);
+    let event = format!(
+        "{{\"seq\":{},\"created_at\":\"{}\",\"kind\":\"turn_cancelled\",\"runtime_thread_id\":\"{}\",\"task_id\":\"{}\",\"task\":\"{}\",\"input\":\"queued turn\",\"reason\":\"{}\"}}\n",
+        seq,
+        json_escape(&rlm_epoch_label()),
+        json_escape(runtime_thread_id),
+        json_escape(task_id),
+        json_escape(task_summary),
+        json_escape(reason)
+    );
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(event.as_bytes()))
+        .map_err(|error| tool_failure(format!("rlm live session event write failed: {error}")))?;
+    Ok(())
+}
+
+fn ensure_cancellable_live_rlm_task(task: &TaskRecord, runtime_thread_id: &str) -> AppResult<()> {
+    if task.thread_id.as_deref() != Some(runtime_thread_id) {
+        return Err(tool_failure(format!(
+            "rlm_process_cancel task {} does not belong to live session thread {runtime_thread_id}",
+            task.id
+        )));
+    }
+    if task.kind != "rlm_process" {
+        return Err(tool_failure(format!(
+            "rlm_process_cancel task {} has kind `{}` instead of `rlm_process`",
+            task.id, task.kind
+        )));
+    }
+    if task.status != "pending" {
+        return Err(tool_failure(format!(
+            "rlm_process_cancel only cancels queued pending turns; task {} is `{}`",
+            task.id, task.status
+        )));
+    }
+    Ok(())
+}
+
+fn is_pending_live_rlm_task(task: &TaskRecord, runtime_thread_id: &str) -> bool {
+    task.kind == "rlm_process"
+        && task.status == "pending"
+        && task.thread_id.as_deref() == Some(runtime_thread_id)
+}
+
+fn count_pending_live_rlm_tasks(store: &RuntimeStore, runtime_thread_id: &str) -> AppResult<u64> {
+    let count = store
+        .list_tasks(None, Some(runtime_thread_id), MAX_RLM_LIVE_TASK_LIST)?
+        .into_iter()
+        .filter(|task| is_pending_live_rlm_task(task, runtime_thread_id))
+        .count();
+    Ok(count as u64)
+}
+
+fn rlm_live_cancelled_task_json(task: &TaskRecord, original_summary: &str) -> JsonValue {
+    JsonValue::Object(BTreeMap::from([
+        ("task_id".to_string(), JsonValue::String(task.id.clone())),
+        ("status".to_string(), JsonValue::String(task.status.clone())),
+        (
+            "original_summary".to_string(),
+            JsonValue::String(original_summary.to_string()),
+        ),
+        (
+            "summary".to_string(),
+            JsonValue::String(task.summary.clone()),
+        ),
+    ]))
 }
 
 fn render_rlm_live_session_list_entry(
@@ -3090,6 +3296,14 @@ fn render_rlm_batch_tasks(
 mod tests {
     use super::*;
 
+    fn meta_value(summary: &str, key: &str) -> Option<String> {
+        let prefix = format!("{key}=");
+        summary.lines().find_map(|line| {
+            line.strip_prefix(&prefix)
+                .map(|value| value.trim().to_string())
+        })
+    }
+
     #[test]
     fn render_rlm_task_includes_context_question_and_strategy() {
         let task = render_rlm_task("alpha\nbeta", "What changed?", "classify");
@@ -3566,6 +3780,108 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("cursor"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rlm_process_cancel_cancels_queued_live_turns() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = cwd.join("target").join(format!(
+            "dscode-rlm-live-cancel-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut config = AppConfig::default();
+        config.workspace.config_dir = root.join(".dscode").display().to_string();
+        let rlm = RlmTool {
+            tool_name: "rlm_process",
+            config: config.clone(),
+            parent_depth: 0,
+        };
+        let first = rlm
+            .execute(
+                ToolInput::new()
+                    .with_arg("task", "first queued turn")
+                    .with_arg("content", "alpha")
+                    .with_arg("session_id", "cancel.1")
+                    .with_arg("live", "true"),
+            )
+            .unwrap();
+        let first_turn = meta_value(&first.summary, "meta.rlm_turn_id").unwrap();
+        let second = rlm
+            .execute(
+                ToolInput::new()
+                    .with_arg("task", "second queued turn")
+                    .with_arg("session_id", "cancel.1")
+                    .with_arg("live", "true"),
+            )
+            .unwrap();
+        let second_turn = meta_value(&second.summary, "meta.rlm_turn_id").unwrap();
+
+        let cancel = RlmLiveCancelTool {
+            config: config.clone(),
+        }
+        .execute(
+            ToolInput::new()
+                .with_arg("session_id", "cancel.1")
+                .with_arg("turn_id", first_turn.clone())
+                .with_arg("reason", "superseded"),
+        )
+        .unwrap();
+        assert!(cancel.summary.contains(r#""cancelled_count":1"#));
+        assert!(cancel.summary.contains(r#""queued_turns":1"#));
+        assert!(cancel.summary.contains(&first_turn));
+
+        let manifest_path = rlm_live_session_manifest_path(&config, "cancel.1");
+        let manifest = read_rlm_live_session_manifest(&manifest_path, "cancel.1").unwrap();
+        let thread_id = rlm_live_manifest_string_field(&manifest, "runtime_thread_id").unwrap();
+        assert_eq!(
+            rlm_live_manifest_u64_field(&manifest, "queued_turns"),
+            Some(1)
+        );
+        let store = rlm_runtime_store(&config);
+        assert_eq!(store.load_task(&first_turn).unwrap().status, "cancelled");
+        assert_eq!(store.load_task(&second_turn).unwrap().status, "pending");
+
+        let events_tool = RlmLiveEventsTool {
+            config: config.clone(),
+        };
+        let events = events_tool
+            .execute(ToolInput::new().with_arg("session_id", "cancel.1"))
+            .unwrap();
+        assert!(events.summary.contains(r#""kind":"turn_cancelled""#));
+        assert!(events.summary.contains(r#""reason":"superseded""#));
+        assert!(events.summary.contains(&first_turn));
+
+        let all = RlmLiveCancelTool {
+            config: config.clone(),
+        }
+        .execute(
+            ToolInput::new()
+                .with_arg("session_id", "cancel.1")
+                .with_arg("all", "true"),
+        )
+        .unwrap();
+        assert!(all.summary.contains(r#""cancelled_count":1"#));
+        assert!(all.summary.contains(r#""queued_turns":0"#));
+        assert_eq!(store.load_task(&second_turn).unwrap().status, "cancelled");
+        let updated = read_rlm_live_session_manifest(&manifest_path, "cancel.1").unwrap();
+        assert_eq!(
+            rlm_live_manifest_string_field(&updated, "runtime_thread_id").as_deref(),
+            Some(thread_id.as_str())
+        );
+        assert_eq!(
+            rlm_live_manifest_u64_field(&updated, "queued_turns"),
+            Some(0)
+        );
+
+        let err = RlmLiveCancelTool { config }
+            .execute(ToolInput::new().with_arg("session_id", "cancel.1"))
+            .unwrap_err();
+        assert!(err.to_string().contains("task_id"));
         let _ = fs::remove_dir_all(root);
     }
 
