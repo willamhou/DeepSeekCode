@@ -345,6 +345,7 @@ Exposed tools:
 | `rlm_python_sessions` | List or inspect persisted `rlm_python_session` JSON state without running Python |
 | `rlm_process_sessions` | List or inspect persisted `rlm_process` durable model-session summaries, optionally including live daemon manifests, without running a child model |
 | `rlm_process_events` | Replay live `rlm_process` daemon event logs by cursor without running a child model |
+| `rlm_process_wait` | Wait for live `rlm_process` daemon event logs after a cursor without running a child model |
 | `rlm_process_cancel` | Hidden by default; exposed with durable runtime approvals, and cancels queued pending live `rlm_process` daemon turns |
 | `rlm_process_run_next` | Hidden by default; exposed with trusted `DSCODE_MCP_ENABLE_SIDE_EFFECTS=1` or durable runtime approvals, and claims/runs one queued live `rlm_process` daemon turn |
 | `rlm_python_session` | Hidden by default; exposed with trusted `DSCODE_MCP_ENABLE_SIDE_EFFECTS=1` or durable runtime approvals, and writes `.dscode/rlm-python` helper state |
@@ -1424,12 +1425,15 @@ remain future work.
 `.dscode/rlm-daemon/<session_id>/events.jsonl` records with `seq` greater than
 the cursor and returns `next_cursor` for clients that want deterministic live
 RLM event polling before full streaming worker support lands.
+`rlm_process_wait` uses the same cursor contract but waits up to `timeout_ms`
+for new events before returning, giving clients a simple long-poll bridge while
+streaming deltas remain future work.
 This gives the model DeepSeek-TUI-style Recursive Language Model entrypoints for
 synthesis/classification tasks with both file-backed and optional process-backed
 Python helper state. MCP server mode exposes the local RLM planning helpers
 (`rlm_chunk_plan`, `rlm_map_reduce_plan`, `rlm_recursive_plan`), restricted pure-compute
 `rlm_python`, read-only `rlm_python_sessions`, read-only `rlm_process_sessions`,
-and read-only `rlm_process_events` by default. Stateful
+read-only `rlm_process_events`, and read-only `rlm_process_wait` by default. Stateful
 `rlm_python_session` is hidden by default and requires trusted side effects or
 durable runtime approvals because it writes `.dscode/rlm-python` state.
 `rlm_process_cancel` is hidden by default and requires durable runtime approvals

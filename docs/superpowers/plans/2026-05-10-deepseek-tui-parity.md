@@ -515,13 +515,14 @@ Remaining:
   thread, persists per-turn payloads, and enqueues pending `rlm_process`
   runtime tasks without running a model worker yet; `rlm_process_events`
   replays queued live-session event logs by cursor as the read-only polling
-  surface before worker streaming lands; `rlm_process_cancel` cancels queued
-  pending live turns, marks payloads cancelled when present, refreshes
-  `queued_turns`, and appends `turn_cancelled` events without claiming active
-  worker cancellation support; `rlm_process_run_next` now claims one queued
-  payload, records `turn_started`, runs the bounded model-backed RLM child
-  flow, and records `turn_completed` / `turn_failed`, giving live sessions a
-  single-step worker bridge before a resident daemon lands
+  surface before worker streaming lands; `rlm_process_wait` adds cursor-based
+  long-polling for those event logs; `rlm_process_cancel` cancels queued pending
+  live turns, marks payloads cancelled when present, refreshes `queued_turns`,
+  and appends `turn_cancelled` events without claiming active worker
+  cancellation support; `rlm_process_run_next` now claims one queued payload,
+  records `turn_started`, runs the bounded model-backed RLM child flow, and
+  records `turn_completed` / `turn_failed`, giving live sessions a single-step
+  worker bridge before a resident daemon lands
 - Review remote PR context signals now exist: `review` parses
   `github_pr_context` JSON to report requested changes, failing/cancelled status
   checks, and missing `include_diff=true` context before optional semantic

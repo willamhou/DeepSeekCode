@@ -3477,6 +3477,12 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
         required_json: r#"["session_id"]"#,
     },
     StaticToolSpec {
+        name: "rlm_process_wait",
+        description: "Wait for live RLM daemon event-log records after a cursor without running a model. Returns immediately when events are available or when timeout_ms elapses.",
+        properties_json: r#"{"session_id":{"type":"string","description":"Live RLM session id."},"cursor":{"type":"string","description":"Return events with seq greater than this cursor. Defaults to 0."},"after_seq":{"type":"string","description":"Alias for cursor."},"limit":{"type":"string","description":"Optional event limit, clamped to 1-500 and defaulting to 50."},"timeout_ms":{"type":"string","description":"Maximum wait in milliseconds, clamped to 30000 and defaulting to 1000."},"poll_interval_ms":{"type":"string","description":"Polling interval in milliseconds, clamped to 25-1000 and defaulting to 100."}}"#,
+        required_json: r#"["session_id"]"#,
+    },
+    StaticToolSpec {
         name: "rlm_process_cancel",
         description: "Cancel queued pending live RLM daemon turns for a session. This only cancels runtime tasks that have not been claimed by a worker yet; active worker cancellation is not implied.",
         properties_json: r#"{"session_id":{"type":"string","description":"Live RLM session id."},"task_id":{"type":"string","description":"Runtime task id for the queued turn to cancel."},"turn_id":{"type":"string","description":"Alias for task_id."},"id":{"type":"string","description":"Alias for task_id."},"all":{"type":"string","description":"Set true/1/yes/on to cancel all queued pending turns in the live session."},"reason":{"type":"string","description":"Optional cancellation reason stored on the runtime task and live event log."}}"#,
@@ -5165,6 +5171,7 @@ mod tests {
             "rlm_python_sessions".to_string(),
             "rlm_process_sessions".to_string(),
             "rlm_process_events".to_string(),
+            "rlm_process_wait".to_string(),
             "rlm_process_cancel".to_string(),
             "rlm_process_run_next".to_string(),
             "rlm_batch".to_string(),
@@ -5183,6 +5190,7 @@ mod tests {
         assert!(openai.contains("\"name\":\"rlm_python_sessions\""));
         assert!(openai.contains("\"name\":\"rlm_process_sessions\""));
         assert!(openai.contains("\"name\":\"rlm_process_events\""));
+        assert!(openai.contains("\"name\":\"rlm_process_wait\""));
         assert!(openai.contains("\"name\":\"rlm_process_cancel\""));
         assert!(openai.contains("\"name\":\"rlm_process_run_next\""));
         assert!(openai.contains("\"name\":\"rlm_batch\""));
@@ -5198,6 +5206,7 @@ mod tests {
         assert!(openai.contains("\"reset\""));
         assert!(openai.contains("\"include_live\""));
         assert!(openai.contains("\"after_seq\""));
+        assert!(openai.contains("\"timeout_ms\""));
         assert!(openai.contains("\"turn_id\""));
         assert!(openai.contains("\"dry_run\""));
         assert!(openai.contains("enqueue a live RLM daemon turn"));
@@ -5222,6 +5231,7 @@ mod tests {
             "rlm_python_sessions".to_string(),
             "rlm_process_sessions".to_string(),
             "rlm_process_events".to_string(),
+            "rlm_process_wait".to_string(),
             "rlm_process_cancel".to_string(),
             "rlm_process_run_next".to_string(),
             "rlm_batch".to_string(),
@@ -5240,6 +5250,7 @@ mod tests {
         assert!(anthropic.contains("\"name\":\"rlm_python_sessions\""));
         assert!(anthropic.contains("\"name\":\"rlm_process_sessions\""));
         assert!(anthropic.contains("\"name\":\"rlm_process_events\""));
+        assert!(anthropic.contains("\"name\":\"rlm_process_wait\""));
         assert!(anthropic.contains("\"name\":\"rlm_process_cancel\""));
         assert!(anthropic.contains("\"name\":\"rlm_process_run_next\""));
         assert!(anthropic.contains("\"name\":\"rlm_batch\""));

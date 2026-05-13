@@ -866,6 +866,15 @@ struct RlmLiveTurnPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct RlmLiveEventBatch {
+    path: PathBuf,
+    exists: bool,
+    next_cursor: u64,
+    events_json: String,
+    count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RlmChunk {
     index: usize,
     start: usize,
@@ -1099,6 +1108,10 @@ pub struct RlmModelSessionsTool {
 }
 
 pub struct RlmLiveEventsTool {
+    pub config: AppConfig,
+}
+
+pub struct RlmLiveWaitTool {
     pub config: AppConfig,
 }
 
@@ -1407,56 +1420,66 @@ impl Tool for RlmLiveEventsTool {
                 .or_else(|| input.get("since_seq")),
         )?;
         let limit = parse_rlm_live_events_limit(input.get("limit"))?;
-        let path = rlm_live_session_event_log_path(&self.config, session_id);
-        if !path.exists() {
-            return Ok(ToolOutput {
-                summary: format!(
-                    "{{\"session_id\":\"{}\",\"path\":\"{}\",\"exists\":false,\"cursor\":{},\"next_cursor\":{},\"events\":[],\"limit\":{}}}",
-                    json_escape(session_id),
-                    json_escape(&path.display().to_string()),
-                    cursor,
-                    cursor,
-                    limit
-                ),
-            });
-        }
-        let content = fs::read_to_string(&path)
-            .map_err(|error| tool_failure(format!("rlm_process_events read failed: {error}")))?;
-        let mut events = String::new();
-        let mut count = 0usize;
-        let mut next_cursor = cursor;
-        for line in content.lines().filter(|line| !line.trim().is_empty()) {
-            let value = parse_json_value(line).map_err(|error| {
-                tool_failure(format!("rlm_process_events invalid JSON: {error}"))
-            })?;
-            let seq = match &value {
-                JsonValue::Object(root) => root.get("seq").and_then(json_as_u64).unwrap_or(0),
-                _ => 0,
-            };
-            if seq <= cursor {
-                continue;
-            }
-            if count >= limit {
-                break;
-            }
-            if count > 0 {
-                events.push(',');
-            }
-            events.push_str(&json_value_to_string(&value));
-            next_cursor = seq;
-            count += 1;
-        }
+        let batch = read_rlm_live_event_batch(&self.config, session_id, cursor, limit)?;
         Ok(ToolOutput {
             summary: format!(
-                "{{\"session_id\":\"{}\",\"path\":\"{}\",\"exists\":true,\"cursor\":{},\"next_cursor\":{},\"events\":[{}],\"limit\":{}}}",
+                "{{\"session_id\":\"{}\",\"path\":\"{}\",\"exists\":{},\"cursor\":{},\"next_cursor\":{},\"events\":[{}],\"limit\":{}}}",
                 json_escape(session_id),
-                json_escape(&path.display().to_string()),
+                json_escape(&batch.path.display().to_string()),
+                batch.exists,
                 cursor,
-                next_cursor,
-                events,
+                batch.next_cursor,
+                batch.events_json,
                 limit
             ),
         })
+    }
+}
+
+impl Tool for RlmLiveWaitTool {
+    fn name(&self) -> &str {
+        "rlm_process_wait"
+    }
+
+    fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
+        let session_id = input
+            .get("session_id")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| tool_failure("rlm_process_wait requires non-empty `session_id`"))?;
+        validate_rlm_model_session_id(session_id)?;
+        let cursor = parse_rlm_live_event_cursor(
+            input
+                .get("cursor")
+                .or_else(|| input.get("after_seq"))
+                .or_else(|| input.get("since_seq")),
+        )?;
+        let limit = parse_rlm_live_events_limit(input.get("limit"))?;
+        let timeout = parse_rlm_live_wait_timeout(input.get("timeout_ms"))?;
+        let poll_interval = parse_rlm_live_wait_poll_interval(input.get("poll_interval_ms"))?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            let batch = read_rlm_live_event_batch(&self.config, session_id, cursor, limit)?;
+            if batch.count > 0 || Instant::now() >= deadline {
+                let timed_out = batch.count == 0 && timeout > Duration::ZERO;
+                return Ok(ToolOutput {
+                    summary: format!(
+                        "{{\"session_id\":\"{}\",\"path\":\"{}\",\"exists\":{},\"cursor\":{},\"next_cursor\":{},\"events\":[{}],\"limit\":{},\"timed_out\":{},\"timeout_ms\":{}}}",
+                        json_escape(session_id),
+                        json_escape(&batch.path.display().to_string()),
+                        batch.exists,
+                        cursor,
+                        batch.next_cursor,
+                        batch.events_json,
+                        limit,
+                        timed_out,
+                        timeout.as_millis()
+                    ),
+                });
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            thread::sleep(std::cmp::min(poll_interval, remaining));
+        }
     }
 }
 
@@ -3348,6 +3371,76 @@ fn parse_rlm_live_event_cursor(raw: Option<&str>) -> AppResult<u64> {
     }
 }
 
+fn parse_rlm_live_wait_timeout(raw: Option<&str>) -> AppResult<Duration> {
+    let millis = match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => value.parse::<u64>().map_err(|_| {
+            tool_failure("rlm_process_wait timeout_ms must be a non-negative integer")
+        })?,
+        None => 1_000,
+    };
+    Ok(Duration::from_millis(millis.min(30_000)))
+}
+
+fn parse_rlm_live_wait_poll_interval(raw: Option<&str>) -> AppResult<Duration> {
+    let millis = match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => value.parse::<u64>().map_err(|_| {
+            tool_failure("rlm_process_wait poll_interval_ms must be a positive integer")
+        })?,
+        None => 100,
+    };
+    Ok(Duration::from_millis(millis.clamp(25, 1_000)))
+}
+
+fn read_rlm_live_event_batch(
+    config: &AppConfig,
+    session_id: &str,
+    cursor: u64,
+    limit: usize,
+) -> AppResult<RlmLiveEventBatch> {
+    let path = rlm_live_session_event_log_path(config, session_id);
+    if !path.exists() {
+        return Ok(RlmLiveEventBatch {
+            path,
+            exists: false,
+            next_cursor: cursor,
+            events_json: String::new(),
+            count: 0,
+        });
+    }
+    let content = fs::read_to_string(&path)
+        .map_err(|error| tool_failure(format!("rlm_process_events read failed: {error}")))?;
+    let mut events_json = String::new();
+    let mut count = 0usize;
+    let mut next_cursor = cursor;
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        let value = parse_json_value(line)
+            .map_err(|error| tool_failure(format!("rlm_process_events invalid JSON: {error}")))?;
+        let seq = match &value {
+            JsonValue::Object(root) => root.get("seq").and_then(json_as_u64).unwrap_or(0),
+            _ => 0,
+        };
+        if seq <= cursor {
+            continue;
+        }
+        if count >= limit {
+            break;
+        }
+        if count > 0 {
+            events_json.push(',');
+        }
+        events_json.push_str(&json_value_to_string(&value));
+        next_cursor = seq;
+        count += 1;
+    }
+    Ok(RlmLiveEventBatch {
+        path,
+        exists: true,
+        next_cursor,
+        events_json,
+        count,
+    })
+}
+
 fn parse_bool_arg(raw: Option<&str>) -> bool {
     matches!(
         raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
@@ -4290,6 +4383,32 @@ mod tests {
         assert!(second.summary.contains(r#""seq":2"#));
         assert!(second.summary.contains("second live turn"));
 
+        let wait = RlmLiveWaitTool {
+            config: config.clone(),
+        }
+        .execute(
+            ToolInput::new()
+                .with_arg("session_id", "events.1")
+                .with_arg("cursor", "1")
+                .with_arg("timeout_ms", "0"),
+        )
+        .unwrap();
+        assert!(wait.summary.contains(r#""timed_out":false"#));
+        assert!(wait.summary.contains(r#""seq":2"#));
+
+        let quiet = RlmLiveWaitTool {
+            config: config.clone(),
+        }
+        .execute(
+            ToolInput::new()
+                .with_arg("session_id", "events.1")
+                .with_arg("cursor", "2")
+                .with_arg("timeout_ms", "0"),
+        )
+        .unwrap();
+        assert!(quiet.summary.contains(r#""timed_out":false"#));
+        assert!(quiet.summary.contains(r#""events":[]"#));
+
         let missing = events_tool
             .execute(ToolInput::new().with_arg("session_id", "missing"))
             .unwrap();
@@ -4297,6 +4416,18 @@ mod tests {
         assert_eq!(parse_rlm_live_events_limit(None).unwrap(), 50);
         assert_eq!(parse_rlm_live_events_limit(Some("0")).unwrap(), 1);
         assert_eq!(parse_rlm_live_events_limit(Some("1000")).unwrap(), 500);
+        assert_eq!(
+            parse_rlm_live_wait_timeout(Some("40000"))
+                .unwrap()
+                .as_millis(),
+            30000
+        );
+        assert_eq!(
+            parse_rlm_live_wait_poll_interval(Some("1"))
+                .unwrap()
+                .as_millis(),
+            25
+        );
         assert!(parse_rlm_live_event_cursor(Some("bad"))
             .unwrap_err()
             .to_string()
