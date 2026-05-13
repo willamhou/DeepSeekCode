@@ -90,7 +90,9 @@ Current surfaces:
   `restore revert-turn`
 - local file-backed TUI sessions expose rollback commands in the command
   palette: `restore snapshot [label]`, `restore list [limit]`,
-  `restore show <snapshot-id|turn-id|last>`, and
+  `restore show <snapshot-id|turn-id|last>`,
+  `restore hunks <snapshot-id|turn-id|last>`,
+  `restore hunk <snapshot-id|turn-id|last> [index]`, and
   `revert turn <snapshot-id|turn-id|last> [--apply]`; `last` resolves to the
   active thread's latest durable turn id, and list/show/revert results render a
   scrollable right-side rollback detail panel with patch or restore-plan
@@ -264,6 +266,8 @@ Command palette commands currently implemented:
 | `restore snapshot [label]` | Create a local rollback snapshot from the current git worktree |
 | `restore list [limit]` | Show recent local rollback snapshots in the right-side detail panel |
 | `restore show <id|last>` | Show one rollback snapshot or runtime-turn-bound snapshot with patch preview |
+| `restore hunks <id|last>`, `restore diff <id|last>` | List parsed rollback patch hunks in the right-side detail panel |
+| `restore hunk <id|last> [index]` | Show one 1-based rollback patch hunk |
 | `revert turn <id|last> [--apply]` | Dry-run or apply a local rollback snapshot and show the restore plan; `--apply` requires modal confirmation |
 | `approval` | Open the approval modal |
 | `cancel`, `stop` | Cancel the active running assistant turn |

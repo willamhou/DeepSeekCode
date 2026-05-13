@@ -711,6 +711,7 @@ fn handle_tui_http_action(
         TuiAction::CreateRollbackSnapshot { .. }
         | TuiAction::ListRollbackSnapshots { .. }
         | TuiAction::ShowRollbackSnapshot { .. }
+        | TuiAction::ShowRollbackHunk { .. }
         | TuiAction::RevertTurn { .. } => {
             app.set_status("rollback commands require local file-backed TUI".to_string());
         }
@@ -1524,6 +1525,39 @@ fn handle_tui_action_with_live(
                 }
             }
         }
+        TuiAction::ShowRollbackHunk { id, hunk } => {
+            let Some(rollback_store) = rollback_store_for_config(config, app) else {
+                return Ok(());
+            };
+            match rollback_store.load_snapshot_or_turn(&id) {
+                Ok(snapshot) => match rollback_store.snapshot_patch(&snapshot.id) {
+                    Ok(patch) => {
+                        let hunks = parse_rollback_patch_hunks(&patch);
+                        let detail = render_rollback_hunk_detail(&snapshot, &patch, hunk);
+                        app.set_mcp_detail(TuiMcpDetailKind::Rollback, detail);
+                        app.set_status(match hunk {
+                            Some(index) => format!(
+                                "rollback hunk {} for {} (hunks={})",
+                                index,
+                                snapshot.id,
+                                hunks.len()
+                            ),
+                            None => format!(
+                                "rollback hunks for {} (hunks={})",
+                                snapshot.id,
+                                hunks.len()
+                            ),
+                        });
+                    }
+                    Err(error) => {
+                        app.set_status(format!("rollback hunk failed for {id}: {error}"));
+                    }
+                },
+                Err(error) => {
+                    app.set_status(format!("rollback hunk failed for {id}: {error}"));
+                }
+            }
+        }
         TuiAction::RevertTurn { id, apply } => {
             let Some(rollback_store) = rollback_store_for_config(config, app) else {
                 return Ok(());
@@ -2065,6 +2099,176 @@ fn render_rollback_snapshot_detail(snapshot: &SnapshotRecord, patch: Option<&str
         detail.push_str(&rollback_patch_preview(patch, 80));
     }
     detail
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RollbackPatchHunk {
+    file: String,
+    header: String,
+    added: usize,
+    removed: usize,
+    lines: Vec<String>,
+}
+
+fn parse_rollback_patch_hunks(patch: &str) -> Vec<RollbackPatchHunk> {
+    let mut hunks = Vec::new();
+    let mut current_file = String::new();
+    let mut current: Option<RollbackPatchHunk> = None;
+
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            if let Some(hunk) = current.take() {
+                hunks.push(hunk);
+            }
+            current_file =
+                rollback_diff_file_from_header(line).unwrap_or_else(|| current_file.clone());
+            continue;
+        }
+        if line.starts_with("+++ ") {
+            if let Some(file) = rollback_diff_file_from_marker(line) {
+                current_file = file;
+            }
+            continue;
+        }
+        if line.starts_with("@@ ") {
+            if let Some(hunk) = current.take() {
+                hunks.push(hunk);
+            }
+            current = Some(RollbackPatchHunk {
+                file: if current_file.is_empty() {
+                    "(unknown file)".to_string()
+                } else {
+                    current_file.clone()
+                },
+                header: line.to_string(),
+                added: 0,
+                removed: 0,
+                lines: vec![line.to_string()],
+            });
+            continue;
+        }
+        if let Some(hunk) = current.as_mut() {
+            if line.starts_with('+') && !line.starts_with("+++") {
+                hunk.added += 1;
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                hunk.removed += 1;
+            }
+            hunk.lines.push(line.to_string());
+        }
+    }
+    if let Some(hunk) = current {
+        hunks.push(hunk);
+    }
+    hunks
+}
+
+fn rollback_diff_file_from_header(line: &str) -> Option<String> {
+    let candidate = line.split_whitespace().nth(3)?;
+    rollback_clean_diff_path(candidate)
+}
+
+fn rollback_diff_file_from_marker(line: &str) -> Option<String> {
+    let candidate = line
+        .strip_prefix("+++ ")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    rollback_clean_diff_path(candidate)
+}
+
+fn rollback_clean_diff_path(path: &str) -> Option<String> {
+    if path == "/dev/null" {
+        return None;
+    }
+    Some(
+        path.strip_prefix("b/")
+            .or_else(|| path.strip_prefix("a/"))
+            .unwrap_or(path)
+            .to_string(),
+    )
+}
+
+fn render_rollback_hunk_detail(
+    snapshot: &SnapshotRecord,
+    patch: &str,
+    selected_hunk: Option<usize>,
+) -> String {
+    let hunks = parse_rollback_patch_hunks(patch);
+    let mut detail = String::new();
+    detail.push_str("Rollback patch hunks\n");
+    detail.push_str(&format!("snapshot: {}\n", snapshot.id));
+    detail.push_str(&format!(
+        "runtime turn: {}\n",
+        snapshot.runtime_turn_id.as_deref().unwrap_or("-")
+    ));
+    detail.push_str(&format!("patch bytes: {}\n", snapshot.patch_bytes));
+    detail.push_str(&format!("hunks: {}\n\n", hunks.len()));
+
+    if hunks.is_empty() {
+        detail.push_str("No unified diff hunks found in this snapshot patch.\n");
+        return detail;
+    }
+
+    if let Some(index) = selected_hunk {
+        if index == 0 || index > hunks.len() {
+            detail.push_str(&format!(
+                "Hunk {index} not found. Valid range: 1..{}\n\n",
+                hunks.len()
+            ));
+            detail.push_str(&rollback_hunk_list(&hunks, 80));
+            return detail;
+        }
+        let hunk = &hunks[index - 1];
+        detail.push_str(&format!("Hunk {index}/{}\n", hunks.len()));
+        detail.push_str(&format!("file: {}\n", hunk.file));
+        detail.push_str(&format!("header: {}\n", hunk.header));
+        detail.push_str(&format!(
+            "added: {} removed: {}\n\n",
+            hunk.added, hunk.removed
+        ));
+        detail.push_str(&rollback_hunk_body(hunk, 220));
+        detail.push_str("\nCommands: restore hunks <id|last> | restore hunk <id|last> <index>\n");
+        return detail;
+    }
+
+    detail.push_str(&rollback_hunk_list(&hunks, 100));
+    detail.push_str("\nCommands: restore hunk <id|last> <index>\n");
+    detail
+}
+
+fn rollback_hunk_list(hunks: &[RollbackPatchHunk], max_hunks: usize) -> String {
+    let mut out = String::new();
+    for (index, hunk) in hunks.iter().take(max_hunks).enumerate() {
+        out.push_str(&format!(
+            "#{} {} {} (+{} -{})\n",
+            index + 1,
+            hunk.file,
+            hunk.header,
+            hunk.added,
+            hunk.removed
+        ));
+    }
+    if hunks.len() > max_hunks {
+        out.push_str(&format!(
+            "... {} more hunks omitted\n",
+            hunks.len() - max_hunks
+        ));
+    }
+    out
+}
+
+fn rollback_hunk_body(hunk: &RollbackPatchHunk, max_lines: usize) -> String {
+    let mut out = String::new();
+    for line in hunk.lines.iter().take(max_lines) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    if hunk.lines.len() > max_lines {
+        out.push_str(&format!(
+            "... {} more hunk lines omitted\n",
+            hunk.lines.len() - max_lines
+        ));
+    }
+    out
 }
 
 fn render_rollback_restore_plan(plan: &RestorePlan) -> String {
@@ -3964,7 +4168,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_tui_action_lists_shows_and_restores_rollback_snapshot() {
+    fn handle_tui_action_lists_shows_hunks_and_restores_rollback_snapshot() {
         let repo = temp_root("rollback-action");
         fs::create_dir_all(&repo).unwrap();
         run_git(&repo, &["init"]);
@@ -4018,6 +4222,35 @@ mod tests {
         let rendered = render_once(&app, 160, 48).unwrap();
         assert!(rendered.contains("Patch preview"));
         assert!(rendered.contains("src.txt"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::ShowRollbackHunk {
+                id: "turn-one".to_string(),
+                hunk: None,
+            },
+        )
+        .unwrap();
+        let rendered = render_once(&app, 160, 48).unwrap();
+        assert!(rendered.contains("Rollback patch hunks"));
+        assert!(rendered.contains("#1 src.txt"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::ShowRollbackHunk {
+                id: "turn-one".to_string(),
+                hunk: Some(1),
+            },
+        )
+        .unwrap();
+        let rendered = render_once(&app, 160, 48).unwrap();
+        assert!(rendered.contains("Hunk 1/"));
+        assert!(rendered.contains("-base"));
+        assert!(rendered.contains("+snapshot"));
 
         handle_tui_action(
             &store,

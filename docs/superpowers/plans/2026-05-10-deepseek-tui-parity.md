@@ -400,6 +400,9 @@ Landed first slice:
   changed-file lists
 - TUI rollback `--apply` commands now open an explicit confirmation modal
   before queueing the local worktree restore action
+- TUI rollback hunk browser commands (`restore hunks`, `restore diff`, and
+  `restore hunk`) parse stored snapshot patches and render hunk lists or a
+  selected hunk in the right-side rollback panel
 - REPL live prompts create pre-turn rollback snapshots in git worktrees, record
   the latest snapshot id for `/restore show last` and `/revert_turn last`, and
   print the rollback hint after tool-using turns
@@ -407,7 +410,7 @@ Landed first slice:
 Remaining:
 
 - side-git/worktree snapshot strategy for directory and special-file fidelity
-- rollback diff hunk browsing in the future TUI
+- selective rollback hunk restore in the future TUI
 
 ### Phase G: Subagent/RLM
 

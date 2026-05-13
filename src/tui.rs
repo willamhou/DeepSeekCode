@@ -654,6 +654,10 @@ pub enum TuiAction {
     ShowRollbackSnapshot {
         id: String,
     },
+    ShowRollbackHunk {
+        id: String,
+        hunk: Option<usize>,
+    },
     RevertTurn {
         id: String,
         apply: bool,
@@ -844,6 +848,9 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "restore snapshot",
     "restore list",
     "restore show ",
+    "restore hunks ",
+    "restore diff ",
+    "restore hunk ",
     "restore revert-turn ",
     "revert turn ",
     "approval",
@@ -3120,6 +3127,15 @@ impl TuiApp {
             ["restore", "show", id] => {
                 self.request_rollback_show(id);
             }
+            ["restore", "hunks", id] | ["restore", "diff", id] => {
+                self.request_rollback_hunk(id, None);
+            }
+            ["restore", "hunk", id] => {
+                self.request_rollback_hunk(id, Some(1));
+            }
+            ["restore", "hunk", id, hunk] => {
+                self.request_rollback_hunk_from_arg(id, hunk);
+            }
             ["restore", "revert-turn", id] | ["restore", "revert_turn", id] => {
                 self.request_revert_turn(id, false);
             }
@@ -4343,6 +4359,28 @@ impl TuiApp {
         self.pending_actions
             .push(TuiAction::ShowRollbackSnapshot { id: id.clone() });
         self.status = format!("rollback snapshot show requested: {id}");
+    }
+
+    fn request_rollback_hunk_from_arg(&mut self, id: &str, hunk: &str) {
+        match hunk.parse::<usize>() {
+            Ok(value) if value > 0 => self.request_rollback_hunk(id, Some(value)),
+            Ok(_) => self.status = "rollback hunk index must be >= 1".to_string(),
+            Err(_) => self.status = format!("invalid rollback hunk index: {hunk}"),
+        }
+    }
+
+    fn request_rollback_hunk(&mut self, id: &str, hunk: Option<usize>) {
+        let Some(id) = self.resolve_rollback_id(id) else {
+            return;
+        };
+        self.pending_actions.push(TuiAction::ShowRollbackHunk {
+            id: id.clone(),
+            hunk,
+        });
+        self.status = match hunk {
+            Some(hunk) => format!("rollback hunk {hunk} requested: {id}"),
+            None => format!("rollback hunks requested: {id}"),
+        };
     }
 
     fn request_revert_turn(&mut self, id: &str, apply: bool) {
@@ -7436,6 +7474,34 @@ mod tests {
         );
 
         assert!(app.handle_key(KeyCode::Char(':')));
+        for ch in "restore hunks last".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::ShowRollbackHunk {
+                id: "turn-latest".to_string(),
+                hunk: None,
+            }]
+        );
+
+        assert!(app.handle_key(KeyCode::Char(':')));
+        for ch in "restore hunk last 2".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::ShowRollbackHunk {
+                id: "turn-latest".to_string(),
+                hunk: Some(2),
+            }]
+        );
+
+        assert!(app.handle_key(KeyCode::Char(':')));
         for ch in "revert turn last --apply".chars() {
             assert!(app.handle_key(KeyCode::Char(ch)));
         }
@@ -7455,6 +7521,54 @@ mod tests {
                 apply: true,
             }]
         );
+    }
+
+    #[test]
+    fn command_palette_requests_rollback_hunk_browser() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: ".".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: Some("turn-latest".to_string()),
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        assert!(app.handle_key(KeyCode::Char(':')));
+        for ch in "restore diff last".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::ShowRollbackHunk {
+                id: "turn-latest".to_string(),
+                hunk: None,
+            }]
+        );
+        assert!(app.status.contains("rollback hunks requested"));
+
+        assert!(app.handle_key(KeyCode::Char(':')));
+        for ch in "restore hunk last nope".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert!(app.drain_actions().is_empty());
+        assert_eq!(app.status, "invalid rollback hunk index: nope");
     }
 
     #[test]
