@@ -1691,6 +1691,7 @@ fn render_shell_supervisor_status(cwd: &str) -> AppResult<String> {
         .map(PathBuf::from)
         .unwrap_or(default_socket);
     let socket_kind = shell_supervisor_socket_kind(&socket_path);
+    let protocol_health = shell_supervisor_protocol_health(&socket_path, socket_kind == "socket");
     let supervisor_alive = manifest
         .as_ref()
         .and_then(|manifest| manifest.supervisor_pid)
@@ -1699,9 +1700,10 @@ fn render_shell_supervisor_status(cwd: &str) -> AppResult<String> {
         manifest.is_some(),
         socket_kind == "socket",
         supervisor_alive,
+        &protocol_health,
     );
     Ok(format!(
-        "kind: deepseek.exec_shell.supervisor_status.v1\nstatus: {status}\nplatform: {}\ncwd: {}\nstate_dir: {}\nmanifest: {}\nmanifest_exists: {}\nmanifest_kind: {}\nsocket: {}\nsocket_kind: {socket_kind}\nsupervisor_pid: {}\nsupervisor_alive: {}\nsupervisor_epoch: {}\nprotocol: {}\nmethods: {}\nunsupported_methods: {}\nactive_jobs: {}\nstarted_at: {}\nupdated_at: {}\nnote: this is the shell supervisor protocol/status skeleton; native PTY ownership, live attach, and TIOCSWINSZ resize are not implemented until a real supervisor process writes this state.\n",
+        "kind: deepseek.exec_shell.supervisor_status.v1\nstatus: {status}\nplatform: {}\ncwd: {}\nstate_dir: {}\nmanifest: {}\nmanifest_exists: {}\nmanifest_kind: {}\nsocket: {}\nsocket_kind: {socket_kind}\nprotocol_health: {protocol_health}\nsupervisor_pid: {}\nsupervisor_alive: {}\nsupervisor_epoch: {}\nprotocol: {}\nmethods: {}\nunsupported_methods: {}\nactive_jobs: {}\nstarted_at: {}\nupdated_at: {}\nnote: this is the shell supervisor protocol/status skeleton; native PTY ownership, live attach, and TIOCSWINSZ resize are not implemented until a real supervisor process writes this state.\n",
         shell_supervisor_platform_label(),
         cwd,
         state_dir.display(),
@@ -1753,7 +1755,12 @@ fn shell_supervisor_status_label(
     manifest_exists: bool,
     socket_ready: bool,
     supervisor_alive: Option<bool>,
+    protocol_health: &str,
 ) -> &'static str {
+    if manifest_exists && socket_ready && supervisor_alive == Some(true) && protocol_health != "ok"
+    {
+        return "protocol_unhealthy";
+    }
     match (manifest_exists, socket_ready, supervisor_alive) {
         (false, false, _) => "not_configured",
         (false, true, _) => "socket_without_manifest",
@@ -1762,6 +1769,81 @@ fn shell_supervisor_status_label(
         (true, false, Some(true)) => "socket_missing",
         (true, true, None) => "socket_without_pid",
         (true, false, None) => "manifest_only",
+    }
+}
+
+fn shell_supervisor_protocol_health(socket_path: &Path, socket_ready: bool) -> String {
+    if !socket_ready {
+        return "not_checked".to_string();
+    }
+    #[cfg(unix)]
+    {
+        match shell_supervisor_protocol_health_unix(socket_path) {
+            Ok(label) => label,
+            Err(error) => format!("error: {}", shell_compact_error_label(&error.to_string())),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = socket_path;
+        "unsupported".to_string()
+    }
+}
+
+#[cfg(unix)]
+fn shell_supervisor_protocol_health_unix(socket_path: &Path) -> AppResult<String> {
+    use std::io::{BufRead, BufReader, ErrorKind};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket_path)
+        .map_err(|error| app_error(format!("health connect failed: {error}")))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .map_err(|error| app_error(format!("health read timeout setup failed: {error}")))?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(250)))
+        .map_err(|error| app_error(format!("health write timeout setup failed: {error}")))?;
+    stream
+        .write_all(b"{\"method\":\"health\"}\n")
+        .map_err(|error| app_error(format!("health request write failed: {error}")))?;
+
+    let mut response = String::new();
+    let mut reader = BufReader::new(stream);
+    match reader.read_line(&mut response) {
+        Ok(0) => return Err(app_error("health response was empty")),
+        Ok(_) => {}
+        Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+            return Err(app_error("health response timed out"));
+        }
+        Err(error) => return Err(app_error(format!("health response read failed: {error}"))),
+    }
+
+    let root = parse_root_object(response.trim()).map_err(|error| {
+        app_error(format!(
+            "health response was not valid JSON: {}; response={}",
+            error,
+            shell_compact_error_label(response.trim())
+        ))
+    })?;
+    if root.get("method").and_then(json_as_string) == Some("health")
+        && root.get("status").and_then(json_as_string) == Some("ok")
+    {
+        Ok("ok".to_string())
+    } else {
+        Ok(format!(
+            "unexpected_response: {}",
+            shell_compact_error_label(response.trim())
+        ))
+    }
+}
+
+fn shell_compact_error_label(value: &str) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let clipped = compact.chars().take(160).collect::<String>();
+    if clipped.len() < compact.len() {
+        format!("{clipped}...")
+    } else {
+        compact
     }
 }
 
@@ -3090,6 +3172,68 @@ mod tests {
         );
         assert!(!status.summary.contains("control_token_hash"));
         assert!(!status.summary.contains("do-not-print"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exec_shell_supervisor_status_probes_protocol_health() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("dsh-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let cwd = root.display().to_string();
+        let state_dir = shell_supervisor_state_dir(&cwd);
+        fs::create_dir_all(&state_dir).unwrap();
+        let socket = state_dir.join("supervisor.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::write(
+            state_dir.join("manifest.json"),
+            format!(
+                "{{\"kind\":\"deepseek.exec_shell.supervisor.v1\",\"supervisor_pid\":{},\"supervisor_socket\":\"{}\",\"supervisor_epoch\":\"epoch+health\",\"protocol\":\"newline-json-v1\",\"methods\":[\"health\",\"status\",\"show\",\"shutdown\"],\"unsupported_methods\":[\"start\",\"attach\"],\"active_jobs\":0,\"started_at\":\"epoch+70\",\"updated_at\":\"epoch+76\"}}",
+                std::process::id(),
+                socket.display()
+            ),
+        )
+        .unwrap();
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            {
+                let mut reader = BufReader::new(&mut stream);
+                reader.read_line(&mut request).unwrap();
+            }
+            assert!(request.contains(r#""method":"health""#));
+            stream
+                .write_all(
+                    br#"{"kind":"deepseek.exec_shell.supervisor.response.v1","method":"health","status":"ok"}"#,
+                )
+                .unwrap();
+            stream.write_all(b"\n").unwrap();
+        });
+
+        let status = ExecShellSupervisorStatusTool
+            .execute(ToolInput::new().with_arg("cwd", cwd.clone()))
+            .unwrap();
+
+        handle.join().unwrap();
+        assert!(
+            status.summary.contains("status: ready"),
+            "{}",
+            status.summary
+        );
+        assert!(
+            status.summary.contains("protocol_health: ok"),
+            "{}",
+            status.summary
+        );
 
         let _ = fs::remove_dir_all(root);
     }

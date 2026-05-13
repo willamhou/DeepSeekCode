@@ -245,6 +245,8 @@ Landed first slice:
   health/status/show/shutdown, and returns structured unsupported responses for
   native PTY methods until supervisor-owned PTYs land; `deepseek agents service`
   and packaged systemd/launchd templates include that shell-supervisor service;
+  `exec_shell_supervisor_status` now probes socket health before reporting a
+  daemon as ready;
   manifests now keep stable child pid, process-group, and owner-pid metadata so
   detached snapshots can report owner liveness separately from child status
 - richer structured data validation

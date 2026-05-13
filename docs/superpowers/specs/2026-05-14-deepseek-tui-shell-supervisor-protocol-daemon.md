@@ -19,6 +19,8 @@ native supervisor-owned PTY support yet.
   and `native_pty=false`, preserving the boundary before native PTY sessions.
 - The supervisor manifest and status output distinguish supported protocol
   methods from unsupported future PTY methods.
+- `exec_shell_supervisor_status` performs a bounded `health` round-trip when a
+  socket exists, so an alive pid plus stale socket cannot report `ready`.
 - Malformed protocol requests return structured error responses without stopping
   the daemon.
 - `deepseek agents service` now renders systemd/launchd shell-supervisor service

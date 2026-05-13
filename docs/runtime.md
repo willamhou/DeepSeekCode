@@ -1345,9 +1345,10 @@ skeleton on Unix, writes `.dscode/shell-supervisor/manifest.json`, binds
 `supervisor.sock`, and answers newline-JSON `health`, `status`, `show`, and
 `shutdown` requests. `exec_shell_supervisor_status cwd=<path>` inspects that
 manifest/socket state, reports absent/stale/ready status and supported method
-names, and never prints `control_token_hash`. Unsupported PTY methods return
-structured `unsupported` responses until native supervisor-owned PTY sessions
-land. Optional `tty_rows` plus `tty_cols` set the initial PTY geometry and are
+names, probes socket protocol health with a bounded `health` request, and never
+prints `control_token_hash`. Unsupported PTY methods return structured
+`unsupported` responses until native supervisor-owned PTY sessions land.
+Optional `tty_rows` plus `tty_cols` set the initial PTY geometry and are
 persisted in shell job manifests.
 `exec_shell_resize cwd=<path> task_id=<id> tty_rows=<n>
 tty_cols=<n>` updates the durable PTY geometry and, for running TTY jobs with
