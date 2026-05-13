@@ -352,11 +352,14 @@ Landed first slice:
   summaries when the configured model API key is present, records
   `summary_source = "model"`, and falls back to deterministic extractive
   summaries when the key is absent or summary generation fails
+- TUI command palette now exposes a reasoning browser through `reasoning`,
+  `reasoning latest`, and `reasoning show <selector>`, and local replay
+  controls through `reasoning replay <0..20>` for TUI-started agent runs
 
 Remaining:
 
-- richer reasoning UX, including fuller reasoning-content browsing and replay
-  controls in the TUI
+- richer reasoning UX can still add in-panel search/highlighting and per-turn
+  replay pinning
 
 ### Phase F: LSP + Revert
 

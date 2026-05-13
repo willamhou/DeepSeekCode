@@ -64,6 +64,10 @@ Current surfaces:
 - active-thread runtime items are summarized in the task panel with state/type
   counts and the latest item, so streamed agent progress and tool activity are
   visible while a background run is active
+- persisted reasoning items can be inspected from the command palette with
+  `reasoning`, `reasoning latest`, and `reasoning show <selector>`; the same
+  panel exposes `reasoning replay <N>` for controlling how many latest reasoning
+  items local TUI-started agent runs replay into the next request
 - `task <summary>` / `task create <summary>` creates a pending active-thread
   `agent` task for the durable task daemon or external runners
 - `task next`, `task prev`, and `task select <id>` move the selected task in
@@ -232,6 +236,9 @@ Command palette commands currently implemented:
 | `automation trigger <id> [prompt]` | Trigger one current-thread automation with an optional prompt override |
 | `compact`, `compact <tail>` | Compact the active durable thread, keeping the latest N turns |
 | `thread compact`, `thread compact <tail>` | Alias for active thread compaction |
+| `reasoning`, `reasoning list` | Show active-thread reasoning items in the right-side detail panel |
+| `reasoning latest`, `reasoning show <latest\|index\|item-id\|turn-id>` | Show full reasoning item content |
+| `reasoning replay <0..20>` | Set how many persisted reasoning entries local TUI agent runs replay |
 | `mcp`, `mcp manager`, `mcp open` | Open the full-width MCP manager screen with merged inventory, config sources, and common actions |
 | `mcp manager tab overview|tools|prompts|resources|resource-templates|health` | Switch the full-width MCP manager tab |
 | `mcp manager filter <query>`, `mcp manager filter` | Filter or clear visible lines in the full-width MCP manager screen |

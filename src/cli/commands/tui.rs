@@ -1101,6 +1101,7 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Shell => Err(app_error("shell details are not MCP details")),
         TuiMcpDetailKind::Memory => Err(app_error("memory details are not MCP details")),
         TuiMcpDetailKind::Rollback => Err(app_error("rollback details are not MCP details")),
+        TuiMcpDetailKind::Reasoning => Err(app_error("reasoning details are not MCP details")),
     }
 }
 
@@ -1156,6 +1157,7 @@ fn handle_tui_action_with_live(
                     config.clone(),
                     thread_id.clone(),
                     content,
+                    app.reasoning_replay_limit(),
                     live_tx,
                 );
                 app.set_status(format!("started agent run for {thread_id}"));
@@ -2126,12 +2128,18 @@ fn start_tui_agent_run(
     config: AppConfig,
     thread_id: String,
     prompt: String,
+    reasoning_replay_limit: usize,
     live_tx: Option<Sender<TuiLiveEvent>>,
 ) {
     let _ = thread::spawn(move || {
-        if let Err(error) =
-            run_tui_agent_turn(store.clone(), config, thread_id.clone(), prompt, live_tx)
-        {
+        if let Err(error) = run_tui_agent_turn(
+            store.clone(),
+            config,
+            thread_id.clone(),
+            prompt,
+            reasoning_replay_limit,
+            live_tx,
+        ) {
             let _ = record_tui_agent_failure(&store, &thread_id, &error.to_string());
         }
     });
@@ -2142,6 +2150,7 @@ fn run_tui_agent_turn(
     config: AppConfig,
     thread_id: String,
     prompt: String,
+    reasoning_replay_limit: usize,
     live_tx: Option<Sender<TuiLiveEvent>>,
 ) -> AppResult<()> {
     let model = config.model.model.clone();
@@ -2218,7 +2227,8 @@ fn run_tui_agent_turn(
         TaskContext::new(prompt, None),
         AgentLoopOptions {
             emit_progress: false,
-            initial_recent_steps: store.recent_reasoning_replay_entries(&thread_id, 3)?,
+            initial_recent_steps: store
+                .recent_reasoning_replay_entries(&thread_id, reasoning_replay_limit)?,
             persist_session: false,
             stream_events: Some(Box::new(stream_events)),
             approval_resolver: Some(resolver),

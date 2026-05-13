@@ -439,6 +439,7 @@ pub enum TuiMcpDetailKind {
     Shell,
     Memory,
     Rollback,
+    Reasoning,
 }
 
 impl TuiMcpDetailKind {
@@ -453,6 +454,7 @@ impl TuiMcpDetailKind {
             Self::Shell => "shell",
             Self::Memory => "memory",
             Self::Rollback => "rollback",
+            Self::Reasoning => "reasoning",
         }
     }
 
@@ -467,6 +469,7 @@ impl TuiMcpDetailKind {
             Self::Shell => "Shell Jobs",
             Self::Memory => "Memory",
             Self::Rollback => "Rollback",
+            Self::Reasoning => "Reasoning",
         }
     }
 
@@ -481,6 +484,7 @@ impl TuiMcpDetailKind {
             Self::Shell => Self::Manager,
             Self::Memory => Self::Manager,
             Self::Rollback => Self::Manager,
+            Self::Reasoning => Self::Manager,
         }
     }
 
@@ -495,6 +499,7 @@ impl TuiMcpDetailKind {
             Self::Shell => Self::Manager,
             Self::Memory => Self::Manager,
             Self::Rollback => Self::Manager,
+            Self::Reasoning => Self::Manager,
         }
     }
 }
@@ -729,6 +734,8 @@ pub enum TuiAction {
 
 const DEFAULT_TUI_COMPACTION_KEEP_TAIL_TURNS: usize = 8;
 const MAX_TUI_COMPACTION_KEEP_TAIL_TURNS: usize = 200;
+const DEFAULT_TUI_REASONING_REPLAY_LIMIT: usize = 3;
+const MAX_TUI_REASONING_REPLAY_LIMIT: usize = 20;
 const MAX_TUI_COMMAND_HISTORY: usize = 100;
 const TUI_PICKER_PAGE_SIZE: usize = 5;
 const TUI_COMMAND_COMPLETIONS: &[&str] = &[
@@ -786,6 +793,11 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "automation trigger",
     "compact",
     "thread compact",
+    "reasoning",
+    "reasoning list",
+    "reasoning latest",
+    "reasoning show ",
+    "reasoning replay ",
     "mcp",
     "mcp manager",
     "mcp manager tab overview",
@@ -876,6 +888,7 @@ pub struct TuiApp {
     composer_cursor: usize,
     composer_focused: bool,
     transcript_scroll: usize,
+    reasoning_replay_limit: usize,
     pending_actions: Vec<TuiAction>,
     status: String,
     mcp_detail: Option<(TuiMcpDetailKind, String)>,
@@ -1032,6 +1045,7 @@ impl TuiApp {
             composer_cursor: 0,
             composer_focused: false,
             transcript_scroll: 0,
+            reasoning_replay_limit: DEFAULT_TUI_REASONING_REPLAY_LIMIT,
             pending_actions: Vec::new(),
             status: "ready".to_string(),
             mcp_detail: None,
@@ -1054,6 +1068,10 @@ impl TuiApp {
 
     pub fn set_status(&mut self, status: impl Into<String>) {
         self.status = status.into();
+    }
+
+    pub fn reasoning_replay_limit(&self) -> usize {
+        self.reasoning_replay_limit
     }
 
     pub fn set_mcp_detail(&mut self, kind: TuiMcpDetailKind, detail: impl Into<String>) {
@@ -1631,6 +1649,13 @@ impl TuiApp {
         items
     }
 
+    fn active_reasoning_items(&self) -> Vec<&TuiItem> {
+        self.active_thread_items()
+            .into_iter()
+            .filter(|item| item.item_type == "reasoning")
+            .collect()
+    }
+
     fn active_running_assistant_item(&self) -> Option<&TuiItem> {
         self.active_thread_items().into_iter().rev().find(|item| {
             item.status == "running"
@@ -2166,6 +2191,7 @@ impl TuiApp {
             format!("Active thread: {}", thread.title),
             format!("Thread mode/status: {} / {}", thread.mode, thread.status),
             format!("Runtime items: {item_count}"),
+            format!("Reasoning replay: latest {}", self.reasoning_replay_limit),
             format!("Event seq: {}", thread.event_seq),
         ];
         self.tasks.extend(item_progress_lines);
@@ -2986,6 +3012,25 @@ impl TuiApp {
             }
             ["thread", id] | ["threads", id] => {
                 self.select_thread_by_id(id);
+            }
+            ["reasoning"] | ["reasoning", "list"] => {
+                self.show_reasoning_list();
+            }
+            ["reasoning", "latest"] | ["reasoning", "last"] => {
+                self.show_reasoning_item("latest");
+            }
+            ["reasoning", "show"] => {
+                self.show_reasoning_item("latest");
+            }
+            ["reasoning", "show", selector] => {
+                self.show_reasoning_item(selector);
+            }
+            ["reasoning", "replay"] => {
+                self.show_reasoning_list();
+                self.status = format!("reasoning replay limit is {}", self.reasoning_replay_limit);
+            }
+            ["reasoning", "replay", limit] => {
+                self.set_reasoning_replay_limit_from_arg(limit);
             }
             ["tasks"] | ["task"] => {
                 let count = self.active_thread_tasks().len();
@@ -3979,6 +4024,104 @@ impl TuiApp {
             format!("compaction requested for {thread_id} (keep_tail_turns={keep_tail_turns})");
     }
 
+    fn show_reasoning_list(&mut self) {
+        let detail = match self.active_thread().cloned() {
+            Some(thread) => {
+                let items = self.active_reasoning_items();
+                let count = items.len();
+                let detail =
+                    render_reasoning_list_detail(&thread, &items, self.reasoning_replay_limit);
+                self.status = format!(
+                    "reasoning items={count} replay_limit={}",
+                    self.reasoning_replay_limit
+                );
+                detail
+            }
+            None => {
+                self.status = "no active durable thread for reasoning".to_string();
+                "Reasoning\n\nNo active durable thread.".to_string()
+            }
+        };
+        self.set_mcp_detail(TuiMcpDetailKind::Reasoning, detail);
+    }
+
+    fn show_reasoning_item(&mut self, selector: &str) {
+        let Some(_thread) = self.active_thread() else {
+            self.status = "no active durable thread for reasoning".to_string();
+            self.set_mcp_detail(
+                TuiMcpDetailKind::Reasoning,
+                "Reasoning\n\nNo active durable thread.",
+            );
+            return;
+        };
+        let items = self.active_reasoning_items();
+        if items.is_empty() {
+            self.status = "no reasoning items in active thread".to_string();
+            self.set_mcp_detail(
+                TuiMcpDetailKind::Reasoning,
+                render_reasoning_empty_detail(self.reasoning_replay_limit),
+            );
+            return;
+        }
+        let selector = selector.trim();
+        let selected = if selector.eq_ignore_ascii_case("latest")
+            || selector.eq_ignore_ascii_case("last")
+            || selector.is_empty()
+        {
+            items
+                .last()
+                .map(|item| (items.len().saturating_sub(1), *item))
+        } else if let Ok(index) = selector.parse::<usize>() {
+            index
+                .checked_sub(1)
+                .and_then(|idx| items.get(idx).map(|item| (idx, *item)))
+        } else {
+            items
+                .iter()
+                .position(|item| item.id == selector || item.turn_id.as_deref() == Some(selector))
+                .map(|idx| (idx, items[idx]))
+        };
+        let Some((index, item)) = selected else {
+            self.status = format!("reasoning item not found: {selector}");
+            self.set_mcp_detail(
+                TuiMcpDetailKind::Reasoning,
+                format!(
+                    "Reasoning\n\nNo reasoning item matched `{selector}`.\n\n{}",
+                    render_reasoning_selector_help()
+                ),
+            );
+            return;
+        };
+        let total = items.len();
+        let item_id = item.id.clone();
+        let detail =
+            render_reasoning_item_detail(item, index + 1, total, self.reasoning_replay_limit);
+        self.set_mcp_detail(TuiMcpDetailKind::Reasoning, detail);
+        self.status = format!(
+            "showing reasoning item {}/{} ({})",
+            index + 1,
+            total,
+            item_id
+        );
+    }
+
+    fn set_reasoning_replay_limit_from_arg(&mut self, limit: &str) {
+        match limit.parse::<usize>() {
+            Ok(value) if value <= MAX_TUI_REASONING_REPLAY_LIMIT => {
+                self.reasoning_replay_limit = value;
+                self.show_reasoning_list();
+                self.status = format!("reasoning replay limit set to {value}");
+            }
+            Ok(_) => {
+                self.status =
+                    format!("reasoning replay limit must be <= {MAX_TUI_REASONING_REPLAY_LIMIT}");
+            }
+            Err(_) => {
+                self.status = format!("invalid reasoning replay limit: {limit}");
+            }
+        }
+    }
+
     fn request_create_task(&mut self, summary: String) {
         let summary = summary.trim().to_string();
         if summary.is_empty() {
@@ -4801,6 +4944,83 @@ fn clip_line(value: &str, max_chars: usize) -> String {
         clipped.push_str("...");
     }
     clipped
+}
+
+fn render_reasoning_empty_detail(replay_limit: usize) -> String {
+    format!(
+        "Reasoning\n\nNo reasoning items recorded for the active thread.\n\n{}",
+        render_reasoning_replay_control(replay_limit)
+    )
+}
+
+fn render_reasoning_list_detail(
+    thread: &TuiThread,
+    items: &[&TuiItem],
+    replay_limit: usize,
+) -> String {
+    if items.is_empty() {
+        return render_reasoning_empty_detail(replay_limit);
+    }
+
+    let mut detail = String::new();
+    detail.push_str("Reasoning\n");
+    detail.push_str(&format!("thread: {}\n", thread.title));
+    detail.push_str(&format!("thread_id: {}\n", thread.id));
+    detail.push_str(&format!("items: {}\n", items.len()));
+    detail.push_str(&render_reasoning_replay_control(replay_limit));
+    detail.push_str("\n\nReasoning items:\n");
+    for (index, item) in items.iter().enumerate() {
+        detail.push_str(&format!(
+            "#{} {} status={} chars={}",
+            index + 1,
+            item.id,
+            item.status,
+            item.content.chars().count()
+        ));
+        if let Some(turn_id) = item.turn_id.as_deref() {
+            detail.push_str(&format!(" turn={turn_id}"));
+        }
+        detail.push('\n');
+        detail.push_str("  ");
+        detail.push_str(&clip_line(&item.content, 160));
+        detail.push('\n');
+    }
+    detail.push_str("\n");
+    detail.push_str(render_reasoning_selector_help());
+    detail
+}
+
+fn render_reasoning_item_detail(
+    item: &TuiItem,
+    position: usize,
+    total: usize,
+    replay_limit: usize,
+) -> String {
+    let mut detail = String::new();
+    detail.push_str("Reasoning item\n");
+    detail.push_str(&format!("position: {position}/{total}\n"));
+    detail.push_str(&format!("id: {}\n", item.id));
+    detail.push_str(&format!("thread_id: {}\n", item.thread_id));
+    if let Some(turn_id) = item.turn_id.as_deref() {
+        detail.push_str(&format!("turn_id: {turn_id}\n"));
+    }
+    detail.push_str(&format!("status: {}\n", item.status));
+    detail.push_str(&format!("chars: {}\n", item.content.chars().count()));
+    detail.push_str(&render_reasoning_replay_control(replay_limit));
+    detail.push_str("\n\nContent:\n");
+    detail.push_str(&item.content);
+    if !item.content.ends_with('\n') {
+        detail.push('\n');
+    }
+    detail
+}
+
+fn render_reasoning_replay_control(replay_limit: usize) -> String {
+    format!("replay_limit: {replay_limit} latest persisted reasoning item(s)")
+}
+
+fn render_reasoning_selector_help() -> &'static str {
+    "Commands: reasoning list | reasoning latest | reasoning show <latest|index|item-id|turn-id> | reasoning replay <0..20>"
 }
 
 fn task_progress_lines(task: &TuiTaskRecord, selected: bool, bulk_selected: bool) -> Vec<String> {
@@ -8438,6 +8658,131 @@ mod tests {
 
         assert!(app.drain_actions().is_empty());
         assert_eq!(app.status, "invalid compact keep_tail_turns: never");
+    }
+
+    #[test]
+    fn command_palette_opens_reasoning_detail_and_sets_replay_limit() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: ".".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: Some("turn-one".to_string()),
+                event_seq: 1,
+            }],
+            vec![
+                TuiItem {
+                    id: "reasoning-one".to_string(),
+                    thread_id: "thread-one".to_string(),
+                    turn_id: Some("turn-one".to_string()),
+                    index: 1,
+                    item_type: "reasoning".to_string(),
+                    role: Some("assistant".to_string()),
+                    content: "first hidden planning note".to_string(),
+                    status: "completed".to_string(),
+                },
+                TuiItem {
+                    id: "message-one".to_string(),
+                    thread_id: "thread-one".to_string(),
+                    turn_id: Some("turn-one".to_string()),
+                    index: 2,
+                    item_type: "message".to_string(),
+                    role: Some("assistant".to_string()),
+                    content: "visible answer".to_string(),
+                    status: "completed".to_string(),
+                },
+            ],
+        );
+
+        app.show_command_palette = true;
+        app.command_query = "reasoning list".to_string();
+        app.command_cursor = app.command_query.len();
+        assert!(app.handle_key(KeyCode::Enter));
+
+        let output = render_once(&app, 140, 36).unwrap();
+        assert!(output.contains("Reasoning"));
+        assert!(output.contains("reasoning-one"));
+        assert!(output.contains("first hidden planning note"));
+        assert!(output.contains("replay_limit: 3"));
+        assert!(app.status.contains("reasoning items=1"));
+
+        app.show_command_palette = true;
+        app.command_query = "reasoning replay 5".to_string();
+        app.command_cursor = app.command_query.len();
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(app.reasoning_replay_limit(), 5);
+        let output = render_once(&app, 140, 36).unwrap();
+        assert!(output.contains("replay_limit: 5"));
+        assert_eq!(app.status, "reasoning replay limit set to 5");
+    }
+
+    #[test]
+    fn command_palette_shows_reasoning_item_by_selector() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: ".".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: Some("turn-two".to_string()),
+                event_seq: 2,
+            }],
+            vec![
+                TuiItem {
+                    id: "reasoning-one".to_string(),
+                    thread_id: "thread-one".to_string(),
+                    turn_id: Some("turn-one".to_string()),
+                    index: 1,
+                    item_type: "reasoning".to_string(),
+                    role: Some("assistant".to_string()),
+                    content: "older reasoning".to_string(),
+                    status: "completed".to_string(),
+                },
+                TuiItem {
+                    id: "reasoning-two".to_string(),
+                    thread_id: "thread-one".to_string(),
+                    turn_id: Some("turn-two".to_string()),
+                    index: 2,
+                    item_type: "reasoning".to_string(),
+                    role: Some("assistant".to_string()),
+                    content: "latest reasoning line one\nlatest reasoning line two".to_string(),
+                    status: "running".to_string(),
+                },
+            ],
+        );
+
+        app.show_command_palette = true;
+        app.command_query = "reasoning show turn-two".to_string();
+        app.command_cursor = app.command_query.len();
+        assert!(app.handle_key(KeyCode::Enter));
+
+        let output = render_once(&app, 140, 36).unwrap();
+        assert!(output.contains("Reasoning item"));
+        assert!(output.contains("position: 2/2"));
+        assert!(output.contains("turn_id: turn-two"));
+        assert!(output.contains("latest reasoning line one"));
+        assert!(output.contains("latest reasoning line two"));
+        assert!(app.status.contains("showing reasoning item 2/2"));
     }
 
     #[test]

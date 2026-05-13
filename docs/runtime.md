@@ -623,7 +623,10 @@ channel as assistant text deltas. The agent loop also replays compact recent
 reasoning summaries inside subsequent model requests during the same run, and
 runtime-backed TUI/daemon agent runs preload the latest persisted reasoning
 items from the active durable thread so later runs can see prior thinking
-continuity.
+continuity. In the TUI, `reasoning`, `reasoning latest`, and
+`reasoning show <selector>` render persisted reasoning in the scrollable
+right-side detail panel, while `reasoning replay <0..20>` controls how many
+latest persisted reasoning entries local TUI-started agent runs preload.
 
 `POST /v1/threads/{id}/compact` appends a non-destructive compaction marker for
 long contexts. The runtime keeps all original turn and item records, then adds a
