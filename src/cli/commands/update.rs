@@ -178,21 +178,25 @@ fn run_homebrew_formula(args: &UpdateHomebrewFormulaArgs) -> AppResult<()> {
 fn run_publish_status(args: &UpdatePublishStatusArgs) -> AppResult<()> {
     let report = build_publish_status_report(&repo_root(), args, &env_value)?;
 
-    println!("DeepSeekCode publish status");
-    println!("  version: {}", report.version);
-    for check in &report.checks {
-        println!(
-            "  {}: {} ({})",
-            check.name,
-            check.status.label(),
-            check.detail
-        );
-    }
-    println!("  not_ready: {}", report.not_ready_count());
-    if report.not_ready_count() == 0 {
-        println!("  next: tag release can publish npm and Homebrew when workflow gates pass");
+    if args.json {
+        println!("{}", render_publish_status_json(&report, args.strict));
     } else {
-        println!("  next: configure missing secrets/assets, then rerun with --strict");
+        println!("DeepSeekCode publish status");
+        println!("  version: {}", report.version);
+        for check in &report.checks {
+            println!(
+                "  {}: {} ({})",
+                check.name,
+                check.status.label(),
+                check.detail
+            );
+        }
+        println!("  not_ready: {}", report.not_ready_count());
+        if report.not_ready_count() == 0 {
+            println!("  next: tag release can publish npm and Homebrew when workflow gates pass");
+        } else {
+            println!("  next: configure missing secrets/assets, then rerun with --strict");
+        }
     }
 
     if args.strict && report.not_ready_count() > 0 {
@@ -202,6 +206,29 @@ fn run_publish_status(args: &UpdatePublishStatusArgs) -> AppResult<()> {
         )));
     }
     Ok(())
+}
+
+fn render_publish_status_json(report: &PublishStatusReport, strict: bool) -> String {
+    let checks = report
+        .checks
+        .iter()
+        .map(|check| {
+            format!(
+                "{{\"name\":\"{}\",\"status\":\"{}\",\"detail\":\"{}\"}}",
+                json_escape(check.name),
+                check.status.label(),
+                json_escape(&check.detail)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"kind\":\"deepseek.publish_status.v1\",\"version\":\"{}\",\"strict\":{},\"not_ready\":{},\"checks\":[{}]}}",
+        json_escape(&report.version),
+        strict,
+        report.not_ready_count(),
+        checks
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1301,6 +1328,7 @@ mod tests {
             dist: Some(dist.display().to_string()),
             npm_dist: Some(npm_dist.display().to_string()),
             strict: true,
+            json: false,
         };
         let report = build_publish_status_report(&repo_root(), &args, &|name| match name {
             "NPM_TOKEN" => Some("npm-token".to_string()),
@@ -1314,6 +1342,22 @@ mod tests {
         assert_eq!(status_of(&report, "release_assets"), PublishStatus::Ready);
         assert_eq!(status_of(&report, "npm_artifacts"), PublishStatus::Ready);
         assert_eq!(status_of(&report, "homebrew_tap"), PublishStatus::Ready);
+    }
+
+    #[test]
+    fn render_publish_status_json_includes_blockers() {
+        let args = UpdatePublishStatusArgs::default();
+        let report = build_publish_status_report(&repo_root(), &args, &|_| None).unwrap();
+
+        let json = render_publish_status_json(&report, true);
+
+        assert!(json.contains("\"kind\":\"deepseek.publish_status.v1\""));
+        assert!(json.contains("\"version\":\""));
+        assert!(json.contains("\"strict\":true"));
+        assert!(json.contains("\"not_ready\":4"));
+        assert!(json.contains("\"name\":\"npm_token\""));
+        assert!(json.contains("\"status\":\"blocked\""));
+        assert!(json.contains("NPM_TOKEN/NODE_AUTH_TOKEN is missing"));
     }
 
     #[test]

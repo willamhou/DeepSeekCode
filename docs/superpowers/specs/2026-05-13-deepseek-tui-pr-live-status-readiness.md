@@ -25,6 +25,8 @@ authorization.
   status report.
 - `--require-write` fails unless repo permissions include `push`, `maintain`, or
   `admin`.
+- `--json` emits the same readiness checks as `deepseek.pr_live_status.v1` for
+  CI scripts.
 - The command is handled before model configuration loading, so it does not
   require a DeepSeek API key.
 - `docs/pr-integration.md` documents the command and clarifies the relationship
@@ -35,6 +37,8 @@ authorization.
 - `/home/willamhou/.cargo/bin/cargo test pr --lib`
 - `/home/willamhou/.cargo/bin/cargo test github --lib`
 - `/home/willamhou/.cargo/bin/cargo fmt --check`
+- `deepseek pr live-status <pr> --json` JSON rendering is covered by unit tests;
+  live execution still requires an external disposable PR.
 - `git diff --check`
 
 ## Remaining

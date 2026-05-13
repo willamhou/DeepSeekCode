@@ -176,6 +176,7 @@ external configuration only:
 
 ```bash
 deepseek update publish-status
+deepseek update publish-status --json
 ```
 
 After downloading release matrix assets and npm platform package artifacts, run

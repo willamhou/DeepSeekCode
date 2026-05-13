@@ -22,12 +22,14 @@ posting comments or mutating the worktree.
 ```
 deepseek pr live-status owner/repo#42
 deepseek pr live-status https://github.com/.../pull/42 --require-write
+deepseek pr live-status owner/repo#42 --json
 ```
 
 The command verifies `gh` authentication, PR metadata, changed files, PR diff
 availability, repository read permission, and current-branch alignment. With
 `--require-write`, it also requires repo permissions that conservatively imply
 write-capable guarded PR comment fixtures (`push`, `maintain`, or `admin`).
+With `--json`, it emits `deepseek.pr_live_status.v1` for CI scripts.
 
 ### `deepseek pr review <pr>`
 

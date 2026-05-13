@@ -727,7 +727,11 @@ Landed first slice:
 - `deepseek update publish-status` now audits npm/Homebrew publish readiness
   without side effects, including token/tap config, platform npm tarballs,
   release archives, and non-placeholder `.sha256` files when artifact
-  directories are supplied; `--strict` fails on blocked or skipped checks
+  directories are supplied; `--strict` fails on blocked or skipped checks and
+  `--json` emits `deepseek.publish_status.v1` for CI/release scripts
+- `deepseek pr live-status <pr> --json` emits
+  `deepseek.pr_live_status.v1`, making live PR fixture readiness scriptable
+  without posting GitHub comments
 
 Remaining:
 

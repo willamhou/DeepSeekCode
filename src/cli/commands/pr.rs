@@ -10,13 +10,15 @@ use crate::integrations::github::{
     RepoPermissions,
 };
 use crate::model::protocol::Observation;
+use crate::util::json::json_escape;
 
 pub fn run(action: PrAction) -> AppResult<()> {
     match action {
         PrAction::LiveStatus {
             reference,
             require_write,
-        } => run_live_status(&reference, require_write),
+            json,
+        } => run_live_status(&reference, require_write, json),
         action => {
             let config = load_or_default()?;
             warn_if_offline_planner(&config);
@@ -46,32 +48,36 @@ fn run_model_backed_action(config: AppConfig, action: PrAction) -> AppResult<()>
     }
 }
 
-fn run_live_status(reference: &str, require_write: bool) -> AppResult<()> {
+fn run_live_status(reference: &str, require_write: bool, json: bool) -> AppResult<()> {
     ensure_gh_auth()?;
     let pr_ref = parse_pr_ref(reference)?;
     let pr = fetch_pr(&pr_ref)?;
     let permissions = fetch_repo_permissions(&pr.repo)?;
     let report = build_live_status_report(&pr, &permissions, current_branch(), require_write);
 
-    println!("DeepSeekCode PR live status");
-    println!("  target: {}#{}", pr.repo, pr.number);
-    println!("  title: {}", pr.title);
-    println!("  branch: {}", pr.branch);
-    println!("  changed_files: {}", pr.changed_files.len());
-    println!("  diff_bytes: {}", pr.diff.len());
-    for check in &report.checks {
-        println!(
-            "  {}: {} ({})",
-            check.name,
-            check.status.label(),
-            check.detail
-        );
-    }
-    println!("  not_ready: {}", report.not_ready_count());
-    if report.not_ready_count() == 0 {
-        println!("  next: live remote PR fixture prerequisites are available");
+    if json {
+        println!("{}", render_live_status_json(&pr, &report, require_write));
     } else {
-        println!("  next: resolve blocked checks before running a write-capable live fixture");
+        println!("DeepSeekCode PR live status");
+        println!("  target: {}#{}", pr.repo, pr.number);
+        println!("  title: {}", pr.title);
+        println!("  branch: {}", pr.branch);
+        println!("  changed_files: {}", pr.changed_files.len());
+        println!("  diff_bytes: {}", pr.diff.len());
+        for check in &report.checks {
+            println!(
+                "  {}: {} ({})",
+                check.name,
+                check.status.label(),
+                check.detail
+            );
+        }
+        println!("  not_ready: {}", report.not_ready_count());
+        if report.not_ready_count() == 0 {
+            println!("  next: live remote PR fixture prerequisites are available");
+        } else {
+            println!("  next: resolve blocked checks before running a write-capable live fixture");
+        }
     }
 
     if require_write && report.not_ready_count() > 0 {
@@ -81,6 +87,40 @@ fn run_live_status(reference: &str, require_write: bool) -> AppResult<()> {
         )));
     }
     Ok(())
+}
+
+fn render_live_status_json(
+    pr: &PrContext,
+    report: &PrLiveStatusReport,
+    require_write: bool,
+) -> String {
+    let checks = report
+        .checks
+        .iter()
+        .map(|check| {
+            format!(
+                "{{\"name\":\"{}\",\"status\":\"{}\",\"detail\":\"{}\"}}",
+                json_escape(check.name),
+                check.status.label(),
+                json_escape(&check.detail)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let target = format!("{}#{}", pr.repo, pr.number);
+    format!(
+        "{{\"kind\":\"deepseek.pr_live_status.v1\",\"target\":\"{}\",\"repo\":\"{}\",\"number\":{},\"title\":\"{}\",\"branch\":\"{}\",\"changed_files\":{},\"diff_bytes\":{},\"require_write\":{},\"not_ready\":{},\"checks\":[{}]}}",
+        json_escape(&target),
+        json_escape(&pr.repo),
+        pr.number,
+        json_escape(&pr.title),
+        json_escape(&pr.branch),
+        pr.changed_files.len(),
+        pr.diff.len(),
+        require_write,
+        report.not_ready_count(),
+        checks
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -557,6 +597,34 @@ mod tests {
         assert_eq!(status_of(&report, "changed_files"), PrLiveStatus::Blocked);
         assert_eq!(status_of(&report, "repo_write"), PrLiveStatus::Ready);
         assert_eq!(report.not_ready_count(), 2);
+    }
+
+    #[test]
+    fn render_live_status_json_includes_target_and_checks() {
+        let mut pr = fixture_pr(42, "Quote \"ready\"");
+        pr.diff = "diff --git a/src/main.rs b/src/main.rs\n+ok".to_string();
+        pr.changed_files = vec!["src/main.rs".to_string()];
+        let report = build_live_status_report(
+            &pr,
+            &RepoPermissions {
+                pull: true,
+                push: true,
+                maintain: false,
+                admin: false,
+            },
+            Some("feat/x".to_string()),
+            true,
+        );
+
+        let json = render_live_status_json(&pr, &report, true);
+
+        assert!(json.contains("\"kind\":\"deepseek.pr_live_status.v1\""));
+        assert!(json.contains("\"target\":\"owner/repo#42\""));
+        assert!(json.contains("\"title\":\"Quote \\\"ready\\\"\""));
+        assert!(json.contains("\"require_write\":true"));
+        assert!(json.contains("\"not_ready\":0"));
+        assert!(json.contains("\"name\":\"repo_write\""));
+        assert!(json.contains("\"status\":\"ready\""));
     }
 
     fn status_of(report: &PrLiveStatusReport, name: &str) -> PrLiveStatus {

@@ -22,6 +22,7 @@ pub enum PrAction {
     LiveStatus {
         reference: String,
         require_write: bool,
+        json: bool,
     },
     Fix {
         reference: String,
@@ -215,6 +216,7 @@ pub fn parse_pr_subcommand(args: Vec<String>) -> Result<PrAction, String> {
         }
         "live-status" => {
             let mut require_write = false;
+            let mut json = false;
             let mut index = 0;
             while index < rest.len() {
                 match rest[index].as_str() {
@@ -222,9 +224,13 @@ pub fn parse_pr_subcommand(args: Vec<String>) -> Result<PrAction, String> {
                         require_write = true;
                         index += 1;
                     }
+                    "--json" => {
+                        json = true;
+                        index += 1;
+                    }
                     other => {
                         return Err(format!(
-                            "unknown flag for `pr live-status`: {other}; expected --require-write"
+                            "unknown flag for `pr live-status`: {other}; expected --require-write|--json"
                         ));
                     }
                 }
@@ -232,6 +238,7 @@ pub fn parse_pr_subcommand(args: Vec<String>) -> Result<PrAction, String> {
             Ok(PrAction::LiveStatus {
                 reference,
                 require_write,
+                json,
             })
         }
         "fix" => {
@@ -639,6 +646,7 @@ pub struct UpdatePublishStatusArgs {
     pub dist: Option<String>,
     pub npm_dist: Option<String>,
     pub strict: bool,
+    pub json: bool,
 }
 
 #[derive(Debug, Default)]
@@ -1400,9 +1408,13 @@ fn parse_update_publish_status_args(args: Vec<String>) -> Result<UpdatePublishSt
                 parsed.strict = true;
                 index += 1;
             }
+            "--json" => {
+                parsed.json = true;
+                index += 1;
+            }
             other => {
                 return Err(format!(
-                    "unknown flag for `update publish-status`: {other}; expected --dist|--npm-dist|--strict"
+                    "unknown flag for `update publish-status`: {other}; expected --dist|--npm-dist|--strict|--json"
                 ));
             }
         }
@@ -2945,9 +2957,33 @@ mod tests {
             PrAction::LiveStatus {
                 reference,
                 require_write,
+                json,
             } => {
                 assert_eq!(reference, "owner/repo#42");
                 assert!(require_write);
+                assert!(!json);
+            }
+            _ => panic!("expected pr live-status args"),
+        }
+    }
+
+    #[test]
+    fn parses_pr_live_status_with_json_flag() {
+        let parsed = parse_pr_subcommand(vec![
+            "live-status".to_string(),
+            "owner/repo#42".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        match parsed {
+            PrAction::LiveStatus {
+                reference,
+                require_write,
+                json,
+            } => {
+                assert_eq!(reference, "owner/repo#42");
+                assert!(!require_write);
+                assert!(json);
             }
             _ => panic!("expected pr live-status args"),
         }
@@ -3638,6 +3674,7 @@ mod tests {
             "--npm-dist".to_string(),
             "npm-dist".to_string(),
             "--strict".to_string(),
+            "--json".to_string(),
         ])
         .expect("parse should succeed");
 
@@ -3647,6 +3684,7 @@ mod tests {
                     assert_eq!(status.dist.as_deref(), Some("dist-assets"));
                     assert_eq!(status.npm_dist.as_deref(), Some("npm-dist"));
                     assert!(status.strict);
+                    assert!(status.json);
                 }
                 other => panic!("expected update publish-status, got {other:?}"),
             },

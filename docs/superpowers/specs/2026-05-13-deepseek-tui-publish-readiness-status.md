@@ -29,6 +29,8 @@ to be visible and machine-checkable.
   - Homebrew formula template version
   - Homebrew tap repository/token availability
 - `--strict` exits non-zero when any check is blocked or skipped.
+- `--json` emits the same readiness checks as
+  `deepseek.publish_status.v1` for CI and release scripts.
 - `docs/release.md` and `docs/install.md` document the default and strict
   release readiness flows.
 
@@ -36,6 +38,7 @@ to be visible and machine-checkable.
 
 - `/home/willamhou/.cargo/bin/cargo test update --lib`
 - `/home/willamhou/.cargo/bin/cargo fmt --check`
+- `deepseek update publish-status --json`
 - `git diff --check`
 
 ## Remaining

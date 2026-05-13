@@ -91,6 +91,7 @@ posting comments:
 ```bash
 deepseek pr live-status owner/repo#42
 deepseek pr live-status owner/repo#42 --require-write
+deepseek pr live-status owner/repo#42 --json
 ```
 
 Check release publishing prerequisites before tagging:
@@ -98,6 +99,7 @@ Check release publishing prerequisites before tagging:
 ```bash
 deepseek update publish-status
 deepseek update publish-status --dist dist-assets --npm-dist npm-dist --strict
+deepseek update publish-status --json
 ```
 
 ## Development Checks
