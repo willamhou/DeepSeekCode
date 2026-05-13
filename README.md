@@ -83,6 +83,23 @@ deepseek tui --runtime-url http://127.0.0.1:13000
 Set `DEEPSEEK_API_KEY` in your environment for real model calls. Local `.env`
 files are intentionally ignored by git.
 
+## Workflow Checks
+
+Check whether a real GitHub PR is ready for live review/retry fixtures without
+posting comments:
+
+```bash
+deepseek pr live-status owner/repo#42
+deepseek pr live-status owner/repo#42 --require-write
+```
+
+Check release publishing prerequisites before tagging:
+
+```bash
+deepseek update publish-status
+deepseek update publish-status --dist dist-assets --npm-dist npm-dist --strict
+```
+
 ## Development Checks
 
 The main regression loop is:
