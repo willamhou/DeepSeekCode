@@ -462,8 +462,9 @@ Remaining:
   and optional `session_id` / `reset` fields persist prior process summaries
   under `.dscode/rlm-model/` so later calls receive durable process-style
   context; existing non-empty sessions can also be continued with
-  `task + session_id` and no new `file_path` / `content`, while the full live
-  model REPL/daemon loop remains future work
+  `task + session_id` and no new `file_path` / `content`; the full live model
+  REPL/daemon loop now has a design spec covering live-session manifests,
+  runtime-thread-backed turn queues, event logs, cancellation, and recovery
 - RLM batch helper now exists: `rlm_batch` maps shared `context` plus up to 16
   `questions` onto parallel bounded child-agent analyses, matching the
   `llm_query_batched` / `rlm_query_batched` usage pattern without a Python REPL
