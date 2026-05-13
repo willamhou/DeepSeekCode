@@ -13,6 +13,8 @@ know the command names up front or open the command palette separately.
 
 - Added a composer-specific built-in slash completion catalog covering local
   slash commands that the composer can execute without starting a model turn.
+- Merged project `.dscode/commands/**/*.md` custom slash commands into the
+  focused composer hint list and `Tab` completion path.
 - Added composer `Tab` completion for `/...` prefixes using the same longest
   common prefix behavior as the command palette.
 - Rendered a dim slash hint line under the composer while the focused composer
@@ -25,6 +27,7 @@ know the command names up front or open the command palette separately.
 ## Verification
 
 - `cargo test composer_slash_tab_completes_and_renders_hints --lib`
+- `cargo test composer_slash_hints_include_project_custom_commands --lib`
 - `cargo test composer_intercepts_memory_prefix_and_slash_commands --lib`
 - `cargo test tui --lib`
 - `cargo fmt --check`
@@ -33,6 +36,7 @@ know the command names up front or open the command palette separately.
 
 ## Remaining
 
-DeepSeekCode's slash hints are currently built-in only. Dynamic custom command
-and skill entries can still execute through the existing composer path, but they
-are not yet merged into the hint list.
+DeepSeekCode's slash hints currently include built-ins and project custom
+commands. User-global custom commands and skill-name entries can still execute
+through the existing composer paths, but they are not yet merged into the hint
+list because the TUI app state does not carry the global config directories.

@@ -3839,12 +3839,13 @@ impl TuiApp {
             self.status = "composer slash completion starts with /".to_string();
             return;
         }
-        let matches = composer_slash_completion_matches(prefix);
+        let matches = composer_slash_completion_matches(self, prefix);
         if matches.is_empty() {
             self.status = format!("no slash completion for `{}`", clip_line(prefix.trim(), 60));
             return;
         }
-        let completed = longest_common_prefix(&matches);
+        let match_refs = matches.iter().map(String::as_str).collect::<Vec<_>>();
+        let completed = longest_common_prefix(&match_refs);
         if completed.len() > prefix.len() {
             let suffix = self.composer[cursor..].to_string();
             let new_cursor = completed.len();
@@ -7551,15 +7552,93 @@ fn handle_text_control_key(value: &mut String, cursor: &mut usize, code: KeyCode
     }
 }
 
-fn composer_slash_completion_matches(prefix: &str) -> Vec<&'static str> {
+fn composer_slash_completion_matches(app: &TuiApp, prefix: &str) -> Vec<String> {
     if !prefix.starts_with('/') {
         return Vec::new();
     }
-    TUI_COMPOSER_SLASH_COMPLETIONS
+    let mut matches = TUI_COMPOSER_SLASH_COMPLETIONS
         .iter()
         .copied()
         .filter(|command| command.starts_with(prefix))
-        .collect()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    matches.extend(
+        project_custom_slash_commands(app)
+            .into_iter()
+            .filter(|command| command.starts_with(prefix)),
+    );
+    matches.sort();
+    matches.dedup();
+    matches
+}
+
+fn project_custom_slash_commands(app: &TuiApp) -> Vec<String> {
+    let Some(session) = app.selected_session() else {
+        return Vec::new();
+    };
+    let root = Path::new(&session.workspace).join(".dscode/commands");
+    let mut commands = Vec::new();
+    collect_project_custom_slash_commands(&root, Path::new(""), 0, &mut commands);
+    commands.sort();
+    commands.dedup();
+    commands
+}
+
+fn collect_project_custom_slash_commands(
+    dir: &Path,
+    prefix: &Path,
+    depth: usize,
+    out: &mut Vec<String>,
+) {
+    if depth > 6 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if path.is_dir() {
+            if !valid_custom_slash_segment(name) {
+                continue;
+            }
+            let mut next_prefix = prefix.to_path_buf();
+            next_prefix.push(name);
+            collect_project_custom_slash_commands(&path, &next_prefix, depth + 1, out);
+            continue;
+        }
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !valid_custom_slash_segment(stem) {
+            continue;
+        }
+        let mut command_path = prefix.to_path_buf();
+        command_path.push(stem);
+        let command = command_path
+            .components()
+            .filter_map(|component| component.as_os_str().to_str())
+            .collect::<Vec<_>>()
+            .join("/");
+        if !command.is_empty() {
+            out.push(format!("/{command}"));
+        }
+    }
+}
+
+fn valid_custom_slash_segment(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('.')
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
 }
 
 fn composer_slash_hint_line(app: &TuiApp) -> Option<String> {
@@ -7571,10 +7650,10 @@ fn composer_slash_hint_line(app: &TuiApp) -> Option<String> {
     if !prefix.starts_with('/') {
         return None;
     }
-    let matches = composer_slash_completion_matches(prefix);
+    let matches = composer_slash_completion_matches(app, prefix);
     if matches.is_empty() {
         return Some(format!(
-            "Slash: no built-in matches for {}",
+            "Slash: no matches for {}",
             clip_line(prefix.trim(), 40)
         ));
     }
@@ -11327,6 +11406,47 @@ mod tests {
         assert!(app.handle_key(KeyCode::Char('n')));
         assert!(app.handle_key(KeyCode::Tab));
         assert_eq!(app.composer, "/provider nvidia-nim");
+    }
+
+    #[test]
+    fn composer_slash_hints_include_project_custom_commands() {
+        let root = temp_root("slash-custom-hints");
+        let command_dir = root.join(".dscode/commands/pr");
+        fs::create_dir_all(&command_dir).unwrap();
+        fs::write(command_dir.join("fix.md"), "Review PR fixes for $ARGUMENTS").unwrap();
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: root.display().to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        assert!(app.handle_key(KeyCode::Char('i')));
+        for ch in "/pr".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        let output = render_once(&app, 120, 36).unwrap();
+        assert!(output.contains("Slash: /pr/fix"));
+
+        assert!(app.handle_key(KeyCode::Char('/')));
+        assert!(app.handle_key(KeyCode::Tab));
+        assert_eq!(app.composer, "/pr/fix");
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

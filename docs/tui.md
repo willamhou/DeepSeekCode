@@ -14,7 +14,8 @@ Current surfaces:
 - composer and command palette custom slash commands from project
   `.dscode/commands/*.md` or the configured user commands dir
 - composer slash-command hints and `Tab` completion for built-in local
-  slash commands while typing `/...`
+  slash commands plus project `.dscode/commands/**/*.md` entries while typing
+  `/...`
 - composer draft stash: `Ctrl+S` parks the current draft, and
   `stash list|pop|clear` / `/stash list|pop|clear` manage parked drafts
 - session rename from the command palette or slash-style composer command with
@@ -192,7 +193,7 @@ Key bindings:
 
 | Key | Behaviour |
 |---|---|
-| `Tab` | Complete command-palette input while the palette is active; complete built-in `/...` commands while the composer is focused; otherwise cycle Plan / Agent / YOLO mode |
+| `Tab` | Complete command-palette input while the palette is active; complete built-in or project `/...` commands while the composer is focused; otherwise cycle Plan / Agent / YOLO mode |
 | `Tab`, `Shift+Tab` | Cycle MCP manager tabs while the full-width MCP manager is visible |
 | `n`, `p`, `e`, `d`, `x`, `t`, `r`, `Space`, `A`, `U`, `E`, `D` | Select next/previous MCP server, enable, disable, remove, show tools, reload, toggle/select/clear multi-select, or bulk enable/disable while the full-width MCP manager is visible |
 | `p`, `a`, `y` | Switch directly to Plan, Agent, or YOLO |
