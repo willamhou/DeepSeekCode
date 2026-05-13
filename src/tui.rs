@@ -568,6 +568,7 @@ pub enum TuiMcpDetailKind {
     Links,
     Home,
     Note,
+    Hooks,
     Mode,
     Help,
     Settings,
@@ -603,6 +604,7 @@ impl TuiMcpDetailKind {
             Self::Links => "links",
             Self::Home => "home",
             Self::Note => "note",
+            Self::Hooks => "hooks",
             Self::Mode => "mode",
             Self::Help => "help",
             Self::Settings => "settings",
@@ -638,6 +640,7 @@ impl TuiMcpDetailKind {
             Self::Links => "Links",
             Self::Home => "Home",
             Self::Note => "Note",
+            Self::Hooks => "Hooks",
             Self::Mode => "Mode",
             Self::Help => "Help",
             Self::Settings => "Settings",
@@ -673,6 +676,7 @@ impl TuiMcpDetailKind {
             Self::Links => Self::Manager,
             Self::Home => Self::Manager,
             Self::Note => Self::Manager,
+            Self::Hooks => Self::Manager,
             Self::Mode => Self::Manager,
             Self::Help => Self::Manager,
             Self::Settings => Self::Manager,
@@ -708,6 +712,7 @@ impl TuiMcpDetailKind {
             Self::Links => Self::Manager,
             Self::Home => Self::Manager,
             Self::Note => Self::Manager,
+            Self::Hooks => Self::Manager,
             Self::Mode => Self::Manager,
             Self::Help => Self::Manager,
             Self::Settings => Self::Manager,
@@ -887,6 +892,12 @@ pub enum TuiNoteCommand {
     Clear,
     Path,
     Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiHooksCommand {
+    List,
+    Events,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1297,6 +1308,23 @@ fn parse_tui_note_command(line: &str) -> Option<Result<TuiNoteCommand, String>> 
     }
 }
 
+fn parse_tui_hooks_command(line: &str) -> Option<Result<TuiHooksCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/hooks")
+        .or_else(|| strip_tui_command_prefix(trimmed, "hooks"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "/hook"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "hook"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] | ["list" | "ls" | "show"] => Some(Ok(TuiHooksCommand::List)),
+        ["events" | "event" | "list-events"] => Some(Ok(TuiHooksCommand::Events)),
+        ["help" | "--help" | "-h"] => Some(Ok(TuiHooksCommand::Events)),
+        _ => Some(Err(
+            "usage: hooks [list|events] or /hooks [list|events]".to_string()
+        )),
+    }
+}
+
 fn parse_note_index_arg(value: &str) -> Option<usize> {
     value.parse::<usize>().ok().filter(|index| *index > 0)
 }
@@ -1435,6 +1463,9 @@ pub enum TuiAction {
     },
     Note {
         command: TuiNoteCommand,
+    },
+    Hooks {
+        command: TuiHooksCommand,
     },
     RespondApproval {
         thread_id: String,
@@ -1631,6 +1662,13 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         aliases: &[],
         usage: "/note [add|list|show|edit|remove|clear|path]",
         description: "Manage persistent workspace notes.",
+    },
+    TuiHelpCommandInfo {
+        category: "Config",
+        name: "hooks",
+        aliases: &["hook"],
+        usage: "/hooks [list|events]",
+        description: "Inspect local hook roots and supported hook event names.",
     },
     TuiHelpCommandInfo {
         category: "Workbench",
@@ -1902,6 +1940,10 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "note remove ",
     "note clear",
     "note path",
+    "hooks",
+    "hooks list",
+    "hooks events",
+    "hook events",
     "network",
     "network allow ",
     "network deny ",
@@ -2043,6 +2085,10 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/note remove ",
     "/note clear",
     "/note path",
+    "/hooks",
+    "/hooks list",
+    "/hooks events",
+    "/hook events",
     "/stash",
     "/stash list",
     "/stash pop",
@@ -4326,6 +4372,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_hooks_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.request_hooks_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = parse_tui_stash_command(&content) {
                     match command {
                         Ok(command) => self.handle_composer_stash_command(command),
@@ -4846,6 +4905,15 @@ impl TuiApp {
         if let Some(command) = parse_tui_note_command(command) {
             match command {
                 Ok(command) => self.request_note_command(command),
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_hooks_command(command) {
+            match command {
+                Ok(command) => self.request_hooks_command(command),
                 Err(message) => {
                     self.status = message;
                 }
@@ -6348,6 +6416,11 @@ impl TuiApp {
         self.status = "note command queued".to_string();
     }
 
+    fn request_hooks_command(&mut self, command: TuiHooksCommand) {
+        self.pending_actions.push(TuiAction::Hooks { command });
+        self.status = "hooks command queued".to_string();
+    }
+
     fn show_feedback_detail(&mut self, command: TuiFeedbackCommand) {
         let detail = render_feedback_detail(command);
         self.set_mcp_detail(TuiMcpDetailKind::Feedback, detail);
@@ -6440,6 +6513,7 @@ impl TuiApp {
         let _ = writeln!(detail, "- /provider [name [model]|list]");
         let _ = writeln!(detail, "- /network [list|allow|deny|remove|default]");
         let _ = writeln!(detail, "- /memory [show|path|clear|edit|help]");
+        let _ = writeln!(detail, "- /hooks [list|events]");
         let _ = writeln!(
             detail,
             "- /mcp manager | /mcp init | /mcp add | /mcp enable | /mcp disable"
@@ -12819,6 +12893,39 @@ mod tests {
             app.drain_actions(),
             vec![TuiAction::Note {
                 command: TuiNoteCommand::Path,
+            }]
+        );
+        assert_eq!(app.composer, "");
+    }
+
+    #[test]
+    fn command_palette_requests_hooks_actions() {
+        let mut app = TuiApp::new(Vec::new());
+
+        run_palette_command(&mut app, "hooks");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Hooks {
+                command: TuiHooksCommand::List,
+            }]
+        );
+
+        run_palette_command(&mut app, "hooks events");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Hooks {
+                command: TuiHooksCommand::Events,
+            }]
+        );
+
+        app.composer_focused = true;
+        app.composer = "/hook list".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Hooks {
+                command: TuiHooksCommand::List,
             }]
         );
         assert_eq!(app.composer, "");

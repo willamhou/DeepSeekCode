@@ -13,6 +13,8 @@ Current surfaces:
   opt-in user memory without starting a model turn
 - persistent workspace notes with `note` / `/note`, including
   `note add|list|show|edit|remove|clear|path`
+- hook inspection with `hooks` / `/hooks`, including `hooks list` and
+  `hooks events` over the configured project/user hook roots
 - composer and command palette custom slash commands from project
   `.dscode/commands/*.md` or the configured user commands dir
 - composer slash-command hints and `Tab` completion for built-in local
@@ -317,6 +319,8 @@ Command palette commands currently implemented:
 | `note <text>`, `/note <text>`, `note add <text>` | Append a persistent workspace note to `memory.notes_path` |
 | `note list`, `note show <n>` | List notes or show one note in the right-side detail panel |
 | `note edit <n> <text>`, `note remove <n>`, `note clear`, `note path` | Replace, remove, clear, or locate persistent workspace notes |
+| `hooks`, `/hooks`, `hooks list`, `/hooks list` | Show hook enabled state, timeout, project/user roots, event directories, and executable scripts |
+| `hooks events`, `/hooks events`, `hook events`, `/hook events` | Show supported hook event directory names |
 | `network`, `network list`, `/network list` | Show `network.default`, `network.allow`, and `network.deny` in the right-side detail panel |
 | `network allow <host>`, `/network allow <host>` | Allow a host in the selected workspace project config |
 | `network deny <host>`, `/network deny <host>` | Deny a host in the selected workspace project config |

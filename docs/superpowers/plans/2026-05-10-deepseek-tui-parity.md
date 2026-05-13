@@ -371,6 +371,9 @@ Landed first slice:
 - local file-backed TUI now supports DeepSeek-TUI-style `/note` workspace notes
   over `memory.notes_path`, including add/list/show/edit/remove/clear/path
   commands from the composer or command palette
+- local file-backed TUI now supports DeepSeek-TUI-style `/hooks` read-only
+  inspection, listing the configured hook enabled state, timeout, project/user
+  hook roots, executable scripts by event directory, and supported event names
 - local file-backed TUI composer and command palette now expand project/user
   custom markdown slash commands from `.dscode/commands/*.md` and the
   configured user commands dir, reusing REPL argument expansion semantics and

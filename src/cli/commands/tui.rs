@@ -29,6 +29,7 @@ use crate::cli::commands::mcp::{
 use crate::config::load::load_or_default;
 use crate::config::types::AppConfig;
 use crate::core::context::TaskContext;
+use crate::core::hooks::HookEvent;
 use crate::core::instructions::init_project_instructions_at;
 use crate::core::loop_runtime::{
     AgentApprovalDecision, AgentApprovalRequest, AgentApprovalResolver, AgentCancelCheck,
@@ -57,9 +58,10 @@ use crate::tools::types::{Tool, ToolInput};
 use crate::tui::{
     discover_custom_slash_commands_dir, render_once, run_interactive,
     run_interactive_with_refresh_actions_and_live, TuiAction, TuiApp, TuiApprovalRequest,
-    TuiAutomationRecord, TuiItem, TuiLiveEvent, TuiMcpConfigScope, TuiMcpDetailKind,
-    TuiMemoryCommand, TuiModelCommand, TuiNetworkCommand, TuiNoteCommand, TuiProviderCommand,
-    TuiSession, TuiSkillsCommand, TuiTaskRecord, TuiThread, TuiUsageSummary, TuiUserInputRequest,
+    TuiAutomationRecord, TuiHooksCommand, TuiItem, TuiLiveEvent, TuiMcpConfigScope,
+    TuiMcpDetailKind, TuiMemoryCommand, TuiModelCommand, TuiNetworkCommand, TuiNoteCommand,
+    TuiProviderCommand, TuiSession, TuiSkillsCommand, TuiTaskRecord, TuiThread, TuiUsageSummary,
+    TuiUserInputRequest,
 };
 use crate::ui::stream::StreamEvents;
 use crate::util::json::{
@@ -765,6 +767,9 @@ fn handle_tui_http_action(
         TuiAction::Note { .. } => {
             app.set_status("note commands require local file-backed TUI".to_string());
         }
+        TuiAction::Hooks { .. } => {
+            app.set_status("hooks commands require local file-backed TUI".to_string());
+        }
         TuiAction::McpManager
         | TuiAction::McpList
         | TuiAction::McpInit { .. }
@@ -1199,6 +1204,7 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Links => Err(app_error("link details are not MCP details")),
         TuiMcpDetailKind::Home => Err(app_error("home details are not MCP details")),
         TuiMcpDetailKind::Note => Err(app_error("note details are not MCP details")),
+        TuiMcpDetailKind::Hooks => Err(app_error("hooks details are not MCP details")),
         TuiMcpDetailKind::Mode => Err(app_error("mode details are not MCP details")),
         TuiMcpDetailKind::Help => Err(app_error("help details are not MCP details")),
         TuiMcpDetailKind::Settings => Err(app_error("settings details are not MCP details")),
@@ -1815,6 +1821,9 @@ fn handle_tui_action_with_live(
         }
         TuiAction::Note { command } => {
             run_tui_note_command(app, config, command);
+        }
+        TuiAction::Hooks { command } => {
+            run_tui_hooks_command(app, config, command);
         }
         TuiAction::McpManager => match config {
             Some(config) => match mcp_manager_summary(config) {
@@ -2487,6 +2496,210 @@ fn render_tui_notes_list(path: &Path, notes: &[String]) -> String {
         detail.push_str("\nUse /note show <n>, /note edit <n> <text>, or /note remove <n>.\n");
     }
     detail
+}
+
+fn run_tui_hooks_command(app: &mut TuiApp, config: Option<&AppConfig>, command: TuiHooksCommand) {
+    let Some(config) = config else {
+        app.set_status("hooks commands require local config".to_string());
+        return;
+    };
+    match command {
+        TuiHooksCommand::List => match render_tui_hooks_list(config) {
+            Ok(detail) => {
+                app.set_status("hooks listed".to_string());
+                app.set_mcp_detail(TuiMcpDetailKind::Hooks, detail);
+            }
+            Err(error) => app.set_status(format!("hooks list failed: {error}")),
+        },
+        TuiHooksCommand::Events => {
+            app.set_status("hook events listed".to_string());
+            app.set_mcp_detail(TuiMcpDetailKind::Hooks, render_tui_hooks_events());
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TuiHookEventSpec {
+    event: HookEvent,
+    description: &'static str,
+}
+
+fn tui_hook_event_specs() -> [TuiHookEventSpec; 10] {
+    [
+        TuiHookEventSpec {
+            event: HookEvent::SessionStart,
+            description: "fires when a local agent session starts",
+        },
+        TuiHookEventSpec {
+            event: HookEvent::SessionStop,
+            description: "fires when a local agent session stops",
+        },
+        TuiHookEventSpec {
+            event: HookEvent::UserPromptSubmit,
+            description: "fires before a submitted user prompt is dispatched",
+        },
+        TuiHookEventSpec {
+            event: HookEvent::PreToolUse,
+            description: "fires before a tool call is executed",
+        },
+        TuiHookEventSpec {
+            event: HookEvent::PermissionRequest,
+            description: "fires when a permission gate asks for approval",
+        },
+        TuiHookEventSpec {
+            event: HookEvent::PostToolUse,
+            description: "fires after a tool call completes",
+        },
+        TuiHookEventSpec {
+            event: HookEvent::SubagentStart,
+            description: "fires when a subagent task is queued or started",
+        },
+        TuiHookEventSpec {
+            event: HookEvent::SubagentStop,
+            description: "fires when a subagent task finishes",
+        },
+        TuiHookEventSpec {
+            event: HookEvent::PreCompact,
+            description: "fires before active context compaction",
+        },
+        TuiHookEventSpec {
+            event: HookEvent::ShellEnv,
+            description: "fires before shell tools and may emit KEY=VALUE environment",
+        },
+    ]
+}
+
+fn render_tui_hooks_events() -> String {
+    let mut detail = String::new();
+    detail.push_str("Hook Events\n\n");
+    detail.push_str("Create executable scripts in one of these event directories under the project or user hook root.\n\n");
+    for spec in tui_hook_event_specs() {
+        detail.push_str(&format!(
+            "- {}: {}\n",
+            spec.event.dir_name(),
+            spec.description
+        ));
+    }
+    detail
+}
+
+fn render_tui_hooks_list(config: &AppConfig) -> AppResult<String> {
+    let project_dir = PathBuf::from(&config.hooks.project_dir);
+    let user_dir = expand_tilde(&config.hooks.user_dir);
+    let mut detail = String::new();
+    detail.push_str("Hooks\n");
+    detail.push_str(&format!("Enabled: {}\n", config.hooks.enabled));
+    detail.push_str(&format!("Timeout: {} ms\n", config.hooks.timeout_ms.max(1)));
+    detail.push_str(&format!("Project root: {}\n", project_dir.display()));
+    detail.push_str(&format!("User root: {}\n", user_dir.display()));
+    detail.push('\n');
+    if !config.hooks.enabled {
+        detail.push_str(
+            "Hooks are globally disabled; executable scripts are shown but will not fire.\n\n",
+        );
+    }
+
+    let mut executable_total = 0usize;
+    executable_total += render_tui_hook_root(&mut detail, "User", &user_dir)?;
+    detail.push('\n');
+    executable_total += render_tui_hook_root(&mut detail, "Project", &project_dir)?;
+
+    if executable_total == 0 {
+        detail.push_str("\nNo executable hook scripts found. Use /hooks events to see supported event directories.\n");
+    }
+    Ok(detail)
+}
+
+fn render_tui_hook_root(detail: &mut String, label: &str, root: &Path) -> AppResult<usize> {
+    detail.push_str(&format!("{label} Hooks ({})\n", root.display()));
+    let mut executable_total = 0usize;
+    for spec in tui_hook_event_specs() {
+        let dir = root.join(spec.event.dir_name());
+        let exists = dir.exists();
+        let entries = tui_hook_dir_entries(&dir)?;
+        let executable_count = entries.iter().filter(|entry| entry.executable).count();
+        executable_total += executable_count;
+        if !exists {
+            detail.push_str(&format!("- {}: missing\n", spec.event.dir_name()));
+        } else if entries.is_empty() {
+            detail.push_str(&format!("- {}: empty\n", spec.event.dir_name()));
+        } else {
+            let ignored_count = entries.len().saturating_sub(executable_count);
+            if ignored_count == 0 {
+                detail.push_str(&format!(
+                    "- {}: {} executable script(s)\n",
+                    spec.event.dir_name(),
+                    executable_count
+                ));
+            } else {
+                detail.push_str(&format!(
+                    "- {}: {} executable script(s), {} ignored\n",
+                    spec.event.dir_name(),
+                    executable_count,
+                    ignored_count
+                ));
+            }
+            for entry in entries {
+                let suffix = if entry.executable {
+                    ""
+                } else if entry.is_file {
+                    " (ignored: not executable)"
+                } else {
+                    " (ignored: not a file)"
+                };
+                detail.push_str(&format!("  - {}{suffix}\n", entry.name));
+            }
+        }
+    }
+    Ok(executable_total)
+}
+
+#[derive(Debug)]
+struct TuiHookDirEntry {
+    name: String,
+    executable: bool,
+    is_file: bool,
+}
+
+fn tui_hook_dir_entries(dir: &Path) -> AppResult<Vec<TuiHookDirEntry>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| path.display().to_string());
+        let is_file = path.is_file();
+        out.push(TuiHookDirEntry {
+            name,
+            executable: is_tui_hook_executable_file(&path),
+            is_file,
+        });
+    }
+    out.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(out)
+}
+
+#[cfg(unix)]
+fn is_tui_hook_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.is_file()
+        && path
+            .metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_tui_hook_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 fn run_tui_diagnostics_from_current_dir(app: &mut TuiApp, changed: bool, paths: Vec<String>) {
@@ -4094,6 +4307,17 @@ mod tests {
         let mut config = AppConfig::default();
         config.workspace.config_dir = root.join(".dscode").display().to_string();
         config
+    }
+
+    fn make_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).unwrap();
+        }
+        let _ = path;
     }
 
     #[test]
@@ -6071,6 +6295,64 @@ shell_allowlist = ["git diff"]
         )
         .unwrap();
         assert_eq!(fs::read_to_string(&notes_path).unwrap().trim(), "");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handle_tui_action_renders_hooks_inventory() {
+        let root = temp_root("hooks-action");
+        fs::create_dir_all(&root).unwrap();
+        let store = RuntimeStore::new(root.join(".dscode/runtime"));
+        let mut config = temp_config(&root);
+        let project_hooks = root.join(".dscode/hooks");
+        let user_hooks = root.join("user-hooks");
+        fs::create_dir_all(project_hooks.join("pre_tool_use")).unwrap();
+        fs::create_dir_all(user_hooks.join("shell_env")).unwrap();
+        let project_script = project_hooks.join("pre_tool_use/10-block");
+        let user_script = user_hooks.join("shell_env/10-env");
+        fs::write(&project_script, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(&user_script, "#!/bin/sh\nprintf 'FOO=bar\\n'\n").unwrap();
+        make_executable(&project_script);
+        make_executable(&user_script);
+        config.hooks.enabled = true;
+        config.hooks.timeout_ms = 1234;
+        config.hooks.project_dir = project_hooks.display().to_string();
+        config.hooks.user_dir = user_hooks.display().to_string();
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::Hooks {
+                command: TuiHooksCommand::List,
+            },
+        )
+        .unwrap();
+        let output = render_once(&app, 160, 48).unwrap();
+        assert!(output.contains("Hooks"));
+        assert!(output.contains("Enabled: true"));
+        assert!(output.contains("Timeout: 1234 ms"));
+        assert!(output.contains("pre_tool_use"));
+        assert!(output.contains("10-block"));
+        assert!(output.contains("shell_env"));
+        assert!(output.contains("10-env"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::Hooks {
+                command: TuiHooksCommand::Events,
+            },
+        )
+        .unwrap();
+        let output = render_once(&app, 160, 48).unwrap();
+        assert!(output.contains("Hook Events"));
+        assert!(output.contains("user_prompt_submit"));
+        assert!(output.contains("permission_request"));
+        assert!(output.contains("shell_env"));
 
         let _ = fs::remove_dir_all(root);
     }

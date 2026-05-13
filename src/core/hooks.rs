@@ -26,7 +26,7 @@ pub enum HookEvent {
 }
 
 impl HookEvent {
-    fn dir_name(self) -> &'static str {
+    pub(crate) fn dir_name(self) -> &'static str {
         match self {
             Self::SessionStart => "session_start",
             Self::SessionStop => "session_stop",
