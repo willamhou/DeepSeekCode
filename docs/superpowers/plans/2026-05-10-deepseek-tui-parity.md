@@ -467,6 +467,10 @@ Landed first slice:
   `runtime_create_automation`, `runtime_update_automation`,
   `runtime_pause_automation`, `runtime_resume_automation`,
   `runtime_delete_automation`, and `runtime_trigger_automation`
+- runtime sub-agent lifecycle tools exposed through MCP: read-only
+  `runtime_list_agents` / `runtime_agent_result`, plus approval-gated
+  `runtime_spawn_agent`, `runtime_cancel_agent`, `runtime_close_agent`,
+  `runtime_resume_agent`, and `runtime_send_agent_input`
 - read-only MCP prompt templates exposed through `prompts/list` / `prompts/get`:
   `review_code`, `explain_code`, and `plan_task`
 - read-only MCP resources exposed through `resources/list` / `resources/read`:
@@ -572,8 +576,8 @@ Remaining:
 - broader long-tail side-effect MCP server surface beyond the current
   `run_tests`/`run_shell`, file write/patch/edit/delete/copy/move,
   `revert_turn`, GitHub write, runtime task, and runtime automation tools;
-  remaining candidates include agent-only subagent, shell-session, and RLM tools
-  that still need explicit MCP safety contracts before exposure
+  remaining candidates include shell-session and RLM tools that still need
+  explicit MCP safety contracts before exposure
 - full ACP standard tool streaming beyond started/result notifications
 
 ### Phase H: Packaging

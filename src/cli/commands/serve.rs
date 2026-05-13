@@ -15,6 +15,7 @@ use crate::core::runtime::{
     automation_to_json, event_to_json, item_to_json, json_array, json_object, json_string_field,
     parse_json_object_body, session_to_json, task_to_json, thread_compaction_to_json,
     thread_to_json, turn_to_json, usage_to_json, validate_record_id, RuntimeEvent, RuntimeStore,
+    TaskRecord,
 };
 use crate::error::{app_error, AppResult};
 use crate::model::client::ModelClient;
@@ -882,6 +883,32 @@ fn execute_mcp_tool(
             let task = state.store.load_task(task_id)?;
             return Ok(json_value_to_string(&task_to_json(&task)));
         }
+        "runtime_list_agents" => {
+            let limit = mcp_limit(arguments, 20, 100);
+            let agents = state
+                .store
+                .list_tasks(None, None, limit)?
+                .into_iter()
+                .filter(mcp_is_agent_task)
+                .map(|task| mcp_agent_snapshot_json(&state.store, &task))
+                .collect::<AppResult<Vec<_>>>()?;
+            return Ok(json_value_to_string(&json_object([
+                (
+                    "summary",
+                    JsonValue::String(format!("{} sub-agent(s)", agents.len())),
+                ),
+                ("agents", json_array(agents)),
+            ])));
+        }
+        "runtime_agent_result" => {
+            let agent_id = mcp_required_any(arguments, &["agent_id", "id"])?;
+            let task = state.store.load_task(&agent_id)?;
+            mcp_ensure_agent_task(&task, "runtime_agent_result")?;
+            return Ok(json_value_to_string(&mcp_agent_snapshot_json(
+                &state.store,
+                &task,
+            )?));
+        }
         "runtime_create_task" => {
             if !mcp_write_tools_enabled(state) {
                 return Err(app_error(
@@ -945,6 +972,46 @@ fn execute_mcp_tool(
                 ));
             }
             return execute_mcp_runtime_trigger_automation(input, state);
+        }
+        "runtime_spawn_agent" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `runtime_spawn_agent` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route sub-agent writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_runtime_spawn_agent(input, state);
+        }
+        "runtime_cancel_agent" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `runtime_cancel_agent` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route sub-agent writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_runtime_cancel_agent(input, state);
+        }
+        "runtime_close_agent" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `runtime_close_agent` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route sub-agent writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_runtime_close_agent(input, state);
+        }
+        "runtime_resume_agent" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `runtime_resume_agent` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route sub-agent writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_runtime_resume_agent(input, state);
+        }
+        "runtime_send_agent_input" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `runtime_send_agent_input` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route sub-agent writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_runtime_send_agent_input(input, state);
         }
         _ => return Err(app_error(format!("unknown MCP tool: {name}"))),
     };
@@ -1614,6 +1681,254 @@ fn execute_mcp_runtime_trigger_automation(
     ])))
 }
 
+fn execute_mcp_runtime_spawn_agent(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    let prompt = mcp_input_required_any(
+        &input,
+        &["prompt", "message", "objective", "task"],
+        "runtime_spawn_agent",
+    )?;
+    request_mcp_runtime_write_approval(
+        state,
+        &input,
+        "runtime_spawn_agent",
+        format!(
+            "spawn runtime sub-agent: {}",
+            mcp_compact_target(&prompt, 120)
+        ),
+    )?;
+    let workspace = mcp_input_optional(&input, "cwd")
+        .or_else(|| mcp_input_optional(&input, "workspace"))
+        .unwrap_or_else(|| state.workspace.display().to_string());
+    let model = mcp_input_optional(&input, "model").unwrap_or_else(|| "deepseek-coder".to_string());
+    let mode = mcp_input_optional(&input, "mode").unwrap_or_else(|| "agent".to_string());
+    let title =
+        mcp_input_optional(&input, "title").unwrap_or_else(|| mcp_summarize_agent_prompt(&prompt));
+    let thread = match mcp_input_optional(&input, "thread_id") {
+        Some(thread_id) => state.store.load_thread(&thread_id)?,
+        None => state.store.create_thread(title, workspace, model, mode)?,
+    };
+    let task = state.store.create_task(
+        thread.session_id.as_deref(),
+        Some(&thread.id),
+        mcp_input_optional(&input, "parent_task_id").as_deref(),
+        "subagent".to_string(),
+        "pending".to_string(),
+        prompt,
+    )?;
+    Ok(json_value_to_string(&mcp_agent_snapshot_json(
+        &state.store,
+        &task,
+    )?))
+}
+
+fn execute_mcp_runtime_cancel_agent(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    let agent_id = mcp_input_required_any(&input, &["agent_id", "id"], "runtime_cancel_agent")?;
+    let task = state.store.load_task(&agent_id)?;
+    mcp_ensure_agent_task(&task, "runtime_cancel_agent")?;
+    request_mcp_runtime_write_approval(
+        state,
+        &input,
+        "runtime_cancel_agent",
+        format!("cancel runtime sub-agent: {agent_id}"),
+    )?;
+    let (task, event) = state
+        .store
+        .cancel_task(&agent_id, "cancelled by runtime_cancel_agent".to_string())?;
+    Ok(json_value_to_string(&json_object([
+        ("agent", mcp_agent_snapshot_json(&state.store, &task)?),
+        (
+            "event",
+            event.as_ref().map(event_to_json).unwrap_or(JsonValue::Null),
+        ),
+    ])))
+}
+
+fn execute_mcp_runtime_close_agent(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    let agent_id = mcp_input_required_any(&input, &["agent_id", "id"], "runtime_close_agent")?;
+    let task = state.store.load_task(&agent_id)?;
+    mcp_ensure_agent_task(&task, "runtime_close_agent")?;
+    if matches!(task.status.as_str(), "completed" | "failed" | "cancelled") {
+        return Ok(json_value_to_string(&mcp_agent_snapshot_json(
+            &state.store,
+            &task,
+        )?));
+    }
+    request_mcp_runtime_write_approval(
+        state,
+        &input,
+        "runtime_close_agent",
+        format!("close runtime sub-agent: {agent_id}"),
+    )?;
+    let (task, _) = state
+        .store
+        .cancel_task(&agent_id, "closed by runtime_close_agent".to_string())?;
+    Ok(json_value_to_string(&mcp_agent_snapshot_json(
+        &state.store,
+        &task,
+    )?))
+}
+
+fn execute_mcp_runtime_resume_agent(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    let agent_id = mcp_input_required_any(&input, &["agent_id", "id"], "runtime_resume_agent")?;
+    let task = state.store.load_task(&agent_id)?;
+    mcp_ensure_agent_task(&task, "runtime_resume_agent")?;
+    request_mcp_runtime_write_approval(
+        state,
+        &input,
+        "runtime_resume_agent",
+        format!("resume runtime sub-agent: {agent_id}"),
+    )?;
+    let prompt =
+        mcp_input_optional(&input, "prompt").or_else(|| mcp_input_optional(&input, "message"));
+    let resumed = if task.status == "paused" {
+        state.store.resume_task(&task.id, prompt)?
+    } else {
+        state.store.create_task(
+            task.session_id.as_deref(),
+            task.thread_id.as_deref(),
+            Some(&task.id),
+            "subagent".to_string(),
+            "pending".to_string(),
+            prompt.unwrap_or_else(|| task.summary.clone()),
+        )?
+    };
+    Ok(json_value_to_string(&json_object([
+        ("agent_id", JsonValue::String(resumed.id.clone())),
+        ("agent", mcp_agent_snapshot_json(&state.store, &resumed)?),
+        ("resumed_from", JsonValue::String(task.id)),
+    ])))
+}
+
+fn execute_mcp_runtime_send_agent_input(
+    input: ToolInput,
+    state: &McpStdioState,
+) -> AppResult<String> {
+    let agent_id = mcp_input_required_any(&input, &["agent_id", "id"], "runtime_send_agent_input")?;
+    let message = mcp_input_required_any(
+        &input,
+        &["message", "input", "prompt"],
+        "runtime_send_agent_input",
+    )?;
+    let task = state.store.load_task(&agent_id)?;
+    mcp_ensure_agent_task(&task, "runtime_send_agent_input")?;
+    let thread_id = task.thread_id.clone().ok_or_else(|| {
+        app_error("runtime_send_agent_input requires an agent linked to a runtime thread")
+    })?;
+    request_mcp_runtime_write_approval(
+        state,
+        &input,
+        "runtime_send_agent_input",
+        format!("send input to runtime sub-agent: {agent_id}"),
+    )?;
+    let turn = state
+        .store
+        .append_turn(&thread_id, "user".to_string(), message.clone())?;
+    let item = state.store.append_item(
+        &thread_id,
+        Some(&turn.id),
+        "message".to_string(),
+        Some("user".to_string()),
+        message.clone(),
+        "completed".to_string(),
+    )?;
+    let followup = state.store.create_task(
+        task.session_id.as_deref(),
+        Some(&thread_id),
+        Some(&task.id),
+        "subagent_input".to_string(),
+        "pending".to_string(),
+        message,
+    )?;
+    Ok(json_value_to_string(&json_object([
+        ("agent_id", JsonValue::String(task.id)),
+        ("queued_agent_id", JsonValue::String(followup.id.clone())),
+        (
+            "queued_agent",
+            mcp_agent_snapshot_json(&state.store, &followup)?,
+        ),
+        ("input_item", item_to_json(&item)),
+    ])))
+}
+
+fn mcp_agent_snapshot_json(store: &RuntimeStore, task: &TaskRecord) -> AppResult<JsonValue> {
+    let thread = task
+        .thread_id
+        .as_deref()
+        .map(|thread_id| store.load_thread(thread_id))
+        .transpose()?;
+    let latest_item = match task.thread_id.as_deref() {
+        Some(thread_id) => store
+            .list_items(thread_id, None)?
+            .into_iter()
+            .rev()
+            .find(|item| item.role.as_deref() == Some("assistant")),
+        None => None,
+    };
+    Ok(json_object([
+        ("agent_id", JsonValue::String(task.id.clone())),
+        ("status", JsonValue::String(task.status.clone())),
+        ("task", task_to_json(task)),
+        (
+            "thread",
+            thread
+                .as_ref()
+                .map(thread_to_json)
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "result",
+            latest_item
+                .as_ref()
+                .map(item_to_json)
+                .unwrap_or(JsonValue::Null),
+        ),
+    ]))
+}
+
+fn mcp_ensure_agent_task(task: &TaskRecord, tool_name: &str) -> AppResult<()> {
+    if mcp_is_agent_task(task) {
+        Ok(())
+    } else {
+        Err(app_error(format!(
+            "{tool_name} expected a sub-agent task id, got task kind `{}`",
+            task.kind
+        )))
+    }
+}
+
+fn mcp_is_agent_task(task: &TaskRecord) -> bool {
+    task.kind == "subagent" || task.kind == "subagent_input"
+}
+
+fn mcp_summarize_agent_prompt(prompt: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in prompt.chars().enumerate() {
+        if index >= 80 {
+            out.push_str("...");
+            break;
+        }
+        out.push(ch);
+    }
+    if out.trim().is_empty() {
+        "Sub-agent task".to_string()
+    } else {
+        out
+    }
+}
+
+fn mcp_compact_target(value: &str, max_chars: usize) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+    let mut out = compact
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    out.push_str("...");
+    out
+}
+
 fn mcp_revert_turn_target(input: &ToolInput) -> String {
     if let Some(id) = input
         .get("snapshot_id")
@@ -1868,6 +2183,19 @@ fn mcp_required_string<'a>(
         .and_then(json_as_string)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| app_error(format!("MCP tool requires string argument `{key}`")))
+}
+
+fn mcp_required_any(arguments: &BTreeMap<String, JsonValue>, keys: &[&str]) -> AppResult<String> {
+    keys.iter()
+        .find_map(|key| {
+            arguments
+                .get(*key)
+                .and_then(json_as_string)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .ok_or_else(|| app_error(format!("MCP tool requires `{}`", keys.join("` or `"))))
 }
 
 fn mcp_input_required_any(input: &ToolInput, keys: &[&str], tool_name: &str) -> AppResult<String> {
@@ -2629,6 +2957,78 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
                 &["automation_id"],
             ),
         ));
+        tools.push(mcp_tool_definition(
+            "runtime_spawn_agent",
+            "Create a durable runtime thread and pending sub-agent task. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("prompt", string_property("Sub-agent prompt.")),
+                    ("message", string_property("Alias for prompt.")),
+                    ("objective", string_property("Alias for prompt.")),
+                    ("task", string_property("Alias for prompt.")),
+                    ("cwd", string_property("Workspace directory.")),
+                    ("workspace", string_property("Alias for cwd.")),
+                    ("model", string_property("Runtime thread model.")),
+                    ("mode", string_property("Runtime thread mode, default agent.")),
+                    ("title", string_property("Optional runtime thread title.")),
+                    ("thread_id", string_property("Existing runtime thread id.")),
+                    (
+                        "parent_task_id",
+                        string_property("Optional parent runtime task id."),
+                    ),
+                ],
+                &["prompt"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "runtime_cancel_agent",
+            "Cancel a durable runtime sub-agent task. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("agent_id", string_property("Runtime sub-agent task id.")),
+                    ("id", string_property("Alias for agent_id.")),
+                ],
+                &["agent_id"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "runtime_close_agent",
+            "Close a durable runtime sub-agent task by cancelling non-terminal tasks. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("agent_id", string_property("Runtime sub-agent task id.")),
+                    ("id", string_property("Alias for agent_id.")),
+                ],
+                &["agent_id"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "runtime_resume_agent",
+            "Resume or fork a durable runtime sub-agent task. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("agent_id", string_property("Runtime sub-agent task id.")),
+                    ("id", string_property("Alias for agent_id.")),
+                    ("prompt", string_property("Optional resumed prompt.")),
+                    ("message", string_property("Alias for prompt.")),
+                ],
+                &["agent_id"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "runtime_send_agent_input",
+            "Append user input to a runtime sub-agent thread and queue a follow-up subagent_input task. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("agent_id", string_property("Runtime sub-agent task id.")),
+                    ("id", string_property("Alias for agent_id.")),
+                    ("message", string_property("User input message.")),
+                    ("input", string_property("Alias for message.")),
+                    ("prompt", string_property("Alias for message.")),
+                ],
+                &["agent_id", "message"],
+            ),
+        ));
     }
     tools.extend([
         mcp_tool_definition(
@@ -2665,6 +3065,22 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
             mcp_schema(
                 vec![("task_id", string_property("Runtime task id."))],
                 &["task_id"],
+            ),
+        ),
+        mcp_tool_definition(
+            "runtime_list_agents",
+            "List durable runtime sub-agent tasks.",
+            mcp_schema(vec![("limit", number_property("Maximum sub-agents."))], &[]),
+        ),
+        mcp_tool_definition(
+            "runtime_agent_result",
+            "Read one durable runtime sub-agent snapshot.",
+            mcp_schema(
+                vec![
+                    ("agent_id", string_property("Runtime sub-agent task id.")),
+                    ("id", string_property("Alias for agent_id.")),
+                ],
+                &["agent_id"],
             ),
         ),
     ]);
@@ -6073,6 +6489,8 @@ mod tests {
         assert!(rendered.contains(r#""name":"github_pr_context""#));
         assert!(rendered.contains(r#""name":"diagnostics""#));
         assert!(rendered.contains(r#""name":"runtime_list_sessions""#));
+        assert!(rendered.contains(r#""name":"runtime_list_agents""#));
+        assert!(rendered.contains(r#""name":"runtime_agent_result""#));
         assert!(!rendered.contains(r#""name":"run_shell""#));
         assert!(!rendered.contains(r#""name":"run_tests""#));
     }
@@ -6229,6 +6647,11 @@ mod tests {
         assert!(!rendered.contains(r#""name":"runtime_resume_automation""#));
         assert!(!rendered.contains(r#""name":"runtime_delete_automation""#));
         assert!(!rendered.contains(r#""name":"runtime_trigger_automation""#));
+        assert!(!rendered.contains(r#""name":"runtime_spawn_agent""#));
+        assert!(!rendered.contains(r#""name":"runtime_cancel_agent""#));
+        assert!(!rendered.contains(r#""name":"runtime_close_agent""#));
+        assert!(!rendered.contains(r#""name":"runtime_resume_agent""#));
+        assert!(!rendered.contains(r#""name":"runtime_send_agent_input""#));
 
         let state = mcp_state_with_side_effects("mcp-apply-patch-side-effects", true);
         let response = mcp_response_for_message(
@@ -6255,6 +6678,11 @@ mod tests {
         assert!(!rendered.contains(r#""name":"runtime_resume_automation""#));
         assert!(!rendered.contains(r#""name":"runtime_delete_automation""#));
         assert!(!rendered.contains(r#""name":"runtime_trigger_automation""#));
+        assert!(!rendered.contains(r#""name":"runtime_spawn_agent""#));
+        assert!(!rendered.contains(r#""name":"runtime_cancel_agent""#));
+        assert!(!rendered.contains(r#""name":"runtime_close_agent""#));
+        assert!(!rendered.contains(r#""name":"runtime_resume_agent""#));
+        assert!(!rendered.contains(r#""name":"runtime_send_agent_input""#));
 
         let state = mcp_state_with_durable_approvals("mcp-apply-patch-visible");
         let response = mcp_response_for_message(
@@ -6280,6 +6708,11 @@ mod tests {
         assert!(rendered.contains(r#""name":"runtime_resume_automation""#));
         assert!(rendered.contains(r#""name":"runtime_delete_automation""#));
         assert!(rendered.contains(r#""name":"runtime_trigger_automation""#));
+        assert!(rendered.contains(r#""name":"runtime_spawn_agent""#));
+        assert!(rendered.contains(r#""name":"runtime_cancel_agent""#));
+        assert!(rendered.contains(r#""name":"runtime_close_agent""#));
+        assert!(rendered.contains(r#""name":"runtime_resume_agent""#));
+        assert!(rendered.contains(r#""name":"runtime_send_agent_input""#));
         assert!(rendered.contains("durable runtime approvals"));
     }
 
@@ -6526,6 +6959,144 @@ mod tests {
         responder.join().unwrap();
         assert!(json_value_to_string(&response).contains(r#""isError":false"#));
         assert!(state.store.load_automation(&automation.id).is_err());
+    }
+
+    #[test]
+    fn mcp_tools_call_spawns_lists_reads_and_sends_runtime_agent_input_after_runtime_approval() {
+        let state = mcp_state_with_durable_approvals("mcp-runtime-agent-spawn");
+        let responder = spawn_mcp_permission_responder(
+            state.store.clone(),
+            state.approval_thread_id.clone().unwrap(),
+            "approved",
+        );
+        let request = r#"{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"runtime_spawn_agent","arguments":{"prompt":"investigate parity gap","title":"Parity helper"}}}"#;
+        let response = mcp_response_for_message(request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("investigate parity gap"));
+        assert!(rendered.contains(r#""isError":false"#));
+        let agent = state
+            .store
+            .list_tasks(None, None, 10)
+            .unwrap()
+            .into_iter()
+            .find(|task| task.kind == "subagent" && task.summary == "investigate parity gap")
+            .expect("spawned subagent task");
+
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":25,"method":"tools/call","params":{{"name":"runtime_agent_result","arguments":{{"agent_id":"{}"}}}}}}"#,
+            agent.id
+        );
+        let response = mcp_response_for_message(&request, &state).unwrap();
+        assert!(json_value_to_string(&response).contains(&agent.id));
+
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":26,"method":"tools/call","params":{"name":"runtime_list_agents","arguments":{"limit":10}}}"#,
+            &state,
+        )
+        .unwrap();
+        assert!(json_value_to_string(&response).contains(&agent.id));
+
+        let responder = spawn_mcp_permission_responder(
+            state.store.clone(),
+            state.approval_thread_id.clone().unwrap(),
+            "approved",
+        );
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":27,"method":"tools/call","params":{{"name":"runtime_send_agent_input","arguments":{{"agent_id":"{}","message":"extra context"}}}}}}"#,
+            agent.id
+        );
+        let response = mcp_response_for_message(&request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("extra context"));
+        assert!(rendered.contains(r#""isError":false"#));
+        let followups = state.store.list_tasks(None, None, 20).unwrap();
+        assert!(followups.iter().any(|task| {
+            task.kind == "subagent_input"
+                && task.parent_task_id.as_deref() == Some(agent.id.as_str())
+                && task.summary == "extra context"
+        }));
+    }
+
+    #[test]
+    fn mcp_tools_call_cancels_closes_and_resumes_runtime_agents_after_runtime_approval() {
+        let state = mcp_state_with_durable_approvals("mcp-runtime-agent-control");
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let cancel_agent = state
+            .store
+            .create_task(
+                None,
+                Some(&thread_id),
+                None,
+                "subagent".to_string(),
+                "pending".to_string(),
+                "cancel me".to_string(),
+            )
+            .unwrap();
+        let responder =
+            spawn_mcp_permission_responder(state.store.clone(), thread_id.clone(), "approved");
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":28,"method":"tools/call","params":{{"name":"runtime_cancel_agent","arguments":{{"agent_id":"{}"}}}}}}"#,
+            cancel_agent.id
+        );
+        let response = mcp_response_for_message(&request, &state).unwrap();
+        responder.join().unwrap();
+        assert!(json_value_to_string(&response).contains(r#""isError":false"#));
+        assert_eq!(
+            state.store.load_task(&cancel_agent.id).unwrap().status,
+            "cancelled"
+        );
+
+        let close_agent = state
+            .store
+            .create_task(
+                None,
+                Some(&thread_id),
+                None,
+                "subagent".to_string(),
+                "pending".to_string(),
+                "close me".to_string(),
+            )
+            .unwrap();
+        let responder =
+            spawn_mcp_permission_responder(state.store.clone(), thread_id.clone(), "approved");
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":29,"method":"tools/call","params":{{"name":"runtime_close_agent","arguments":{{"agent_id":"{}"}}}}}}"#,
+            close_agent.id
+        );
+        let response = mcp_response_for_message(&request, &state).unwrap();
+        responder.join().unwrap();
+        assert!(json_value_to_string(&response).contains(r#""isError":false"#));
+        assert_eq!(
+            state.store.load_task(&close_agent.id).unwrap().status,
+            "cancelled"
+        );
+
+        let resume_agent = state
+            .store
+            .create_task(
+                None,
+                Some(&thread_id),
+                None,
+                "subagent".to_string(),
+                "paused".to_string(),
+                "resume me".to_string(),
+            )
+            .unwrap();
+        let responder = spawn_mcp_permission_responder(state.store.clone(), thread_id, "approved");
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{{"name":"runtime_resume_agent","arguments":{{"agent_id":"{}","prompt":"resume with context"}}}}}}"#,
+            resume_agent.id
+        );
+        let response = mcp_response_for_message(&request, &state).unwrap();
+        responder.join().unwrap();
+        assert!(json_value_to_string(&response).contains(r#""isError":false"#));
+        let resumed = state.store.load_task(&resume_agent.id).unwrap();
+        assert_eq!(resumed.status, "pending");
+        assert_eq!(resumed.summary, "resume with context");
     }
 
     #[test]

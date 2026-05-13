@@ -341,6 +341,13 @@ Exposed tools:
 | `runtime_resume_automation` | Hidden by default; exposed only with durable runtime approvals and resumes durable runtime automations |
 | `runtime_delete_automation` | Hidden by default; exposed only with durable runtime approvals and deletes durable runtime automations |
 | `runtime_trigger_automation` | Hidden by default; exposed only with durable runtime approvals and triggers durable runtime automations into pending tasks |
+| `runtime_list_agents` | List durable runtime sub-agent tasks |
+| `runtime_agent_result` | Read one durable runtime sub-agent snapshot |
+| `runtime_spawn_agent` | Hidden by default; exposed only with durable runtime approvals and creates a thread plus pending sub-agent task |
+| `runtime_cancel_agent` | Hidden by default; exposed only with durable runtime approvals and cancels a durable runtime sub-agent task |
+| `runtime_close_agent` | Hidden by default; exposed only with durable runtime approvals and closes a durable runtime sub-agent task |
+| `runtime_resume_agent` | Hidden by default; exposed only with durable runtime approvals and resumes or forks a durable runtime sub-agent task |
+| `runtime_send_agent_input` | Hidden by default; exposed only with durable runtime approvals and appends input plus a follow-up sub-agent task |
 
 Exposed MCP prompts:
 
@@ -1004,7 +1011,10 @@ pending `subagent` task, `agent_result`/`agent_list` read task/thread snapshots,
 `agent_cancel`/`close_agent` cancel pending or running sub-agent tasks,
 `resume_agent` requeues work, and `send_input` appends a user message to the
 sub-agent thread while queuing a follow-up `subagent_input` task. Mutation tools
-use the same write-approval policy as other runtime state changes.
+use the same write-approval policy as other runtime state changes. MCP server
+mode mirrors the lifecycle with `runtime_list_agents`, `runtime_agent_result`,
+and durable-approval `runtime_spawn_agent`, `runtime_cancel_agent`,
+`runtime_close_agent`, `runtime_resume_agent`, and `runtime_send_agent_input`.
 PR attempt evidence tools include DeepSeek-TUI-compatible
 `pr_attempt_record`, `pr_attempt_list`, `pr_attempt_read`, and
 `pr_attempt_preflight`. They store attempt metadata and captured patch
