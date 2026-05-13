@@ -56,6 +56,7 @@ use crate::tools::tool_search::{ToolSearchMode, ToolSearchTool};
 use crate::tools::types::{Tool, ToolInput};
 use crate::tools::user_input::RequestUserInputTool;
 use crate::tools::validate_data::ValidateDataTool;
+use crate::tools::vision::ImageAnalyzeTool;
 use crate::tools::web::{FetchUrlTool, FinanceTool, WebRunTool, WebSearchTool};
 use crate::ui::stream::NoopStreamEvents;
 use crate::util::cwd::CwdGuard;
@@ -745,6 +746,9 @@ fn execute_mcp_tool(
             return execute_mcp_pandoc_convert(input, state);
         }
         "image_ocr" => ImageOcrTool.execute(input)?,
+        "image_analyze" => {
+            return execute_mcp_image_analyze(input, state);
+        }
         "git_status" => GitStatusTool.execute(input)?,
         "git_diff" => GitDiffTool.execute(input)?,
         "project_map" => ProjectMapTool.execute(input)?,
@@ -2352,6 +2356,29 @@ fn execute_mcp_model_rlm_tool(
     Ok(output.summary)
 }
 
+fn execute_mcp_image_analyze(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    if !mcp_side_effect_tools_enabled(state) {
+        return Err(app_error(
+            "MCP model-running vision tool `image_analyze` is disabled; set DSCODE_MCP_ENABLE_SIDE_EFFECTS=1 for trusted direct execution or DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 to route through runtime approvals",
+        ));
+    }
+    if let Some(thread_id) = state.approval_thread_id.as_deref() {
+        if state.approval.require_mcp_confirmation && !env_flag("DSCODE_AUTO_APPROVE_MCP") {
+            let approval = state.store.append_permission_request(
+                thread_id,
+                state.approval_turn_id.as_deref(),
+                "image_analyze".to_string(),
+                "mcp".to_string(),
+                mcp_image_analyze_target(&input),
+                input.args.clone(),
+            )?;
+            wait_for_mcp_permission_response(state, thread_id, &approval, "image_analyze")?;
+        }
+    }
+
+    Ok(ImageAnalyzeTool::new(&state.config).execute(input)?.summary)
+}
+
 fn mcp_model_rlm_target(name: &str, input: &ToolInput) -> String {
     input
         .get("task")
@@ -2359,6 +2386,14 @@ fn mcp_model_rlm_target(name: &str, input: &ToolInput) -> String {
         .or_else(|| input.get("context"))
         .map(|target| format!("{name}: {}", mcp_compact_target(target, 160)))
         .unwrap_or_else(|| name.to_string())
+}
+
+fn mcp_image_analyze_target(input: &ToolInput) -> String {
+    input
+        .get("image_path")
+        .or_else(|| input.get("path"))
+        .map(|target| format!("image_analyze: {}", mcp_compact_target(target, 160)))
+        .unwrap_or_else(|| "image_analyze".to_string())
 }
 
 fn mcp_rlm_python_session_target(input: &ToolInput) -> String {
@@ -3263,6 +3298,22 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
                     ("timeout_ms", number_property("Timeout milliseconds, clamped.")),
                 ],
                 &["session_id", "code"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "image_analyze",
+            "Analyze a workspace image through an OpenAI-compatible vision model. Requires trusted side effects or durable MCP approval because it can spend model tokens and use networked APIs.",
+            mcp_schema(
+                vec![
+                    ("image_path", string_property("Workspace-relative image path.")),
+                    ("path", string_property("Alias for image_path.")),
+                    ("prompt", string_property("Optional analysis prompt.")),
+                    ("model", string_property("Optional vision model override.")),
+                    ("base_url", string_property("Optional OpenAI-compatible base URL override.")),
+                    ("api_key_env", string_property("Optional API key environment variable override.")),
+                    ("max_tokens", number_property("Maximum response tokens.")),
+                ],
+                &[],
             ),
         ));
         for name in ["rlm", "rlm_query", "llm_query", "rlm_process"] {
@@ -5000,7 +5051,8 @@ fn acp_tool_kind(name: &str) -> &'static str {
         | "rlm_query_batched"
         | "llm_query_batched"
         | "rlm_chunk_plan"
-        | "rlm_map_reduce_plan" => "think",
+        | "rlm_map_reduce_plan"
+        | "image_analyze" => "think",
         _ => "other",
     }
 }
@@ -7469,6 +7521,7 @@ mod tests {
         assert!(rendered.contains(r#""name":"rlm_batch""#));
         assert!(rendered.contains(r#""name":"rlm_query_batched""#));
         assert!(rendered.contains(r#""name":"llm_query_batched""#));
+        assert!(rendered.contains(r#""name":"image_analyze""#));
     }
 
     #[test]
@@ -7789,6 +7842,56 @@ shell_allowlist = ["cargo test"]
     }
 
     #[test]
+    fn mcp_tools_call_rejects_image_analyze_until_side_effects_enabled() {
+        let state = mcp_state("mcp-image-analyze-disabled");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":47,"method":"tools/call","params":{"name":"image_analyze","arguments":{"image_path":"image.png"}}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("MCP model-running vision tool `image_analyze` is disabled"));
+        assert!(rendered.contains(r#""isError":true"#));
+
+        let state = mcp_state_with_side_effects("mcp-image-analyze-validation", true);
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":48,"method":"tools/call","params":{"name":"image_analyze","arguments":{"image_path":"../secret.png"}}}"#,
+            &state,
+        )
+        .unwrap();
+        let rendered = json_value_to_string(&response);
+        assert!(rendered.contains("unsafe image_analyze path outside workspace"));
+        assert!(rendered.contains(r#""isError":true"#));
+    }
+
+    #[test]
+    fn mcp_tools_call_rejects_image_analyze_after_runtime_denial() {
+        let state = mcp_state_with_durable_approvals("mcp-image-analyze-denied");
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let responder =
+            spawn_mcp_permission_responder(state.store.clone(), thread_id.clone(), "denied");
+        let response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":49,"method":"tools/call","params":{"name":"image_analyze","arguments":{"image_path":"image.png","prompt":"describe"}}}"#,
+            &state,
+        )
+        .unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("MCP image_analyze denied by runtime approval"));
+        assert!(rendered.contains(r#""isError":true"#));
+        let events = state.store.read_events(&thread_id, 0).unwrap();
+        assert!(events.iter().any(|event| {
+            event.kind == "permission_request"
+                && json_as_object(&event.payload).is_some_and(|payload| {
+                    payload.get("tool").and_then(json_as_string) == Some("image_analyze")
+                        && payload.get("kind").and_then(json_as_string) == Some("mcp")
+                })
+        }));
+    }
+
+    #[test]
     fn mcp_tools_call_rejects_run_shell_until_side_effects_enabled() {
         let state = mcp_state("mcp-run-shell-disabled");
         let response = mcp_response_for_message(
@@ -7979,6 +8082,7 @@ shell_allowlist = ["cargo test"]
         assert!(rendered.contains(r#""name":"rlm_batch""#));
         assert!(rendered.contains(r#""name":"rlm_query_batched""#));
         assert!(rendered.contains(r#""name":"llm_query_batched""#));
+        assert!(rendered.contains(r#""name":"image_analyze""#));
         assert!(rendered.contains("durable runtime approvals"));
     }
 
@@ -9162,6 +9266,7 @@ shell_allowlist = ["cargo test"]
         assert!(rendered.contains(r#""name":"rlm_python_sessions""#));
         assert!(!rendered.contains(r#""name":"run_shell""#));
         assert!(!rendered.contains(r#""name":"run_tests""#));
+        assert!(!rendered.contains(r#""name":"image_analyze""#));
         assert!(!rendered.contains(r#""name":"rlm_python_session""#));
         assert!(!rendered.contains(r#""name":"apply_patch""#));
         assert!(!rendered.contains(r#""name":"write_file""#));
@@ -9328,6 +9433,7 @@ shell_allowlist = ["cargo test"]
         assert!(rendered_list.contains(r#""name":"write_file""#));
         assert!(rendered_list.contains(r#""name":"edit_file""#));
         assert!(rendered_list.contains(r#""name":"apply_patch""#));
+        assert!(rendered_list.contains(r#""name":"image_analyze""#));
 
         let responder =
             spawn_mcp_permission_responder(state.store.clone(), thread.id.clone(), "approved");

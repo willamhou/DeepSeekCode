@@ -72,6 +72,9 @@ fail today.
   read-only tool.
 - Documented `image_analyze` and `vision.*` settings in runtime and install
   docs, and updated the DeepSeek-TUI parity plan.
+- Follow-up MCP work exposes `image_analyze` through MCP/ACP only in trusted
+  side-effect or durable approval modes because it can spend model tokens and
+  use networked vision APIs.
 
 ## 验证
 

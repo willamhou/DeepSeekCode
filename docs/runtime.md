@@ -302,6 +302,7 @@ Exposed tools:
 | `finance` | Fetch a live stock, ETF, index, or crypto quote |
 | `pandoc_convert` | Convert workspace documents via local `pandoc` |
 | `image_ocr` | Extract text from workspace images via local `tesseract` |
+| `image_analyze` | Hidden by default; exposed with trusted `DSCODE_MCP_ENABLE_SIDE_EFFECTS=1` or durable runtime approvals, and analyzes workspace images through an OpenAI-compatible vision model |
 | `git_status` | Show concise git status for the workspace |
 | `git_diff` | Show working-tree or staged diff, optionally scoped by path/context |
 | `project_map` | Render a high-level tree, summary, and key files |
@@ -375,10 +376,11 @@ Exposed tools:
 | `runtime_resume_agent` | Hidden by default; exposed only with durable runtime approvals and resumes or forks a durable runtime sub-agent task |
 | `runtime_send_agent_input` | Hidden by default; exposed only with durable runtime approvals and appends input plus a follow-up sub-agent task |
 
-`image_analyze` remains agent-visible but is intentionally not exposed through
-MCP/ACP yet because it can spend model tokens and make network calls to an
-external vision API. `note` and `remember` are also kept out of default
-MCP/ACP because they append durable note or memory files.
+`image_analyze` is hidden by default because it can spend model tokens and make
+network calls to an external vision API; durable MCP mode routes it through
+`permission_request kind=mcp` before execution. `note` and `remember` remain
+agent-visible only and are kept out of default MCP/ACP because they append
+durable note or memory files.
 
 Exposed MCP prompts:
 

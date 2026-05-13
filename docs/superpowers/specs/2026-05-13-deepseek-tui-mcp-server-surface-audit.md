@@ -18,6 +18,8 @@ through MCP/ACP. Follow-up read-only helper slices also expose `review`,
 `recall_archive`, `tool_search_tool_regex`, `tool_search_tool_bm25`,
 `image_ocr`, inline `pandoc_convert`, `load_skill`, `request_user_input`, and
 `notify`; `pandoc_convert output_path` now requires durable write approval.
+Model-running vision helper `image_analyze` is now MCP/ACP-visible only in
+trusted side-effect or durable approval modes.
 
 ## Spec
 

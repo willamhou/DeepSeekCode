@@ -40,3 +40,6 @@ and ACP's inherited tool bridge did not actually expose them.
 - MCP `tools/call pandoc_convert` runs inline conversions directly, but routes
   `output_path` calls through durable write approval before executing.
 - ACP inherits both tools through the session-scoped MCP state adapter.
+
+Follow-up vision helper work now exposes `image_analyze` only in trusted
+side-effect or durable MCP approval modes.

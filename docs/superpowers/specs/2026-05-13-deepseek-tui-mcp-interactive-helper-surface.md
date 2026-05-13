@@ -42,4 +42,7 @@ as MCP-visible even though it still needs a model-token and network contract.
 - MCP `tools/call` dispatches those names to their existing local tool
   implementations.
 - ACP inherits all three helpers through its session-scoped MCP adapter.
-- The MCP runtime table no longer claims `image_analyze` is MCP-visible.
+- The MCP runtime table no longer claims `image_analyze` is default-visible.
+
+Follow-up vision helper work now exposes `image_analyze` only in trusted
+side-effect or durable MCP approval modes.

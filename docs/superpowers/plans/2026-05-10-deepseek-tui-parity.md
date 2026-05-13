@@ -590,6 +590,10 @@ Landed first slice:
 - MCP and ACP tool bridges now expose interactive/local helpers `load_skill`,
   `request_user_input`, and `notify`, while keeping durable memory writes and
   external vision-model calls out of the default MCP surface
+- MCP and ACP tool bridges now expose model-running vision helper
+  `image_analyze` only with trusted side effects or durable
+  `permission_request kind=mcp` approvals, matching the token/network safety
+  contract used by model-running RLM tools
 - ACP loaded-session tool calls now create an assistant runtime turn with
   `tool_call` and `tool_result` items, and side-effect permission requests are
   linked to that same turn for auditability
