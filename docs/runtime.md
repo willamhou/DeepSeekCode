@@ -1314,7 +1314,12 @@ match, and context-line limits so later turns can fetch only the relevant slice.
 Agent runs also expose DeepSeek-TUI-compatible shell tool names:
 `exec_shell`, `task_shell_start`, `task_shell_wait`, `exec_shell_wait`,
 `exec_wait`, `exec_shell_interact`, `exec_interact`, and `exec_shell_cancel`.
-Foreground `exec_shell` reuses the existing safe `run_shell` execution path.
+Foreground `exec_shell` reuses the existing safe `run_shell` execution path by
+default. If `timeout_ms` or `detach_after_ms` is supplied, the command is
+managed through the background job table: completed commands return a normal
+snapshot, while still-running commands return `meta.backgrounded=true` plus a
+`task_id` that can be polled or cancelled. This mirrors the DeepSeek-TUI
+foreground-to-background safety path without requiring a live TUI modal.
 `exec_shell background=true` and `task_shell_start` create in-process background
 jobs, return a `task_id`, and can be polled by `task_shell_wait` or
 `exec_shell_wait`, sent stdin, or cancelled by the companion tools. Each

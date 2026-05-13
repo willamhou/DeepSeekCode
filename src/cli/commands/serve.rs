@@ -3623,6 +3623,14 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
                     ("command", string_property("Allowlisted shell command.")),
                     ("cwd", string_property("Working directory, default workspace root.")),
                     ("background", string_property("Set true to run in background.")),
+                    (
+                        "timeout_ms",
+                        number_property("Foreground compatibility timeout; unfinished commands return a background task_id."),
+                    ),
+                    (
+                        "detach_after_ms",
+                        number_property("Alias for timeout_ms; foreground commands still running after this duration are left in the background."),
+                    ),
                     ("tty", string_property("Set true to request the Unix script PTY backend.")),
                     (
                         "tty_rows",
@@ -8988,6 +8996,7 @@ mod tests {
         assert!(rendered.contains(r#""name":"run_shell""#));
         assert!(rendered.contains(r#""name":"run_tests""#));
         assert!(rendered.contains(r#""name":"exec_shell""#));
+        assert!(rendered.contains(r#""detach_after_ms""#));
         assert!(rendered.contains(r#""name":"task_shell_start""#));
         assert!(rendered.contains(r#""name":"exec_shell_interact""#));
         assert!(rendered.contains(r#""name":"exec_interact""#));

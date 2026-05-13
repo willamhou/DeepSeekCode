@@ -247,6 +247,10 @@ Landed first slice:
   and packaged systemd/launchd templates include that shell-supervisor service;
   `exec_shell_supervisor_status` now probes socket health before reporting a
   daemon as ready;
+  foreground `exec_shell timeout_ms` / `detach_after_ms` now uses the durable
+  background job table and returns `meta.backgrounded=true` plus a `task_id`
+  when the command is still running, approximating DeepSeek-TUI's
+  foreground-to-background shell control for non-interactive API/model calls;
   manifests now keep stable child pid, process-group, and owner-pid metadata so
   detached snapshots can report owner liveness separately from child status
 - richer structured data validation

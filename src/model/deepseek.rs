@@ -3022,8 +3022,8 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
     },
     StaticToolSpec {
         name: "exec_shell",
-        description: "DeepSeek-TUI-compatible shell execution tool. Use background=true for long-running commands, then poll with exec_shell_wait. On Unix, tty=true uses the script PTY backend for background jobs.",
-        properties_json: r#"{"command":{"type":"string","description":"Safe shell command to execute."},"timeout_ms":{"type":"string","description":"Compatibility timeout in milliseconds for foreground commands."},"background":{"type":"string","description":"Set true to run in the background and return task_id."},"tty":{"type":"string","description":"Set true with background=true to run through the Unix script PTY backend when available."},"tty_rows":{"type":"string","description":"Optional initial PTY row count; requires tty=true and tty_cols."},"tty_cols":{"type":"string","description":"Optional initial PTY column count; requires tty=true and tty_rows."},"stdin":{"type":"string","description":"Optional stdin data sent to a background command at start."},"input":{"type":"string","description":"Alias for stdin."},"data":{"type":"string","description":"Alias for stdin."},"cwd":{"type":"string","description":"Working directory for the command."}}"#,
+        description: "DeepSeek-TUI-compatible shell execution tool. Use background=true for long-running commands, then poll with exec_shell_wait. Foreground timeout_ms/detach_after_ms returns a background task_id if the command is still running. On Unix, tty=true uses the script PTY backend for background jobs.",
+        properties_json: r#"{"command":{"type":"string","description":"Safe shell command to execute."},"timeout_ms":{"type":"string","description":"Foreground compatibility timeout in milliseconds; unfinished commands return a background task_id."},"detach_after_ms":{"type":"string","description":"Alias for timeout_ms; leave unfinished foreground commands in the background."},"background":{"type":"string","description":"Set true to run in the background and return task_id."},"tty":{"type":"string","description":"Set true with background=true to run through the Unix script PTY backend when available."},"tty_rows":{"type":"string","description":"Optional initial PTY row count; requires tty=true and tty_cols."},"tty_cols":{"type":"string","description":"Optional initial PTY column count; requires tty=true and tty_rows."},"stdin":{"type":"string","description":"Optional stdin data sent to a background command at start."},"input":{"type":"string","description":"Alias for stdin."},"data":{"type":"string","description":"Alias for stdin."},"cwd":{"type":"string","description":"Working directory for the command."}}"#,
         required_json: r#"["command"]"#,
     },
     StaticToolSpec {
@@ -5181,6 +5181,7 @@ mod tests {
         ]);
         assert!(openai.contains("\"name\":\"exec_shell\""));
         assert!(openai.contains("\"background\""));
+        assert!(openai.contains("\"detach_after_ms\""));
         assert!(openai.contains("\"tty\""));
         assert!(openai.contains("\"tty_rows\""));
         assert!(openai.contains("\"tty_cols\""));

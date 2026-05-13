@@ -92,6 +92,14 @@ impl Tool for ExecShellTool {
             if tty_options.requested() {
                 return Err(app_error("exec_shell tty options require background=true"));
             }
+            if let Some(detach_after_ms) = foreground_detach_after_ms(&input)? {
+                let cwd = input.get("cwd").unwrap_or(".");
+                let stdin = input
+                    .get("stdin")
+                    .or_else(|| input.get("input"))
+                    .or_else(|| input.get("data"));
+                return run_managed_foreground_shell(command, cwd, stdin, detach_after_ms);
+            }
             let mut shell_input = ToolInput::new().with_arg("command", command.to_string());
             if let Some(cwd) = input.get("cwd") {
                 shell_input = shell_input.with_arg("cwd", cwd.to_string());
@@ -117,6 +125,42 @@ impl Tool for ExecShellTool {
                 tty_cols_label(tty_options.size)
             ),
         })
+    }
+}
+
+fn run_managed_foreground_shell(
+    command: &str,
+    cwd: &str,
+    stdin: Option<&str>,
+    detach_after_ms: u64,
+) -> AppResult<ToolOutput> {
+    let task_id =
+        shell_manager()
+            .lock()
+            .unwrap()
+            .spawn(command, cwd, stdin, ShellTtyOptions::default())?;
+    let deadline = Instant::now() + Duration::from_millis(detach_after_ms.min(MAX_TIMEOUT_MS));
+    loop {
+        let mut manager = shell_manager().lock().unwrap();
+        manager.refresh(&task_id)?;
+        if manager.is_finished(&task_id)? {
+            let snapshot = manager.render_snapshot(&task_id)?;
+            return Ok(ToolOutput {
+                summary: format!(
+                    "meta.foreground_managed=true\nmeta.backgrounded=false\nmeta.detach_after_ms={detach_after_ms}\n{snapshot}"
+                ),
+            });
+        }
+        if Instant::now() >= deadline {
+            let delta = manager.render_delta(&task_id)?;
+            return Ok(ToolOutput {
+                summary: format!(
+                    "meta.foreground_managed=true\nmeta.backgrounded=true\nmeta.detach_after_ms={detach_after_ms}\n{delta}\nPoll with exec_shell_wait task_id={task_id} or cancel with exec_shell_cancel task_id={task_id}."
+                ),
+            });
+        }
+        drop(manager);
+        thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -1146,6 +1190,25 @@ fn required_task_id(input: &ToolInput) -> AppResult<&str> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| app_error("background shell task_id is required"))
+}
+
+fn foreground_detach_after_ms(input: &ToolInput) -> AppResult<Option<u64>> {
+    let Some((key, value)) = input
+        .get("detach_after_ms")
+        .map(|value| ("detach_after_ms", value))
+        .or_else(|| input.get("timeout_ms").map(|value| ("timeout_ms", value)))
+    else {
+        return Ok(None);
+    };
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| app_error(format!("exec_shell {key} must be an integer")))?;
+    if parsed == 0 {
+        return Err(app_error(format!(
+            "exec_shell {key} must be greater than zero"
+        )));
+    }
+    Ok(Some(parsed.min(MAX_TIMEOUT_MS)))
 }
 
 fn input_u64(input: &ToolInput, key: &str, default: u64) -> u64 {
@@ -2530,6 +2593,57 @@ mod tests {
             .unwrap();
         assert!(output.summary.contains("meta.result=ok"));
         assert!(output.summary.contains("hello"));
+    }
+
+    #[test]
+    fn exec_shell_foreground_timeout_returns_completed_managed_snapshot() {
+        let root = temp_root("foreground-complete");
+        fs::create_dir_all(&root).unwrap();
+        let cwd = root.display().to_string();
+        let output = ExecShellTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("command", "echo managed")
+                    .with_arg("cwd", cwd.clone())
+                    .with_arg("timeout_ms", "1000"),
+            )
+            .unwrap();
+
+        assert!(output.summary.contains("meta.foreground_managed=true"));
+        assert!(output.summary.contains("meta.backgrounded=false"));
+        assert!(output.summary.contains("status: completed"));
+        assert!(output.summary.contains("managed"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exec_shell_foreground_timeout_detaches_running_command() {
+        let root = temp_root("foreground-detach");
+        fs::create_dir_all(&root).unwrap();
+        let cwd = root.display().to_string();
+        let output = ExecShellTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("command", "tail -f /dev/null")
+                    .with_arg("cwd", cwd.clone())
+                    .with_arg("timeout_ms", "25"),
+            )
+            .unwrap();
+        let task_id = task_id_from(&output.summary);
+
+        assert!(output.summary.contains("meta.foreground_managed=true"));
+        assert!(output.summary.contains("meta.backgrounded=true"));
+        assert!(output.summary.contains("status: running"));
+        assert!(output.summary.contains("Poll with exec_shell_wait"));
+
+        ExecShellCancelTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("task_id", task_id)
+                    .with_arg("cwd", cwd.clone()),
+            )
+            .unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
