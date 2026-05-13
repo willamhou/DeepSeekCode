@@ -470,8 +470,12 @@ Remaining:
   discoverable before choosing whether to continue, reset, or create a session;
   it now also reports `process.active` / `process.pid` for persistent Python
   REPLs alive in the current DeepSeekCode process
-- Remaining: richer recursive helper API and stronger end-to-end semantic
-  review fixtures / remote PR review loops
+- Review remote PR context signals now exist: `review` parses
+  `github_pr_context` JSON to report requested changes, failing/cancelled status
+  checks, and missing `include_diff=true` context before optional semantic
+  review delegation
+- Remaining: richer recursive helper API and stronger live end-to-end semantic
+  review fixtures / remote PR comment/retry loops
 
 ### Phase G2: MCP Server Mode
 

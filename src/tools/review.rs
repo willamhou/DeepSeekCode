@@ -6,7 +6,10 @@ use crate::core::runtime::{json_array, json_object};
 use crate::error::{app_error, AppResult};
 use crate::tools::dispatch_subagent::DispatchSubagentTool;
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
-use crate::util::json::{json_value_to_string, JsonValue};
+use crate::util::json::{
+    json_as_array, json_as_object, json_as_string, json_value_to_string, parse_root_object,
+    JsonValue,
+};
 
 const DEFAULT_MAX_CHARS: usize = 200_000;
 const HARD_MAX_CHARS: usize = 1_000_000;
@@ -328,10 +331,77 @@ fn review_issues(source: &ReviewSource) -> Vec<ReviewIssue> {
 }
 
 fn review_behavioral_issues(source: &ReviewSource) -> Vec<ReviewIssue> {
+    let mut issues = if source.kind.starts_with("github_pr") {
+        review_github_pr_context_issues(source)
+    } else {
+        Vec::new()
+    };
     if source.kind.contains("diff") {
-        return review_diff_behavioral_issues(source);
+        issues.extend(review_diff_behavioral_issues(source));
+    } else {
+        issues.extend(review_file_behavioral_issues(source));
     }
-    review_file_behavioral_issues(source)
+    issues
+}
+
+fn review_github_pr_context_issues(source: &ReviewSource) -> Vec<ReviewIssue> {
+    let mut issues = Vec::new();
+    if source.kind == "github_pr_context" {
+        issues.push(issue(
+            "info",
+            "GitHub PR context missing diff",
+            "Remote PR review context did not include a patch diff; rerun github_pr_context with include_diff=true before relying on code review findings.",
+            None,
+            None,
+        ));
+    }
+    let Some(json_block) = github_pr_context_json(&source.content) else {
+        return issues;
+    };
+    let Ok(root) = parse_root_object(json_block) else {
+        issues.push(issue(
+            "info",
+            "GitHub PR context JSON was not parsed",
+            "PR metadata could not be parsed, so review decision and status-check signals were not inspected.",
+            None,
+            None,
+        ));
+        return issues;
+    };
+    if let Some(decision) = root.get("reviewDecision").and_then(json_as_string) {
+        match decision {
+            "CHANGES_REQUESTED" => issues.push(issue(
+                "warning",
+                "GitHub PR has requested changes",
+                "The PR review decision is CHANGES_REQUESTED; inspect reviewer feedback before treating the diff as ready.",
+                None,
+                None,
+            )),
+            "REVIEW_REQUIRED" => issues.push(issue(
+                "info",
+                "GitHub PR still requires review",
+                "The PR review decision is REVIEW_REQUIRED; verify required reviewers have approved before merge.",
+                None,
+                None,
+            )),
+            _ => {}
+        }
+    }
+    let failing_checks = failing_status_check_names(root.get("statusCheckRollup"));
+    if !failing_checks.is_empty() {
+        issues.push(issue(
+            "warning",
+            "GitHub PR status checks failing",
+            &format!(
+                "{} status check(s) are failing or cancelled: {}",
+                failing_checks.len(),
+                failing_checks.join(", ")
+            ),
+            None,
+            None,
+        ));
+    }
+    issues
 }
 
 fn review_file_behavioral_issues(source: &ReviewSource) -> Vec<ReviewIssue> {
@@ -439,6 +509,64 @@ fn review_diff_behavioral_issues(source: &ReviewSource) -> Vec<ReviewIssue> {
         ));
     }
     issues
+}
+
+fn github_pr_context_json(content: &str) -> Option<&str> {
+    let after_json = if let Some(rest) = content.strip_prefix("json:\n") {
+        rest
+    } else {
+        let start = content.find("\njson:\n")? + "\njson:\n".len();
+        &content[start..]
+    };
+    let json = if let Some(end) = after_json.find("\ndiff:\n") {
+        &after_json[..end]
+    } else {
+        after_json
+    };
+    let json = json.trim();
+    (!json.is_empty()).then_some(json)
+}
+
+fn failing_status_check_names(raw: Option<&JsonValue>) -> Vec<String> {
+    let Some(items) = raw.and_then(json_as_array) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for item in items {
+        let Some(object) = json_as_object(item) else {
+            continue;
+        };
+        let failing = json_string_field(object, "conclusion")
+            .or_else(|| json_string_field(object, "state"))
+            .or_else(|| json_string_field(object, "status"))
+            .is_some_and(is_failing_status_value);
+        if !failing {
+            continue;
+        }
+        let name = json_string_field(object, "name")
+            .or_else(|| json_string_field(object, "workflowName"))
+            .or_else(|| json_string_field(object, "context"))
+            .unwrap_or("unnamed check")
+            .to_string();
+        if !names.iter().any(|item| item == &name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+fn json_string_field<'a>(
+    object: &'a std::collections::BTreeMap<String, JsonValue>,
+    key: &str,
+) -> Option<&'a str> {
+    object.get(key).and_then(json_as_string)
+}
+
+fn is_failing_status_value(value: &str) -> bool {
+    matches!(
+        value,
+        "FAILURE" | "FAILED" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
+    )
 }
 
 fn push_line_issues(
@@ -974,7 +1102,7 @@ mod tests {
 meta.number=42\n\
 PR #42: Add API\n\
 json:\n\
-{\"number\":42,\"title\":\"Add API\"}\n\
+{\"number\":42,\"title\":\"Add API\",\"reviewDecision\":\"APPROVED\",\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"SUCCESS\"}]}\n\
 diff:\n\
 diff --git a/src/lib.rs b/src/lib.rs\n\
 index 0000000..1111111 100644\n\
@@ -1002,6 +1130,38 @@ index 0000000..1111111 100644\n\
         assert!(output
             .summary
             .contains(r#""title":"source change without test change""#));
+        assert!(!output.summary.contains("GitHub PR status checks failing"));
+    }
+
+    #[test]
+    fn review_github_pr_context_reports_remote_pr_blockers() {
+        let pr_context = "meta.kind=pr\n\
+meta.number=42\n\
+meta.state=OPEN\n\
+PR #42: Add API\n\
+json:\n\
+{\"number\":42,\"title\":\"Add API\",\"reviewDecision\":\"CHANGES_REQUESTED\",\"statusCheckRollup\":[{\"name\":\"unit-tests\",\"conclusion\":\"FAILURE\"},{\"workflowName\":\"lint\",\"state\":\"SUCCESS\"},{\"context\":\"deploy\",\"status\":\"CANCELLED\"}]}\n";
+
+        let output = ReviewTool::default()
+            .execute(
+                ToolInput::new()
+                    .with_arg("target", "github_pr_context")
+                    .with_arg("github_context", pr_context),
+            )
+            .unwrap();
+
+        assert!(output.summary.contains(r#""kind":"github_pr_context""#));
+        assert!(output
+            .summary
+            .contains(r#""title":"GitHub PR context missing diff""#));
+        assert!(output
+            .summary
+            .contains(r#""title":"GitHub PR has requested changes""#));
+        assert!(output
+            .summary
+            .contains(r#""title":"GitHub PR status checks failing""#));
+        assert!(output.summary.contains("unit-tests"));
+        assert!(output.summary.contains("deploy"));
     }
 
     #[test]

@@ -3065,7 +3065,7 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
         ),
         mcp_tool_definition(
             "review",
-            "Run deterministic local code review over a workspace file, git diff, or github_pr_context output.",
+            "Run deterministic local code review over a workspace file, git diff, or github_pr_context output, including PR review/status signals.",
             mcp_schema(
                 vec![
                     ("target", string_property("Workspace file path, diff, staged, or github_pr_context.")),
