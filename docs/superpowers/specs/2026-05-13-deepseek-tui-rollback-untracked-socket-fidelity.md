@@ -27,7 +27,8 @@ and restore could replace a captured socket path with nothing.
   `untracked_sockets`, preserving backward compatibility for older manifests.
 - Runtime docs and the DeepSeek-TUI parity plan narrow the remaining Phase F
   special-file gap to device nodes, Windows symlink recreation, and richer
-  directory metadata.
+  directory metadata. The directory metadata gap is covered by the follow-up
+  rollback directory metadata slice.
 
 ## Verification
 
@@ -41,6 +42,6 @@ and restore could replace a captured socket path with nothing.
 
 ## Remaining
 
-Non-empty directory metadata, device nodes, platform-specific Windows symlink
-recreation, and a full side-worktree snapshot strategy remain out of this
-slice.
+Device nodes, platform-specific Windows symlink recreation, and a full
+side-worktree snapshot strategy remain out of this slice. Untracked directory
+metadata is covered by the follow-up rollback directory metadata slice.

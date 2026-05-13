@@ -37,6 +37,6 @@ IPC fixture paths after a restore.
 
 ## Remaining
 
-Non-empty directory metadata, device nodes, platform-specific Windows symlink
-recreation, and a full side-worktree snapshot strategy remain out of this
-slice. Unix socket fidelity is covered by the follow-up rollback socket slice.
+Device nodes, platform-specific Windows symlink recreation, and a full
+side-worktree snapshot strategy remain out of this slice. Unix socket fidelity
+and untracked directory metadata are covered by follow-up rollback slices.

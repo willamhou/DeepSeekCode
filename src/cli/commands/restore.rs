@@ -27,6 +27,10 @@ pub fn run(action: RestoreAction) -> AppResult<()> {
                 snapshot.untracked_directories.len()
             );
             println!(
+                "  untracked_directory_metadata: {}",
+                snapshot.untracked_directory_metadata.len()
+            );
+            println!(
                 "  untracked_symlinks: {}",
                 snapshot.untracked_symlinks.len()
             );
@@ -78,6 +82,10 @@ pub fn run(action: RestoreAction) -> AppResult<()> {
                 snapshot.untracked_directories.len()
             );
             println!(
+                "  untracked_directory_metadata: {}",
+                snapshot.untracked_directory_metadata.len()
+            );
+            println!(
                 "  untracked_symlinks: {}",
                 snapshot.untracked_symlinks.len()
             );
@@ -95,6 +103,12 @@ pub fn run(action: RestoreAction) -> AppResult<()> {
                 println!("  untracked directory paths:");
                 for directory in &snapshot.untracked_directories {
                     println!("    - {directory}");
+                }
+            }
+            if !snapshot.untracked_directory_metadata.is_empty() {
+                println!("  untracked directory metadata:");
+                for directory in &snapshot.untracked_directory_metadata {
+                    println!("    - {} mode={:o}", directory.path, directory.mode);
                 }
             }
             if !snapshot.untracked_symlinks.is_empty() {

@@ -26,6 +26,7 @@ pub struct SnapshotRecord {
     pub untracked_bytes: u64,
     pub untracked_files: Vec<String>,
     pub untracked_directories: Vec<String>,
+    pub untracked_directory_metadata: Vec<UntrackedDirectoryMetadataRecord>,
     pub untracked_fifos: Vec<String>,
     pub untracked_sockets: Vec<String>,
     pub untracked_symlinks: Vec<UntrackedSymlinkRecord>,
@@ -38,6 +39,12 @@ pub struct SnapshotRecord {
 pub struct UntrackedSymlinkRecord {
     pub path: String,
     pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UntrackedDirectoryMetadataRecord {
+    pub path: String,
+    pub mode: u32,
 }
 
 impl SnapshotRecord {
@@ -121,8 +128,18 @@ impl RollbackStore {
             capture_empty_untracked_directories(Path::new(&git_root), &self.root)?;
         let untracked_fifos = capture_untracked_fifos(Path::new(&git_root), &self.root)?;
         let untracked_sockets = capture_untracked_sockets(Path::new(&git_root), &self.root)?;
+        let untracked_directory_metadata = capture_untracked_directory_metadata(
+            Path::new(&git_root),
+            &self.root,
+            &untracked_files,
+            &untracked_directories,
+            &untracked_fifos,
+            &untracked_sockets,
+            &untracked_symlinks,
+        )?;
         let tracked_only = untracked_files.is_empty()
             && untracked_directories.is_empty()
+            && untracked_directory_metadata.is_empty()
             && untracked_fifos.is_empty()
             && untracked_sockets.is_empty()
             && untracked_symlinks.is_empty();
@@ -144,6 +161,7 @@ impl RollbackStore {
             untracked_bytes,
             untracked_files,
             untracked_directories,
+            untracked_directory_metadata,
             untracked_fifos,
             untracked_sockets,
             untracked_symlinks,
@@ -296,6 +314,7 @@ impl RollbackStore {
                 &snapshot_dir,
                 &record.untracked_files,
                 &record.untracked_directories,
+                &record.untracked_directory_metadata,
                 &record.untracked_fifos,
                 &record.untracked_sockets,
                 &record.untracked_symlinks,
@@ -424,6 +443,16 @@ pub fn snapshot_to_json(record: &SnapshotRecord) -> JsonValue {
         ),
     );
     value.insert(
+        "untracked_directory_metadata".to_string(),
+        JsonValue::Array(
+            record
+                .untracked_directory_metadata
+                .iter()
+                .map(untracked_directory_metadata_to_json)
+                .collect(),
+        ),
+    );
+    value.insert(
         "untracked_symlinks".to_string(),
         JsonValue::Array(
             record
@@ -465,6 +494,13 @@ fn untracked_symlink_to_json(record: &UntrackedSymlinkRecord) -> JsonValue {
     ]))
 }
 
+fn untracked_directory_metadata_to_json(record: &UntrackedDirectoryMetadataRecord) -> JsonValue {
+    JsonValue::Object(object([
+        ("path", JsonValue::String(record.path.clone())),
+        ("mode", JsonValue::Number(record.mode.to_string())),
+    ]))
+}
+
 fn parse_snapshot_record(root: &BTreeMap<String, JsonValue>) -> AppResult<SnapshotRecord> {
     Ok(SnapshotRecord {
         id: required_string(root, "id")?,
@@ -480,6 +516,7 @@ fn parse_snapshot_record(root: &BTreeMap<String, JsonValue>) -> AppResult<Snapsh
         untracked_bytes: optional_u64(root, "untracked_bytes")?,
         untracked_files: optional_string_array(root, "untracked_files")?,
         untracked_directories: optional_string_array(root, "untracked_directories")?,
+        untracked_directory_metadata: optional_untracked_directory_metadata(root)?,
         untracked_fifos: optional_string_array(root, "untracked_fifos")?,
         untracked_sockets: optional_string_array(root, "untracked_sockets")?,
         untracked_symlinks: optional_untracked_symlinks(root)?,
@@ -744,6 +781,111 @@ fn capture_empty_untracked_directories(
 }
 
 #[cfg(unix)]
+fn capture_untracked_directory_metadata(
+    git_root: &Path,
+    store_root: &Path,
+    files: &[String],
+    directories: &[String],
+    fifos: &[String],
+    sockets: &[String],
+    symlinks: &[UntrackedSymlinkRecord],
+) -> AppResult<Vec<UntrackedDirectoryMetadataRecord>> {
+    use std::collections::BTreeSet;
+    use std::os::unix::fs::PermissionsExt;
+
+    let store_prefix = store_root_relative_prefix(git_root, store_root);
+    let mut candidates = BTreeSet::new();
+    for path in files.iter().chain(fifos).chain(sockets) {
+        collect_parent_directory_candidates(path, &mut candidates)?;
+    }
+    for directory in directories {
+        collect_directory_and_parent_candidates(directory, &mut candidates)?;
+    }
+    for symlink in symlinks {
+        collect_parent_directory_candidates(&symlink.path, &mut candidates)?;
+    }
+
+    let mut records = Vec::new();
+    for path in candidates {
+        if is_rollback_internal_path(&path, store_prefix.as_deref())
+            || is_git_internal_path(&path)
+            || is_git_ignored_path(git_root, &path)?
+            || directory_has_tracked_descendants(git_root, &path)?
+        {
+            continue;
+        }
+        let relative = safe_relative_path(&path)?;
+        let target = git_root.join(&relative);
+        let metadata = fs::symlink_metadata(&target).map_err(|error| {
+            app_error(format!(
+                "failed to inspect untracked directory metadata `{path}`: {error}"
+            ))
+        })?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        records.push(UntrackedDirectoryMetadataRecord {
+            path,
+            mode: metadata.permissions().mode() & 0o7777,
+        });
+    }
+    records.sort_by(|a, b| a.path.cmp(&b.path));
+    records.dedup_by(|a, b| a.path == b.path);
+    Ok(records)
+}
+
+#[cfg(not(unix))]
+fn capture_untracked_directory_metadata(
+    _git_root: &Path,
+    _store_root: &Path,
+    _files: &[String],
+    _directories: &[String],
+    _fifos: &[String],
+    _sockets: &[String],
+    _symlinks: &[UntrackedSymlinkRecord],
+) -> AppResult<Vec<UntrackedDirectoryMetadataRecord>> {
+    Ok(Vec::new())
+}
+
+fn collect_parent_directory_candidates(
+    path: &str,
+    candidates: &mut std::collections::BTreeSet<String>,
+) -> AppResult<()> {
+    let relative = safe_relative_path(path)?;
+    let mut current = PathBuf::new();
+    for component in relative.parent().into_iter().flat_map(Path::components) {
+        match component {
+            Component::Normal(part) => {
+                current.push(part);
+                candidates.insert(current.to_string_lossy().into_owned());
+            }
+            Component::CurDir => {}
+            _ => return Err(app_error(format!("unsafe rollback path `{path}`"))),
+        }
+    }
+    Ok(())
+}
+
+fn collect_directory_and_parent_candidates(
+    path: &str,
+    candidates: &mut std::collections::BTreeSet<String>,
+) -> AppResult<()> {
+    let relative = safe_relative_path(path)?;
+    let mut current = PathBuf::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => {
+                current.push(part);
+                candidates.insert(current.to_string_lossy().into_owned());
+            }
+            Component::CurDir => {}
+            _ => return Err(app_error(format!("unsafe rollback path `{path}`"))),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn capture_untracked_fifos(git_root: &Path, store_root: &Path) -> AppResult<Vec<String>> {
     let store_prefix = store_root_relative_prefix(git_root, store_root);
     let mut fifos = Vec::new();
@@ -947,11 +1089,27 @@ fn is_git_tracked_path(git_root: &Path, path: &str) -> AppResult<bool> {
     }
 }
 
+fn directory_has_tracked_descendants(git_root: &Path, path: &str) -> AppResult<bool> {
+    let output = Command::new("git")
+        .args(["ls-files", "-z", "--", path])
+        .current_dir(git_root)
+        .output()
+        .map_err(|error| app_error(format!("could not invoke git ls-files: {error}")))?;
+    if !output.status.success() {
+        return Err(app_error(format!(
+            "git ls-files failed for `{path}`: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(!output.stdout.is_empty())
+}
+
 fn restore_untracked_entries(
     git_root: &Path,
     snapshot_dir: &Path,
     files: &[String],
     directories: &[String],
+    directory_metadata: &[UntrackedDirectoryMetadataRecord],
     fifos: &[String],
     sockets: &[String],
     symlinks: &[UntrackedSymlinkRecord],
@@ -961,6 +1119,7 @@ fn restore_untracked_entries(
         let target = git_root.join(&relative);
         restore_untracked_directory(&target)?;
     }
+    prepare_untracked_directory_metadata_targets(git_root, directory_metadata)?;
     for file in files {
         let relative = safe_relative_path(file)?;
         let source = snapshot_dir.join("untracked").join(&relative);
@@ -1020,6 +1179,72 @@ fn restore_untracked_entries(
             ))
         })?;
     }
+    for directory in directory_metadata.iter().rev() {
+        let relative = safe_relative_path(&directory.path)?;
+        let target = git_root.join(&relative);
+        restore_untracked_directory(&target)?;
+        set_directory_mode(&target, directory.mode).map_err(|error| {
+            app_error(format!(
+                "failed to restore untracked directory metadata `{}`: {error}",
+                directory.path
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn prepare_untracked_directory_metadata_targets(
+    git_root: &Path,
+    directory_metadata: &[UntrackedDirectoryMetadataRecord],
+) -> AppResult<()> {
+    for directory in directory_metadata {
+        let relative = safe_relative_path(&directory.path)?;
+        let target = git_root.join(&relative);
+        match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+                make_directory_restore_writable(&target)?;
+            }
+            Ok(_) => {
+                return Err(app_error(format!(
+                    "cannot restore untracked directory metadata over non-directory `{}`",
+                    target.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir_all(&target).map_err(|error| {
+                    app_error(format!(
+                        "failed to prepare untracked directory metadata target `{}`: {error}",
+                        target.display()
+                    ))
+                })?;
+                make_directory_restore_writable(&target)?;
+            }
+            Err(error) => {
+                return Err(app_error(format!(
+                    "failed to inspect untracked directory metadata target `{}`: {error}",
+                    target.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn make_directory_restore_writable(target: &Path) -> AppResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::symlink_metadata(target)?;
+    let mode = metadata.permissions().mode();
+    let restore_mode = mode | 0o700;
+    if restore_mode != mode {
+        fs::set_permissions(target, fs::Permissions::from_mode(restore_mode))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_directory_restore_writable(_target: &Path) -> AppResult<()> {
     Ok(())
 }
 
@@ -1076,6 +1301,18 @@ fn remove_existing_restore_target(target: &Path) -> AppResult<()> {
             target.display()
         ))),
     }
+}
+
+#[cfg(unix)]
+fn set_directory_mode(target: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(target, fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_directory_mode(_target: &Path, _mode: u32) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1217,6 +1454,38 @@ fn optional_untracked_symlinks(
     }
     items.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.target.cmp(&b.target)));
     items.dedup_by(|a, b| a.path == b.path && a.target == b.target);
+    Ok(items)
+}
+
+fn optional_untracked_directory_metadata(
+    root: &BTreeMap<String, JsonValue>,
+) -> AppResult<Vec<UntrackedDirectoryMetadataRecord>> {
+    let Some(value) = root.get("untracked_directory_metadata") else {
+        return Ok(Vec::new());
+    };
+    let array = json_as_array(value).ok_or_else(|| {
+        app_error("rollback manifest `untracked_directory_metadata` must be an array")
+    })?;
+    let mut items = Vec::with_capacity(array.len());
+    for item in array {
+        let object = json_as_object(item).ok_or_else(|| {
+            app_error("rollback manifest `untracked_directory_metadata` must contain objects")
+        })?;
+        let path = required_string(object, "path")?;
+        safe_relative_path(&path)?;
+        let mode = required_u64(object, "mode")?;
+        if mode > 0o7777 {
+            return Err(app_error(format!(
+                "rollback manifest directory mode out of range for `{path}`: {mode}"
+            )));
+        }
+        items.push(UntrackedDirectoryMetadataRecord {
+            path,
+            mode: mode as u32,
+        });
+    }
+    items.sort_by(|a, b| a.path.cmp(&b.path));
+    items.dedup_by(|a, b| a.path == b.path);
     Ok(items)
 }
 
@@ -1489,6 +1758,83 @@ mod tests {
         assert_eq!(loaded.untracked_directories, snapshot.untracked_directories);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_restore_round_trip_untracked_directory_metadata() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = temp_root("dir-metadata");
+        fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init"]);
+        fs::write(repo.join("src.txt"), "base\n").unwrap();
+        run_git(&repo, &["add", "src.txt"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+
+        let notes = repo.join("notes");
+        let subdir = notes.join("subdir");
+        fs::create_dir_all(&subdir).unwrap();
+        fs::write(subdir.join("todo.txt"), "snapshot note\n").unwrap();
+        fs::set_permissions(&notes, fs::Permissions::from_mode(0o750)).unwrap();
+        fs::set_permissions(&subdir, fs::Permissions::from_mode(0o711)).unwrap();
+        let store = RollbackStore::new(repo.join(".dscode/rollback"));
+        let snapshot = store
+            .create_snapshot(&repo, "capture directory metadata".to_string())
+            .unwrap();
+
+        assert_eq!(
+            snapshot.untracked_files,
+            vec!["notes/subdir/todo.txt".to_string()]
+        );
+        assert_eq!(
+            snapshot.untracked_directory_metadata,
+            vec![
+                UntrackedDirectoryMetadataRecord {
+                    path: "notes".to_string(),
+                    mode: 0o750,
+                },
+                UntrackedDirectoryMetadataRecord {
+                    path: "notes/subdir".to_string(),
+                    mode: 0o711,
+                },
+            ]
+        );
+
+        fs::write(subdir.join("todo.txt"), "later note\n").unwrap();
+        fs::set_permissions(&notes, fs::Permissions::from_mode(0o500)).unwrap();
+        fs::set_permissions(&subdir, fs::Permissions::from_mode(0o500)).unwrap();
+        store.restore_snapshot(&snapshot.id, true).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(subdir.join("todo.txt")).unwrap(),
+            "snapshot note\n"
+        );
+        assert_eq!(
+            fs::symlink_metadata(&notes).unwrap().permissions().mode() & 0o7777,
+            0o750
+        );
+        assert_eq!(
+            fs::symlink_metadata(&subdir).unwrap().permissions().mode() & 0o7777,
+            0o711
+        );
+
+        let loaded = store.load_snapshot(&snapshot.id).unwrap();
+        assert_eq!(
+            loaded.untracked_directory_metadata,
+            snapshot.untracked_directory_metadata
+        );
+    }
+
     #[test]
     fn snapshot_ignores_ignored_empty_directories() {
         let repo = temp_root("ignored-empty-dir");
@@ -1698,6 +2044,7 @@ mod tests {
         assert_eq!(record.id, "snapshot-legacy");
         assert!(record.untracked_files.is_empty());
         assert!(record.untracked_directories.is_empty());
+        assert!(record.untracked_directory_metadata.is_empty());
         assert!(record.untracked_fifos.is_empty());
         assert!(record.untracked_sockets.is_empty());
         assert!(record.untracked_symlinks.is_empty());

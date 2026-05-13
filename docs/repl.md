@@ -29,7 +29,7 @@ Explicit aliases are also supported:
 | `/budget [N]` | Show current budget; or set new value (1..200) |
 | `/skill [name\|-]` | Show / switch / clear the active skill |
 | `/diff` | Show pending git diff |
-| `/restore snapshot [label]` | Capture a rollback snapshot for tracked changes and untracked regular files |
+| `/restore snapshot [label]` | Capture a rollback snapshot for tracked changes, untracked files, directory metadata, and supported Unix special files |
 | `/restore list` | List recent rollback snapshots |
 | `/restore show <id\|last>` | Inspect rollback snapshot metadata by snapshot id, bound runtime turn id, or the latest REPL turn snapshot |
 | `/revert_turn <id\|last> [--apply]` | Dry-run or apply a rollback snapshot by snapshot id, bound runtime turn id, or `last`; dry-run is the default |
