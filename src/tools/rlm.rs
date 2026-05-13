@@ -885,6 +885,14 @@ struct RlmLiveEventBatch {
     count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RlmLiveDaemonOwner {
+    pid: Option<u64>,
+    alive: Option<bool>,
+    stale: bool,
+    owner: &'static str,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RlmLiveRecoveryMode {
     Requeue,
@@ -1753,7 +1761,8 @@ impl Tool for RlmLiveRunNextTool {
             Vec::new(),
         )?;
         let queued_turns = count_pending_live_rlm_tasks(&store, &runtime_thread_id)?;
-        write_rlm_live_session_manifest(
+        let daemon_epoch = rlm_epoch_label();
+        write_rlm_live_session_manifest_with_daemon(
             &self.config,
             session_id,
             "running",
@@ -1764,6 +1773,8 @@ impl Tool for RlmLiveRunNextTool {
             &payload.model,
             &payload.workspace,
             rlm_live_manifest_string_field(&manifest, "created_at").as_deref(),
+            Some(std::process::id() as u64),
+            Some(&daemon_epoch),
         )?;
         append_rlm_live_session_event(
             &self.config,
@@ -2864,6 +2875,7 @@ fn read_rlm_live_session_manifest(path: &Path, session_id: &str) -> AppResult<Js
     if stored_id != session_id {
         return Err(tool_failure("rlm live session_id mismatch"));
     }
+    let daemon = rlm_live_daemon_owner_status(&root);
     Ok(JsonValue::Object(BTreeMap::from([
         (
             "kind".to_string(),
@@ -2889,6 +2901,15 @@ fn read_rlm_live_session_manifest(path: &Path, session_id: &str) -> AppResult<Js
         (
             "daemon_epoch".to_string(),
             optional_string_json(&root, "daemon_epoch"),
+        ),
+        (
+            "daemon_alive".to_string(),
+            daemon.alive.map(JsonValue::Bool).unwrap_or(JsonValue::Null),
+        ),
+        ("daemon_stale".to_string(), JsonValue::Bool(daemon.stale)),
+        (
+            "daemon_owner".to_string(),
+            JsonValue::String(daemon.owner.to_string()),
         ),
         (
             "runtime_thread_id".to_string(),
@@ -2939,6 +2960,37 @@ fn write_rlm_live_session_manifest(
     workspace: &str,
     created_at: Option<&str>,
 ) -> AppResult<()> {
+    write_rlm_live_session_manifest_with_daemon(
+        config,
+        session_id,
+        status,
+        runtime_thread_id,
+        runtime_session_id,
+        active_turn_id,
+        queued_turns,
+        model,
+        workspace,
+        created_at,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_rlm_live_session_manifest_with_daemon(
+    config: &AppConfig,
+    session_id: &str,
+    status: &str,
+    runtime_thread_id: &str,
+    runtime_session_id: Option<&str>,
+    active_turn_id: Option<&str>,
+    queued_turns: u64,
+    model: &str,
+    workspace: &str,
+    created_at: Option<&str>,
+    daemon_pid: Option<u64>,
+    daemon_epoch: Option<&str>,
+) -> AppResult<()> {
     let path = rlm_live_session_manifest_path(config, session_id);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -2957,8 +3009,18 @@ fn write_rlm_live_session_manifest(
             JsonValue::String(session_id.to_string()),
         ),
         ("status".to_string(), JsonValue::String(status.to_string())),
-        ("daemon_pid".to_string(), JsonValue::Null),
-        ("daemon_epoch".to_string(), JsonValue::Null),
+        (
+            "daemon_pid".to_string(),
+            daemon_pid
+                .map(|pid| JsonValue::Number(pid.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "daemon_epoch".to_string(),
+            daemon_epoch
+                .map(|value| JsonValue::String(value.to_string()))
+                .unwrap_or(JsonValue::Null),
+        ),
         (
             "runtime_thread_id".to_string(),
             JsonValue::String(runtime_thread_id.to_string()),
@@ -3442,17 +3504,25 @@ fn render_rlm_live_session_list_entry(
     let status = json_field_string(root, "status");
     let updated_at = json_field_string(root, "updated_at");
     let daemon_pid = json_field_value(root, "daemon_pid");
+    let daemon = rlm_live_daemon_owner_status(root);
+    let daemon_alive = daemon
+        .alive
+        .map(|alive| alive.to_string())
+        .unwrap_or_else(|| "null".to_string());
     let runtime_thread_id = json_field_value(root, "runtime_thread_id");
     let active_turn_id = json_field_value(root, "active_turn_id");
     let queued_turns = json_field_value(root, "queued_turns");
     let last_error = json_field_value(root, "last_error");
     let mut rendered = format!(
-        "{{\"session_id\":\"{}\",\"path\":\"{}\",\"bytes\":{},\"status\":\"{}\",\"daemon_pid\":{},\"runtime_thread_id\":{},\"active_turn_id\":{},\"queued_turns\":{},\"updated_at\":\"{}\",\"last_error\":{}}}",
+        "{{\"session_id\":\"{}\",\"path\":\"{}\",\"bytes\":{},\"status\":\"{}\",\"daemon_pid\":{},\"daemon_alive\":{},\"daemon_stale\":{},\"daemon_owner\":\"{}\",\"runtime_thread_id\":{},\"active_turn_id\":{},\"queued_turns\":{},\"updated_at\":\"{}\",\"last_error\":{}}}",
         json_escape(session_id),
         json_escape(&path.display().to_string()),
         bytes,
         json_escape(&status),
         daemon_pid,
+        daemon_alive,
+        daemon.stale,
+        daemon.owner,
         runtime_thread_id,
         active_turn_id,
         queued_turns,
@@ -3763,6 +3833,59 @@ fn rlm_live_manifest_u64_field(manifest: &JsonValue, key: &str) -> Option<u64> {
         return None;
     };
     root.get(key).and_then(json_as_u64)
+}
+
+fn rlm_live_daemon_owner_status(root: &BTreeMap<String, JsonValue>) -> RlmLiveDaemonOwner {
+    let pid = root.get("daemon_pid").and_then(json_as_u64);
+    let status = root.get("status").and_then(json_as_string).unwrap_or("");
+    let alive = pid.map(rlm_process_is_alive);
+    let stale = status == "running" && alive == Some(false);
+    let owner = match (pid, alive) {
+        (None, _) => "none",
+        (Some(pid), Some(true)) if pid == std::process::id() as u64 => "current",
+        (Some(_), Some(true)) => "external",
+        (Some(_), Some(false)) => "stale",
+        (Some(_), None) => "unknown",
+    };
+    RlmLiveDaemonOwner {
+        pid,
+        alive,
+        stale,
+        owner,
+    }
+}
+
+fn rlm_process_is_alive(pid: u64) -> bool {
+    if pid <= 1 || pid > i32::MAX as u64 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        if rlm_process_is_zombie(pid) {
+            return false;
+        }
+        unsafe extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        let result = unsafe { kill(pid as i32, 0) };
+        if result == 0 {
+            return true;
+        }
+        matches!(std::io::Error::last_os_error().raw_os_error(), Some(1))
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+#[cfg(unix)]
+fn rlm_process_is_zombie(pid: u64) -> bool {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    let Some(after_name) = stat.rsplit_once(") ") else {
+        return false;
+    };
+    after_name.1.starts_with("Z ")
 }
 
 fn rlm_runtime_store(config: &AppConfig) -> RuntimeStore {
@@ -5196,6 +5319,78 @@ mod tests {
             .summary
             .contains(r#""kind":"deepseek.rlm.live_session.v1""#));
         assert!(shown.summary.contains(r#""model":"deepseek-coder""#));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rlm_live_sessions_report_daemon_owner_liveness() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = cwd.join("target").join(format!(
+            "dscode-rlm-live-daemon-owner-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut config = AppConfig::default();
+        config.workspace.config_dir = root.join(".dscode").display().to_string();
+        write_rlm_live_session_manifest_with_daemon(
+            &config,
+            "owner.current",
+            "running",
+            "thread-current",
+            Some("session-current"),
+            Some("turn-current"),
+            0,
+            "deepseek-coder",
+            "/tmp/ws",
+            None,
+            Some(std::process::id() as u64),
+            Some("epoch+owner"),
+        )
+        .unwrap();
+        write_rlm_live_session_manifest_with_daemon(
+            &config,
+            "owner.stale",
+            "running",
+            "thread-stale",
+            Some("session-stale"),
+            Some("turn-stale"),
+            0,
+            "deepseek-coder",
+            "/tmp/ws",
+            None,
+            Some(i32::MAX as u64 + 1),
+            Some("epoch+stale"),
+        )
+        .unwrap();
+
+        let current_manifest = read_rlm_live_session_manifest(
+            &rlm_live_session_manifest_path(&config, "owner.current"),
+            "owner.current",
+        )
+        .unwrap();
+        assert_eq!(
+            rlm_live_manifest_u64_field(&current_manifest, "daemon_pid"),
+            Some(std::process::id() as u64)
+        );
+        let current_json = json_value_to_string(&current_manifest);
+        assert!(current_json.contains(r#""daemon_alive":true"#));
+        assert!(current_json.contains(r#""daemon_stale":false"#));
+        assert!(current_json.contains(r#""daemon_owner":"current""#));
+
+        let listed = RlmModelSessionsTool {
+            config: config.clone(),
+        }
+        .execute(ToolInput::new().with_arg("include_live", "true"))
+        .unwrap();
+        assert!(listed.summary.contains(r#""session_id":"owner.current""#));
+        assert!(listed.summary.contains(r#""daemon_alive":true"#));
+        assert!(listed.summary.contains(r#""daemon_owner":"current""#));
+        assert!(listed.summary.contains(r#""session_id":"owner.stale""#));
+        assert!(listed.summary.contains(r#""daemon_alive":false"#));
+        assert!(listed.summary.contains(r#""daemon_stale":true"#));
+        assert!(listed.summary.contains(r#""daemon_owner":"stale""#));
         let _ = fs::remove_dir_all(root);
     }
 

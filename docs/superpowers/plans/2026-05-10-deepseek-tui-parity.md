@@ -531,7 +531,10 @@ Remaining:
   `turn_recovered`; `deepseek agents daemon` now runs one queued live RLM turn
   per tick through the RLM worker path instead of the generic runtime task path;
   `rlm_process_stop` stops idle live sessions and blocks accidental reuse until
-  `reset=true`
+  `reset=true`; live RLM worker ownership now stamps daemon pid/epoch while a
+  turn is running, and `rlm_process_sessions include_live=true` reports
+  `daemon_alive`, `daemon_stale`, and `daemon_owner` so dead owners are visible
+  before recovery
 - Review remote PR context signals now exist: `review` parses
   `github_pr_context` JSON to report requested changes, failing/cancelled status
   checks, and missing `include_diff=true` context before optional semantic

@@ -176,15 +176,19 @@ resumption.
    - `rlm_process_events`
    - active turn cancellation via runtime cancel events
    - status: partial; event-log replay/wait, queued-turn cancellation, and
-     single-step/batch worker completion are implemented; worker streaming,
-     resident daemon service packaging, and active worker cancellation remain open
+     single-step/batch worker completion are implemented; worker ownership is
+     stamped into live manifests while a turn is running and inventory reports
+     stale owner pids; worker streaming, resident daemon service packaging, and
+     active worker cancellation remain open
 5. Recovery:
    - daemon restart scan
    - stale pid detection
    - interrupted-turn recovery records
    - status: partial; `rlm_process_recover` can requeue or fail interrupted
      running turns for one session or all live manifests and records
-     `turn_recovered`; stale pid ownership checks remain open
+     `turn_recovered`; `rlm_process_sessions include_live=true` now reports
+     `daemon_alive`, `daemon_stale`, and `daemon_owner` from the live manifest
+     pid/epoch, while automatic stale-owner recovery orchestration remains open
 6. Service packaging:
    - systemd/launchd templates for RLM daemon alongside runtime and diagnostics
    - status: partial; `deepseek agents daemon` now runs one queued live RLM
@@ -212,5 +216,5 @@ Future implementation should add these gates:
 Do not rename the existing bounded child-agent `rlm_process` implementation as a
 live daemon. It is already useful and should remain the default until a real
 live worker exists. The remaining executable RLM slices should focus on
-streaming model/tool deltas, active worker cancellation, stale daemon pid
-detection, and explicit lifecycle commands.
+streaming model/tool deltas, active worker cancellation, automatic stale-owner
+recovery orchestration, and explicit lifecycle commands.

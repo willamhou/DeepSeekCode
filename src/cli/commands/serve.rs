@@ -3499,12 +3499,12 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
         ),
         mcp_tool_definition(
             "rlm_process_sessions",
-            "List or inspect persisted rlm_process durable model-session summaries, optionally including live RLM daemon manifests and turn inventory, without running a child model.",
+            "List or inspect persisted rlm_process durable model-session summaries, optionally including live RLM daemon manifests, daemon owner liveness/stale status, and turn inventory, without running a child model.",
             mcp_schema(
                 vec![
                     ("session_id", string_property("Optional session id to inspect.")),
                     ("limit", number_property("Maximum sessions to list.")),
-                    ("include_live", string_property("Set true to include .dscode/rlm-daemon live-session manifests.")),
+                    ("include_live", string_property("Set true to include .dscode/rlm-daemon live-session manifests with daemon_alive, daemon_stale, and daemon_owner.")),
                     ("include_turns", string_property("Set true to include live turn payload inventory. Implies include_live.")),
                 ],
                 &[],
@@ -3732,7 +3732,7 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
         }
         tools.push(mcp_tool_definition(
             "rlm_process_run_next",
-            "Claim and run the next queued live RLM daemon turn from its persisted payload. Requires trusted side effects or durable MCP approval because it can spend model tokens and updates runtime state.",
+            "Claim and run the next queued live RLM daemon turn from its persisted payload, stamping daemon pid/epoch while running. Requires trusted side effects or durable MCP approval because it can spend model tokens and updates runtime state.",
             mcp_schema(
                 vec![
                     ("session_id", string_property("Live RLM session id.")),

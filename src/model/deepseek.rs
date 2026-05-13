@@ -3466,8 +3466,8 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
     },
     StaticToolSpec {
         name: "rlm_process_sessions",
-        description: "List or inspect persisted rlm_process durable model-session summaries, optionally including live RLM daemon manifests and live turn inventory, without running a child model. Use to discover existing long-input RLM process sessions before continuing or resetting them.",
-        properties_json: r#"{"session_id":{"type":"string","description":"Optional durable RLM model session id to inspect. Omit to list sessions."},"limit":{"type":"string","description":"Optional list limit, clamped to 1-100 and defaulting to 20."},"include_live":{"type":"string","description":"Set true/1/yes/on to include .dscode/rlm-daemon live-session manifests alongside legacy .dscode/rlm-model summaries."},"include_turns":{"type":"string","description":"Set true/1/yes/on to include live turn payload inventory with runtime status, input metadata, result preview, and error preview. Implies include_live."}}"#,
+        description: "List or inspect persisted rlm_process durable model-session summaries, optionally including live RLM daemon manifests, daemon owner liveness/stale status, and live turn inventory, without running a child model. Use to discover existing long-input RLM process sessions before continuing or resetting them.",
+        properties_json: r#"{"session_id":{"type":"string","description":"Optional durable RLM model session id to inspect. Omit to list sessions."},"limit":{"type":"string","description":"Optional list limit, clamped to 1-100 and defaulting to 20."},"include_live":{"type":"string","description":"Set true/1/yes/on to include .dscode/rlm-daemon live-session manifests alongside legacy .dscode/rlm-model summaries, including daemon_alive, daemon_stale, and daemon_owner."},"include_turns":{"type":"string","description":"Set true/1/yes/on to include live turn payload inventory with runtime status, input metadata, result preview, and error preview. Implies include_live."}}"#,
         required_json: r#"[]"#,
     },
     StaticToolSpec {
@@ -3502,7 +3502,7 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
     },
     StaticToolSpec {
         name: "rlm_process_run_next",
-        description: "Claim and run the next queued live RLM daemon turn from its persisted payload. Use dry_run=true to inspect the selected payload and rendered task without claiming it.",
+        description: "Claim and run the next queued live RLM daemon turn from its persisted payload, stamping daemon pid/epoch while the turn is running. Use dry_run=true to inspect the selected payload and rendered task without claiming it.",
         properties_json: r#"{"session_id":{"type":"string","description":"Live RLM session id."},"task_id":{"type":"string","description":"Optional runtime task id for a specific queued turn."},"turn_id":{"type":"string","description":"Alias for task_id."},"id":{"type":"string","description":"Alias for task_id."},"dry_run":{"type":"string","description":"Set true/1/yes/on to load the payload and render the child task without claiming or running it."}}"#,
         required_json: r#"["session_id"]"#,
     },

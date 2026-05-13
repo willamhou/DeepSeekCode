@@ -1409,7 +1409,8 @@ counts, last task metadata, and full stored summaries for a requested
 `session_id` without spending model tokens. Passing `include_live=true` also
 reports normalized live-daemon manifests from
 `.dscode/rlm-daemon/<session_id>/manifest.json`, including daemon status,
-runtime thread id, queued turn count, active turn id, and last error. Passing
+runtime thread id, queued turn count, active turn id, daemon pid/epoch,
+best-effort daemon owner liveness, stale-owner status, and last error. Passing
 `include_turns=true` implies `include_live=true` and adds live turn payload
 inventory with runtime status, input label/counts, cancellation reason, and
 bounded result/error previews without returning the long input content. This is
@@ -1439,13 +1440,16 @@ pending turns, appends `session_stopped`, and blocks accidental reuse until
 `rlm_process_run_next session_id=<id>` is the first non-daemon worker bridge: it
 claims the oldest queued payload, writes `turn_started`, runs the bounded child
 model flow, then records `turn_completed` or `turn_failed`; `dry_run=true`
-renders the selected payload without claiming it. `rlm_process_drain` repeats
-that single-step worker path for up to `max_turns` queued payloads in FIFO
-order, with `dry_run=true` for a non-mutating batch preview. The existing
-`deepseek agents daemon` service loop now runs one queued live RLM turn per tick
-through the same worker path. Model delta streaming, active worker cancellation,
-stale daemon pid ownership checks, and explicit RLM daemon lifecycle commands
-remain future work.
+renders the selected payload without claiming it. While the worker owns the
+turn, the live manifest stores the worker process pid and daemon epoch; normal
+completion/failure clears that owner, while `rlm_process_sessions include_live=true`
+reports `daemon_stale=true` when a `running` manifest points at a dead or
+invalid owner pid. `rlm_process_drain` repeats that single-step worker path for
+up to `max_turns` queued payloads in FIFO order, with `dry_run=true` for a
+non-mutating batch preview. The existing `deepseek agents daemon` service loop
+now runs one queued live RLM turn per tick through the same worker path. Model
+delta streaming, active worker cancellation, and broader RLM daemon lifecycle
+commands remain future work.
 `rlm_process_events session_id=<id> cursor=<seq>` replays parsed
 `.dscode/rlm-daemon/<session_id>/events.jsonl` records with `seq` greater than
 the cursor and returns `next_cursor` for clients that want deterministic live
