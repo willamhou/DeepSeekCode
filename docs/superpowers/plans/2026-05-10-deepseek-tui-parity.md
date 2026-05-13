@@ -395,7 +395,7 @@ Landed first slice:
 - Applied restores now report restored changed files and run post-restore diagnostics through the same fallback diagnostic runner
 - Applied restores now restore captured untracked regular files, captured empty
   directories, captured untracked Unix FIFOs, and captured untracked Unix
-  symlinks, while excluding rollback storage from untracked capture
+  sockets and symlinks, while excluding rollback storage from untracked capture
 - Applied restores preserve the snapshot staged-index versus unstaged-worktree split for new split-patch snapshots
 - `deepseek exec` creates a pre-run rollback snapshot in git worktrees and binds it to the successful assistant runtime turn id; restore/show accept either snapshot id or bound turn id
 - TUI-started agent runs create a pre-run rollback snapshot in git worktrees and bind it to the running assistant turn id as soon as the durable turn exists
@@ -419,8 +419,8 @@ Landed first slice:
 Remaining:
 
 - side-git/worktree snapshot strategy for non-empty directory metadata and
-  special-file fidelity beyond Unix FIFOs/symlinks, including sockets, device
-  nodes, and Windows symlink recreation
+  special-file fidelity beyond Unix FIFOs/sockets/symlinks, including device
+  nodes and Windows symlink recreation
 
 ### Phase G: Subagent/RLM
 

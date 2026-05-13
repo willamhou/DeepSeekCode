@@ -37,6 +37,6 @@ toolchains, generated fixtures, and local project wiring.
 
 ## Remaining
 
-Non-empty directory trees, device nodes, sockets, platform-specific Windows
+Non-empty directory trees, device nodes, platform-specific Windows
 symlink recreation, and a full side-worktree capture strategy remain out of this
-slice. Unix FIFO fidelity is covered by the follow-up rollback FIFO slice.
+slice. Unix FIFO and socket fidelity are covered by follow-up rollback slices.

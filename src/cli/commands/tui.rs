@@ -2069,10 +2069,11 @@ fn render_rollback_snapshot_list(snapshots: &[SnapshotRecord]) -> String {
             snapshot.patch_bytes, snapshot.staged_patch_bytes, snapshot.unstaged_patch_bytes
         ));
         detail.push_str(&format!(
-            "  untracked: files {}, dirs {}, fifos {}, symlinks {}\n\n",
+            "  untracked: files {}, dirs {}, fifos {}, sockets {}, symlinks {}\n\n",
             snapshot.untracked_files.len(),
             snapshot.untracked_directories.len(),
             snapshot.untracked_fifos.len(),
+            snapshot.untracked_sockets.len(),
             snapshot.untracked_symlinks.len()
         ));
     }
@@ -2144,6 +2145,19 @@ fn render_rollback_snapshot_detail(snapshot: &SnapshotRecord, patch: Option<&str
         detail.push_str(&format!(
             "  - ... {} more\n",
             snapshot.untracked_fifos.len() - 20
+        ));
+    }
+    detail.push_str(&format!(
+        "untracked sockets: {}\n",
+        snapshot.untracked_sockets.len()
+    ));
+    for socket in snapshot.untracked_sockets.iter().take(20) {
+        detail.push_str(&format!("  - {socket}\n"));
+    }
+    if snapshot.untracked_sockets.len() > 20 {
+        detail.push_str(&format!(
+            "  - ... {} more\n",
+            snapshot.untracked_sockets.len() - 20
         ));
     }
     detail.push_str(&format!(

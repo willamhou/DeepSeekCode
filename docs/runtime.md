@@ -1480,12 +1480,13 @@ Snapshots are stored under `.dscode/rollback/snapshots/<snapshot-id>/` with a
 manifest, `status.txt`, binary-safe `diff.patch`, `staged.patch`, and
 `unstaged.patch` files, captured untracked regular files under `untracked/`,
 manifest entries for captured empty untracked directories, and manifest entries
-for captured untracked Unix FIFOs and symlinks. Restoring a snapshot verifies
-that the current git `HEAD` still matches the commit captured in the snapshot.
+for captured untracked Unix FIFOs, Unix sockets, and symlinks. Restoring a
+snapshot verifies that the current git `HEAD` still matches the commit captured
+in the snapshot.
 Dry-run is the default; `--apply` reverses the current tracked diff, restores
 the snapshot staged index and unstaged worktree split, restores captured
-untracked files, empty directories, FIFOs, and symlinks, lists the restored
-changed files, and runs a post-restore diagnostic pass for those files.
+untracked files, empty directories, FIFOs, sockets, and symlinks, lists the
+restored changed files, and runs a post-restore diagnostic pass for those files.
 
 When `deepseek exec` runs inside a git worktree, it creates a pre-run rollback
 snapshot and, after a successful run, binds that snapshot to the durable runtime
@@ -1529,8 +1530,8 @@ the runtime thread bound to that ACP session.
 Current boundaries are explicit:
 
 - untracked restore currently covers regular files, empty directories, Unix
-  FIFOs, and Unix symlinks, not non-empty directory metadata, sockets, device
-  nodes, or Windows symlink recreation;
+  FIFOs, Unix sockets, and Unix symlinks, not non-empty directory metadata,
+  device nodes, or Windows symlink recreation;
 - untracked files created after the snapshot are not cleaned unless they became
   tracked changes in the git diff;
 - rollback storage under `.dscode/rollback` is excluded from untracked capture;

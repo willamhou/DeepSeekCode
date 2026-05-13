@@ -13,8 +13,8 @@ IPC fixture paths after a restore.
 - Restore captured FIFOs as FIFO nodes without treating them as regular files.
 - Preserve older snapshots that do not contain FIFO manifest entries.
 - Include FIFO counts and paths in CLI, REPL, and TUI rollback details.
-- Keep sockets, device nodes, Windows symlink recreation, and a full
-  side-worktree strategy as explicit future work.
+- Keep device nodes, Windows symlink recreation, and a full side-worktree
+  strategy as explicit future work.
 
 ## Implementation
 
@@ -37,6 +37,6 @@ IPC fixture paths after a restore.
 
 ## Remaining
 
-Non-empty directory metadata, sockets, device nodes, platform-specific Windows
-symlink recreation, and a full side-worktree snapshot strategy remain out of
-this slice.
+Non-empty directory metadata, device nodes, platform-specific Windows symlink
+recreation, and a full side-worktree snapshot strategy remain out of this
+slice. Unix socket fidelity is covered by the follow-up rollback socket slice.

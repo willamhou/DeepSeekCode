@@ -31,6 +31,7 @@ pub fn run(action: RestoreAction) -> AppResult<()> {
                 snapshot.untracked_symlinks.len()
             );
             println!("  untracked_fifos: {}", snapshot.untracked_fifos.len());
+            println!("  untracked_sockets: {}", snapshot.untracked_sockets.len());
             println!("  untracked_bytes: {}", snapshot.untracked_bytes);
             println!("  tracked_only: {}", snapshot.tracked_only);
         }
@@ -81,6 +82,7 @@ pub fn run(action: RestoreAction) -> AppResult<()> {
                 snapshot.untracked_symlinks.len()
             );
             println!("  untracked_fifos: {}", snapshot.untracked_fifos.len());
+            println!("  untracked_sockets: {}", snapshot.untracked_sockets.len());
             println!("  untracked_bytes: {}", snapshot.untracked_bytes);
             println!("  tracked_only: {}", snapshot.tracked_only);
             if !snapshot.untracked_files.is_empty() {
@@ -105,6 +107,12 @@ pub fn run(action: RestoreAction) -> AppResult<()> {
                 println!("  untracked FIFO paths:");
                 for fifo in &snapshot.untracked_fifos {
                     println!("    - {fifo}");
+                }
+            }
+            if !snapshot.untracked_sockets.is_empty() {
+                println!("  untracked socket paths:");
+                for socket in &snapshot.untracked_sockets {
+                    println!("    - {socket}");
                 }
             }
             if patch {

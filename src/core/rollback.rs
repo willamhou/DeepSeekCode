@@ -27,6 +27,7 @@ pub struct SnapshotRecord {
     pub untracked_files: Vec<String>,
     pub untracked_directories: Vec<String>,
     pub untracked_fifos: Vec<String>,
+    pub untracked_sockets: Vec<String>,
     pub untracked_symlinks: Vec<UntrackedSymlinkRecord>,
     pub tracked_only: bool,
     pub runtime_thread_id: Option<String>,
@@ -44,6 +45,7 @@ impl SnapshotRecord {
         self.untracked_files.len()
             + self.untracked_directories.len()
             + self.untracked_fifos.len()
+            + self.untracked_sockets.len()
             + self.untracked_symlinks.len()
     }
 }
@@ -118,9 +120,11 @@ impl RollbackStore {
         let untracked_directories =
             capture_empty_untracked_directories(Path::new(&git_root), &self.root)?;
         let untracked_fifos = capture_untracked_fifos(Path::new(&git_root), &self.root)?;
+        let untracked_sockets = capture_untracked_sockets(Path::new(&git_root), &self.root)?;
         let tracked_only = untracked_files.is_empty()
             && untracked_directories.is_empty()
             && untracked_fifos.is_empty()
+            && untracked_sockets.is_empty()
             && untracked_symlinks.is_empty();
         let record = SnapshotRecord {
             id,
@@ -141,6 +145,7 @@ impl RollbackStore {
             untracked_files,
             untracked_directories,
             untracked_fifos,
+            untracked_sockets,
             untracked_symlinks,
             tracked_only,
             runtime_thread_id: None,
@@ -292,6 +297,7 @@ impl RollbackStore {
                 &record.untracked_files,
                 &record.untracked_directories,
                 &record.untracked_fifos,
+                &record.untracked_sockets,
                 &record.untracked_symlinks,
             )?;
         }
@@ -304,6 +310,7 @@ impl RollbackStore {
             changed_files.extend(record.untracked_files.iter().cloned());
             changed_files.extend(record.untracked_directories.iter().cloned());
             changed_files.extend(record.untracked_fifos.iter().cloned());
+            changed_files.extend(record.untracked_sockets.iter().cloned());
             changed_files.extend(
                 record
                     .untracked_symlinks
@@ -437,6 +444,17 @@ pub fn snapshot_to_json(record: &SnapshotRecord) -> JsonValue {
                 .collect(),
         ),
     );
+    value.insert(
+        "untracked_sockets".to_string(),
+        JsonValue::Array(
+            record
+                .untracked_sockets
+                .iter()
+                .cloned()
+                .map(JsonValue::String)
+                .collect(),
+        ),
+    );
     JsonValue::Object(value)
 }
 
@@ -463,6 +481,7 @@ fn parse_snapshot_record(root: &BTreeMap<String, JsonValue>) -> AppResult<Snapsh
         untracked_files: optional_string_array(root, "untracked_files")?,
         untracked_directories: optional_string_array(root, "untracked_directories")?,
         untracked_fifos: optional_string_array(root, "untracked_fifos")?,
+        untracked_sockets: optional_string_array(root, "untracked_sockets")?,
         untracked_symlinks: optional_untracked_symlinks(root)?,
         tracked_only: matches!(root.get("tracked_only"), Some(JsonValue::Bool(true))),
         runtime_thread_id: optional_safe_string(root, "runtime_thread_id")?,
@@ -739,6 +758,20 @@ fn capture_untracked_fifos(_git_root: &Path, _store_root: &Path) -> AppResult<Ve
 }
 
 #[cfg(unix)]
+fn capture_untracked_sockets(git_root: &Path, store_root: &Path) -> AppResult<Vec<String>> {
+    let store_prefix = store_root_relative_prefix(git_root, store_root);
+    let mut sockets = Vec::new();
+    collect_untracked_sockets(git_root, git_root, store_prefix.as_deref(), &mut sockets)?;
+    normalize_file_list(&mut sockets);
+    Ok(sockets)
+}
+
+#[cfg(not(unix))]
+fn capture_untracked_sockets(_git_root: &Path, _store_root: &Path) -> AppResult<Vec<String>> {
+    Ok(Vec::new())
+}
+
+#[cfg(unix)]
 fn collect_untracked_fifos(
     git_root: &Path,
     current: &Path,
@@ -766,6 +799,39 @@ fn collect_untracked_fifos(
         } else if file_type.is_fifo() && !is_git_tracked_path(git_root, &relative)? {
             safe_relative_path(&relative)?;
             fifos.push(relative);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn collect_untracked_sockets(
+    git_root: &Path,
+    current: &Path,
+    store_prefix: Option<&str>,
+    sockets: &mut Vec<String>,
+) -> AppResult<()> {
+    use std::os::unix::fs::FileTypeExt;
+
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        let Some(relative) = relative_git_path(git_root, &path)? else {
+            continue;
+        };
+        if is_rollback_internal_path(&relative, store_prefix)
+            || is_git_internal_path(&relative)
+            || is_git_ignored_path(git_root, &relative)?
+        {
+            continue;
+        }
+        let file_type = metadata.file_type();
+        if file_type.is_dir() && !file_type.is_symlink() {
+            collect_untracked_sockets(git_root, &path, store_prefix, sockets)?;
+        } else if file_type.is_socket() && !is_git_tracked_path(git_root, &relative)? {
+            safe_relative_path(&relative)?;
+            sockets.push(relative);
         }
     }
     Ok(())
@@ -887,6 +953,7 @@ fn restore_untracked_entries(
     files: &[String],
     directories: &[String],
     fifos: &[String],
+    sockets: &[String],
     symlinks: &[UntrackedSymlinkRecord],
 ) -> AppResult<()> {
     for directory in directories {
@@ -923,6 +990,19 @@ fn restore_untracked_entries(
         create_fifo(&target).map_err(|error| {
             app_error(format!(
                 "failed to restore untracked FIFO `{fifo}`: {error}"
+            ))
+        })?;
+    }
+    for socket in sockets {
+        let relative = safe_relative_path(socket)?;
+        let target = git_root.join(&relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        remove_existing_restore_target(&target)?;
+        create_socket(&target).map_err(|error| {
+            app_error(format!(
+                "failed to restore untracked socket `{socket}`: {error}"
             ))
         })?;
     }
@@ -1030,6 +1110,19 @@ fn create_fifo(target: &Path) -> AppResult<()> {
 #[cfg(not(unix))]
 fn create_fifo(_target: &Path) -> AppResult<()> {
     Err(app_error("FIFO restore is only supported on Unix"))
+}
+
+#[cfg(unix)]
+fn create_socket(target: &Path) -> AppResult<()> {
+    let listener = std::os::unix::net::UnixListener::bind(target)
+        .map_err(|error| app_error(format!("could not bind Unix socket: {error}")))?;
+    drop(listener);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_socket(_target: &Path) -> AppResult<()> {
+    Err(app_error("Unix socket restore is only supported on Unix"))
 }
 
 fn safe_relative_path(path: &str) -> AppResult<PathBuf> {
@@ -1532,6 +1625,60 @@ mod tests {
         assert_eq!(loaded.untracked_fifos, snapshot.untracked_fifos);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_restore_round_trip_untracked_sockets() {
+        use std::os::unix::fs::FileTypeExt;
+        use std::os::unix::net::UnixListener;
+
+        let repo = temp_root("socket");
+        fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init"]);
+        fs::write(repo.join("src.txt"), "base\n").unwrap();
+        run_git(&repo, &["add", "src.txt"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+
+        fs::create_dir_all(repo.join("sockets")).unwrap();
+        let socket_path = repo.join("sockets/agent.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let store = RollbackStore::new(repo.join(".dscode/rollback"));
+        let snapshot = store
+            .create_snapshot(&repo, "capture socket".to_string())
+            .unwrap();
+
+        assert!(!snapshot.tracked_only);
+        assert!(snapshot.untracked_files.is_empty());
+        assert_eq!(
+            snapshot.untracked_sockets,
+            vec!["sockets/agent.sock".to_string()]
+        );
+
+        drop(listener);
+        fs::remove_file(&socket_path).unwrap();
+        fs::write(&socket_path, "later file\n").unwrap();
+        let plan = store.restore_snapshot(&snapshot.id, true).unwrap();
+
+        assert!(fs::symlink_metadata(&socket_path)
+            .unwrap()
+            .file_type()
+            .is_socket());
+        assert_eq!(plan.changed_files, vec!["sockets/agent.sock".to_string()]);
+
+        let loaded = store.load_snapshot(&snapshot.id).unwrap();
+        assert_eq!(loaded.untracked_sockets, snapshot.untracked_sockets);
+    }
+
     #[test]
     fn legacy_snapshot_manifest_without_symlinks_still_parses() {
         let manifest = r#"{
@@ -1552,6 +1699,7 @@ mod tests {
         assert!(record.untracked_files.is_empty());
         assert!(record.untracked_directories.is_empty());
         assert!(record.untracked_fifos.is_empty());
+        assert!(record.untracked_sockets.is_empty());
         assert!(record.untracked_symlinks.is_empty());
     }
 
