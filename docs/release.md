@@ -193,6 +193,11 @@ deepseek update publish-status \
 `--strict` fails when `NPM_TOKEN`/`NODE_AUTH_TOKEN`,
 `HOMEBREW_TAP_REPOSITORY`, `HOMEBREW_TAP_TOKEN`, platform release archives,
 non-placeholder `.sha256` files, or platform npm package tarballs are missing.
+The text and JSON output also include a `public_install` audit for source
+checkout, GitHub Release, npm, Homebrew, GHCR, and Cargo registry policy. Treat
+`ready_to_publish` as local readiness only: do not advertise npm, Homebrew,
+Docker, or release-binary install paths until the corresponding verification
+command in that audit succeeds against the live public channel.
 
 When the workflow runs from a `v*` tag, it also creates or updates the matching
 GitHub Release and uploads every platform archive plus checksum file as release

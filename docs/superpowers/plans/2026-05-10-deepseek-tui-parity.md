@@ -1,7 +1,7 @@
 # DeepSeek-TUI Parity Plan
 
 **Status:** active
-**Source comparison:** `Hmbown/DeepSeek-TUI` cloned to `/tmp/deepseek-tui-compare-20260512`, HEAD `3382242`.
+**Source comparison:** `Hmbown/DeepSeek-TUI` refreshed at `/tmp/deepseek-tui-compare-20260514`, HEAD `81e4b93cc9df55de47489238078e255a563d044b`.
 **Current repo:** `willamhou/DeepSeekCode` (`PUBLIC` after 2026-05-12 repo publication), release command `deepseek`, compatibility alias `dscode`.
 
 ## Objective
@@ -10,7 +10,7 @@ Move DeepseekCode from a regression-gated CLI code agent toward a full terminal 
 
 ## Baseline Gap
 
-DeepSeek-TUI is a 14-crate Rust workspace with a dedicated `deepseek` dispatcher, `deepseek-tui` runtime, TUI state machine, HTTP/SSE runtime API, MCP server mode, SQLite-backed durable state, LSP diagnostics, keybindings, package wrappers, and release automation. Its Rust source under `crates/` is about `196k` lines.
+DeepSeek-TUI is a multi-crate Rust workspace with a dedicated `deepseek` dispatcher, `deepseek-tui` runtime, TUI state machine, HTTP/SSE runtime API, MCP server mode, SQLite-backed durable state, LSP diagnostics, keybindings, package wrappers, release automation, and newer app-server/web distribution surfaces. Its current public install story includes npm, crates.io, Homebrew, GitHub Release binaries, and GHCR Docker references.
 
 DeepseekCode is currently a mostly single-crate CLI with a strong deterministic test/benchmark/dogfood surface and about `36.8k` lines under `src/`. Its CLI core is relatively close, but the terminal product surface is still incomplete.
 
@@ -819,6 +819,11 @@ Landed first slice:
   release archives, and non-placeholder `.sha256` files when artifact
   directories are supplied; `--strict` fails on blocked or skipped checks and
   `--json` emits `deepseek.publish_status.v1` for CI/release scripts
+- `deepseek update publish-status` now also emits a public install audit for
+  source checkout, GitHub Release, npm, Homebrew, GHCR, and Cargo registry
+  policy, with explicit `source_available`, `ready_to_publish`,
+  `requires_publish`, and `source_only_policy` states plus verification commands
+  for live release evidence
 - `deepseek pr live-status <pr> --json` emits
   `deepseek.pr_live_status.v1`, making live PR fixture readiness scriptable
   without posting GitHub comments
@@ -827,6 +832,8 @@ Remaining:
 
 - Actual published npm package with uploaded platform binaries
 - Published Homebrew tap with real release asset SHA-256 values
+- Tagged GitHub Release and GHCR image evidence for the public binary/container
+  install channels
 
 ## Completion Audit Gate
 

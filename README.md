@@ -20,10 +20,11 @@ This repository is an active workbench, not a polished hosted product.
 - The runtime contract is file-backed first, with an HTTP/SSE mode for local
   supervisors and TUI clients.
 - Compared with `DeepSeek-TUI`, the common terminal/runtime workflow is now
-  substantially closer. The remaining gap is concentrated in hard
-  infrastructure edges: cross-process shell takeover, stateful RLM daemon
-  lifecycle polish, platform-specific rollback fidelity, and external
-  publishing or write-fixture validation.
+  substantially closer, including live RLM runtime events and ACP RLM
+  subscriptions. The remaining gap is concentrated in hard infrastructure
+  edges: cross-process shell takeover, platform-specific rollback fidelity,
+  public binary/npm/Homebrew/GHCR release evidence, and external write-fixture
+  validation.
 
 ## Feature Surface
 
@@ -41,7 +42,8 @@ This repository is an active workbench, not a polished hosted product.
   cancellation, recovery, stopping, and manual run/drain controls
 - HTTP runtime with health, session, thread, task, event, usage, diagnostics,
   automation, and SSE stream endpoints
-- ACP stdio adapter for editor clients, including durable session list/load
+- ACP stdio adapter for editor clients, including durable session list/load and
+  RLM event subscriptions
 - LSP-backed and fallback diagnostics runners with JSON/JSONL watch output
 - Git rollback snapshots for TUI-started turns
 - MCP client inventory/tooling/prompts/resources/templates/config CRUD, a full-width TUI MCP manager
@@ -54,7 +56,15 @@ This repository is an active workbench, not a polished hosted product.
 
 ## Quick Start
 
-Install from a local checkout:
+Install from the public source repository:
+
+```bash
+cargo install --git https://github.com/willamhou/DeepSeekCode.git --locked
+deepseek version
+deepseek doctor --json
+```
+
+Or install from a local checkout:
 
 ```bash
 cargo install --path .
@@ -105,6 +115,9 @@ deepseek update publish-status
 deepseek update publish-status --dist dist-assets --npm-dist npm-dist --strict
 deepseek update publish-status --json
 ```
+
+`publish-status` also reports the public install channels that are source-only,
+ready to publish, or still missing live publication evidence.
 
 ## Development Checks
 

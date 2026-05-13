@@ -183,6 +183,7 @@ fn run_publish_status(args: &UpdatePublishStatusArgs) -> AppResult<()> {
     } else {
         println!("DeepSeekCode publish status");
         println!("  version: {}", report.version);
+        println!("  repository: {}", report.repository);
         for check in &report.checks {
             println!(
                 "  {}: {} ({})",
@@ -191,9 +192,21 @@ fn run_publish_status(args: &UpdatePublishStatusArgs) -> AppResult<()> {
                 check.detail
             );
         }
+        println!("  public_install:");
+        for check in &report.public_install {
+            println!(
+                "    {}: {} ({})",
+                check.name,
+                check.status.label(),
+                check.detail
+            );
+            println!("      verify: {}", check.verify);
+        }
         println!("  not_ready: {}", report.not_ready_count());
         if report.not_ready_count() == 0 {
-            println!("  next: tag release can publish npm and Homebrew when workflow gates pass");
+            println!(
+                "  next: tag release can publish npm, Homebrew, GHCR, and GitHub Release assets when workflow gates pass"
+            );
         } else {
             println!("  next: configure missing secrets/assets, then rerun with --strict");
         }
@@ -222,19 +235,37 @@ fn render_publish_status_json(report: &PublishStatusReport, strict: bool) -> Str
         })
         .collect::<Vec<_>>()
         .join(",");
+    let public_install = report
+        .public_install
+        .iter()
+        .map(|check| {
+            format!(
+                "{{\"name\":\"{}\",\"status\":\"{}\",\"detail\":\"{}\",\"verify\":\"{}\"}}",
+                json_escape(check.name),
+                check.status.label(),
+                json_escape(&check.detail),
+                json_escape(&check.verify)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
-        "{{\"kind\":\"deepseek.publish_status.v1\",\"version\":\"{}\",\"strict\":{},\"not_ready\":{},\"checks\":[{}]}}",
+        "{{\"kind\":\"deepseek.publish_status.v1\",\"version\":\"{}\",\"repository\":\"{}\",\"strict\":{},\"not_ready\":{},\"checks\":[{}],\"public_install\":[{}]}}",
         json_escape(&report.version),
+        json_escape(&report.repository),
         strict,
         report.not_ready_count(),
-        checks
+        checks,
+        public_install
     )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PublishStatusReport {
     version: String,
+    repository: String,
     checks: Vec<PublishStatusCheck>,
+    public_install: Vec<PublicInstallCheck>,
 }
 
 impl PublishStatusReport {
@@ -300,6 +331,49 @@ impl PublishStatus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublicInstallCheck {
+    name: &'static str,
+    status: PublicInstallStatus,
+    detail: String,
+    verify: String,
+}
+
+impl PublicInstallCheck {
+    fn new(
+        name: &'static str,
+        status: PublicInstallStatus,
+        detail: impl Into<String>,
+        verify: impl Into<String>,
+    ) -> Self {
+        Self {
+            name,
+            status,
+            detail: detail.into(),
+            verify: verify.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicInstallStatus {
+    SourceAvailable,
+    ReadyToPublish,
+    RequiresPublish,
+    SourceOnlyPolicy,
+}
+
+impl PublicInstallStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::SourceAvailable => "source_available",
+            Self::ReadyToPublish => "ready_to_publish",
+            Self::RequiresPublish => "requires_publish",
+            Self::SourceOnlyPolicy => "source_only_policy",
+        }
+    }
+}
+
 fn build_publish_status_report(
     repo: &Path,
     args: &UpdatePublishStatusArgs,
@@ -308,6 +382,7 @@ fn build_publish_status_report(
     let cargo_toml = std::fs::read_to_string(repo.join("Cargo.toml"))?;
     let version = toml_string_value(&cargo_toml, "version")
         .ok_or_else(|| app_error("Cargo.toml package version was not found"))?;
+    let repository = repository_slug(&cargo_toml, env).unwrap_or_else(|| "owner/repo".to_string());
 
     let mut checks = Vec::new();
     checks.push(cargo_registry_status(&cargo_toml, env));
@@ -317,8 +392,128 @@ fn build_publish_status_report(
     checks.push(release_asset_status(args.dist.as_deref()));
     checks.push(homebrew_template_status(repo, &version));
     checks.push(homebrew_tap_status(env));
+    let public_install =
+        build_public_install_checks(&repository, &version, &cargo_toml, &checks, env);
 
-    Ok(PublishStatusReport { version, checks })
+    Ok(PublishStatusReport {
+        version,
+        repository,
+        checks,
+        public_install,
+    })
+}
+
+fn build_public_install_checks(
+    repository: &str,
+    version: &str,
+    cargo_toml: &str,
+    checks: &[PublishStatusCheck],
+    env: &impl Fn(&str) -> Option<String>,
+) -> Vec<PublicInstallCheck> {
+    let release_ready = publish_check_ready(checks, "release_assets");
+    let npm_ready = publish_check_ready(checks, "npm_metadata")
+        && publish_check_ready(checks, "npm_token")
+        && publish_check_ready(checks, "npm_artifacts");
+    let homebrew_ready = publish_check_ready(checks, "homebrew_formula")
+        && publish_check_ready(checks, "homebrew_tap")
+        && release_ready;
+    let cargo_source_only = toml_bool_value(cargo_toml, "publish") == Some(false);
+    let tag = format!("v{version}");
+    let repository_url = format!("https://github.com/{repository}");
+    let ghcr_image = format!("ghcr.io/{}:{version}", repository.to_ascii_lowercase());
+    let homebrew_tap =
+        env("HOMEBREW_TAP_REPOSITORY").unwrap_or_else(|| "<tap-owner/tap-repo>".to_string());
+
+    vec![
+        PublicInstallCheck::new(
+            "source_checkout",
+            PublicInstallStatus::SourceAvailable,
+            "repository metadata provides the source install path; verify GitHub visibility before announcing it",
+            format!("git ls-remote {repository_url}.git HEAD"),
+        ),
+        PublicInstallCheck::new(
+            "github_release",
+            if release_ready {
+                PublicInstallStatus::ReadyToPublish
+            } else {
+                PublicInstallStatus::RequiresPublish
+            },
+            if release_ready {
+                "local release archives and checksums are present; tag workflow still needs live release verification"
+            } else {
+                "public binary release evidence is not verified; pass --dist after the release matrix assets are available"
+            },
+            format!("gh release view {tag} --repo {repository}"),
+        ),
+        PublicInstallCheck::new(
+            "npm",
+            if npm_ready {
+                PublicInstallStatus::ReadyToPublish
+            } else {
+                PublicInstallStatus::RequiresPublish
+            },
+            if npm_ready {
+                "npm metadata, registry token, and platform tarballs are ready; publish before advertising npm install"
+            } else {
+                "npm registry availability is not verified; configure NPM_TOKEN/NODE_AUTH_TOKEN and pass --npm-dist"
+            },
+            "npm view @deepseek-code/cli version",
+        ),
+        PublicInstallCheck::new(
+            "homebrew",
+            if homebrew_ready {
+                PublicInstallStatus::ReadyToPublish
+            } else {
+                PublicInstallStatus::RequiresPublish
+            },
+            if homebrew_ready {
+                "tap configuration, formula template, and release checksums are ready; publish the tap before advertising brew install"
+            } else {
+                "Homebrew tap availability is not verified; configure HOMEBREW_TAP_REPOSITORY/HOMEBREW_TAP_TOKEN and pass --dist"
+            },
+            format!("brew tap {homebrew_tap} && brew install deepseek"),
+        ),
+        PublicInstallCheck::new(
+            "ghcr",
+            if release_ready {
+                PublicInstallStatus::ReadyToPublish
+            } else {
+                PublicInstallStatus::RequiresPublish
+            },
+            if release_ready {
+                "release assets are present locally; tag workflow must still publish and verify the GHCR image"
+            } else {
+                "GHCR image availability is not verified; publish from a tag workflow before advertising docker pull"
+            },
+            format!("docker pull {ghcr_image}"),
+        ),
+        PublicInstallCheck::new(
+            "cargo_registry",
+            if cargo_source_only {
+                PublicInstallStatus::SourceOnlyPolicy
+            } else if publish_check_ready(checks, "cargo_registry") {
+                PublicInstallStatus::ReadyToPublish
+            } else {
+                PublicInstallStatus::RequiresPublish
+            },
+            if cargo_source_only {
+                "Cargo.toml publish=false; Cargo registry distribution is intentionally source-build/package-only"
+            } else {
+                "Cargo registry publish policy requires token and ownership verification before advertising cargo install"
+            },
+            if cargo_source_only {
+                format!("cargo install --git {repository_url}.git --locked")
+            } else {
+                "cargo search deepseek-code".to_string()
+            },
+        ),
+    ]
+}
+
+fn publish_check_ready(checks: &[PublishStatusCheck], name: &str) -> bool {
+    checks
+        .iter()
+        .any(|check| check.name == name && check.status.is_ready())
 }
 
 fn cargo_registry_status(
@@ -571,6 +766,32 @@ fn env_value(name: &str) -> Option<String> {
     std::env::var_os(name)
         .map(|value| value.to_string_lossy().trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn repository_slug(cargo_toml: &str, env: &impl Fn(&str) -> Option<String>) -> Option<String> {
+    env("GITHUB_REPOSITORY")
+        .filter(|value| is_owner_repo(value))
+        .or_else(|| {
+            toml_string_value(cargo_toml, "repository")
+                .and_then(|value| repository_slug_from_url(&value))
+        })
+}
+
+fn repository_slug_from_url(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_end_matches('/');
+    let without_git = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    let candidate = without_git
+        .strip_prefix("https://github.com/")
+        .or_else(|| without_git.strip_prefix("http://github.com/"))
+        .or_else(|| without_git.strip_prefix("git@github.com:"))
+        .or_else(|| without_git.strip_prefix("ssh://git@github.com/"))
+        .unwrap_or(without_git);
+
+    if is_owner_repo(candidate) {
+        Some(candidate.to_string())
+    } else {
+        None
+    }
 }
 
 fn toml_string_value(content: &str, key: &str) -> Option<String> {
@@ -1296,6 +1517,23 @@ mod tests {
         assert_eq!(status_of(&report, "release_assets"), PublishStatus::Skipped);
         assert_eq!(status_of(&report, "homebrew_formula"), PublishStatus::Ready);
         assert_eq!(status_of(&report, "homebrew_tap"), PublishStatus::Blocked);
+        assert_eq!(report.repository, "willamhou/DeepSeekCode");
+        assert_eq!(
+            public_status_of(&report, "source_checkout"),
+            PublicInstallStatus::SourceAvailable
+        );
+        assert_eq!(
+            public_status_of(&report, "npm"),
+            PublicInstallStatus::RequiresPublish
+        );
+        assert_eq!(
+            public_status_of(&report, "homebrew"),
+            PublicInstallStatus::RequiresPublish
+        );
+        assert_eq!(
+            public_status_of(&report, "cargo_registry"),
+            PublicInstallStatus::SourceOnlyPolicy
+        );
         assert_eq!(report.not_ready_count(), 4);
     }
 
@@ -1352,6 +1590,18 @@ mod tests {
         assert_eq!(status_of(&report, "release_assets"), PublishStatus::Ready);
         assert_eq!(status_of(&report, "npm_artifacts"), PublishStatus::Ready);
         assert_eq!(status_of(&report, "homebrew_tap"), PublishStatus::Ready);
+        assert_eq!(
+            public_status_of(&report, "github_release"),
+            PublicInstallStatus::ReadyToPublish
+        );
+        assert_eq!(
+            public_status_of(&report, "npm"),
+            PublicInstallStatus::ReadyToPublish
+        );
+        assert_eq!(
+            public_status_of(&report, "homebrew"),
+            PublicInstallStatus::ReadyToPublish
+        );
     }
 
     #[test]
@@ -1368,6 +1618,9 @@ mod tests {
         assert!(json.contains("\"name\":\"npm_token\""));
         assert!(json.contains("\"status\":\"blocked\""));
         assert!(json.contains("NPM_TOKEN/NODE_AUTH_TOKEN is missing"));
+        assert!(json.contains("\"public_install\""));
+        assert!(json.contains("\"status\":\"requires_publish\""));
+        assert!(json.contains("npm view @deepseek-code/cli version"));
     }
 
     #[test]
@@ -1594,6 +1847,15 @@ esac
             .iter()
             .find(|check| check.name == name)
             .unwrap_or_else(|| panic!("missing check {name}"))
+            .status
+    }
+
+    fn public_status_of(report: &PublishStatusReport, name: &str) -> PublicInstallStatus {
+        report
+            .public_install
+            .iter()
+            .find(|check| check.name == name)
+            .unwrap_or_else(|| panic!("missing public install check {name}"))
             .status
     }
 }
