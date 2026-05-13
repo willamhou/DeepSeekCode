@@ -594,6 +594,9 @@ Landed first slice:
   `image_analyze` only with trusted side effects or durable
   `permission_request kind=mcp` approvals, matching the token/network safety
   contract used by model-running RLM tools
+- MCP and ACP tool bridges now expose persistent note/memory helpers `note` and
+  enabled `remember` only with durable `permission_request kind=write`
+  approvals, keeping note and memory file appends out of the default surface
 - ACP loaded-session tool calls now create an assistant runtime turn with
   `tool_call` and `tool_result` items, and side-effect permission requests are
   linked to that same turn for auditability

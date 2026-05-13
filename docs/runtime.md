@@ -346,6 +346,8 @@ Exposed tools:
 | `llm_query_batched` | Alias for `rlm_batch` |
 | `apply_patch` | Hidden by default; exposed only with durable runtime approvals and applies unified diffs through the existing patch validator |
 | `write_file` | Agent-visible write tool; hidden in MCP/ACP by default and exposed there only with durable runtime approvals; writes UTF-8 text to safe relative paths |
+| `note` | Hidden by default; exposed only with durable runtime approvals and appends to the configured notes file |
+| `remember` | Hidden by default; exposed only when memory is enabled and durable runtime approvals are available; appends to the configured memory file |
 | `edit_file` | Agent-visible write tool for exact search/replace in one UTF-8 file under the workspace |
 | `fim_edit` | Agent-visible DeepSeek-TUI-compatible Fill-in-the-Middle file edit tool using prefix/suffix anchors |
 | `delete_file` | Hidden by default; exposed only with durable runtime approvals and deletes one regular file at a safe relative path under the MCP workspace |
@@ -378,9 +380,9 @@ Exposed tools:
 
 `image_analyze` is hidden by default because it can spend model tokens and make
 network calls to an external vision API; durable MCP mode routes it through
-`permission_request kind=mcp` before execution. `note` and `remember` remain
-agent-visible only and are kept out of default MCP/ACP because they append
-durable note or memory files.
+`permission_request kind=mcp` before execution. `note` and `remember` are
+hidden by default because they append durable note or memory files; durable MCP
+mode routes them through `permission_request kind=write` before execution.
 
 Exposed MCP prompts:
 

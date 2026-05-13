@@ -19,7 +19,8 @@ through MCP/ACP. Follow-up read-only helper slices also expose `review`,
 `image_ocr`, inline `pandoc_convert`, `load_skill`, `request_user_input`, and
 `notify`; `pandoc_convert output_path` now requires durable write approval.
 Model-running vision helper `image_analyze` is now MCP/ACP-visible only in
-trusted side-effect or durable approval modes.
+trusted side-effect or durable approval modes. Persistent `note` and enabled
+`remember` helpers are now MCP/ACP-visible only in durable write-approval mode.
 
 ## Spec
 

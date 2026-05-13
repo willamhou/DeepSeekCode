@@ -37,6 +37,7 @@ use crate::tools::github::{
     GithubCloseIssueTool, GithubCommentTool, GithubIssueContextTool, GithubPrContextTool,
 };
 use crate::tools::list_files::{ListDirTool, ListFilesTool};
+use crate::tools::notes::{NoteTool, RememberTool};
 use crate::tools::notify::NotifyTool;
 use crate::tools::project_map::ProjectMapTool;
 use crate::tools::read_file::ReadFileTool;
@@ -773,6 +774,22 @@ fn execute_mcp_tool(
         "load_skill" => LoadSkillTool::new(state.config.clone()).execute(input)?,
         "request_user_input" => RequestUserInputTool.execute(input)?,
         "notify" => NotifyTool.execute(input)?,
+        "note" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `note` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route note writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_note(input, state);
+        }
+        "remember" => {
+            if !mcp_write_tools_enabled(state) || !state.config.memory.enabled {
+                return Err(app_error(
+                    "MCP write tool `remember` is disabled; enable memory and set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route memory writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_remember(input, state);
+        }
         "exec_shell_list" => ExecShellListTool.execute(input)?,
         "exec_shell_show" => ExecShellShowTool.execute(input)?,
         "exec_shell_wait" => ExecShellWaitTool {
@@ -2379,6 +2396,52 @@ fn execute_mcp_image_analyze(input: ToolInput, state: &McpStdioState) -> AppResu
     Ok(ImageAnalyzeTool::new(&state.config).execute(input)?.summary)
 }
 
+fn execute_mcp_note(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    let Some(thread_id) = state.approval_thread_id.as_deref() else {
+        return Err(app_error(
+            "MCP write tool `note` is disabled; durable runtime approvals are required",
+        ));
+    };
+    if state.approval.require_write_confirmation && !env_flag("DSCODE_AUTO_APPROVE_WRITES") {
+        let target = format!("note {}", state.config.memory.notes_path().display());
+        let approval = state.store.append_permission_request(
+            thread_id,
+            state.approval_turn_id.as_deref(),
+            "note".to_string(),
+            "write".to_string(),
+            target,
+            input.args.clone(),
+        )?;
+        wait_for_mcp_permission_response(state, thread_id, &approval, "note")?;
+    }
+    Ok(NoteTool::new(state.config.memory.notes_path())
+        .execute(input)?
+        .summary)
+}
+
+fn execute_mcp_remember(input: ToolInput, state: &McpStdioState) -> AppResult<String> {
+    let Some(thread_id) = state.approval_thread_id.as_deref() else {
+        return Err(app_error(
+            "MCP write tool `remember` is disabled; durable runtime approvals are required",
+        ));
+    };
+    if state.approval.require_write_confirmation && !env_flag("DSCODE_AUTO_APPROVE_WRITES") {
+        let target = format!("remember {}", state.config.memory.memory_path().display());
+        let approval = state.store.append_permission_request(
+            thread_id,
+            state.approval_turn_id.as_deref(),
+            "remember".to_string(),
+            "write".to_string(),
+            target,
+            input.args.clone(),
+        )?;
+        wait_for_mcp_permission_response(state, thread_id, &approval, "remember")?;
+    }
+    Ok(RememberTool::new(state.config.memory.memory_path())
+        .execute(input)?
+        .summary)
+}
+
 fn mcp_model_rlm_target(name: &str, input: &ToolInput) -> String {
     input
         .get("task")
@@ -3407,6 +3470,30 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
                 &["path", "content"],
             ),
         ));
+        tools.push(mcp_tool_definition(
+            "note",
+            "Append a persistent maintainer or agent note to the configured notes file. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("content", string_property("Note content to append.")),
+                    ("note", string_property("Alias for content.")),
+                ],
+                &[],
+            ),
+        ));
+        if state.config.memory.enabled {
+            tools.push(mcp_tool_definition(
+                "remember",
+                "Append a durable user-memory note to the configured memory file. Requires durable runtime approvals and enabled memory.",
+                mcp_schema(
+                    vec![
+                        ("note", string_property("Single-sentence durable note to remember.")),
+                        ("content", string_property("Alias for note.")),
+                    ],
+                    &[],
+                ),
+            ));
+        }
         tools.push(mcp_tool_definition(
             "edit_file",
             "Replace exact text in one UTF-8 file under the MCP workspace. Requires durable runtime approvals.",
@@ -5020,7 +5107,8 @@ fn acp_tool_kind(name: &str) -> &'static str {
         | "recall_archive"
         | "load_skill"
         | "image_ocr" => "read",
-        "write_file" | "edit_file" | "fim_edit" | "apply_patch" | "revert_turn" => "edit",
+        "write_file" | "edit_file" | "fim_edit" | "apply_patch" | "revert_turn" | "note"
+        | "remember" => "edit",
         "delete_file" => "delete",
         "copy_file" | "move_file" => "move",
         "search_text"
@@ -7494,6 +7582,8 @@ mod tests {
         assert!(!rendered.contains(r#""name":"run_shell""#));
         assert!(!rendered.contains(r#""name":"run_tests""#));
         assert!(!rendered.contains(r#""name":"image_analyze""#));
+        assert!(!rendered.contains(r#""name":"note""#));
+        assert!(!rendered.contains(r#""name":"remember""#));
     }
 
     #[test]
@@ -7892,6 +7982,92 @@ shell_allowlist = ["cargo test"]
     }
 
     #[test]
+    fn mcp_tools_call_rejects_memory_writes_until_durable_approvals() {
+        let state = mcp_state("mcp-memory-writes-disabled");
+        let note_response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":50,"method":"tools/call","params":{"name":"note","arguments":{"content":"keep this"}}}"#,
+            &state,
+        )
+        .unwrap();
+        let note_rendered = json_value_to_string(&note_response);
+        assert!(note_rendered.contains("MCP write tool `note` is disabled"));
+        assert!(note_rendered.contains(r#""isError":true"#));
+
+        let remember_response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":51,"method":"tools/call","params":{"name":"remember","arguments":{"note":"prefer short tests"}}}"#,
+            &state,
+        )
+        .unwrap();
+        let remember_rendered = json_value_to_string(&remember_response);
+        assert!(remember_rendered.contains("MCP write tool `remember` is disabled"));
+        assert!(remember_rendered.contains(r#""isError":true"#));
+    }
+
+    #[test]
+    fn mcp_tools_call_executes_memory_writes_after_runtime_approval() {
+        let mut state = mcp_state_with_durable_approvals("mcp-memory-writes-approval");
+        let thread_id = state.approval_thread_id.clone().unwrap();
+        let notes_path = state.workspace.join("notes.md");
+        let memory_path = state.workspace.join("memory.md");
+        state.config.memory.enabled = true;
+        state.config.memory.notes_path = notes_path.display().to_string();
+        state.config.memory.memory_path = memory_path.display().to_string();
+
+        let list_response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":52,"method":"tools/list","params":{}}"#,
+            &state,
+        )
+        .unwrap();
+        let list_rendered = json_value_to_string(&list_response);
+        assert!(list_rendered.contains(r#""name":"note""#));
+        assert!(list_rendered.contains(r#""name":"remember""#));
+
+        let responder =
+            spawn_mcp_permission_responder(state.store.clone(), thread_id.clone(), "approved");
+        let note_response = mcp_response_for_message(
+            r#"{"jsonrpc":"2.0","id":53,"method":"tools/call","params":{"name":"note","arguments":{"content":"record release decision"}}}"#,
+            &state,
+        )
+        .unwrap();
+        responder.join().unwrap();
+        let note_text = mcp_response_text(&note_response);
+        assert!(note_text.contains("Note appended"));
+        assert!(fs::read_to_string(&notes_path)
+            .unwrap()
+            .contains("record release decision"));
+
+        let responder =
+            spawn_mcp_permission_responder(state.store.clone(), thread_id.clone(), "approved");
+        let remember_response = mcp_response_for_message(
+            r##"{"jsonrpc":"2.0","id":54,"method":"tools/call","params":{"name":"remember","arguments":{"note":"# prefer cargo fmt"}}}"##,
+            &state,
+        )
+        .unwrap();
+        responder.join().unwrap();
+        let remember_text = mcp_response_text(&remember_response);
+        assert!(remember_text.contains("remembered: prefer cargo fmt"));
+        let memory_content = fs::read_to_string(&memory_path).unwrap();
+        assert!(memory_content.contains("prefer cargo fmt"));
+        assert!(!memory_content.contains("# prefer cargo fmt"));
+
+        let events = state.store.read_events(&thread_id, 0).unwrap();
+        assert!(events.iter().any(|event| {
+            event.kind == "permission_request"
+                && json_as_object(&event.payload).is_some_and(|payload| {
+                    payload.get("tool").and_then(json_as_string) == Some("note")
+                        && payload.get("kind").and_then(json_as_string) == Some("write")
+                })
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == "permission_request"
+                && json_as_object(&event.payload).is_some_and(|payload| {
+                    payload.get("tool").and_then(json_as_string) == Some("remember")
+                        && payload.get("kind").and_then(json_as_string) == Some("write")
+                })
+        }));
+    }
+
+    #[test]
     fn mcp_tools_call_rejects_run_shell_until_side_effects_enabled() {
         let state = mcp_state("mcp-run-shell-disabled");
         let response = mcp_response_for_message(
@@ -8049,6 +8225,8 @@ shell_allowlist = ["cargo test"]
         let rendered = json_value_to_string(&response);
         assert!(rendered.contains(r#""name":"apply_patch""#));
         assert!(rendered.contains(r#""name":"write_file""#));
+        assert!(rendered.contains(r#""name":"note""#));
+        assert!(!rendered.contains(r#""name":"remember""#));
         assert!(rendered.contains(r#""name":"edit_file""#));
         assert!(rendered.contains(r#""name":"delete_file""#));
         assert!(rendered.contains(r#""name":"copy_file""#));
@@ -9431,6 +9609,8 @@ shell_allowlist = ["cargo test"]
         };
         let rendered_list = json_value_to_string(&list_responses[0]);
         assert!(rendered_list.contains(r#""name":"write_file""#));
+        assert!(rendered_list.contains(r#""name":"note""#));
+        assert!(!rendered_list.contains(r#""name":"remember""#));
         assert!(rendered_list.contains(r#""name":"edit_file""#));
         assert!(rendered_list.contains(r#""name":"apply_patch""#));
         assert!(rendered_list.contains(r#""name":"image_analyze""#));

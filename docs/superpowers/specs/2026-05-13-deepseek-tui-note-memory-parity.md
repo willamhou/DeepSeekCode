@@ -67,6 +67,8 @@ no agent-visible persistent note or user-memory tool.
   runtime registry.
 - Added static model schemas for `note` and `remember`.
 - Documented the tools and config in `docs/runtime.md` and the parity plan.
+- Follow-up MCP work exposes `note` and enabled `remember` only in durable
+  write-approval mode because they append persistent files.
 
 ## 验证
 

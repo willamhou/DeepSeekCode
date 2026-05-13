@@ -44,5 +44,6 @@ as MCP-visible even though it still needs a model-token and network contract.
 - ACP inherits all three helpers through its session-scoped MCP adapter.
 - The MCP runtime table no longer claims `image_analyze` is default-visible.
 
-Follow-up vision helper work now exposes `image_analyze` only in trusted
-side-effect or durable MCP approval modes.
+Follow-up work now exposes `image_analyze` only in trusted side-effect or
+durable MCP approval modes, and exposes durable note/memory writes only through
+MCP write approvals.
