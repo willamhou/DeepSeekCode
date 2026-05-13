@@ -2050,6 +2050,7 @@ fn run_tui_agent_turn(
         TaskContext::new(prompt, None),
         AgentLoopOptions {
             emit_progress: false,
+            initial_recent_steps: store.recent_reasoning_replay_entries(&thread_id, 3)?,
             persist_session: false,
             stream_events: Some(Box::new(stream_events)),
             approval_resolver: Some(resolver),

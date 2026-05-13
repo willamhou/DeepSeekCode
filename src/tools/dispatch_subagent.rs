@@ -162,6 +162,7 @@ fn run_subagent_request(
             AgentLoopOptions {
                 steps: request.steps,
                 initial_observations: Vec::new(),
+                initial_recent_steps: Vec::new(),
                 todos: Rc::new(RefCell::new(TodoList::default())),
                 subagent_depth: parent_depth + 1,
                 emit_progress: false,

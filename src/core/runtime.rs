@@ -601,6 +601,37 @@ impl RuntimeStore {
         Ok(records)
     }
 
+    pub fn recent_reasoning_replay_entries(
+        &self,
+        thread_id: &str,
+        limit: usize,
+    ) -> AppResult<Vec<String>> {
+        validate_record_id(thread_id)?;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut entries = self
+            .list_items(thread_id, None)?
+            .into_iter()
+            .rev()
+            .filter(|item| item.item_type == "reasoning" && !item.content.trim().is_empty())
+            .take(limit)
+            .map(|item| {
+                let turn = item
+                    .turn_id
+                    .as_deref()
+                    .map(|turn_id| format!(" turn={turn_id}"))
+                    .unwrap_or_default();
+                format!(
+                    "persisted reasoning{turn}: {}",
+                    compact_excerpt(&item.content, 600)
+                )
+            })
+            .collect::<Vec<_>>();
+        entries.reverse();
+        Ok(entries)
+    }
+
     pub fn compact_thread(
         &self,
         thread_id: &str,
@@ -2925,6 +2956,54 @@ mod tests {
             events.last().unwrap().turn_id.as_deref(),
             Some(compaction.summary_turn.id.as_str())
         );
+    }
+
+    #[test]
+    fn recent_reasoning_replay_entries_reads_persisted_reasoning_items() {
+        let store = RuntimeStore::new(temp_root("reasoning-replay"));
+        let thread = store
+            .create_thread(
+                "Reasoning replay".to_string(),
+                ".".to_string(),
+                "deepseek-v4-flash".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let old_turn = store
+            .append_turn(&thread.id, "assistant".to_string(), "old".to_string())
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                Some(&old_turn.id),
+                "reasoning".to_string(),
+                Some("assistant".to_string()),
+                "old reasoning".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        let latest_turn = store
+            .append_turn(&thread.id, "assistant".to_string(), "latest".to_string())
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                Some(&latest_turn.id),
+                "reasoning".to_string(),
+                Some("assistant".to_string()),
+                "latest reasoning\nwith details".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+
+        let entries = store
+            .recent_reasoning_replay_entries(&thread.id, 2)
+            .unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].contains("old reasoning"));
+        assert!(entries[1].contains("latest reasoning with details"));
+        assert!(entries[1].contains(&latest_turn.id));
     }
 
     #[test]

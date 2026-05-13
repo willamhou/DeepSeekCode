@@ -28,6 +28,7 @@ use crate::util::json::{json_value_to_string, JsonValue};
 pub struct AgentLoopOptions {
     pub steps: usize,
     pub initial_observations: Vec<Observation>,
+    pub initial_recent_steps: Vec<String>,
     pub todos: std::rc::Rc<std::cell::RefCell<crate::core::todos::TodoList>>,
     pub subagent_depth: usize,
     pub emit_progress: bool,
@@ -44,6 +45,7 @@ impl Default for AgentLoopOptions {
         Self {
             steps: 4,
             initial_observations: Vec::new(),
+            initial_recent_steps: Vec::new(),
             todos: std::rc::Rc::new(std::cell::RefCell::new(
                 crate::core::todos::TodoList::default(),
             )),
@@ -176,6 +178,7 @@ impl AgentLoop {
         let AgentLoopOptions {
             steps,
             initial_observations,
+            initial_recent_steps,
             todos,
             subagent_depth,
             emit_progress,
@@ -320,8 +323,14 @@ impl AgentLoop {
         // summaries so each step sees what it already considered. Without this,
         // dscode run loops on "I'll start by …" because the LLM never sees its own
         // progress (REPL has Repl.transcript; one-shot did not).
-        let mut recent_steps_log: Vec<String> = Vec::new();
         const RECENT_STEPS_KEEP: usize = 3;
+        let mut recent_steps_log = initial_recent_steps
+            .into_iter()
+            .filter(|entry| !entry.trim().is_empty())
+            .rev()
+            .take(RECENT_STEPS_KEEP)
+            .collect::<Vec<_>>();
+        recent_steps_log.reverse();
         // Phase 10c-2: repeat-call detection. Track fingerprints of the last
         // REPEAT_WINDOW tool calls. 2nd identical call appends a stuck-warning to the
         // observation summary; 3rd short-circuits with tool_failure forcing the LLM
@@ -2159,6 +2168,40 @@ mod cr1_regression_test {
         assert_eq!(captured[2].len(), 2);
         assert!(captured[2][0].contains("step ONE"));
         assert!(captured[2][1].contains("step TWO"));
+    }
+
+    #[test]
+    fn run_with_client_replays_initial_recent_steps_on_first_request() {
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("dummy".to_string(), None);
+        let client = ScriptedReplyClient {
+            replies: RefCell::new(vec!["done".to_string()]),
+            captured_recent_steps: RefCell::new(Vec::new()),
+        };
+        let _ = agent.run_with_client(
+            context,
+            AgentLoopOptions {
+                steps: 1,
+                emit_progress: false,
+                initial_recent_steps: vec![
+                    "older persisted reasoning".to_string(),
+                    "latest persisted reasoning".to_string(),
+                ],
+                ..AgentLoopOptions::default()
+            },
+            &client,
+        );
+
+        let captured = client.captured_recent_steps.borrow();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0],
+            vec![
+                "older persisted reasoning".to_string(),
+                "latest persisted reasoning".to_string()
+            ]
+        );
     }
 
     struct ScriptedReasoningClient {

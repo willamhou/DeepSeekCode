@@ -772,6 +772,7 @@ fn run_runtime_task_loop(
         }));
     let options = AgentLoopOptions {
         steps: budget.unwrap_or_else(|| AgentLoopOptions::default().steps),
+        initial_recent_steps: store.recent_reasoning_replay_entries(&thread.id, 3)?,
         emit_progress: !json,
         persist_session: false,
         approval_resolver: Some(approval_resolver),

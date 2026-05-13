@@ -620,7 +620,10 @@ For TUI-started agent runs, streamed `reasoning_content`, `thinking_delta`, and
 `reasoning_delta` chunks are persisted as linked `reasoning` items on the
 assistant turn and emitted to the foreground TUI through the same live item
 channel as assistant text deltas. The agent loop also replays compact recent
-reasoning summaries inside subsequent model requests during the same run.
+reasoning summaries inside subsequent model requests during the same run, and
+runtime-backed TUI/daemon agent runs preload the latest persisted reasoning
+items from the active durable thread so later runs can see prior thinking
+continuity.
 
 `POST /v1/threads/{id}/compact` appends a non-destructive compaction marker for
 long contexts. The runtime keeps all original turn and item records, then adds a

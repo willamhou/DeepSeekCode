@@ -345,10 +345,14 @@ Landed first slice:
 - TUI usage panel renders cache and cost split bars so DeepSeek prefix-cache and cost behavior is visible during durable sessions
 - TUI command palette can trigger non-destructive active-thread compaction with `compact [tail]`, reusing the runtime `thread_compacted` audit event path
 - `model.reasoning_effort = "off|high|max|auto"` and `DEEPSEEK_REASONING_EFFORT` now map to official DeepSeek V4 thinking/reasoning parameters for OpenAI-compatible and Anthropic-compatible requests; streaming parsers surface reasoning deltas separately from final answer text
+- runtime-backed TUI and daemon agent runs preload compact persisted reasoning
+  items from the active durable thread into the next model request, extending
+  reasoning replay beyond a single in-process tool loop
 
 Remaining:
 
-- richer reasoning UX, including full reasoning-content replay for multi-turn tool-call conversations
+- richer reasoning UX, including fuller reasoning-content browsing and replay
+  controls in the TUI
 - model-generated automatic compaction policy
 
 ### Phase F: LSP + Revert
