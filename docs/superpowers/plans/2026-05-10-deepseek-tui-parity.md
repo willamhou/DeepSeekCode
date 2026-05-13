@@ -463,6 +463,10 @@ Landed first slice:
   `runtime_list_tasks`, `runtime_read_task`
 - approval-gated runtime task side-effect tools exposed through MCP:
   `runtime_create_task` and `runtime_cancel_task`
+- approval-gated runtime automation side-effect tools exposed through MCP:
+  `runtime_create_automation`, `runtime_update_automation`,
+  `runtime_pause_automation`, `runtime_resume_automation`,
+  `runtime_delete_automation`, and `runtime_trigger_automation`
 - read-only MCP prompt templates exposed through `prompts/list` / `prompts/get`:
   `review_code`, `explain_code`, and `plan_task`
 - read-only MCP resources exposed through `resources/list` / `resources/read`:
@@ -567,9 +571,9 @@ Remaining:
 
 - broader long-tail side-effect MCP server surface beyond the current
   `run_tests`/`run_shell`, file write/patch/edit/delete/copy/move,
-  `revert_turn`, GitHub write, and runtime task tools; remaining candidates
-  include agent-only automation, subagent, shell-session, and RLM tools that
-  still need explicit MCP safety contracts before exposure
+  `revert_turn`, GitHub write, runtime task, and runtime automation tools;
+  remaining candidates include agent-only subagent, shell-session, and RLM tools
+  that still need explicit MCP safety contracts before exposure
 - full ACP standard tool streaming beyond started/result notifications
 
 ### Phase H: Packaging

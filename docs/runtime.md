@@ -335,6 +335,12 @@ Exposed tools:
 | `runtime_read_task` | Read one durable runtime task |
 | `runtime_create_task` | Hidden by default; exposed only with durable runtime approvals and creates durable runtime tasks |
 | `runtime_cancel_task` | Hidden by default; exposed only with durable runtime approvals and cancels durable runtime tasks |
+| `runtime_create_automation` | Hidden by default; exposed only with durable runtime approvals and creates durable runtime automations |
+| `runtime_update_automation` | Hidden by default; exposed only with durable runtime approvals and updates durable runtime automations |
+| `runtime_pause_automation` | Hidden by default; exposed only with durable runtime approvals and pauses durable runtime automations |
+| `runtime_resume_automation` | Hidden by default; exposed only with durable runtime approvals and resumes durable runtime automations |
+| `runtime_delete_automation` | Hidden by default; exposed only with durable runtime approvals and deletes durable runtime automations |
+| `runtime_trigger_automation` | Hidden by default; exposed only with durable runtime approvals and triggers durable runtime automations into pending tasks |
 
 Exposed MCP prompts:
 
@@ -983,10 +989,11 @@ Agent-visible durable work tools include DeepSeek-TUI-compatible `task_create`,
 `.dscode/runtime`. Task creation/cancellation and automation
 creation/update/pause/resume/delete/run use write approval, `task_gate_run` uses
 shell approval, and task/automation reads are approval-free. MCP server mode now
-also exposes durable-approval `runtime_create_task` and `runtime_cancel_task`
-for task queue writes. `automation_create` accepts DeepSeek-TUI-style
-`name`/`prompt`/`rrule` inputs and stores the recurrence in the local runtime
-`schedule` field; `schedule` remains accepted as
+also exposes durable-approval `runtime_create_task`, `runtime_cancel_task`, and
+`runtime_*_automation` tools for task queue and automation metadata writes.
+`automation_create` accepts DeepSeek-TUI-style `name`/`prompt`/`rrule` inputs
+and stores the recurrence in the local runtime `schedule` field; `schedule`
+remains accepted as
 a local alias. `automation_update` accepts `name`, `prompt`, `rrule`/`schedule`,
 `status`, `paused`, and `next_run_at`.
 DeepSeek-TUI-compatible sub-agent lifecycle tools are also exposed on the

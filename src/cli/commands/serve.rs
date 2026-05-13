@@ -898,6 +898,54 @@ fn execute_mcp_tool(
             }
             return execute_mcp_runtime_cancel_task(input, state);
         }
+        "runtime_create_automation" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `runtime_create_automation` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route automation writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_runtime_create_automation(input, state);
+        }
+        "runtime_update_automation" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `runtime_update_automation` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route automation writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_runtime_update_automation(input, state);
+        }
+        "runtime_pause_automation" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `runtime_pause_automation` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route automation writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_runtime_pause_automation(input, state);
+        }
+        "runtime_resume_automation" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `runtime_resume_automation` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route automation writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_runtime_resume_automation(input, state);
+        }
+        "runtime_delete_automation" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `runtime_delete_automation` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route automation writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_runtime_delete_automation(input, state);
+        }
+        "runtime_trigger_automation" => {
+            if !mcp_write_tools_enabled(state) {
+                return Err(app_error(
+                    "MCP write tool `runtime_trigger_automation` is disabled; set DSCODE_MCP_ENABLE_DURABLE_APPROVALS=1 or DSCODE_MCP_APPROVAL_THREAD_ID=<thread-id> to route automation writes through runtime approvals",
+                ));
+            }
+            return execute_mcp_runtime_trigger_automation(input, state);
+        }
         _ => return Err(app_error(format!("unknown MCP tool: {name}"))),
     };
     Ok(output.summary)
@@ -1377,6 +1425,195 @@ fn execute_mcp_runtime_cancel_task(input: ToolInput, state: &McpStdioState) -> A
     ])))
 }
 
+fn request_mcp_runtime_write_approval(
+    state: &McpStdioState,
+    input: &ToolInput,
+    tool_name: &str,
+    target: String,
+) -> AppResult<()> {
+    let Some(approval_thread_id) = state.approval_thread_id.as_deref() else {
+        return Err(app_error(format!(
+            "MCP write tool `{tool_name}` is disabled; durable runtime approvals are required"
+        )));
+    };
+    if state.approval.require_write_confirmation && !env_flag("DSCODE_AUTO_APPROVE_WRITES") {
+        let approval = state.store.append_permission_request(
+            approval_thread_id,
+            state.approval_turn_id.as_deref(),
+            tool_name.to_string(),
+            "write".to_string(),
+            target,
+            input.args.clone(),
+        )?;
+        wait_for_mcp_permission_response(state, approval_thread_id, &approval, tool_name)?;
+    }
+    Ok(())
+}
+
+fn execute_mcp_runtime_create_automation(
+    input: ToolInput,
+    state: &McpStdioState,
+) -> AppResult<String> {
+    let name = mcp_input_required_any(&input, &["name"], "runtime_create_automation")?;
+    let prompt = mcp_input_required_any(&input, &["prompt"], "runtime_create_automation")?;
+    let schedule =
+        mcp_input_required_any(&input, &["rrule", "schedule"], "runtime_create_automation")?;
+    request_mcp_runtime_write_approval(
+        state,
+        &input,
+        "runtime_create_automation",
+        format!("create runtime automation: {name}"),
+    )?;
+    let status = mcp_input_optional(&input, "status")
+        .or_else(|| {
+            mcp_input_optional_bool(&input, "paused")
+                .filter(|paused| *paused)
+                .map(|_| "paused".to_string())
+        })
+        .unwrap_or_else(|| "active".to_string());
+    let automation = state.store.create_automation(
+        mcp_input_optional(&input, "session_id").as_deref(),
+        mcp_input_optional(&input, "thread_id").as_deref(),
+        name,
+        status,
+        schedule,
+        prompt,
+        mcp_input_optional(&input, "last_run_at"),
+        mcp_input_optional(&input, "next_run_at"),
+    )?;
+    Ok(json_value_to_string(&automation_to_json(&automation)))
+}
+
+fn execute_mcp_runtime_update_automation(
+    input: ToolInput,
+    state: &McpStdioState,
+) -> AppResult<String> {
+    let automation_id = mcp_input_required_any(
+        &input,
+        &["automation_id", "id"],
+        "runtime_update_automation",
+    )?;
+    let name = mcp_input_optional(&input, "name");
+    let status = mcp_input_optional(&input, "status").or_else(|| {
+        mcp_input_optional_bool(&input, "paused").map(|paused| {
+            if paused {
+                "paused".to_string()
+            } else {
+                "active".to_string()
+            }
+        })
+    });
+    let schedule =
+        mcp_input_optional(&input, "rrule").or_else(|| mcp_input_optional(&input, "schedule"));
+    let prompt = mcp_input_optional(&input, "prompt");
+    let next_run_at = mcp_input_optional(&input, "next_run_at");
+    if name.is_none()
+        && status.is_none()
+        && schedule.is_none()
+        && prompt.is_none()
+        && next_run_at.is_none()
+    {
+        return Err(app_error(
+            "runtime_update_automation requires at least one updated field",
+        ));
+    }
+    request_mcp_runtime_write_approval(
+        state,
+        &input,
+        "runtime_update_automation",
+        format!("update runtime automation: {automation_id}"),
+    )?;
+    let automation = state.store.update_automation(
+        &automation_id,
+        name,
+        status,
+        schedule,
+        prompt,
+        next_run_at,
+    )?;
+    Ok(json_value_to_string(&automation_to_json(&automation)))
+}
+
+fn execute_mcp_runtime_pause_automation(
+    input: ToolInput,
+    state: &McpStdioState,
+) -> AppResult<String> {
+    let automation_id =
+        mcp_input_required_any(&input, &["automation_id", "id"], "runtime_pause_automation")?;
+    request_mcp_runtime_write_approval(
+        state,
+        &input,
+        "runtime_pause_automation",
+        format!("pause runtime automation: {automation_id}"),
+    )?;
+    let automation = state.store.pause_automation(&automation_id)?;
+    Ok(json_value_to_string(&automation_to_json(&automation)))
+}
+
+fn execute_mcp_runtime_resume_automation(
+    input: ToolInput,
+    state: &McpStdioState,
+) -> AppResult<String> {
+    let automation_id = mcp_input_required_any(
+        &input,
+        &["automation_id", "id"],
+        "runtime_resume_automation",
+    )?;
+    request_mcp_runtime_write_approval(
+        state,
+        &input,
+        "runtime_resume_automation",
+        format!("resume runtime automation: {automation_id}"),
+    )?;
+    let automation = state.store.resume_automation(&automation_id)?;
+    Ok(json_value_to_string(&automation_to_json(&automation)))
+}
+
+fn execute_mcp_runtime_delete_automation(
+    input: ToolInput,
+    state: &McpStdioState,
+) -> AppResult<String> {
+    let automation_id = mcp_input_required_any(
+        &input,
+        &["automation_id", "id"],
+        "runtime_delete_automation",
+    )?;
+    request_mcp_runtime_write_approval(
+        state,
+        &input,
+        "runtime_delete_automation",
+        format!("delete runtime automation: {automation_id}"),
+    )?;
+    let automation = state.store.delete_automation(&automation_id)?;
+    Ok(json_value_to_string(&automation_to_json(&automation)))
+}
+
+fn execute_mcp_runtime_trigger_automation(
+    input: ToolInput,
+    state: &McpStdioState,
+) -> AppResult<String> {
+    let automation_id = mcp_input_required_any(
+        &input,
+        &["automation_id", "id"],
+        "runtime_trigger_automation",
+    )?;
+    request_mcp_runtime_write_approval(
+        state,
+        &input,
+        "runtime_trigger_automation",
+        format!("trigger runtime automation: {automation_id}"),
+    )?;
+    let prompt_override = mcp_input_optional(&input, "prompt")
+        .or_else(|| mcp_input_optional(&input, "prompt_override"));
+    let (automation, task) = state
+        .store
+        .trigger_automation(&automation_id, prompt_override)?;
+    Ok(json_value_to_string(&json_object([
+        ("automation", automation_to_json(&automation)),
+        ("task", task_to_json(&task)),
+    ])))
+}
+
 fn mcp_revert_turn_target(input: &ToolInput) -> String {
     if let Some(id) = input
         .get("snapshot_id")
@@ -1645,6 +1882,14 @@ fn mcp_input_optional(input: &ToolInput, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn mcp_input_optional_bool(input: &ToolInput, key: &str) -> Option<bool> {
+    input
+        .get(key)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "on"))
 }
 
 fn mcp_success_response(id: JsonValue, result: JsonValue) -> JsonValue {
@@ -2269,6 +2514,119 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
                     ("reason", string_property("Optional cancellation reason.")),
                 ],
                 &["task_id"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "runtime_create_automation",
+            "Create a durable runtime automation. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("name", string_property("Automation name.")),
+                    (
+                        "prompt",
+                        string_property("Prompt to enqueue when triggered."),
+                    ),
+                    (
+                        "rrule",
+                        string_property("Schedule expression; alias for schedule."),
+                    ),
+                    ("schedule", string_property("Schedule expression.")),
+                    (
+                        "status",
+                        string_property("Automation status, default active."),
+                    ),
+                    ("paused", string_property("Set true to create paused.")),
+                    (
+                        "session_id",
+                        string_property("Optional runtime session id."),
+                    ),
+                    ("thread_id", string_property("Optional runtime thread id.")),
+                    (
+                        "last_run_at",
+                        string_property("Optional last-run timestamp."),
+                    ),
+                    (
+                        "next_run_at",
+                        string_property("Optional next-run timestamp."),
+                    ),
+                ],
+                &["name", "prompt"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "runtime_update_automation",
+            "Update durable runtime automation metadata. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("automation_id", string_property("Runtime automation id.")),
+                    ("id", string_property("Alias for automation_id.")),
+                    ("name", string_property("Optional replacement name.")),
+                    ("prompt", string_property("Optional replacement prompt.")),
+                    (
+                        "rrule",
+                        string_property("Optional replacement schedule alias."),
+                    ),
+                    (
+                        "schedule",
+                        string_property("Optional replacement schedule."),
+                    ),
+                    ("status", string_property("Optional replacement status.")),
+                    (
+                        "paused",
+                        string_property("Set true/false to pause or resume."),
+                    ),
+                    (
+                        "next_run_at",
+                        string_property("Optional next-run timestamp."),
+                    ),
+                ],
+                &["automation_id"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "runtime_pause_automation",
+            "Pause a durable runtime automation. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("automation_id", string_property("Runtime automation id.")),
+                    ("id", string_property("Alias for automation_id.")),
+                ],
+                &["automation_id"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "runtime_resume_automation",
+            "Resume a durable runtime automation. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("automation_id", string_property("Runtime automation id.")),
+                    ("id", string_property("Alias for automation_id.")),
+                ],
+                &["automation_id"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "runtime_delete_automation",
+            "Delete a durable runtime automation. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("automation_id", string_property("Runtime automation id.")),
+                    ("id", string_property("Alias for automation_id.")),
+                ],
+                &["automation_id"],
+            ),
+        ));
+        tools.push(mcp_tool_definition(
+            "runtime_trigger_automation",
+            "Trigger a durable runtime automation into a pending task. Requires durable runtime approvals.",
+            mcp_schema(
+                vec![
+                    ("automation_id", string_property("Runtime automation id.")),
+                    ("id", string_property("Alias for automation_id.")),
+                    ("prompt", string_property("Optional prompt override.")),
+                    ("prompt_override", string_property("Alias for prompt.")),
+                ],
+                &["automation_id"],
             ),
         ));
     }
@@ -5630,7 +5988,16 @@ mod tests {
                 let events = store.read_events(&thread_id, 0).unwrap();
                 if let Some(request) = events
                     .iter()
-                    .find(|event| event.kind == "permission_request")
+                    .filter(|event| event.kind == "permission_request")
+                    .find(|request| {
+                        !events.iter().any(|event| {
+                            event.kind == "permission_response"
+                                && json_as_object(&event.payload)
+                                    .and_then(|payload| payload.get("request_id"))
+                                    .and_then(json_as_string)
+                                    == Some(request.id.as_str())
+                        })
+                    })
                 {
                     store
                         .append_permission_response(
@@ -5856,6 +6223,12 @@ mod tests {
         assert!(!rendered.contains(r#""name":"github_close_issue""#));
         assert!(!rendered.contains(r#""name":"runtime_create_task""#));
         assert!(!rendered.contains(r#""name":"runtime_cancel_task""#));
+        assert!(!rendered.contains(r#""name":"runtime_create_automation""#));
+        assert!(!rendered.contains(r#""name":"runtime_update_automation""#));
+        assert!(!rendered.contains(r#""name":"runtime_pause_automation""#));
+        assert!(!rendered.contains(r#""name":"runtime_resume_automation""#));
+        assert!(!rendered.contains(r#""name":"runtime_delete_automation""#));
+        assert!(!rendered.contains(r#""name":"runtime_trigger_automation""#));
 
         let state = mcp_state_with_side_effects("mcp-apply-patch-side-effects", true);
         let response = mcp_response_for_message(
@@ -5876,6 +6249,12 @@ mod tests {
         assert!(!rendered.contains(r#""name":"github_close_issue""#));
         assert!(!rendered.contains(r#""name":"runtime_create_task""#));
         assert!(!rendered.contains(r#""name":"runtime_cancel_task""#));
+        assert!(!rendered.contains(r#""name":"runtime_create_automation""#));
+        assert!(!rendered.contains(r#""name":"runtime_update_automation""#));
+        assert!(!rendered.contains(r#""name":"runtime_pause_automation""#));
+        assert!(!rendered.contains(r#""name":"runtime_resume_automation""#));
+        assert!(!rendered.contains(r#""name":"runtime_delete_automation""#));
+        assert!(!rendered.contains(r#""name":"runtime_trigger_automation""#));
 
         let state = mcp_state_with_durable_approvals("mcp-apply-patch-visible");
         let response = mcp_response_for_message(
@@ -5895,6 +6274,12 @@ mod tests {
         assert!(rendered.contains(r#""name":"github_close_issue""#));
         assert!(rendered.contains(r#""name":"runtime_create_task""#));
         assert!(rendered.contains(r#""name":"runtime_cancel_task""#));
+        assert!(rendered.contains(r#""name":"runtime_create_automation""#));
+        assert!(rendered.contains(r#""name":"runtime_update_automation""#));
+        assert!(rendered.contains(r#""name":"runtime_pause_automation""#));
+        assert!(rendered.contains(r#""name":"runtime_resume_automation""#));
+        assert!(rendered.contains(r#""name":"runtime_delete_automation""#));
+        assert!(rendered.contains(r#""name":"runtime_trigger_automation""#));
         assert!(rendered.contains("durable runtime approvals"));
     }
 
@@ -6014,6 +6399,133 @@ mod tests {
         assert!(rendered.contains(r#""isError":false"#));
         let cancelled = state.store.load_task(&task.id).unwrap();
         assert_eq!(cancelled.status, "cancelled");
+    }
+
+    #[test]
+    fn mcp_tools_call_creates_and_triggers_runtime_automation_after_runtime_approval() {
+        let state = mcp_state_with_durable_approvals("mcp-runtime-automation-create");
+        let responder = spawn_mcp_permission_responder(
+            state.store.clone(),
+            state.approval_thread_id.clone().unwrap(),
+            "approved",
+        );
+        let request = r#"{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"runtime_create_automation","arguments":{"name":"Nightly check","prompt":"run diagnostics","schedule":"daily"}}}"#;
+        let response = mcp_response_for_message(request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("Nightly check"));
+        assert!(rendered.contains(r#""isError":false"#));
+        let automation = state
+            .store
+            .list_automations(None, None, 10)
+            .unwrap()
+            .into_iter()
+            .find(|automation| automation.name == "Nightly check")
+            .expect("created automation");
+
+        let responder = spawn_mcp_permission_responder(
+            state.store.clone(),
+            state.approval_thread_id.clone().unwrap(),
+            "approved",
+        );
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{{"name":"runtime_trigger_automation","arguments":{{"automation_id":"{}","prompt":"manual automation run"}}}}}}"#,
+            automation.id
+        );
+        let response = mcp_response_for_message(&request, &state).unwrap();
+        responder.join().unwrap();
+        let rendered = json_value_to_string(&response);
+
+        assert!(rendered.contains("manual automation run"));
+        assert!(rendered.contains(r#""isError":false"#));
+        let tasks = state.store.list_tasks(None, None, 10).unwrap();
+        assert!(tasks
+            .iter()
+            .any(|task| { task.summary == "manual automation run" && task.kind == "automation" }));
+    }
+
+    #[test]
+    fn mcp_tools_call_updates_pauses_resumes_and_deletes_runtime_automation_after_runtime_approval()
+    {
+        let state = mcp_state_with_durable_approvals("mcp-runtime-automation-update");
+        let automation = state
+            .store
+            .create_automation(
+                None,
+                None,
+                "Weekly check".to_string(),
+                "active".to_string(),
+                "weekly".to_string(),
+                "run checks".to_string(),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let responder = spawn_mcp_permission_responder(
+            state.store.clone(),
+            state.approval_thread_id.clone().unwrap(),
+            "approved",
+        );
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{{"name":"runtime_update_automation","arguments":{{"automation_id":"{}","name":"Updated check","schedule":"daily"}}}}}}"#,
+            automation.id
+        );
+        let response = mcp_response_for_message(&request, &state).unwrap();
+        responder.join().unwrap();
+        assert!(json_value_to_string(&response).contains(r#""isError":false"#));
+        let updated = state.store.load_automation(&automation.id).unwrap();
+        assert_eq!(updated.name, "Updated check");
+        assert_eq!(updated.schedule, "daily");
+
+        let responder = spawn_mcp_permission_responder(
+            state.store.clone(),
+            state.approval_thread_id.clone().unwrap(),
+            "approved",
+        );
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{{"name":"runtime_pause_automation","arguments":{{"automation_id":"{}"}}}}}}"#,
+            automation.id
+        );
+        let response = mcp_response_for_message(&request, &state).unwrap();
+        responder.join().unwrap();
+        assert!(json_value_to_string(&response).contains(r#""isError":false"#));
+        assert_eq!(
+            state.store.load_automation(&automation.id).unwrap().status,
+            "paused"
+        );
+
+        let responder = spawn_mcp_permission_responder(
+            state.store.clone(),
+            state.approval_thread_id.clone().unwrap(),
+            "approved",
+        );
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{{"name":"runtime_resume_automation","arguments":{{"automation_id":"{}"}}}}}}"#,
+            automation.id
+        );
+        let response = mcp_response_for_message(&request, &state).unwrap();
+        responder.join().unwrap();
+        assert!(json_value_to_string(&response).contains(r#""isError":false"#));
+        assert_eq!(
+            state.store.load_automation(&automation.id).unwrap().status,
+            "active"
+        );
+
+        let responder = spawn_mcp_permission_responder(
+            state.store.clone(),
+            state.approval_thread_id.clone().unwrap(),
+            "approved",
+        );
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{{"name":"runtime_delete_automation","arguments":{{"automation_id":"{}"}}}}}}"#,
+            automation.id
+        );
+        let response = mcp_response_for_message(&request, &state).unwrap();
+        responder.join().unwrap();
+        assert!(json_value_to_string(&response).contains(r#""isError":false"#));
+        assert!(state.store.load_automation(&automation.id).is_err());
     }
 
     #[test]
