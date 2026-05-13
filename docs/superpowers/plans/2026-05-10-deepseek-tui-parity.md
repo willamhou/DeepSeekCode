@@ -398,6 +398,8 @@ Landed first slice:
   right-side rollback detail panel, including snapshot metadata, untracked
   file/symlink counts, bounded patch previews, dry-run plans, and applied
   changed-file lists
+- TUI rollback `--apply` commands now open an explicit confirmation modal
+  before queueing the local worktree restore action
 - REPL live prompts create pre-turn rollback snapshots in git worktrees, record
   the latest snapshot id for `/restore show last` and `/revert_turn last`, and
   print the rollback hint after tool-using turns
@@ -405,7 +407,7 @@ Landed first slice:
 Remaining:
 
 - side-git/worktree snapshot strategy for directory and special-file fidelity
-- rollback confirmation modal / diff hunk browsing in the future TUI
+- rollback diff hunk browsing in the future TUI
 
 ### Phase G: Subagent/RLM
 

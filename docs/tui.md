@@ -93,7 +93,8 @@ Current surfaces:
   `restore show <snapshot-id|turn-id|last>`, and
   `revert turn <snapshot-id|turn-id|last> [--apply]`; `last` resolves to the
   active thread's latest durable turn id, and list/show/revert results render a
-  scrollable right-side rollback detail panel with patch or restore-plan context
+  scrollable right-side rollback detail panel with patch or restore-plan
+  context. Apply restores open a confirmation modal before mutating files
 - `diagnostics [--changed|paths...]` runs through the local diagnostics runner
   in file-backed TUI sessions and through `POST /v1/diagnostics` in HTTP
   runtime TUI sessions, so remote runtime mode can reuse the runtime process'
@@ -263,7 +264,7 @@ Command palette commands currently implemented:
 | `restore snapshot [label]` | Create a local rollback snapshot from the current git worktree |
 | `restore list [limit]` | Show recent local rollback snapshots in the right-side detail panel |
 | `restore show <id|last>` | Show one rollback snapshot or runtime-turn-bound snapshot with patch preview |
-| `revert turn <id|last> [--apply]` | Dry-run or apply a local rollback snapshot and show the restore plan |
+| `revert turn <id|last> [--apply]` | Dry-run or apply a local rollback snapshot and show the restore plan; `--apply` requires modal confirmation |
 | `approval` | Open the approval modal |
 | `cancel`, `stop` | Cancel the active running assistant turn |
 

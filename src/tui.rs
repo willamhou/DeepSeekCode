@@ -551,6 +551,11 @@ struct TuiMcpPendingRemove {
     name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiRollbackPendingApply {
+    id: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TuiMcpManagerMouseAction {
     Enable,
@@ -898,6 +903,7 @@ pub struct TuiApp {
     mcp_manager_selected_server_keys: BTreeSet<String>,
     mcp_manager_drag_anchor_key: Option<String>,
     mcp_remove_confirmation: Option<TuiMcpPendingRemove>,
+    rollback_apply_confirmation: Option<TuiRollbackPendingApply>,
     last_frame_area: Rect,
     transcript: Vec<String>,
     tasks: Vec<String>,
@@ -1055,6 +1061,7 @@ impl TuiApp {
             mcp_manager_selected_server_keys: BTreeSet::new(),
             mcp_manager_drag_anchor_key: None,
             mcp_remove_confirmation: None,
+            rollback_apply_confirmation: None,
             last_frame_area: Rect::default(),
             transcript: Vec::new(),
             tasks: Vec::new(),
@@ -1082,6 +1089,7 @@ impl TuiApp {
         self.mcp_manager_selected_server_keys.clear();
         self.mcp_manager_drag_anchor_key = None;
         self.mcp_remove_confirmation = None;
+        self.rollback_apply_confirmation = None;
     }
 
     pub fn set_mcp_manager(&mut self, detail: impl Into<String>) {
@@ -1092,6 +1100,7 @@ impl TuiApp {
         self.mcp_manager_selected_server_keys.clear();
         self.mcp_manager_drag_anchor_key = None;
         self.mcp_remove_confirmation = None;
+        self.rollback_apply_confirmation = None;
     }
 
     pub fn set_mcp_manager_detail(&mut self, kind: TuiMcpDetailKind, detail: impl Into<String>) {
@@ -1101,6 +1110,7 @@ impl TuiApp {
         self.mcp_manager_selected_server_keys.clear();
         self.mcp_manager_drag_anchor_key = None;
         self.mcp_remove_confirmation = None;
+        self.rollback_apply_confirmation = None;
     }
 
     pub fn set_mcp_manager_filter(&mut self, filter: impl Into<String>) {
@@ -2614,6 +2624,9 @@ impl TuiApp {
         if self.mcp_remove_confirmation.is_some() {
             return self.handle_mcp_remove_confirmation_key(code);
         }
+        if self.rollback_apply_confirmation.is_some() {
+            return self.handle_rollback_apply_confirmation_key(code);
+        }
         if self.composer_focused {
             return self.handle_composer_key(code);
         }
@@ -3900,6 +3913,30 @@ impl TuiApp {
         true
     }
 
+    fn handle_rollback_apply_confirmation_key(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Char('y') | KeyCode::Enter => {
+                if let Some(pending) = self.rollback_apply_confirmation.take() {
+                    self.pending_actions.push(TuiAction::RevertTurn {
+                        id: pending.id.clone(),
+                        apply: true,
+                    });
+                    self.status = format!("rollback apply confirmed: {}", pending.id);
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                if let Some(pending) = self.rollback_apply_confirmation.take() {
+                    self.status = format!("rollback apply cancelled: {}", pending.id);
+                }
+            }
+            _ => {
+                self.status =
+                    "confirm rollback apply with y/Enter or cancel with n/Esc".to_string();
+            }
+        }
+        true
+    }
+
     fn request_cancel_run(&mut self) {
         let active_run = self
             .active_running_assistant_item()
@@ -4312,15 +4349,16 @@ impl TuiApp {
         let Some(id) = self.resolve_rollback_id(id) else {
             return;
         };
+        if apply {
+            self.rollback_apply_confirmation = Some(TuiRollbackPendingApply { id: id.clone() });
+            self.status = format!("confirm rollback apply: {id}");
+            return;
+        }
         self.pending_actions.push(TuiAction::RevertTurn {
             id: id.clone(),
-            apply,
+            apply: false,
         });
-        self.status = if apply {
-            format!("rollback apply requested: {id}")
-        } else {
-            format!("rollback dry-run requested: {id}")
-        };
+        self.status = format!("rollback dry-run requested: {id}");
     }
 
     fn resolve_rollback_id(&mut self, id: &str) -> Option<String> {
@@ -5541,6 +5579,9 @@ fn draw(frame: &mut Frame, app: &TuiApp) {
     if app.mcp_remove_confirmation.is_some() {
         draw_mcp_remove_confirmation_modal(frame, app);
     }
+    if app.rollback_apply_confirmation.is_some() {
+        draw_rollback_apply_confirmation_modal(frame, app);
+    }
     if app.show_user_input_modal {
         draw_user_input_modal(frame, app);
     }
@@ -6112,6 +6153,34 @@ fn draw_mcp_remove_confirmation_modal(frame: &mut Frame, app: &TuiApp) {
         Block::default()
             .borders(Borders::ALL)
             .title("MCP Remove Confirmation"),
+    );
+    frame.render_widget(modal, area);
+}
+
+fn draw_rollback_apply_confirmation_modal(frame: &mut Frame, app: &TuiApp) {
+    let area = bottom_center_rect(frame.area(), 72, 10);
+    frame.render_widget(Clear, area);
+    let lines = if let Some(pending) = app.rollback_apply_confirmation.as_ref() {
+        vec![
+            Line::from("Apply Rollback?"),
+            Line::from(format!("Target: {}", clip_line(&pending.id, 52))),
+            Line::from(""),
+            Line::from("This will restore files in the local git worktree."),
+            Line::from("Run without --apply first to preview the restore plan."),
+            Line::from(""),
+            Line::from("[y] apply    [Enter] apply    [n/Esc] cancel"),
+        ]
+    } else {
+        vec![
+            Line::from("No rollback apply pending"),
+            Line::from(""),
+            Line::from("[Esc] close"),
+        ]
+    };
+    let modal = Paragraph::new(lines).alignment(Alignment::Center).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Rollback Apply Confirmation"),
     );
     frame.render_widget(modal, area);
 }
@@ -7372,6 +7441,13 @@ mod tests {
         }
         assert!(app.handle_key(KeyCode::Enter));
 
+        assert!(app.drain_actions().is_empty());
+        let output = render_once(&app, 120, 36).unwrap();
+        assert!(output.contains("Rollback Apply Confirmation"));
+        assert!(output.contains("Target: turn-latest"));
+        assert!(app.status.contains("confirm rollback apply"));
+
+        assert!(app.handle_key(KeyCode::Char('y')));
         assert_eq!(
             app.drain_actions(),
             vec![TuiAction::RevertTurn {
@@ -7379,6 +7455,89 @@ mod tests {
                 apply: true,
             }]
         );
+    }
+
+    #[test]
+    fn command_palette_confirms_rollback_apply_before_queueing() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: ".".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: Some("turn-latest".to_string()),
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        assert!(app.handle_key(KeyCode::Char(':')));
+        for ch in "restore revert-turn last --apply".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert!(app.drain_actions().is_empty());
+        assert!(app.rollback_apply_confirmation.is_some());
+        assert!(app.status.contains("confirm rollback apply"));
+
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::RevertTurn {
+                id: "turn-latest".to_string(),
+                apply: true,
+            }]
+        );
+        assert!(app.rollback_apply_confirmation.is_none());
+        assert_eq!(app.status, "rollback apply confirmed: turn-latest");
+    }
+
+    #[test]
+    fn command_palette_cancels_rollback_apply_confirmation() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: ".".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: Some("turn-latest".to_string()),
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        assert!(app.handle_key(KeyCode::Char(':')));
+        for ch in "revert turn last --apply".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+        assert!(app.rollback_apply_confirmation.is_some());
+
+        assert!(app.handle_key(KeyCode::Esc));
+
+        assert!(app.rollback_apply_confirmation.is_none());
+        assert!(app.drain_actions().is_empty());
+        assert_eq!(app.status, "rollback apply cancelled: turn-latest");
     }
 
     #[test]
