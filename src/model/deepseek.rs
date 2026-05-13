@@ -3022,14 +3022,14 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
     },
     StaticToolSpec {
         name: "exec_shell",
-        description: "DeepSeek-TUI-compatible shell execution tool. Use background=true for long-running commands, then poll with exec_shell_wait.",
-        properties_json: r#"{"command":{"type":"string","description":"Safe shell command to execute."},"timeout_ms":{"type":"string","description":"Compatibility timeout in milliseconds for foreground commands."},"background":{"type":"string","description":"Set true to run in the background and return task_id."},"stdin":{"type":"string","description":"Optional stdin data sent to a background command at start."},"input":{"type":"string","description":"Alias for stdin."},"data":{"type":"string","description":"Alias for stdin."},"cwd":{"type":"string","description":"Working directory for the command."}}"#,
+        description: "DeepSeek-TUI-compatible shell execution tool. Use background=true for long-running commands, then poll with exec_shell_wait. On Unix, tty=true uses the script PTY backend for background jobs.",
+        properties_json: r#"{"command":{"type":"string","description":"Safe shell command to execute."},"timeout_ms":{"type":"string","description":"Compatibility timeout in milliseconds for foreground commands."},"background":{"type":"string","description":"Set true to run in the background and return task_id."},"tty":{"type":"string","description":"Set true with background=true to run through the Unix script PTY backend when available."},"stdin":{"type":"string","description":"Optional stdin data sent to a background command at start."},"input":{"type":"string","description":"Alias for stdin."},"data":{"type":"string","description":"Alias for stdin."},"cwd":{"type":"string","description":"Working directory for the command."}}"#,
         required_json: r#"["command"]"#,
     },
     StaticToolSpec {
         name: "task_shell_start",
         description: "DeepSeek-TUI-compatible background shell starter for long-running commands. Returns a task_id to poll with task_shell_wait.",
-        properties_json: r#"{"command":{"type":"string","description":"Safe shell command to start in the background."},"cwd":{"type":"string","description":"Optional working directory."},"timeout_ms":{"type":"string","description":"Compatibility timeout in milliseconds."},"stdin":{"type":"string","description":"Optional stdin data sent at start."},"tty":{"type":"string","description":"Compatibility flag accepted for DeepSeek-TUI tool calls."}}"#,
+        properties_json: r#"{"command":{"type":"string","description":"Safe shell command to start in the background."},"cwd":{"type":"string","description":"Optional working directory."},"timeout_ms":{"type":"string","description":"Compatibility timeout in milliseconds."},"stdin":{"type":"string","description":"Optional stdin data sent at start."},"tty":{"type":"string","description":"Set true to run through the Unix script PTY backend when available."}}"#,
         required_json: r#"["command"]"#,
     },
     StaticToolSpec {
@@ -5105,6 +5105,8 @@ mod tests {
         ]);
         assert!(openai.contains("\"name\":\"exec_shell\""));
         assert!(openai.contains("\"background\""));
+        assert!(openai.contains("\"tty\""));
+        assert!(openai.contains("script PTY backend"));
         assert!(openai.contains("\"name\":\"task_shell_start\""));
         assert!(openai.contains("\"name\":\"task_shell_wait\""));
         assert!(openai.contains("\"gate\""));

@@ -17,8 +17,9 @@ web, review, RLM helper, and request-user-input surfaces landed.
    start, list, show, poll, wait, stdin, close stdin, cancel, ACP streaming, and
    detached manifest/log inspection. Later slices also add best-effort
    detached cancel by persisted pid/process group, direct durable stdout/stderr
-   logs, and Unix FIFO detached stdin for new background jobs. The remaining
-   shell gap is true PTY takeover and robust supervisor ownership after the
+   logs, Unix FIFO detached stdin for new background jobs, and `tty=true`
+   execution through the Unix `script` PTY backend. The remaining shell gap is
+   a dedicated PTY supervisor with resize/replay and robust ownership after the
    owner DeepSeekCode process has exited.
 2. TUI interaction parity no longer has a first-order open item in the plan.
    The workbench has command history/completion, modal approvals, user-input
@@ -46,18 +47,20 @@ web, review, RLM helper, and request-user-input surfaces landed.
 
 The remaining gap is concentrated in hard infrastructure and external-fixture
 areas rather than the everyday DeepSeek-TUI terminal workflow. The objective is
-not complete because true shell PTY/supervisor ownership, true live model-backed
-RLM daemon semantics, platform-specific rollback edges, and live external
-publishing/write fixtures still need either more architecture or explicit
-external resources. Shell cancel has since narrowed to best-effort detached
-process-group cancellation; detached stdin has since narrowed to Unix FIFO
-control for new jobs; RLM process semantics have since narrowed to durable
-model-session context. PTY takeover and a true live model daemon remain open.
+not complete because dedicated shell PTY supervisor ownership, true live
+model-backed RLM daemon semantics, platform-specific rollback edges, and live
+external publishing/write fixtures still need either more architecture or
+explicit external resources. Shell cancel has since narrowed to best-effort
+detached process-group cancellation; detached stdin has since narrowed to Unix
+FIFO control for new jobs; `tty=true` has since narrowed to a Unix `script` PTY
+backend; RLM process semantics have since narrowed to durable model-session
+context. PTY resize/replay/supervisor takeover and a true live model daemon
+remain open.
 
 ## Next Candidate Specs
 
-- Shell supervisor/PTY design for true PTY sessions and stronger cross-process
-  ownership guarantees.
+- Shell supervisor/PTY design for supervised PTY sessions, resize/replay, and
+  stronger cross-process ownership guarantees.
 - True live model-backed RLM REPL/daemon design, likely backed by durable
   runtime threads rather than persisted child-agent summaries.
 - Platform restore strategy for device nodes and Windows symlink semantics.

@@ -46,7 +46,10 @@ pub fn run_trusted_background_shell(command: &str, cwd: &str) -> AppResult<ToolO
     if command.is_empty() {
         return Err(app_error("trusted background shell requires a command"));
     }
-    let task_id = shell_manager().lock().unwrap().spawn(command, cwd, None)?;
+    let task_id = shell_manager()
+        .lock()
+        .unwrap()
+        .spawn(command, cwd, None, false)?;
     Ok(ToolOutput {
         summary: format!(
             "task_id: {task_id}\nstatus: running\ncommand: {command}\ncwd: {cwd}\ntrusted_foreground_approval: true\nPoll with exec_shell_wait task_id={task_id} or cancel with exec_shell_cancel task_id={task_id}."
@@ -67,7 +70,11 @@ impl Tool for ExecShellTool {
             return Err(app_error(format!("command not allowed: {command}")));
         }
         let background = truthy(input.get("background"));
+        let tty = truthy(input.get("tty"));
         if !background {
+            if tty {
+                return Err(app_error("exec_shell tty=true requires background=true"));
+            }
             let mut shell_input = ToolInput::new().with_arg("command", command.to_string());
             if let Some(cwd) = input.get("cwd") {
                 shell_input = shell_input.with_arg("cwd", cwd.to_string());
@@ -80,10 +87,14 @@ impl Tool for ExecShellTool {
             .get("stdin")
             .or_else(|| input.get("input"))
             .or_else(|| input.get("data"));
-        let task_id = shell_manager().lock().unwrap().spawn(command, cwd, stdin)?;
+        let task_id = shell_manager()
+            .lock()
+            .unwrap()
+            .spawn(command, cwd, stdin, tty)?;
         Ok(ToolOutput {
             summary: format!(
-                "task_id: {task_id}\nstatus: running\ncommand: {command}\ncwd: {cwd}\nPoll with exec_shell_wait task_id={task_id} or cancel with exec_shell_cancel task_id={task_id}."
+                "task_id: {task_id}\nstatus: running\ncommand: {command}\ncwd: {cwd}\ntty: {tty}\npty_backend: {}\nPoll with exec_shell_wait task_id={task_id} or cancel with exec_shell_cancel task_id={task_id}.",
+                if tty { "script" } else { "none" }
             ),
         })
     }
@@ -110,13 +121,19 @@ impl Tool for TaskShellStartTool {
         if let Some(timeout_ms) = input.get("timeout_ms") {
             shell_input = shell_input.with_arg("timeout_ms", timeout_ms.to_string());
         }
+        let tty = truthy(input.get("tty"));
+        if tty {
+            shell_input = shell_input.with_arg("tty", "true");
+        }
         let mut output = ExecShellTool.execute(shell_input)?;
         output.summary = output
             .summary
             .replace("Poll with exec_shell_wait", "Poll with task_shell_wait");
         output.summary.push_str("\nmeta.task_shell=true");
-        if input.get("tty").is_some() {
-            output.summary.push_str("\nmeta.tty_compat=accepted");
+        if tty {
+            output.summary.push_str("\nmeta.tty=true");
+        } else if input.get("tty").is_some() {
+            output.summary.push_str("\nmeta.tty=false");
         }
         Ok(output)
     }
@@ -304,6 +321,7 @@ struct BackgroundShellJob {
     id: String,
     command: String,
     cwd: String,
+    tty: bool,
     child: Option<Child>,
     stdin: Option<ShellStdinControl>,
     stdout_cursor: usize,
@@ -348,7 +366,13 @@ enum ShellJobStatus {
 }
 
 impl BackgroundShellManager {
-    fn spawn(&mut self, command: &str, cwd: &str, stdin_data: Option<&str>) -> AppResult<String> {
+    fn spawn(
+        &mut self,
+        command: &str,
+        cwd: &str,
+        stdin_data: Option<&str>,
+        tty: bool,
+    ) -> AppResult<String> {
         let id = generated_job_id();
         let record_dir = shell_job_record_dir(cwd, &id);
         fs::create_dir_all(&record_dir)?;
@@ -364,9 +388,8 @@ impl BackgroundShellManager {
             stdio: stdin_stdio,
             mode: stdin_mode,
         } = prepare_background_stdin(&record_dir)?;
-        let mut process = Command::new("sh");
+        let mut process = shell_process_for_background_job(command, tty)?;
         process
-            .args(["-lc", command])
             .current_dir(cwd)
             .stdin(stdin_stdio)
             .stdout(Stdio::from(stdout_file))
@@ -387,6 +410,7 @@ impl BackgroundShellManager {
                 id: id.clone(),
                 command: command.to_string(),
                 cwd: cwd.to_string(),
+                tty,
                 child: Some(child),
                 stdin,
                 stdout_cursor: 0,
@@ -465,7 +489,7 @@ impl BackgroundShellManager {
             let stdout_total = durable_log_bytes(&job.record_dir, "stdout.log", 0);
             let stderr_total = durable_log_bytes(&job.record_dir, "stderr.log", 0);
             lines.push(format!(
-                "- {} [{}] exit={} stdout={} stderr={} cwd={}",
+                "- {} [{}] exit={} stdout={} stderr={} tty={} cwd={}",
                 job.id,
                 job.status.as_str(),
                 job.exit_code
@@ -473,6 +497,7 @@ impl BackgroundShellManager {
                     .unwrap_or_else(|| "null".to_string()),
                 stdout_total,
                 stderr_total,
+                job.tty,
                 job.cwd
             ));
             lines.push(format!("  command: {}", job.command));
@@ -482,7 +507,7 @@ impl BackgroundShellManager {
                 continue;
             }
             lines.push(format!(
-                "- {} [{} detached] exit={} stdout={} stderr={} cwd={}",
+                "- {} [{} detached] exit={} stdout={} stderr={} tty={} cwd={}",
                 record.id,
                 record.status,
                 record
@@ -491,6 +516,7 @@ impl BackgroundShellManager {
                     .unwrap_or_else(|| "null".to_string()),
                 record.stdout_total_bytes,
                 record.stderr_total_bytes,
+                record.tty,
                 record.cwd
             ));
             lines.push(format!("  command: {}", record.command));
@@ -512,14 +538,16 @@ impl BackgroundShellManager {
         let stdout_total = durable_log_bytes(&job.record_dir, "stdout.log", 0);
         let stderr_total = durable_log_bytes(&job.record_dir, "stderr.log", 0);
         let mut out = format!(
-            "task_id: {}\nstatus: {}\nexit_code: {}\ncommand: {}\ncwd: {}\nstdout_total_bytes: {stdout_total}\nstderr_total_bytes: {stderr_total}\n",
+            "task_id: {}\nstatus: {}\nexit_code: {}\ncommand: {}\ncwd: {}\ntty: {}\npty_backend: {}\nstdout_total_bytes: {stdout_total}\nstderr_total_bytes: {stderr_total}\n",
             job.id,
             job.status.as_str(),
             job.exit_code
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "null".to_string()),
             job.command,
-            job.cwd
+            job.cwd,
+            job.tty,
+            if job.tty { "script" } else { "none" }
         );
         if !stdout_delta.trim().is_empty() {
             out.push_str("stdout_delta:\n");
@@ -546,14 +574,16 @@ impl BackgroundShellManager {
         let stdout_total = stdout.len();
         let stderr_total = stderr.len();
         let mut out = format!(
-            "task_id: {}\nstatus: {}\nexit_code: {}\ncommand: {}\ncwd: {}\nstdout_total_bytes: {stdout_total}\nstderr_total_bytes: {stderr_total}\n",
+            "task_id: {}\nstatus: {}\nexit_code: {}\ncommand: {}\ncwd: {}\ntty: {}\npty_backend: {}\nstdout_total_bytes: {stdout_total}\nstderr_total_bytes: {stderr_total}\n",
             job.id,
             job.status.as_str(),
             job.exit_code
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "null".to_string()),
             job.command,
-            job.cwd
+            job.cwd,
+            job.tty,
+            if job.tty { "script" } else { "none" }
         );
         if !stdout.trim().is_empty() {
             out.push_str("stdout:\n");
@@ -653,6 +683,34 @@ impl ShellJobStatus {
 
 fn shell_manager() -> &'static Mutex<BackgroundShellManager> {
     SHELL_JOBS.get_or_init(|| Mutex::new(BackgroundShellManager::default()))
+}
+
+fn shell_process_for_background_job(command: &str, tty: bool) -> AppResult<Command> {
+    if tty {
+        if !script_pty_backend_available() {
+            return Err(app_error(
+                "exec_shell/task_shell_start tty=true requires the `script` PTY utility",
+            ));
+        }
+        let mut process = Command::new("script");
+        process.args(["-q", "-f", "-e", "-c", command, "/dev/null"]);
+        process.env("TERM", "xterm-256color");
+        Ok(process)
+    } else {
+        let mut process = Command::new("sh");
+        process.args(["-lc", command]);
+        Ok(process)
+    }
+}
+
+fn script_pty_backend_available() -> bool {
+    Command::new("script")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 fn prepare_background_stdin(record_dir: &Path) -> AppResult<PreparedBackgroundStdin> {
@@ -815,6 +873,7 @@ struct DurableShellJobRecord {
     id: String,
     command: String,
     cwd: String,
+    tty: bool,
     status: String,
     exit_code: Option<i32>,
     pid: u32,
@@ -971,6 +1030,15 @@ fn persist_job_snapshot(job: &BackgroundShellJob) -> AppResult<()> {
             JsonValue::String(job.command.clone()),
         ),
         ("cwd".to_string(), JsonValue::String(job.cwd.clone())),
+        ("tty".to_string(), JsonValue::Bool(job.tty)),
+        (
+            "pty_backend".to_string(),
+            if job.tty {
+                JsonValue::String("script".to_string())
+            } else {
+                JsonValue::Null
+            },
+        ),
         (
             "status".to_string(),
             JsonValue::String(job.status.as_str().to_string()),
@@ -1033,6 +1101,15 @@ fn write_durable_shell_job_manifest(cwd: &str, record: &DurableShellJobRecord) -
             JsonValue::String(record.command.clone()),
         ),
         ("cwd".to_string(), JsonValue::String(record.cwd.clone())),
+        ("tty".to_string(), JsonValue::Bool(record.tty)),
+        (
+            "pty_backend".to_string(),
+            if record.tty {
+                JsonValue::String("script".to_string())
+            } else {
+                JsonValue::Null
+            },
+        ),
         (
             "status".to_string(),
             JsonValue::String(record.status.clone()),
@@ -1112,7 +1189,7 @@ fn render_durable_snapshot(cwd: &str, task_id: &str) -> AppResult<String> {
         "unavailable"
     };
     let mut out = format!(
-        "task_id: {}\nstatus: {}\nmanaged: false\nexit_code: {}\npid: {}\ncommand: {}\ncwd: {}\nstarted_at: {}\nupdated_at: {}\nstdout_total_bytes: {}\nstderr_total_bytes: {}\nstdin_control: {}\nnote: durable metadata and logs are available; detached cancel is best-effort and detached stdin is available only when stdin_control=detached_fifo.\n",
+        "task_id: {}\nstatus: {}\nmanaged: false\nexit_code: {}\npid: {}\ncommand: {}\ncwd: {}\ntty: {}\npty_backend: {}\nstarted_at: {}\nupdated_at: {}\nstdout_total_bytes: {}\nstderr_total_bytes: {}\nstdin_control: {}\nnote: durable metadata and logs are available; detached cancel is best-effort and detached stdin is available only when stdin_control=detached_fifo.\n",
         record.id,
         record.status,
         record
@@ -1122,6 +1199,8 @@ fn render_durable_snapshot(cwd: &str, task_id: &str) -> AppResult<String> {
         record.pid,
         record.command,
         record.cwd,
+        record.tty,
+        if record.tty { "script" } else { "none" },
         record.started_at,
         record.updated_at,
         record.stdout_total_bytes,
@@ -1157,6 +1236,7 @@ fn read_durable_shell_job_manifest(path: &Path) -> AppResult<DurableShellJobReco
         id: required_manifest_string(&root, "id")?,
         command: required_manifest_string(&root, "command")?,
         cwd: required_manifest_string(&root, "cwd")?,
+        tty: matches!(root.get("tty"), Some(JsonValue::Bool(true))),
         status: required_manifest_string(&root, "status")?,
         exit_code: match root.get("exit_code") {
             Some(JsonValue::Null) | None => None,
@@ -1690,6 +1770,7 @@ mod tests {
             id: task_id.clone(),
             command: "sleep 30".to_string(),
             cwd: cwd.clone(),
+            tty: false,
             status: "running".to_string(),
             exit_code: None,
             pid: child.id(),
@@ -1752,6 +1833,7 @@ mod tests {
             id: task_id.clone(),
             command: "sleep 30".to_string(),
             cwd: cwd.clone(),
+            tty: false,
             status: "running".to_string(),
             exit_code: None,
             pid: 9_999_999,
@@ -1832,6 +1914,91 @@ mod tests {
         assert!(waited.summary.contains("meta.command=echo task-ready"));
         assert!(waited.summary.contains("status: completed"));
         assert!(waited.summary.contains("task-ready"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_shell_start_tty_uses_script_pty_backend() {
+        if !script_pty_backend_available() {
+            return;
+        }
+        let root = temp_root("task-shell-tty");
+        fs::create_dir_all(&root).unwrap();
+        let cwd = root.display().to_string();
+
+        let task_id = shell_manager()
+            .lock()
+            .unwrap()
+            .spawn(
+                "test -t 1 && echo tty-ready || echo not-tty",
+                &cwd,
+                None,
+                true,
+            )
+            .unwrap();
+        let waited = ExecShellWaitTool {
+            tool_name: "task_shell_wait",
+        }
+        .execute(
+            ToolInput::new()
+                .with_arg("task_id", task_id.clone())
+                .with_arg("cwd", cwd.clone())
+                .with_arg("timeout_ms", "1000"),
+        )
+        .unwrap();
+        assert!(waited.summary.contains("tty: true"), "{}", waited.summary);
+        assert!(
+            waited.summary.contains("pty_backend: script"),
+            "{}",
+            waited.summary
+        );
+        let stdout_delta = waited
+            .summary
+            .split("stdout_delta:\n")
+            .nth(1)
+            .unwrap_or_default();
+        assert!(
+            stdout_delta.lines().any(|line| line.trim() == "tty-ready"),
+            "{}",
+            waited.summary
+        );
+        assert!(
+            !stdout_delta.lines().any(|line| line.trim() == "not-tty"),
+            "{}",
+            waited.summary
+        );
+
+        let manifest = fs::read_to_string(
+            root.join(".dscode/shell-jobs")
+                .join(&task_id)
+                .join("manifest.json"),
+        )
+        .unwrap();
+        assert!(manifest.contains(r#""tty":true"#), "{manifest}");
+        assert!(manifest.contains(r#""pty_backend":"script""#), "{manifest}");
+
+        let started = TaskShellStartTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("command", "echo task-tty")
+                    .with_arg("cwd", cwd.clone())
+                    .with_arg("tty", "true"),
+            )
+            .unwrap();
+        assert!(started.summary.contains("tty: true"), "{}", started.summary);
+        assert!(
+            started.summary.contains("meta.tty=true"),
+            "{}",
+            started.summary
+        );
+        let started_id = task_id_from(&started.summary);
+        let _ = TaskShellWaitTool.execute(
+            ToolInput::new()
+                .with_arg("task_id", started_id)
+                .with_arg("cwd", cwd.clone())
+                .with_arg("timeout_ms", "1000"),
+        );
         let _ = fs::remove_dir_all(root);
     }
 

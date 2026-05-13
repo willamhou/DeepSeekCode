@@ -223,7 +223,9 @@ Landed first slice:
   to `exited` when the pid is gone, and new Unix background jobs use durable
   FIFO stdin plus direct stdout/stderr log files so detached
   `exec_shell_interact cwd=<path> task_id=<id>` can write stdin or close it
-  without the original in-memory manager
+  without the original in-memory manager; `tty=true` now runs new background
+  shell jobs through the Unix `script` PTY backend and persists `tty` /
+  `pty_backend` metadata
 - richer structured data validation
 
 ### Phase D: TUI
@@ -336,8 +338,9 @@ Landed first slice:
 Remaining:
 
 - post-shell review found no open first-order TUI interaction gaps; remaining
-  work is now in harder cross-process/platform/external buckets: true shell
-  PTY/supervisor ownership after owner-process exit, side-git/platform restore
+  work is now in harder cross-process/platform/external buckets: dedicated
+  shell supervisor ownership after owner-process exit, PTY resize/replay and
+  terminal takeover beyond the `script` backend, side-git/platform restore
   fidelity beyond the Unix special files already captured, true live
   model-backed RLM daemon semantics, and external live PR/release fixtures
 

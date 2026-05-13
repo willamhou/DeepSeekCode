@@ -3410,12 +3410,13 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
     if mcp_side_effect_tools_enabled(state) {
         tools.push(mcp_tool_definition(
             "exec_shell",
-            "DeepSeek-TUI-compatible shell execution. Use background=true for long-running commands. Requires trusted side effects or durable runtime approvals.",
+            "DeepSeek-TUI-compatible shell execution. Use background=true for long-running commands. On Unix, tty=true uses the script PTY backend. Requires trusted side effects or durable runtime approvals.",
             mcp_schema(
                 vec![
                     ("command", string_property("Allowlisted shell command.")),
                     ("cwd", string_property("Working directory, default workspace root.")),
                     ("background", string_property("Set true to run in background.")),
+                    ("tty", string_property("Set true to request the Unix script PTY backend.")),
                     ("stdin", string_property("Optional initial stdin.")),
                     ("input", string_property("Alias for stdin.")),
                     ("data", string_property("Alias for stdin.")),
@@ -3433,7 +3434,7 @@ fn mcp_tool_definitions(state: &McpStdioState) -> Vec<JsonValue> {
                     ("stdin", string_property("Optional initial stdin.")),
                     ("input", string_property("Alias for stdin.")),
                     ("timeout_ms", number_property("Compatibility timeout metadata.")),
-                    ("tty", string_property("Accepted compatibility flag.")),
+                    ("tty", string_property("Set true to request the Unix script PTY backend.")),
                 ],
                 &["command"],
             ),
