@@ -177,12 +177,14 @@ impl Default for NetworkConfig {
 #[derive(Debug, Clone)]
 pub struct SkillsConfig {
     pub registry_url: String,
+    pub cache_dir: String,
 }
 
 impl Default for SkillsConfig {
     fn default() -> Self {
         Self {
             registry_url: DEFAULT_SKILL_REGISTRY_URL.to_string(),
+            cache_dir: "~/.cache/dscode/skills".to_string(),
         }
     }
 }

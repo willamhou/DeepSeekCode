@@ -1335,6 +1335,7 @@ const REMOTE_SKILL_REGISTRY_TIMEOUT_MS: u64 = 15_000;
 fn format_skills_summary(config: &AppConfig, command: &TuiSkillsCommand) -> AppResult<String> {
     match command {
         TuiSkillsCommand::Remote => return Ok(format_remote_skills_summary(config)),
+        TuiSkillsCommand::Sync => return Ok(sync_remote_skills_summary(config)),
         TuiSkillsCommand::Install { source } => return install_user_skill(config, source),
         TuiSkillsCommand::Update { name } => return update_user_skill(config, name),
         TuiSkillsCommand::Uninstall { name } => return uninstall_user_skill(config, name),
@@ -1418,6 +1419,7 @@ fn format_skills_summary(config: &AppConfig, command: &TuiSkillsCommand) -> AppR
             Ok(format_skill_detail(skill, &searched))
         }
         TuiSkillsCommand::Remote
+        | TuiSkillsCommand::Sync
         | TuiSkillsCommand::Install { .. }
         | TuiSkillsCommand::Update { .. }
         | TuiSkillsCommand::Uninstall { .. }
@@ -1556,9 +1558,199 @@ fn render_remote_skill_entries(registry_url: &str, entries: &[RemoteSkillEntry])
     detail.push_str("\nRegistry: ");
     detail.push_str(registry_url);
     detail.push_str(
-        "\n\nInstall/update download support is not available in this TUI slice yet; use the source URL to create a local TOML skill manually.",
+        "\n\nUse /skill install <name|url> for direct TOML skill sources, or /skills sync to cache supported TOML registry entries. GitHub/tarball/SKILL.md archive installs remain pending.",
     );
     detail
+}
+
+fn sync_remote_skills_summary(config: &AppConfig) -> String {
+    let registry_url = config.skills.registry_url.trim();
+    let registry_url = if registry_url.is_empty() {
+        crate::config::types::DEFAULT_SKILL_REGISTRY_URL
+    } else {
+        registry_url
+    };
+    let body = match fetch_url_text(
+        registry_url,
+        REMOTE_SKILL_REGISTRY_MAX_BYTES,
+        REMOTE_SKILL_REGISTRY_TIMEOUT_MS,
+        false,
+    ) {
+        Ok(body) => body,
+        Err(error) => {
+            return format!(
+                "Remote skill registry sync failed.\n\nRegistry: {registry_url}\nError: {error}\n\nConfigure `skills.registry_url` or allow the registry host with `network allow <host>` before retrying."
+            );
+        }
+    };
+    let entries = match parse_remote_skill_entries(&body) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return format!(
+                "Remote skill registry sync failed.\n\nRegistry: {registry_url}\nError: {error}\n\nExpected JSON with a top-level `skills` object."
+            );
+        }
+    };
+    let cache_dir = expand_tilde(&config.skills.cache_dir);
+    if let Err(error) = std::fs::create_dir_all(&cache_dir) {
+        return format!(
+            "Remote skill registry sync failed.\n\nCache dir: {}\nError: {error}",
+            cache_dir.display()
+        );
+    }
+
+    let mut downloaded = 0usize;
+    let mut fresh = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+    let mut lines = Vec::new();
+    for entry in &entries {
+        match sync_remote_skill_entry(entry, &cache_dir) {
+            SkillSyncEntryOutcome::Downloaded { name, path } => {
+                downloaded += 1;
+                lines.push(format!("[+] {name} downloaded to {}", path.display()));
+            }
+            SkillSyncEntryOutcome::Fresh { name } => {
+                fresh += 1;
+                lines.push(format!("[=] {name} already up to date"));
+            }
+            SkillSyncEntryOutcome::Skipped { name, reason } => {
+                skipped += 1;
+                lines.push(format!("[-] {name} skipped: {reason}"));
+            }
+            SkillSyncEntryOutcome::Failed { name, reason } => {
+                failed += 1;
+                lines.push(format!("[!] {name} failed: {reason}"));
+            }
+        }
+    }
+
+    let mut detail = format!(
+        "Remote skill registry sync complete.\n\nRegistry: {registry_url}\nCache dir: {}\n\n",
+        cache_dir.display()
+    );
+    if lines.is_empty() {
+        detail.push_str("Registry is empty.\n");
+    } else {
+        for line in lines {
+            detail.push_str("- ");
+            detail.push_str(&line);
+            detail.push('\n');
+        }
+    }
+    detail.push_str(&format!(
+        "\n{} skill(s) processed: {downloaded} downloaded, {fresh} up-to-date, {skipped} skipped, {failed} failed.",
+        entries.len()
+    ));
+    detail
+}
+
+enum SkillSyncEntryOutcome {
+    Downloaded { name: String, path: PathBuf },
+    Fresh { name: String },
+    Skipped { name: String, reason: String },
+    Failed { name: String, reason: String },
+}
+
+fn sync_remote_skill_entry(entry: &RemoteSkillEntry, cache_dir: &Path) -> SkillSyncEntryOutcome {
+    if is_unsupported_skill_archive_source(&entry.source) || !is_http_url(&entry.source) {
+        return SkillSyncEntryOutcome::Skipped {
+            name: entry.name.clone(),
+            reason: "source is not a direct TOML URL; archive installer is pending".to_string(),
+        };
+    }
+    let content = match fetch_url_text(
+        &entry.source,
+        REMOTE_SKILL_REGISTRY_MAX_BYTES,
+        REMOTE_SKILL_REGISTRY_TIMEOUT_MS,
+        false,
+    ) {
+        Ok(content) => content,
+        Err(error) => {
+            return SkillSyncEntryOutcome::Failed {
+                name: entry.name.clone(),
+                reason: error.to_string(),
+            };
+        }
+    };
+    let temp_path = temporary_skill_path(cache_dir);
+    if let Err(error) = std::fs::write(&temp_path, &content) {
+        return SkillSyncEntryOutcome::Failed {
+            name: entry.name.clone(),
+            reason: error.to_string(),
+        };
+    }
+    let skill = match validate_downloaded_skill_toml(&temp_path, &content) {
+        Ok(skill) => skill,
+        Err(error) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return SkillSyncEntryOutcome::Failed {
+                name: entry.name.clone(),
+                reason: error.to_string(),
+            };
+        }
+    };
+    let final_path = match user_skill_path(cache_dir, &skill.name) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return SkillSyncEntryOutcome::Failed {
+                name: entry.name.clone(),
+                reason: error.to_string(),
+            };
+        }
+    };
+    let checksum = checksum_hex(&content);
+    let marker = skill_sync_marker_path(&final_path);
+    if final_path.exists()
+        && std::fs::read_to_string(&marker)
+            .ok()
+            .and_then(|body| read_marker_value(&body, "checksum"))
+            .as_deref()
+            == Some(checksum.as_str())
+    {
+        let _ = std::fs::remove_file(&temp_path);
+        return SkillSyncEntryOutcome::Fresh { name: skill.name };
+    }
+    if let Err(error) = std::fs::rename(&temp_path, &final_path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return SkillSyncEntryOutcome::Failed {
+            name: skill.name,
+            reason: error.to_string(),
+        };
+    }
+    if let Err(error) = write_skill_sync_marker(&marker, &entry.name, &entry.source, &checksum) {
+        return SkillSyncEntryOutcome::Failed {
+            name: skill.name,
+            reason: error.to_string(),
+        };
+    }
+    SkillSyncEntryOutcome::Downloaded {
+        name: skill.name,
+        path: final_path,
+    }
+}
+
+fn skill_sync_marker_path(skill_path: &Path) -> PathBuf {
+    skill_path.with_extension("sync-meta")
+}
+
+fn write_skill_sync_marker(
+    marker: &Path,
+    registry_name: &str,
+    source: &str,
+    checksum: &str,
+) -> AppResult<()> {
+    std::fs::write(
+        marker,
+        format!(
+            "registry_name = \"{}\"\nsource = \"{}\"\nchecksum = \"{}\"\n",
+            toml_escape(registry_name),
+            toml_escape(source),
+            toml_escape(checksum)
+        ),
+    )?;
+    Ok(())
 }
 
 fn install_user_skill(config: &AppConfig, source: &str) -> AppResult<String> {
@@ -1782,12 +1974,17 @@ fn is_http_url(value: &str) -> bool {
 
 fn is_unsupported_skill_archive_source(source: &str) -> bool {
     let lower = source.to_ascii_lowercase();
+    let lower_without_suffix = lower
+        .split(|ch| ch == '?' || ch == '#')
+        .next()
+        .unwrap_or(lower.as_str());
     lower.starts_with("github:")
         || lower.starts_with("https://github.com/")
         || lower.starts_with("http://github.com/")
-        || lower.ends_with(".tar.gz")
-        || lower.ends_with(".tgz")
-        || lower.ends_with(".zip")
+        || lower_without_suffix.ends_with(".tar.gz")
+        || lower_without_suffix.ends_with(".tgz")
+        || lower_without_suffix.ends_with(".zip")
+        || lower_without_suffix.ends_with("/skill.md")
 }
 
 fn unsupported_skill_archive_message(source: &str) -> String {
@@ -2794,6 +2991,7 @@ fn handle_tui_action_with_live(
                 }
                 TuiSkillsCommand::List { prefix: None } => "skills listed".to_string(),
                 TuiSkillsCommand::Remote => "remote skills listed".to_string(),
+                TuiSkillsCommand::Sync => "remote skills synced".to_string(),
                 TuiSkillsCommand::Show { name } => format!("skill shown: {name}"),
                 TuiSkillsCommand::Install { source } => {
                     format!("skill install processed: {source}")
@@ -8670,7 +8868,94 @@ shell_allowlist = ["git diff"]
         assert!(detail.contains("- beta: Beta skill"));
         assert!(detail.contains("source: github:team/beta"));
         assert!(detail.contains(&format!("Registry: {registry_url}")));
-        assert!(detail.contains("Install/update download support is not available"));
+        assert!(detail.contains("Use /skill install <name|url>"));
+        assert!(detail.contains("GitHub/tarball/SKILL.md archive installs remain pending"));
+
+        restore_env_var("DSCODE_ALLOW_LOCAL_FETCH", previous_allow_local);
+        restore_env_var("DSCODE_NETWORK_DEFAULT", previous_network_default);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handle_tui_action_syncs_remote_toml_skill_cache() {
+        let _guard = env_lock();
+        let previous_allow_local = std::env::var("DSCODE_ALLOW_LOCAL_FETCH").ok();
+        let previous_network_default = std::env::var("DSCODE_NETWORK_DEFAULT").ok();
+        std::env::set_var("DSCODE_ALLOW_LOCAL_FETCH", "1");
+        std::env::set_var("DSCODE_NETWORK_DEFAULT", "allow");
+
+        let skill_url = serve_once_text(test_skill_toml("cache-triage", "Cache triage"));
+        let registry_url = serve_once_text(format!(
+            r#"{{"skills":{{"cache-triage":{{"description":"Cache triage","source":"{skill_url}"}},"archive":{{"description":"Archive skill","source":"github:owner/repo"}}}}}}"#
+        ));
+        let root = temp_root("skill-sync-cache");
+        let store = RuntimeStore::new(root.join("runtime"));
+        let cache_dir = root.join("skill-cache");
+        let mut config = temp_config(&root);
+        config.skills.registry_url = registry_url;
+        config.skills.cache_dir = cache_dir.display().to_string();
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::Skills {
+                command: TuiSkillsCommand::Sync,
+            },
+        )
+        .unwrap();
+
+        assert!(cache_dir.join("cache-triage.toml").is_file());
+        assert!(cache_dir.join("cache-triage.sync-meta").is_file());
+        let (_, detail) = app.mcp_detail_for_test().expect("skill sync detail");
+        assert!(detail.contains("Remote skill registry sync complete."));
+        assert!(detail.contains("cache-triage downloaded"));
+        assert!(detail.contains("archive skipped"));
+        assert!(detail
+            .contains("2 skill(s) processed: 1 downloaded, 0 up-to-date, 1 skipped, 0 failed."));
+
+        restore_env_var("DSCODE_ALLOW_LOCAL_FETCH", previous_allow_local);
+        restore_env_var("DSCODE_NETWORK_DEFAULT", previous_network_default);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sync_remote_skill_entry_reports_fresh_when_checksum_matches() {
+        let _guard = env_lock();
+        let previous_allow_local = std::env::var("DSCODE_ALLOW_LOCAL_FETCH").ok();
+        let previous_network_default = std::env::var("DSCODE_NETWORK_DEFAULT").ok();
+        std::env::set_var("DSCODE_ALLOW_LOCAL_FETCH", "1");
+        std::env::set_var("DSCODE_NETWORK_DEFAULT", "allow");
+
+        let root = temp_root("skill-sync-fresh");
+        let cache_dir = root.join("skill-cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        let body = test_skill_toml("cache-triage", "Cache triage");
+        let skill_path = cache_dir.join("cache-triage.toml");
+        fs::write(&skill_path, &body).unwrap();
+        let source = serve_once_text(body.clone());
+        write_skill_sync_marker(
+            &cache_dir.join("cache-triage.sync-meta"),
+            "cache-triage",
+            &source,
+            &checksum_hex(&body),
+        )
+        .unwrap();
+
+        let outcome = sync_remote_skill_entry(
+            &RemoteSkillEntry {
+                name: "cache-triage".to_string(),
+                description: "Cache triage".to_string(),
+                source,
+            },
+            &cache_dir,
+        );
+
+        match outcome {
+            SkillSyncEntryOutcome::Fresh { name } => assert_eq!(name, "cache-triage"),
+            _ => panic!("expected fresh sync outcome"),
+        }
 
         restore_env_var("DSCODE_ALLOW_LOCAL_FETCH", previous_allow_local);
         restore_env_var("DSCODE_NETWORK_DEFAULT", previous_network_default);

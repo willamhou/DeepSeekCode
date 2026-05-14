@@ -621,6 +621,7 @@ fn print_config(config: &AppConfig) {
     println!("network.audit = {}", config.network.audit);
     println!("network.audit_path = {}", config.network.audit_path);
     println!("skills.registry_url = {}", config.skills.registry_url);
+    println!("skills.cache_dir = {}", config.skills.cache_dir);
 }
 
 pub(crate) fn init_config_at(root: &std::path::Path, force: bool) -> AppResult<std::path::PathBuf> {
@@ -1268,6 +1269,7 @@ network.audit_path = "{network_audit_path}"
 
 # Community skill registry browsing for `deepseek tui` `/skills --remote`.
 skills.registry_url = "{skills_registry_url}"
+skills.cache_dir = "{skills_cache_dir}"
 "#,
         base_url = config.model.base_url,
         model = config.model.model,
@@ -1303,6 +1305,7 @@ skills.registry_url = "{skills_registry_url}"
         network_audit = config.network.audit,
         network_audit_path = config.network.audit_path,
         skills_registry_url = config.skills.registry_url,
+        skills_cache_dir = config.skills.cache_dir,
     )
 }
 

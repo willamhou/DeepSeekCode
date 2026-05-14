@@ -127,6 +127,11 @@ fn apply_env_overrides(config: &mut AppConfig) {
     {
         config.skills.registry_url = value;
     }
+    if let Some(value) =
+        first_nonempty_env(&["DSCODE_SKILLS_CACHE_DIR", "DEEPSEEK_SKILLS_CACHE_DIR"])
+    {
+        config.skills.cache_dir = value;
+    }
 }
 
 fn first_nonempty_env(keys: &[&str]) -> Option<String> {
@@ -312,6 +317,9 @@ fn apply_config_key(key: &str, value: &str, config: &mut AppConfig) -> AppResult
         "skills.registry_url" => {
             config.skills.registry_url = unquote(value);
         }
+        "skills.cache_dir" => {
+            config.skills.cache_dir = unquote(value);
+        }
         "workspace.config_dir" => config.workspace.config_dir = unquote(value),
         "workspace.session_dir" => config.workspace.session_dir = unquote(value),
         "workspace.user_skills_dir" => {
@@ -422,6 +430,14 @@ mod tests {
             config.skills.registry_url,
             "https://example.com/skills.json"
         );
+    }
+
+    #[test]
+    fn parse_config_overrides_skills_cache_dir_from_toml() {
+        let mut config = AppConfig::default();
+        let toml = "skills.cache_dir = \"/tmp/dscode-skills\"\n";
+        parse_config(toml, &mut config).unwrap();
+        assert_eq!(config.skills.cache_dir, "/tmp/dscode-skills");
     }
 
     #[test]
