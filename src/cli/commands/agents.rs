@@ -1141,7 +1141,7 @@ fn shell_supervisor_replay_job(
     let input = shell_supervisor_task_tool_input(
         request,
         supervisor_cwd,
-        &["stream", "offset", "limit_bytes", "tail"],
+        &["stream", "offset", "cursor", "limit_bytes", "tail"],
     )?;
     ExecShellReplayTool.execute(input)
 }

@@ -180,8 +180,9 @@ Future implementation should add these gates:
 
 ## Current Decision
 
-Do not add fake live resize or fake attach on top of the `script` backend. The
-next shell implementation slice should start with the supervisor protocol
-skeleton or the native Unix PTY backend. Until then, docs and tool outputs must
-continue to describe current PTY support as `script` execution with initial
-geometry, durable logs, FIFO stdin, and best-effort detached process control.
+Do not add fake live resize or fake attach on top of the `script` backend.
+The supervisor protocol skeleton and terminal event replay/attach plumbing have
+landed; native Unix PTY ownership is still the next hard implementation slice.
+Until then, docs and tool outputs must continue to describe current PTY support
+as `script` execution with initial geometry, durable logs, FIFO stdin, and
+best-effort detached process control.

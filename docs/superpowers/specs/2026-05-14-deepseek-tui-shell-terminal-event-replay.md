@@ -1,0 +1,37 @@
+# DeepSeek-TUI Shell Terminal Event Replay
+
+Date: 2026-05-14
+
+Status: completed
+
+## Context
+
+The shell-supervisor PTY design reserves `terminal-events.jsonl` for future
+native supervisor-owned PTY sessions. Before a native Unix PTY backend can be
+useful to the TUI/MCP/ACP surfaces, existing shell tools need to understand
+terminal event logs instead of only stdout/stderr byte logs.
+
+## Implementation
+
+- `exec_shell_replay` now accepts `stream=terminal` / `stream=events`.
+- Terminal replay reads the durable `terminal_event_log` declared in a shell
+  job manifest and uses `cursor` as an event sequence cursor.
+- `exec_shell_attach` now switches to `terminal_event_attach` mode when a job
+  has a terminal event log; older jobs still use durable stdout byte replay.
+- `exec_shell_attach wait_ms=<n>` waits for new terminal events, completion,
+  or timeout when the cursor is already caught up.
+- Terminal event rendering supports `seq`, `kind`, optional `timestamp`/`ts`,
+  and either `preview`, `data`, `text`, or structured resize/status fields.
+- Shell-supervisor protocol replay requests now pass through the `cursor`
+  argument.
+
+## Verification
+
+- `cargo test exec_shell_replay_reads_terminal_event_log_by_cursor --lib`
+- `cargo test shell_supervisor_protocol --lib`
+
+## Residual
+
+This is replay/attach plumbing only. Native Unix PTY ownership, live
+`TIOCSWINSZ` resize, supervisor-owned PTY master fds, and owner-exit survival
+remain open implementation slices.

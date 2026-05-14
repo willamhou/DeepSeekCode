@@ -4,7 +4,8 @@ use crate::tools::run_shell::{
 };
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
 use crate::util::json::{
-    json_as_string, json_as_u64, json_value_to_string, parse_root_object, JsonValue,
+    json_as_object, json_as_string, json_as_u64, json_value_to_string, parse_json_value,
+    parse_root_object, JsonValue,
 };
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -340,12 +341,13 @@ impl Tool for ExecShellReplayTool {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or("stdout");
+        let cursor = input_u64(&input, "cursor", input_u64(&input, "offset", 0));
         let offset = input_u64(&input, "offset", 0) as usize;
         let limit_bytes = input_u64(&input, "limit_bytes", DEFAULT_REPLAY_LIMIT_BYTES)
             .min(MAX_REPLAY_LIMIT_BYTES) as usize;
         let tail = truthy(input.get("tail"));
         Ok(ToolOutput {
-            summary: render_shell_replay(cwd, task_id, stream, offset, limit_bytes, tail)?,
+            summary: render_shell_replay(cwd, task_id, stream, offset, cursor, limit_bytes, tail)?,
         })
     }
 }
@@ -2260,6 +2262,7 @@ fn render_shell_replay(
     task_id: &str,
     stream: &str,
     offset: usize,
+    cursor: u64,
     limit_bytes: usize,
     tail: bool,
 ) -> AppResult<String> {
@@ -2273,6 +2276,9 @@ fn render_shell_replay(
     refresh_durable_running_status(cwd, &mut record)?;
     let record_dir = shell_job_record_dir(cwd, task_id);
     match stream {
+        "terminal" | "events" => {
+            render_terminal_event_replay(&record, &record_dir, cursor, limit_bytes, tail)
+        }
         "stdout" | "out" => Ok(render_shell_replay_stream(
             &record,
             &record_dir,
@@ -2313,7 +2319,7 @@ fn render_shell_replay(
             Ok(format!("{stdout}\n---\n{stderr}"))
         }
         _ => Err(app_error(
-            "exec_shell_replay stream must be stdout, stderr, or all",
+            "exec_shell_replay stream must be stdout, stderr, all, or terminal",
         )),
     }
 }
@@ -2321,7 +2327,7 @@ fn render_shell_replay(
 fn render_shell_attach(
     cwd: &str,
     task_id: &str,
-    offset: usize,
+    cursor: usize,
     limit_bytes: usize,
     tail: bool,
     wait_ms: u64,
@@ -2337,18 +2343,48 @@ fn render_shell_attach(
         let mut record = read_durable_shell_job_manifest(&manifest)?;
         refresh_durable_running_status(cwd, &mut record)?;
         let record_dir = shell_job_record_dir(cwd, task_id);
+        if record.terminal_event_log.is_some() {
+            let (events, next_cursor, clipped) = terminal_events_after_cursor(
+                &record,
+                &record_dir,
+                cursor as u64,
+                limit_bytes,
+                tail,
+            )?;
+            let should_return = tail
+                || wait_ms == 0
+                || !events.is_empty()
+                || record.status != "running"
+                || Instant::now() >= deadline;
+            if should_return {
+                let timed_out =
+                    wait_ms > 0 && !tail && events.is_empty() && record.status == "running";
+                return Ok(render_terminal_event_attach_snapshot(
+                    &record,
+                    cursor as u64,
+                    tail,
+                    wait_ms,
+                    timed_out,
+                    &events,
+                    next_cursor,
+                    clipped,
+                ));
+            }
+            thread::sleep(Duration::from_millis(25));
+            continue;
+        }
         let total = durable_log_bytes(&record_dir, "stdout.log", record.stdout_total_bytes);
         let should_return = tail
             || wait_ms == 0
-            || total > offset
+            || total > cursor
             || record.status != "running"
             || Instant::now() >= deadline;
         if should_return {
-            let timed_out = wait_ms > 0 && !tail && total <= offset && record.status == "running";
+            let timed_out = wait_ms > 0 && !tail && total <= cursor && record.status == "running";
             return Ok(render_shell_attach_snapshot(
                 &record,
                 &record_dir,
-                offset,
+                cursor,
                 limit_bytes,
                 tail,
                 wait_ms,
@@ -2402,6 +2438,245 @@ fn render_shell_attach_snapshot(
         out.push('\n');
     }
     out.trim_end().to_string()
+}
+
+#[derive(Debug, Clone)]
+struct TerminalEventRecord {
+    seq: u64,
+    kind: String,
+    timestamp: Option<String>,
+    preview: String,
+}
+
+fn render_terminal_event_replay(
+    record: &DurableShellJobRecord,
+    record_dir: &Path,
+    cursor: u64,
+    limit_bytes: usize,
+    tail: bool,
+) -> AppResult<String> {
+    let (events, next_cursor, clipped) =
+        terminal_events_after_cursor(record, record_dir, cursor, limit_bytes, tail)?;
+    let event_log = shell_optional_string_label(record.terminal_event_log.as_deref());
+    let mut out = format!(
+        "task_id: {}\nstatus: {}\nstream: terminal\ncursor: {cursor}\nnext_cursor: {next_cursor}\nevents: {}\ntail: {tail}\nterminal_event_log: {event_log}\ntruncated: {clipped}\n",
+        record.id,
+        record.status,
+        events.len()
+    );
+    if !events.is_empty() {
+        out.push_str("data:\n");
+        out.push_str(&render_terminal_event_lines(&events));
+        out.push('\n');
+    }
+    Ok(out.trim_end().to_string())
+}
+
+fn render_terminal_event_attach_snapshot(
+    record: &DurableShellJobRecord,
+    cursor: u64,
+    tail: bool,
+    wait_ms: u64,
+    timed_out: bool,
+    events: &[TerminalEventRecord],
+    next_cursor: u64,
+    clipped: bool,
+) -> String {
+    let event_log = shell_optional_string_label(record.terminal_event_log.as_deref());
+    let mut out = format!(
+        "task_id: {}\nstatus: {}\nmode: terminal_event_attach\ncommand: {}\ncwd: {}\ntty: {}\npty_backend: {}\nattachable: {}\nresizable: {}\nsupervisor_pid: {}\nsupervisor_alive: {}\nsupervisor_socket: {}\nsupervisor_epoch: {}\nterminal_event_log: {event_log}\nterminal_event_seq: {}\ntty_rows: {}\ntty_cols: {}\nterminal_stream: terminal\ncursor: {cursor}\nnext_cursor: {next_cursor}\nevents: {}\ntail: {tail}\nwait_ms: {wait_ms}\ntimed_out: {timed_out}\ntruncated: {clipped}\nnote: attach replay is backed by the supervisor terminal event log; non-supervisor jobs fall back to durable stdout bytes.\n",
+        record.id,
+        record.status,
+        record.command,
+        record.cwd,
+        record.tty,
+        durable_pty_backend_label(record),
+        record.attachable,
+        record.resizable,
+        shell_optional_pid_label(record.supervisor_pid),
+        owner_alive_label(record.supervisor_pid),
+        shell_optional_string_label(record.supervisor_socket.as_deref()),
+        shell_optional_string_label(record.supervisor_epoch.as_deref()),
+        shell_optional_u64_label(record.terminal_event_seq),
+        tty_rows_label(record.tty_size),
+        tty_cols_label(record.tty_size),
+        events.len()
+    );
+    if !events.is_empty() {
+        out.push_str("terminal:\n");
+        out.push_str(&render_terminal_event_lines(&events));
+        out.push('\n');
+    }
+    out.trim_end().to_string()
+}
+
+fn terminal_events_after_cursor(
+    record: &DurableShellJobRecord,
+    record_dir: &Path,
+    cursor: u64,
+    limit_bytes: usize,
+    tail: bool,
+) -> AppResult<(Vec<TerminalEventRecord>, u64, bool)> {
+    let log_path = terminal_event_log_path(record, record_dir)?;
+    let content = fs::read_to_string(&log_path).map_err(|error| {
+        app_error(format!(
+            "failed to read terminal event log {}: {error}",
+            log_path.display()
+        ))
+    })?;
+    let mut events = content
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(index, line)| parse_terminal_event_line(line, index + 1, &log_path))
+        .collect::<AppResult<Vec<_>>>()?;
+    if tail {
+        events.reverse();
+    }
+    let mut selected = Vec::new();
+    let mut total_bytes = 0usize;
+    let mut clipped = false;
+    for event in events {
+        if !tail && event.seq <= cursor {
+            continue;
+        }
+        if tail && event.seq > cursor && cursor > 0 {
+            continue;
+        }
+        let event_bytes = event
+            .preview
+            .len()
+            .saturating_add(event.kind.len())
+            .saturating_add(32);
+        if !selected.is_empty() && total_bytes.saturating_add(event_bytes) > limit_bytes {
+            clipped = true;
+            break;
+        }
+        total_bytes = total_bytes.saturating_add(event_bytes);
+        selected.push(event);
+    }
+    if tail {
+        selected.reverse();
+    }
+    let next_cursor = selected
+        .iter()
+        .map(|event| event.seq)
+        .max()
+        .unwrap_or(cursor);
+    Ok((selected, next_cursor, clipped))
+}
+
+fn terminal_event_log_path(
+    record: &DurableShellJobRecord,
+    record_dir: &Path,
+) -> AppResult<PathBuf> {
+    let Some(raw) = record
+        .terminal_event_log
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(app_error(format!(
+            "background shell task {} has no terminal event log",
+            record.id
+        )));
+    };
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(record_dir.join(path))
+    }
+}
+
+fn parse_terminal_event_line(
+    line: &str,
+    line_no: usize,
+    path: &Path,
+) -> AppResult<TerminalEventRecord> {
+    let value = parse_json_value(line.trim()).map_err(|error| {
+        app_error(format!(
+            "failed to parse terminal event log line {line_no} in {}: {error}",
+            path.display()
+        ))
+    })?;
+    let Some(root) = json_as_object(&value) else {
+        return Err(app_error(format!(
+            "terminal event log line {line_no} in {} must be a JSON object",
+            path.display()
+        )));
+    };
+    let seq = root
+        .get("seq")
+        .and_then(json_as_u64)
+        .ok_or_else(|| app_error(format!("terminal event log line {line_no} missing `seq`")))?;
+    let kind = root
+        .get("kind")
+        .and_then(json_as_string)
+        .unwrap_or("event")
+        .to_string();
+    let timestamp = root
+        .get("timestamp")
+        .or_else(|| root.get("ts"))
+        .and_then(json_as_string)
+        .map(str::to_string);
+    let preview = terminal_event_preview(root);
+    Ok(TerminalEventRecord {
+        seq,
+        kind,
+        timestamp,
+        preview,
+    })
+}
+
+fn terminal_event_preview(root: &BTreeMap<String, JsonValue>) -> String {
+    root.get("preview")
+        .or_else(|| root.get("data"))
+        .or_else(|| root.get("text"))
+        .and_then(json_as_string)
+        .map(str::to_string)
+        .or_else(|| {
+            let mut parts = Vec::new();
+            if let Some(rows) = root.get("rows").and_then(json_as_u64) {
+                parts.push(format!("rows={rows}"));
+            }
+            if let Some(cols) = root.get("cols").and_then(json_as_u64) {
+                parts.push(format!("cols={cols}"));
+            }
+            if let Some(status) = root.get("status").and_then(json_as_string) {
+                parts.push(format!("status={status}"));
+            }
+            if let Some(code) = root.get("exit_code").and_then(json_as_u64) {
+                parts.push(format!("exit_code={code}"));
+            }
+            (!parts.is_empty()).then(|| parts.join(" "))
+        })
+        .unwrap_or_default()
+}
+
+fn render_terminal_event_lines(events: &[TerminalEventRecord]) -> String {
+    events
+        .iter()
+        .map(|event| {
+            let timestamp = event
+                .timestamp
+                .as_deref()
+                .map(|value| format!(" {value}"))
+                .unwrap_or_default();
+            if event.preview.is_empty() {
+                format!("[{} {}{}]", event.seq, event.kind, timestamp)
+            } else {
+                format!(
+                    "[{} {}{}] {}",
+                    event.seq,
+                    event.kind,
+                    timestamp,
+                    event.preview.trim_end()
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn render_shell_replay_stream(
@@ -3485,6 +3760,124 @@ mod tests {
         );
         assert!(loaded.attachable);
         assert!(loaded.resizable);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exec_shell_replay_reads_terminal_event_log_by_cursor() {
+        let root = temp_root("terminal-event-replay");
+        fs::create_dir_all(&root).unwrap();
+        let cwd = root.display().to_string();
+        let task_id = generated_job_id();
+        let record_dir = shell_job_record_dir(&cwd, &task_id);
+        fs::create_dir_all(&record_dir).unwrap();
+        fs::write(record_dir.join("stdout.log"), b"").unwrap();
+        fs::write(record_dir.join("stderr.log"), b"").unwrap();
+        fs::write(
+            record_dir.join("terminal-events.jsonl"),
+            r#"{"seq":1,"kind":"started","timestamp":"epoch+1","preview":"spawned"}
+{"seq":2,"kind":"output","timestamp":"epoch+2","preview":"alpha"}
+{"seq":3,"kind":"resize","rows":40,"cols":120}
+"#,
+        )
+        .unwrap();
+        let record = DurableShellJobRecord {
+            id: task_id.clone(),
+            command: "bash".to_string(),
+            cwd: cwd.clone(),
+            tty: true,
+            pty_backend: Some("native-supervisor".to_string()),
+            tty_size: Some(ShellTtySize {
+                rows: 40,
+                cols: 120,
+            }),
+            status: "completed".to_string(),
+            exit_code: Some(0),
+            pid: std::process::id(),
+            owner_pid: Some(std::process::id()),
+            process_group: Some(std::process::id()),
+            supervisor_pid: Some(std::process::id()),
+            supervisor_socket: Some(".dscode/shell-supervisor/supervisor.sock".to_string()),
+            supervisor_epoch: Some("epoch+1".to_string()),
+            terminal_event_log: Some("terminal-events.jsonl".to_string()),
+            terminal_event_seq: Some(3),
+            control_token_hash: None,
+            attachable: true,
+            resizable: true,
+            stdin_path: None,
+            stdin_keeper_pid: None,
+            stdin_closed: true,
+            started_at: epoch_label(),
+            updated_at: epoch_label(),
+            stdout_total_bytes: 0,
+            stderr_total_bytes: 0,
+        };
+        write_durable_shell_job_manifest(&cwd, &record).unwrap();
+
+        let replayed = ExecShellReplayTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("task_id", task_id.clone())
+                    .with_arg("cwd", cwd.clone())
+                    .with_arg("stream", "terminal")
+                    .with_arg("cursor", "1"),
+            )
+            .unwrap();
+        assert!(
+            replayed.summary.contains("stream: terminal"),
+            "{}",
+            replayed.summary
+        );
+        assert!(
+            replayed.summary.contains("next_cursor: 3"),
+            "{}",
+            replayed.summary
+        );
+        assert!(
+            replayed.summary.contains("[2 output epoch+2] alpha"),
+            "{}",
+            replayed.summary
+        );
+        assert!(
+            replayed.summary.contains("[3 resize] rows=40 cols=120"),
+            "{}",
+            replayed.summary
+        );
+        assert!(
+            !replayed.summary.contains("[1 started"),
+            "{}",
+            replayed.summary
+        );
+
+        let attached = ExecShellAttachTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("task_id", task_id)
+                    .with_arg("cwd", cwd.clone())
+                    .with_arg("cursor", "2"),
+            )
+            .unwrap();
+        assert!(
+            attached.summary.contains("mode: terminal_event_attach"),
+            "{}",
+            attached.summary
+        );
+        assert!(
+            attached.summary.contains("terminal_stream: terminal"),
+            "{}",
+            attached.summary
+        );
+        assert!(
+            attached.summary.contains("[3 resize] rows=40 cols=120"),
+            "{}",
+            attached.summary
+        );
+        assert!(
+            !attached.summary.contains("[2 output"),
+            "{}",
+            attached.summary
+        );
 
         let _ = fs::remove_dir_all(root);
     }

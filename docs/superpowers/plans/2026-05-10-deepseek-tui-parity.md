@@ -246,10 +246,13 @@ Landed first slice:
   PTY geometry; `exec_shell_resize` updates durable PTY geometry and sends a
   best-effort `stty rows/cols` command through attached stdin or detached FIFO
   for running TTY jobs; `exec_shell_replay` now replays durable stdout/stderr
-  log slices by byte offset for restart-safe shell-log replay; `exec_shell_attach`
-  now provides terminal-oriented attach snapshots over durable stdout PTY/log
-  bytes with cursor, tail, wait, and TTY geometry metadata; shell manifests now
-  carry supervisor capability fields (`attachable`, `resizable`,
+  log slices by byte offset for restart-safe shell-log replay and can replay
+  supervisor terminal event logs with `stream=terminal` / `stream=events` plus
+  sequence cursors; `exec_shell_attach` now provides terminal-oriented attach
+  snapshots over durable stdout PTY/log bytes with cursor, tail, wait, and TTY
+  geometry metadata, and switches to terminal event attach with cursor/wait
+  semantics when a `terminal_event_log` is present; shell manifests now carry
+  supervisor capability fields (`attachable`, `resizable`,
   `supervisor_pid`, `supervisor_socket`, `supervisor_epoch`,
   `terminal_event_log`, `terminal_event_seq`) so current `script` records
   explicitly render as non-attachable/non-supervisor while future
