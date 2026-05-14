@@ -32,7 +32,7 @@ use crate::tools::dispatch_subagent::{
     active_agent_thread_path, agent_threads_dir, thread_file_path, validate_thread_id,
 };
 use crate::tools::exec_shell::{
-    ExecShellSupervisorStatusTool, SHELL_SUPERVISOR_SUPPORTED_METHODS,
+    ExecShellListTool, ExecShellSupervisorStatusTool, SHELL_SUPERVISOR_SUPPORTED_METHODS,
     SHELL_SUPERVISOR_UNSUPPORTED_PTY_METHODS,
 };
 use crate::tools::rlm::{
@@ -884,6 +884,23 @@ fn shell_supervisor_protocol_response(
                 "shell supervisor method `{method}` is not implemented before native PTY support"
             )),
         );
+    } else if method == "show" {
+        let inventory =
+            ExecShellListTool.execute(ToolInput::new().with_arg("cwd", cwd.display().to_string()));
+        match inventory {
+            Ok(output) => {
+                response.insert(
+                    "job_inventory".to_string(),
+                    JsonValue::String(output.summary),
+                );
+            }
+            Err(error) => {
+                response.insert(
+                    "job_inventory_error".to_string(),
+                    JsonValue::String(error.to_string()),
+                );
+            }
+        }
     }
     JsonValue::Object(response)
 }
@@ -2675,6 +2692,91 @@ mod tests {
         assert!(json_as_string(object.get("error").unwrap())
             .unwrap()
             .contains("not implemented before native PTY support"));
+    }
+
+    #[test]
+    fn shell_supervisor_protocol_show_includes_job_inventory() {
+        let root = temp_root("shell-supervisor-show");
+        let task_id = "shell-one";
+        let job_dir = root.join(".dscode/shell-jobs").join(task_id);
+        std::fs::create_dir_all(&job_dir).unwrap();
+        std::fs::write(job_dir.join("stdout.log"), "durable\n").unwrap();
+        let manifest = JsonValue::Object(BTreeMap::from([
+            (
+                "kind".to_string(),
+                JsonValue::String("deepseek.exec_shell.job.v1".to_string()),
+            ),
+            ("id".to_string(), JsonValue::String(task_id.to_string())),
+            (
+                "command".to_string(),
+                JsonValue::String("echo durable".to_string()),
+            ),
+            (
+                "cwd".to_string(),
+                JsonValue::String(root.display().to_string()),
+            ),
+            ("tty".to_string(), JsonValue::Bool(false)),
+            ("pty_backend".to_string(), JsonValue::Null),
+            ("attachable".to_string(), JsonValue::Bool(false)),
+            ("resizable".to_string(), JsonValue::Bool(false)),
+            ("supervisor_pid".to_string(), JsonValue::Null),
+            ("supervisor_socket".to_string(), JsonValue::Null),
+            ("supervisor_epoch".to_string(), JsonValue::Null),
+            ("terminal_event_log".to_string(), JsonValue::Null),
+            ("terminal_event_seq".to_string(), JsonValue::Null),
+            ("control_token_hash".to_string(), JsonValue::Null),
+            ("tty_rows".to_string(), JsonValue::Null),
+            ("tty_cols".to_string(), JsonValue::Null),
+            (
+                "status".to_string(),
+                JsonValue::String("exited".to_string()),
+            ),
+            ("exit_code".to_string(), JsonValue::Number("0".to_string())),
+            ("pid".to_string(), JsonValue::Number("0".to_string())),
+            ("owner_pid".to_string(), JsonValue::Null),
+            ("process_group".to_string(), JsonValue::Null),
+            ("stdin_path".to_string(), JsonValue::Null),
+            ("stdin_keeper_pid".to_string(), JsonValue::Null),
+            ("stdin_closed".to_string(), JsonValue::Bool(true)),
+            (
+                "started_at".to_string(),
+                JsonValue::String("epoch+1".to_string()),
+            ),
+            (
+                "updated_at".to_string(),
+                JsonValue::String("epoch+2".to_string()),
+            ),
+            (
+                "stdout_total_bytes".to_string(),
+                JsonValue::Number("8".to_string()),
+            ),
+            (
+                "stderr_total_bytes".to_string(),
+                JsonValue::Number("0".to_string()),
+            ),
+        ]));
+        std::fs::write(
+            job_dir.join("manifest.json"),
+            json_value_to_string(&manifest),
+        )
+        .unwrap();
+
+        let response = shell_supervisor_protocol_response(
+            "show",
+            &root,
+            &root.join(".dscode/shell-supervisor/supervisor.sock"),
+            "epoch+3",
+        );
+        let object = json_as_object(&response).unwrap();
+        let inventory = json_as_string(object.get("job_inventory").unwrap()).unwrap();
+
+        assert_eq!(json_as_string(object.get("status").unwrap()), Some("ok"));
+        assert_eq!(json_as_string(object.get("method").unwrap()), Some("show"));
+        assert!(inventory.contains("Background shell jobs"), "{inventory}");
+        assert!(inventory.contains(task_id), "{inventory}");
+        assert!(inventory.contains("echo durable"), "{inventory}");
+        assert!(inventory.contains("stdout=8"), "{inventory}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

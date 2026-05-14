@@ -1348,11 +1348,14 @@ be confused with the best-effort `script` resize path.
 `deepseek agents shell-supervisor --json` starts the workspace-local protocol
 skeleton on Unix, writes `.dscode/shell-supervisor/manifest.json`, binds
 `supervisor.sock`, and answers newline-JSON `health`, `status`, `show`, and
-`shutdown` requests. `exec_shell_supervisor_status cwd=<path>` inspects that
-manifest/socket state, reports absent/stale/ready status and supported method
-names, probes socket protocol health with a bounded `health` request, and never
-prints `control_token_hash`. Unsupported PTY methods return structured
-`unsupported` responses until native supervisor-owned PTY sessions land.
+`shutdown` requests. The `show` response includes a `job_inventory` summary
+rendered from the durable `.dscode/shell-jobs` table, so a supervisor client can
+inspect persisted shell jobs without separately calling the model tool.
+`exec_shell_supervisor_status cwd=<path>` inspects that manifest/socket state,
+reports absent/stale/ready status and supported method names, probes socket
+protocol health with a bounded `health` request, and never prints
+`control_token_hash`. Unsupported PTY methods return structured `unsupported`
+responses until native supervisor-owned PTY sessions land.
 Local file-backed TUI sessions surface the same read-only protocol check through
 the command palette with `shell supervisor` and `jobs supervisor`, rendering the
 result in the shell detail panel.

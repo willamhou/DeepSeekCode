@@ -246,8 +246,9 @@ Landed first slice:
   without leaking `control_token_hash`; `deepseek agents shell-supervisor
   --json` now starts a Unix newline-JSON protocol daemon skeleton that writes
   the workspace supervisor manifest, binds `supervisor.sock`, answers
-  health/status/show/shutdown, and returns structured unsupported responses for
-  native PTY methods until supervisor-owned PTYs land; `deepseek agents service`
+  health/status/show/shutdown, includes durable `.dscode/shell-jobs` inventory
+  in `show` responses, and returns structured unsupported responses for native
+  PTY methods until supervisor-owned PTYs land; `deepseek agents service`
   and packaged systemd/launchd templates include that shell-supervisor service;
   `exec_shell_supervisor_status` now probes socket health before reporting a
   daemon as ready;
@@ -375,7 +376,8 @@ Landed first slice:
   the existing `exec_shell` job manager; shell metadata and stdout/stderr logs
   are persisted for detached later inspection through the same job id and cwd;
   `shell supervisor` / `jobs supervisor` also expose workspace-local shell
-  supervisor manifest, socket, and protocol health in the shell detail panel
+  supervisor manifest, socket, protocol health, and `show` job inventory in the
+  shell detail panel
 - local file-backed TUI composer slash commands now route DeepSeek-TUI-style
   palette-backed `/mcp`, `/jobs`, and `/restore` forms through the same built-in
   local dispatcher before custom slash fallback
