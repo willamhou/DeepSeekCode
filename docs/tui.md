@@ -78,6 +78,8 @@ Current surfaces:
   `/cycles`, `cycle <n>` / `/cycle <n>`, and `recall <query>` /
   `/recall <query>`
 - deterministic local review with `review <target>` / `/review <target>`
+- named config profile switching with `profile [name|list|clear]` /
+  `/profile [name|list|clear]`
 - workspace diff inspection with `diff` / `/diff`, showing changed tracked
   files and `git diff --stat` for the selected session workspace
 - slash quit aliases with `exit` / `/exit`, `quit` / `/quit`, and `q` / `/q`
@@ -348,6 +350,7 @@ Command palette commands currently implemented:
 | `cycle <n>`, `/cycle <n>` | Show one durable compaction handoff in full |
 | `recall <query>`, `/recall <query>` | Search durable runtime archives with `recall_archive` |
 | `review <target>`, `/review <target>` | Run deterministic local review for a file, diff, or supported target |
+| `profile [name|list|clear]`, `/profile [name|list|clear]` | Inspect or switch named project config profiles |
 | `stash`, `stash list`, `/stash list` | List parked composer drafts in the right-side detail panel |
 | `stash pop`, `/stash pop` | Restore the most recently stashed composer draft |
 | `stash clear`, `/stash clear` | Clear all parked composer drafts |
@@ -431,6 +434,10 @@ Command palette commands currently implemented:
 | `provider`, `/provider` | Show selected workspace provider preset inferred from `model.base_url` |
 | `provider list` | Show supported provider presets: DeepSeek, NVIDIA NIM, OpenAI-compatible, AtlasCloud, OpenRouter, Novita, Fireworks, SGLang, vLLM, and Ollama |
 | `provider <name> [model]`, `/provider <name> [model]` | Update selected workspace `model.base_url`, `model.api_key_env`, and `model.model` with provider defaults or an optional model override |
+| `profile`, `/profile` | Show selected workspace active config profile and configured profile entries |
+| `profile list`, `/profile list` | List configured profiles from `profiles.<name>.*` or `[profiles.name]` config sections |
+| `profile <name>`, `/profile <name>` | Persist `workspace.active_profile` so future local TUI turns reload that profile |
+| `profile clear`, `/profile clear` | Clear the persisted active config profile |
 | `skills`, `/skills`, `skills <prefix>` | List configured TOML skills from repo and user skill directories |
 | `skill <name>`, `/skill <name>` | Show one configured TOML skill's description, triggers, tools, references, policy, and system append |
 | `feedback`, `/feedback` | Show DeepSeekCode feedback targets in the right-side detail panel |

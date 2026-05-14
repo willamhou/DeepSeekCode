@@ -416,6 +416,10 @@ Landed first slice:
 - local file-backed TUI now supports DeepSeek-TUI-style `/review <target>` as a
   built-in before custom slash fallback, rendering deterministic `review` tool
   JSON in the detail panel
+- local file-backed TUI now supports DeepSeek-TUI-style `/profile <name>` with
+  `profile list` and `profile clear`, backed by `workspace.active_profile` and
+  `profiles.<name>.*` / `[profiles.name]` config overlays applied before env
+  overrides
 - local file-backed TUI now supports DeepSeek-TUI-style `/clear` conversation
   reset by creating and switching to a fresh empty active thread in the selected
   durable session without deleting older thread history
@@ -527,10 +531,11 @@ Landed first slice:
 
 Remaining:
 
-- post-shell review found no open first-order TUI interaction gaps; remaining
-  work is now in harder cross-process/platform/external buckets: dedicated
-  shell supervisor ownership after owner-process exit and attachable terminal
-  replay beyond durable terminal attach snapshots now have an explicit
+- source-level command audit still shows DeepSeek-TUI slash surfaces not yet
+  closed in DeepSeekCode: `/trust`, `/logout`, and `/translate`
+- harder cross-process/platform/external buckets remain: dedicated shell
+  supervisor ownership after owner-process exit and attachable terminal replay
+  beyond durable terminal attach snapshots now have an explicit
   shell-supervisor/PTY design spec; side-git/platform restore fidelity beyond
   the Unix special files already captured and external live PR/release fixtures
   remain open

@@ -12,7 +12,12 @@ pub fn load_or_default() -> AppResult<AppConfig> {
 
     if Path::new(&path).exists() {
         let content = fs::read_to_string(path)?;
-        parse_config(&content, &mut config)?;
+        let selected_profile = first_nonempty_env(&["DSCODE_PROFILE", "DEEPSEEK_PROFILE"])
+            .or_else(|| active_profile_from_content(&content));
+        parse_config_with_profile(&content, &mut config, selected_profile.as_deref())?;
+        if let Some(profile) = selected_profile {
+            config.workspace.active_profile = Some(profile);
+        }
     }
 
     apply_env_overrides(&mut config);
@@ -143,107 +148,179 @@ fn parse_env_list(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn parse_config(content: &str, config: &mut AppConfig) -> AppResult<()> {
+pub(crate) fn config_assignments(content: &str) -> Vec<(String, String)> {
+    let mut section = String::new();
+    let mut assignments = Vec::new();
     for raw_line in content.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-
+        if let Some(inner) = line
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+        {
+            section = inner.trim().to_string();
+            continue;
+        }
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
         let key = key.trim();
-        let value = value.trim();
-
-        match key {
-            "model.base_url" => config.model.base_url = unquote(value),
-            "model.model" => config.model.model = unquote(value),
-            "model.api_key_env" => config.model.api_key_env = unquote(value),
-            "model.reasoning_effort" => config.model.reasoning_effort = unquote(value),
-            "vision.base_url" | "vision_model.base_url" => config.vision.base_url = unquote(value),
-            "vision.model" | "vision_model.model" => config.vision.model = unquote(value),
-            "vision.api_key_env" | "vision_model.api_key_env" => {
-                config.vision.api_key_env = unquote(value)
-            }
-            "approval.require_write_confirmation" => {
-                config.approval.require_write_confirmation = parse_bool(value)?
-            }
-            "approval.require_shell_confirmation" => {
-                config.approval.require_shell_confirmation = parse_bool(value)?
-            }
-            "approval.require_mcp_confirmation" => {
-                config.approval.require_mcp_confirmation = parse_bool(value)?
-            }
-            "approval.mcp_call_allowlist" => {
-                config.approval.mcp_call_allowlist = parse_mcp_call_allowlist(value)?
-            }
-            "hooks.enabled" => {
-                config.hooks.enabled = parse_bool(value)?;
-            }
-            "hooks.project_dir" => {
-                config.hooks.project_dir = unquote(value);
-            }
-            "hooks.user_dir" => {
-                config.hooks.user_dir = unquote(value);
-            }
-            "hooks.timeout_ms" => {
-                config.hooks.timeout_ms = parse_u64(value)?;
-            }
-            "mcp.enabled" => {
-                config.mcp.enabled = parse_bool(value)?;
-            }
-            "mcp.expose_remote_tools" => {
-                config.mcp.expose_remote_tools = parse_bool(value)?;
-            }
-            "mcp.project_file" => {
-                config.mcp.project_file = unquote(value);
-            }
-            "mcp.user_file" => {
-                config.mcp.user_file = unquote(value);
-            }
-            "diagnostics.post_edit" => {
-                config.diagnostics.post_edit = parse_bool(value)?;
-            }
-            "memory.enabled" => {
-                config.memory.enabled = parse_bool(value)?;
-            }
-            "memory.notes_path" | "notes_path" => {
-                config.memory.notes_path = unquote(value);
-            }
-            "memory.memory_path" | "memory_path" => {
-                config.memory.memory_path = unquote(value);
-            }
-            "network.default" => {
-                config.network.default = unquote(value);
-            }
-            "network.allow" => {
-                config.network.allow = parse_string_list(value)?;
-            }
-            "network.deny" => {
-                config.network.deny = parse_string_list(value)?;
-            }
-            "network.audit" => {
-                config.network.audit = parse_bool(value)?;
-            }
-            "network.audit_path" => {
-                config.network.audit_path = unquote(value);
-            }
-            "workspace.config_dir" => config.workspace.config_dir = unquote(value),
-            "workspace.session_dir" => config.workspace.session_dir = unquote(value),
-            "workspace.user_skills_dir" => {
-                config.workspace.user_skills_dir = unquote(value);
-            }
-            "workspace.user_commands_dir" => {
-                config.workspace.user_commands_dir = unquote(value);
-            }
-            "workspace.user_instructions_file" => {
-                config.workspace.user_instructions_file = unquote(value);
-            }
-            _ => {}
+        if key.is_empty() {
+            continue;
         }
+        let full_key = if section.is_empty() {
+            key.to_string()
+        } else {
+            format!("{section}.{key}")
+        };
+        assignments.push((full_key, value.trim().to_string()));
+    }
+    assignments
+}
+
+fn active_profile_from_content(content: &str) -> Option<String> {
+    config_assignments(content)
+        .into_iter()
+        .find_map(|(key, value)| {
+            (key == "workspace.active_profile")
+                .then(|| unquote(&value))
+                .filter(|profile| !profile.trim().is_empty())
+        })
+}
+
+#[cfg(test)]
+fn parse_config(content: &str, config: &mut AppConfig) -> AppResult<()> {
+    parse_config_with_profile(content, config, None)
+}
+
+fn parse_config_with_profile(
+    content: &str,
+    config: &mut AppConfig,
+    selected_profile: Option<&str>,
+) -> AppResult<()> {
+    let assignments = config_assignments(content);
+    for (key, value) in assignments
+        .iter()
+        .filter(|(key, _)| !key.starts_with("profiles."))
+    {
+        apply_config_key(key, value, config)?;
     }
 
+    if let Some(profile) = selected_profile
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let mut found = false;
+        let prefix = format!("profiles.{profile}.");
+        for (key, value) in assignments
+            .iter()
+            .filter_map(|(key, value)| key.strip_prefix(&prefix).map(|stripped| (stripped, value)))
+        {
+            found = true;
+            apply_config_key(key, value, config)?;
+        }
+        if !found {
+            return Err(app_error(format!("config profile `{profile}` not found")));
+        }
+        config.workspace.active_profile = Some(profile.to_string());
+    }
+
+    Ok(())
+}
+
+fn apply_config_key(key: &str, value: &str, config: &mut AppConfig) -> AppResult<()> {
+    match key {
+        "model.base_url" => config.model.base_url = unquote(value),
+        "model.model" => config.model.model = unquote(value),
+        "model.api_key_env" => config.model.api_key_env = unquote(value),
+        "model.reasoning_effort" => config.model.reasoning_effort = unquote(value),
+        "vision.base_url" | "vision_model.base_url" => config.vision.base_url = unquote(value),
+        "vision.model" | "vision_model.model" => config.vision.model = unquote(value),
+        "vision.api_key_env" | "vision_model.api_key_env" => {
+            config.vision.api_key_env = unquote(value)
+        }
+        "approval.require_write_confirmation" => {
+            config.approval.require_write_confirmation = parse_bool(value)?
+        }
+        "approval.require_shell_confirmation" => {
+            config.approval.require_shell_confirmation = parse_bool(value)?
+        }
+        "approval.require_mcp_confirmation" => {
+            config.approval.require_mcp_confirmation = parse_bool(value)?
+        }
+        "approval.mcp_call_allowlist" => {
+            config.approval.mcp_call_allowlist = parse_mcp_call_allowlist(value)?
+        }
+        "hooks.enabled" => {
+            config.hooks.enabled = parse_bool(value)?;
+        }
+        "hooks.project_dir" => {
+            config.hooks.project_dir = unquote(value);
+        }
+        "hooks.user_dir" => {
+            config.hooks.user_dir = unquote(value);
+        }
+        "hooks.timeout_ms" => {
+            config.hooks.timeout_ms = parse_u64(value)?;
+        }
+        "mcp.enabled" => {
+            config.mcp.enabled = parse_bool(value)?;
+        }
+        "mcp.expose_remote_tools" => {
+            config.mcp.expose_remote_tools = parse_bool(value)?;
+        }
+        "mcp.project_file" => {
+            config.mcp.project_file = unquote(value);
+        }
+        "mcp.user_file" => {
+            config.mcp.user_file = unquote(value);
+        }
+        "diagnostics.post_edit" => {
+            config.diagnostics.post_edit = parse_bool(value)?;
+        }
+        "memory.enabled" => {
+            config.memory.enabled = parse_bool(value)?;
+        }
+        "memory.notes_path" | "notes_path" => {
+            config.memory.notes_path = unquote(value);
+        }
+        "memory.memory_path" | "memory_path" => {
+            config.memory.memory_path = unquote(value);
+        }
+        "network.default" => {
+            config.network.default = unquote(value);
+        }
+        "network.allow" => {
+            config.network.allow = parse_string_list(value)?;
+        }
+        "network.deny" => {
+            config.network.deny = parse_string_list(value)?;
+        }
+        "network.audit" => {
+            config.network.audit = parse_bool(value)?;
+        }
+        "network.audit_path" => {
+            config.network.audit_path = unquote(value);
+        }
+        "workspace.config_dir" => config.workspace.config_dir = unquote(value),
+        "workspace.session_dir" => config.workspace.session_dir = unquote(value),
+        "workspace.user_skills_dir" => {
+            config.workspace.user_skills_dir = unquote(value);
+        }
+        "workspace.user_commands_dir" => {
+            config.workspace.user_commands_dir = unquote(value);
+        }
+        "workspace.user_instructions_file" => {
+            config.workspace.user_instructions_file = unquote(value);
+        }
+        "workspace.active_profile" => {
+            let profile = unquote(value);
+            config.workspace.active_profile = (!profile.trim().is_empty()).then_some(profile);
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -350,6 +427,45 @@ mod tests {
         let toml = "model.reasoning_effort = \"max\"\n";
         parse_config(toml, &mut config).unwrap();
         assert_eq!(config.model.reasoning_effort, "max");
+    }
+
+    #[test]
+    fn parse_config_accepts_table_sections_and_selected_profiles() {
+        let mut config = AppConfig::default();
+        let toml = r#"
+[model]
+model = "base"
+reasoning_effort = "off"
+
+[profiles.work]
+model.model = "deepseek-v4-pro"
+model.reasoning_effort = "max"
+
+[profiles.flash.model]
+model = "deepseek-v4-flash"
+"#;
+        parse_config_with_profile(toml, &mut config, Some("work")).unwrap();
+
+        assert_eq!(config.model.model, "deepseek-v4-pro");
+        assert_eq!(config.model.reasoning_effort, "max");
+        assert_eq!(config.workspace.active_profile.as_deref(), Some("work"));
+
+        let mut flash = AppConfig::default();
+        parse_config_with_profile(toml, &mut flash, Some("flash")).unwrap();
+        assert_eq!(flash.model.model, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn parse_config_rejects_missing_selected_profile() {
+        let mut config = AppConfig::default();
+        let error = parse_config_with_profile(
+            r#"profiles.work.model.model = "deepseek-v4-pro""#,
+            &mut config,
+            Some("missing"),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("profile `missing` not found"));
     }
 
     #[test]

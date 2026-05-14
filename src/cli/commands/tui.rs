@@ -17,9 +17,10 @@ use std::time::Duration;
 use crate::cli::app::{McpConfigScope, TuiArgs};
 use crate::cli::commands::config::{
     diagnostics_config_summary_at, model_config_summary_at, network_policy_summary_at,
-    provider_config_summary_at, remove_network_rule_at, set_diagnostics_post_edit_at, set_model_at,
-    set_network_default_at, set_network_rule_at, set_provider_at, DiagnosticsConfigSummary,
-    ModelConfigSummary, NetworkPolicySummary, NetworkRuleTarget, ProviderConfigSummary,
+    profile_config_summary_at, provider_config_summary_at, remove_network_rule_at,
+    set_diagnostics_post_edit_at, set_model_at, set_network_default_at, set_network_rule_at,
+    set_provider_at, switch_profile_at, DiagnosticsConfigSummary, ModelConfigSummary,
+    NetworkPolicySummary, NetworkRuleTarget, ProfileConfigSummary, ProviderConfigSummary,
 };
 use crate::cli::commands::mcp::{
     add_mcp_server_at, init_mcp_config_at, list_remote_prompts_summary,
@@ -64,8 +65,8 @@ use crate::tui::{
     run_interactive_with_refresh_actions_and_live, TuiAction, TuiAnchorCommand, TuiApp,
     TuiApprovalRequest, TuiAutomationRecord, TuiHooksCommand, TuiItem, TuiLiveEvent, TuiLspCommand,
     TuiMcpConfigScope, TuiMcpDetailKind, TuiMemoryCommand, TuiMode, TuiModelCommand,
-    TuiNetworkCommand, TuiNoteCommand, TuiProviderCommand, TuiSession, TuiSkillsCommand,
-    TuiTaskRecord, TuiThread, TuiUsageSummary, TuiUserInputRequest,
+    TuiNetworkCommand, TuiNoteCommand, TuiProfileCommand, TuiProviderCommand, TuiSession,
+    TuiSkillsCommand, TuiTaskRecord, TuiThread, TuiUsageSummary, TuiUserInputRequest,
 };
 use crate::ui::stream::StreamEvents;
 use crate::util::json::{
@@ -638,6 +639,9 @@ fn handle_tui_http_action(
         }
         TuiAction::Provider { .. } => {
             app.set_status("provider commands require local file-backed TUI".to_string());
+        }
+        TuiAction::Profile { .. } => {
+            app.set_status("profile commands require local file-backed TUI".to_string());
         }
         TuiAction::Skills { .. } => {
             app.set_status("skills commands require local file-backed TUI".to_string());
@@ -1270,6 +1274,7 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Clear => Err(app_error("clear details are not MCP details")),
         TuiMcpDetailKind::Model => Err(app_error("model details are not MCP details")),
         TuiMcpDetailKind::Provider => Err(app_error("provider details are not MCP details")),
+        TuiMcpDetailKind::Profile => Err(app_error("profile details are not MCP details")),
         TuiMcpDetailKind::Skills => Err(app_error("skill details are not MCP details")),
         TuiMcpDetailKind::Feedback => Err(app_error("feedback details are not MCP details")),
         TuiMcpDetailKind::Links => Err(app_error("link details are not MCP details")),
@@ -1631,6 +1636,45 @@ fn format_provider_catalog_summary(summary: &ProviderConfigSummary) -> String {
     out
 }
 
+fn format_profile_config_summary(summary: &ProfileConfigSummary) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "DeepSeekCode Profiles ({})\n",
+        summary.path.display()
+    ));
+    out.push_str("=====================\n\n");
+    out.push_str(&format!(
+        "Active profile: {}\n",
+        summary.active_profile.as_deref().unwrap_or("(none)")
+    ));
+    out.push_str("\nProfiles:\n");
+    if summary.profiles.is_empty() {
+        out.push_str("- none configured\n");
+    } else {
+        for profile in &summary.profiles {
+            let marker = if summary.active_profile.as_deref() == Some(profile.name.as_str()) {
+                " (active)"
+            } else {
+                ""
+            };
+            out.push_str(&format!("- {}{}\n", profile.name, marker));
+            for (key, value) in profile.keys.iter().take(6) {
+                out.push_str(&format!("  {key} = {value}\n"));
+            }
+            if profile.keys.len() > 6 {
+                out.push_str(&format!(
+                    "  ... {} more setting(s)\n",
+                    profile.keys.len() - 6
+                ));
+            }
+        }
+    }
+    out.push_str(
+        "\nUse profile <name> to persist workspace.active_profile. Future local TUI turns reload this profile before env overrides.\n",
+    );
+    out
+}
+
 fn format_string_list(values: &[String]) -> String {
     if values.is_empty() {
         "[]".to_string()
@@ -1934,6 +1978,38 @@ fn handle_tui_action_with_live(
                 }
             };
             app.set_mcp_detail(TuiMcpDetailKind::Provider, detail);
+            app.set_status(status);
+        }
+        TuiAction::Profile { workspace, command } => {
+            let workspace = Path::new(&workspace);
+            let status = match &command {
+                TuiProfileCommand::Show => "profile config shown".to_string(),
+                TuiProfileCommand::List => "profiles listed".to_string(),
+                TuiProfileCommand::Clear => {
+                    let result = switch_profile_at(workspace, None)?;
+                    if result.changed {
+                        match result.previous {
+                            Some(previous) => format!("profile cleared: {previous}"),
+                            None => "profile cleared".to_string(),
+                        }
+                    } else {
+                        "profile already clear".to_string()
+                    }
+                }
+                TuiProfileCommand::Switch { profile } => {
+                    let result = switch_profile_at(workspace, Some(profile))?;
+                    if result.changed {
+                        format!("profile switched: {profile}")
+                    } else {
+                        format!("profile unchanged: {profile}")
+                    }
+                }
+            };
+            let summary = profile_config_summary_at(workspace)?;
+            app.set_mcp_detail(
+                TuiMcpDetailKind::Profile,
+                format_profile_config_summary(&summary),
+            );
             app.set_status(status);
         }
         TuiAction::Skills { command } => {
@@ -7109,6 +7185,70 @@ description = "Review pull requests."
         assert!(output.contains("openrouter"));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handle_tui_action_manages_profile_config() {
+        let root = temp_root("profile-config");
+        let config_dir = root.join(".dscode");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join("config.toml"),
+            r#"model.model = "base-model"
+
+[profiles.work]
+model.model = "deepseek-v4-pro"
+model.reasoning_effort = "max"
+
+[profiles.flash]
+model.model = "deepseek-v4-flash"
+"#,
+        )
+        .unwrap();
+        let store = RuntimeStore::new(root.join("runtime"));
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::Profile {
+                workspace: root.display().to_string(),
+                command: TuiProfileCommand::Switch {
+                    profile: "work".to_string(),
+                },
+            },
+        )
+        .unwrap();
+
+        let config = fs::read_to_string(config_dir.join("config.toml")).unwrap();
+        assert!(config.contains(r#"workspace.active_profile = "work""#));
+        let (kind, detail) = app.mcp_detail_for_test().expect("profile detail");
+        assert_eq!(kind, TuiMcpDetailKind::Profile);
+        assert!(detail.contains("work (active)"));
+        assert!(detail.contains(r#"model.model = "deepseek-v4-pro""#));
+        assert!(render_once(&app, 120, 36)
+            .unwrap()
+            .contains("profile switched: work"));
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::Profile {
+                workspace: root.display().to_string(),
+                command: TuiProfileCommand::Clear,
+            },
+        )
+        .unwrap();
+
+        let config = fs::read_to_string(config_dir.join("config.toml")).unwrap();
+        assert!(config.contains(r#"workspace.active_profile = """#));
+        assert!(render_once(&app, 120, 36)
+            .unwrap()
+            .contains("profile cleared: work"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

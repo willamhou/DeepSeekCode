@@ -580,6 +580,7 @@ pub enum TuiMcpDetailKind {
     Clear,
     Model,
     Provider,
+    Profile,
     Skills,
     Feedback,
     Links,
@@ -638,6 +639,7 @@ impl TuiMcpDetailKind {
             Self::Clear => "clear",
             Self::Model => "model",
             Self::Provider => "provider",
+            Self::Profile => "profile",
             Self::Skills => "skills",
             Self::Feedback => "feedback",
             Self::Links => "links",
@@ -696,6 +698,7 @@ impl TuiMcpDetailKind {
             Self::Clear => "Clear",
             Self::Model => "Model",
             Self::Provider => "Provider",
+            Self::Profile => "Profile",
             Self::Skills => "Skills",
             Self::Feedback => "Feedback",
             Self::Links => "Links",
@@ -754,6 +757,7 @@ impl TuiMcpDetailKind {
             Self::Clear => Self::Manager,
             Self::Model => Self::Manager,
             Self::Provider => Self::Manager,
+            Self::Profile => Self::Manager,
             Self::Skills => Self::Manager,
             Self::Feedback => Self::Manager,
             Self::Links => Self::Manager,
@@ -812,6 +816,7 @@ impl TuiMcpDetailKind {
             Self::Clear => Self::Manager,
             Self::Model => Self::Manager,
             Self::Provider => Self::Manager,
+            Self::Profile => Self::Manager,
             Self::Skills => Self::Manager,
             Self::Feedback => Self::Manager,
             Self::Links => Self::Manager,
@@ -1174,6 +1179,14 @@ pub enum TuiProviderCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuiProfileCommand {
+    Show,
+    List,
+    Switch { profile: String },
+    Clear,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiSkillsCommand {
     List { prefix: Option<String> },
     Show { name: String },
@@ -1477,6 +1490,24 @@ fn parse_tui_provider_command(line: &str) -> Option<Result<TuiProviderCommand, S
         }
         _ => Some(Err(
             "usage: provider [name [model]|list] or /provider [name [model]|list]".to_string(),
+        )),
+    }
+}
+
+fn parse_tui_profile_command(line: &str) -> Option<Result<TuiProfileCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/profile")
+        .or_else(|| strip_tui_command_prefix(trimmed, "profile"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] | ["show" | "status" | "help" | "--help" | "-h"] => Some(Ok(TuiProfileCommand::Show)),
+        ["list" | "ls"] => Some(Ok(TuiProfileCommand::List)),
+        ["clear" | "default" | "none" | "off"] => Some(Ok(TuiProfileCommand::Clear)),
+        [profile] if !profile.starts_with('-') => Some(Ok(TuiProfileCommand::Switch {
+            profile: (*profile).to_string(),
+        })),
+        _ => Some(Err(
+            "usage: profile [name|list|clear] or /profile [name|list|clear]".to_string(),
         )),
     }
 }
@@ -2286,6 +2317,10 @@ pub enum TuiAction {
         workspace: String,
         command: TuiProviderCommand,
     },
+    Profile {
+        workspace: String,
+        command: TuiProfileCommand,
+    },
     Skills {
         command: TuiSkillsCommand,
     },
@@ -2761,6 +2796,13 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         aliases: &[],
         usage: "/provider [name [model]|list]",
         description: "Inspect or update the selected workspace provider preset.",
+    },
+    TuiHelpCommandInfo {
+        category: "Config",
+        name: "profile",
+        aliases: &[],
+        usage: "/profile [name|list|clear]",
+        description: "Inspect or switch the selected workspace config profile.",
     },
     TuiHelpCommandInfo {
         category: "Config",
@@ -3258,6 +3300,9 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/provider nvidia-nim",
     "/provider openrouter",
     "/provider ollama",
+    "/profile",
+    "/profile list",
+    "/profile clear",
     "/skills",
     "/skill ",
     "/feedback",
@@ -5988,6 +6033,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_profile_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.request_profile_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) =
                     parse_tui_skills_command(&content).or_else(|| parse_tui_skill_command(&content))
                 {
@@ -6674,6 +6732,17 @@ impl TuiApp {
             match command {
                 Ok(command) => {
                     self.request_provider_command(command);
+                }
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_profile_command(command) {
+            match command {
+                Ok(command) => {
+                    self.request_profile_command(command);
                 }
                 Err(message) => {
                     self.status = message;
@@ -8120,6 +8189,18 @@ impl TuiApp {
             command,
         });
         self.status = format!("provider command queued: {workspace}");
+    }
+
+    fn request_profile_command(&mut self, command: TuiProfileCommand) {
+        let workspace = self
+            .selected_session()
+            .map(|session| session.workspace.clone())
+            .unwrap_or_else(|| ".".to_string());
+        self.pending_actions.push(TuiAction::Profile {
+            workspace: workspace.clone(),
+            command,
+        });
+        self.status = format!("profile command queued: {workspace}");
     }
 
     fn request_skills_command(&mut self, command: TuiSkillsCommand) {
@@ -9636,6 +9717,7 @@ impl TuiApp {
         let _ = writeln!(detail, "- /goal [objective [budget: N]|clear]");
         let _ = writeln!(detail, "- /model [name|list]");
         let _ = writeln!(detail, "- /provider [name [model]|list]");
+        let _ = writeln!(detail, "- /profile [name|list|clear]");
         let _ = writeln!(detail, "- /network [list|allow|deny|remove|default]");
         let _ = writeln!(detail, "- /lsp [on|off|status]");
         let _ = writeln!(detail, "- /memory [show|path|clear|edit|help]");
@@ -17609,6 +17691,71 @@ mod tests {
     }
 
     #[test]
+    fn command_palette_requests_profile_actions() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: "/tmp/deepseek-profile".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        run_palette_command(&mut app, "profile");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Profile {
+                workspace: "/tmp/deepseek-profile".to_string(),
+                command: TuiProfileCommand::Show,
+            }]
+        );
+
+        run_palette_command(&mut app, "/profile work");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Profile {
+                workspace: "/tmp/deepseek-profile".to_string(),
+                command: TuiProfileCommand::Switch {
+                    profile: "work".to_string(),
+                },
+            }]
+        );
+
+        run_palette_command(&mut app, "profile list");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Profile {
+                workspace: "/tmp/deepseek-profile".to_string(),
+                command: TuiProfileCommand::List,
+            }]
+        );
+
+        app.composer_focused = true;
+        app.composer = "/profile clear".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Profile {
+                workspace: "/tmp/deepseek-profile".to_string(),
+                command: TuiProfileCommand::Clear,
+            }]
+        );
+    }
+
+    #[test]
     fn command_palette_requests_skills_actions() {
         let mut app = TuiApp::new(Vec::new());
 
@@ -18432,7 +18579,7 @@ mod tests {
         let mut app = TuiApp::new(Vec::new());
 
         assert!(app.handle_key(KeyCode::Char('i')));
-        for ch in "/pro".chars() {
+        for ch in "/prov".chars() {
             assert!(app.handle_key(KeyCode::Char(ch)));
         }
 

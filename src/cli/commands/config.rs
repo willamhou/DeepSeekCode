@@ -1,5 +1,5 @@
 use crate::cli::app::ConfigArgs;
-use crate::config::load::load_or_default;
+use crate::config::load::{config_assignments, load_or_default};
 use crate::config::types::AppConfig;
 use crate::core::network_policy::{decide, normalize_host, NetworkDecision};
 use crate::error::app_error;
@@ -125,6 +125,27 @@ pub(crate) struct ProviderSetResult {
     pub(crate) base_url: String,
     pub(crate) model: String,
     pub(crate) api_key_env: String,
+    pub(crate) changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProfileConfigSummary {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) active_profile: Option<String>,
+    pub(crate) profiles: Vec<ProfileEntrySummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProfileEntrySummary {
+    pub(crate) name: String,
+    pub(crate) keys: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProfileSwitchResult {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) profile: Option<String>,
+    pub(crate) previous: Option<String>,
     pub(crate) changed: bool,
 }
 
@@ -400,6 +421,64 @@ pub(crate) fn set_provider_at(
     })
 }
 
+pub(crate) fn profile_config_summary_at(root: &std::path::Path) -> AppResult<ProfileConfigSummary> {
+    let path = network_config_path_at(root);
+    if !path.exists() {
+        init_config_at(root, false)?;
+    }
+    let content = std::fs::read_to_string(&path)?;
+    Ok(ProfileConfigSummary {
+        path,
+        active_profile: read_assignment_string_key(&content, "workspace.active_profile")
+            .filter(|value| !value.trim().is_empty()),
+        profiles: profile_entries_from_content(&content),
+    })
+}
+
+pub(crate) fn switch_profile_at(
+    root: &std::path::Path,
+    profile: Option<&str>,
+) -> AppResult<ProfileSwitchResult> {
+    let path = network_config_path_at(root);
+    if !path.exists() {
+        init_config_at(root, false)?;
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let previous = read_assignment_string_key(&content, "workspace.active_profile")
+        .filter(|value| !value.trim().is_empty());
+    let profile = profile
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Some(profile) = profile.as_deref() {
+        validate_profile_name(profile)?;
+        let available = profile_names_from_content(&content);
+        if !available.iter().any(|name| name == profile) {
+            return Err(app_error(format!(
+                "profile `{profile}` not found; available: {}",
+                if available.is_empty() {
+                    "none".to_string()
+                } else {
+                    available.join(", ")
+                }
+            )));
+        }
+    }
+    let changed = previous != profile;
+    if changed {
+        let value = profile.as_deref().unwrap_or("");
+        let updated =
+            replace_or_append_root_string_key(&content, "workspace.active_profile", value);
+        std::fs::write(&path, updated)?;
+    }
+    Ok(ProfileSwitchResult {
+        path,
+        profile,
+        previous,
+        changed,
+    })
+}
+
 fn print_config(config: &AppConfig) {
     println!("model.base_url = {}", config.model.base_url);
     println!("model.model = {}", config.model.model);
@@ -438,6 +517,9 @@ fn print_config(config: &AppConfig) {
         "workspace.user_instructions_file = {}",
         config.workspace.user_instructions_file
     );
+    if let Some(profile) = config.workspace.active_profile.as_deref() {
+        println!("workspace.active_profile = {profile}");
+    }
     println!("hooks.enabled = {}", config.hooks.enabled);
     println!("hooks.project_dir = {}", config.hooks.project_dir);
     println!("hooks.user_dir = {}", config.hooks.user_dir);
@@ -776,6 +858,63 @@ fn provider_model_value(preset: ProviderPreset, raw: &str) -> AppResult<String> 
     Ok(mapped.to_string())
 }
 
+fn validate_profile_name(profile: &str) -> AppResult<()> {
+    if profile.trim().is_empty()
+        || profile
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace() || matches!(ch, '"' | '\'' | '\\'))
+    {
+        return Err(app_error(
+            "profile name must be a single token without quotes or whitespace",
+        ));
+    }
+    Ok(())
+}
+
+fn profile_entries_from_content(content: &str) -> Vec<ProfileEntrySummary> {
+    let mut grouped = std::collections::BTreeMap::<String, Vec<(String, String)>>::new();
+    for (key, value) in config_assignments(content) {
+        let Some((name, field)) = profile_assignment_key(&key) else {
+            continue;
+        };
+        grouped
+            .entry(name.to_string())
+            .or_default()
+            .push((field.to_string(), value));
+    }
+    grouped
+        .into_iter()
+        .map(|(name, mut keys)| {
+            keys.sort_by(|left, right| left.0.cmp(&right.0));
+            ProfileEntrySummary { name, keys }
+        })
+        .collect()
+}
+
+fn profile_names_from_content(content: &str) -> Vec<String> {
+    profile_entries_from_content(content)
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect()
+}
+
+fn profile_assignment_key(key: &str) -> Option<(&str, &str)> {
+    let rest = key.strip_prefix("profiles.")?;
+    let (name, field) = rest.split_once('.')?;
+    if name.is_empty() || field.is_empty() {
+        return None;
+    }
+    Some((name, field))
+}
+
+fn read_assignment_string_key(content: &str, requested_key: &str) -> Option<String> {
+    config_assignments(content)
+        .into_iter()
+        .find_map(|(key, value)| {
+            (key == requested_key).then(|| unquote_config_string(value.trim()))
+        })
+}
+
 fn read_string_key(content: &str, key: &str) -> Option<String> {
     for line in content.lines() {
         let trimmed = line.trim_start();
@@ -879,6 +1018,48 @@ fn replace_or_append_string_list_key(content: &str, key: &str, values: &[String]
 fn replace_or_append_string_key(content: &str, key: &str, value: &str) -> String {
     let rendered = format!("{key} = \"{}\"", value.replace('"', "\\\""));
     replace_or_append_line(content, key, rendered)
+}
+
+fn replace_or_append_root_string_key(content: &str, key: &str, value: &str) -> String {
+    let rendered = format!("{key} = \"{}\"", value.replace('"', "\\\""));
+    let mut replaced = false;
+    let mut section_seen = false;
+    let mut inserted = false;
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if !section_seen
+            && !replaced
+            && trimmed
+                .strip_prefix(key)
+                .is_some_and(|rest| rest.trim_start().starts_with('='))
+        {
+            lines.push(rendered.clone());
+            replaced = true;
+            continue;
+        }
+        if !section_seen && trimmed.starts_with('[') {
+            if !replaced {
+                if !lines.is_empty() && !lines.last().is_some_and(|line: &String| line.is_empty()) {
+                    lines.push(String::new());
+                }
+                lines.push(rendered.clone());
+                lines.push(String::new());
+                inserted = true;
+            }
+            section_seen = true;
+        }
+        lines.push(line.to_string());
+    }
+    if !replaced && !inserted {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(rendered);
+    }
+    let mut updated = lines.join("\n");
+    updated.push('\n');
+    updated
 }
 
 fn replace_or_append_bool_key(content: &str, key: &str, value: bool) -> String {
