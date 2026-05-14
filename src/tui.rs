@@ -582,6 +582,7 @@ pub enum TuiMcpDetailKind {
     Provider,
     Profile,
     Trust,
+    Logout,
     Skills,
     Feedback,
     Links,
@@ -642,6 +643,7 @@ impl TuiMcpDetailKind {
             Self::Provider => "provider",
             Self::Profile => "profile",
             Self::Trust => "trust",
+            Self::Logout => "logout",
             Self::Skills => "skills",
             Self::Feedback => "feedback",
             Self::Links => "links",
@@ -702,6 +704,7 @@ impl TuiMcpDetailKind {
             Self::Provider => "Provider",
             Self::Profile => "Profile",
             Self::Trust => "Trust",
+            Self::Logout => "Logout",
             Self::Skills => "Skills",
             Self::Feedback => "Feedback",
             Self::Links => "Links",
@@ -762,6 +765,7 @@ impl TuiMcpDetailKind {
             Self::Provider => Self::Manager,
             Self::Profile => Self::Manager,
             Self::Trust => Self::Manager,
+            Self::Logout => Self::Manager,
             Self::Skills => Self::Manager,
             Self::Feedback => Self::Manager,
             Self::Links => Self::Manager,
@@ -822,6 +826,7 @@ impl TuiMcpDetailKind {
             Self::Provider => Self::Manager,
             Self::Profile => Self::Manager,
             Self::Trust => Self::Manager,
+            Self::Logout => Self::Manager,
             Self::Skills => Self::Manager,
             Self::Feedback => Self::Manager,
             Self::Links => Self::Manager,
@@ -1558,6 +1563,17 @@ fn parse_tui_trust_command(line: &str) -> Option<Result<TuiTrustCommand, String>
         _ => Some(Err(
             "usage: trust [on|off|add <path>|remove <path>|list] or /trust [on|off|add <path>|remove <path>|list]".to_string(),
         )),
+    }
+}
+
+fn parse_tui_logout_command(line: &str) -> Option<Result<(), String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/logout")
+        .or_else(|| strip_tui_command_prefix(trimmed, "logout"))?;
+    if rest.trim().is_empty() {
+        Some(Ok(()))
+    } else {
+        Some(Err("usage: logout or /logout".to_string()))
     }
 }
 
@@ -2374,6 +2390,9 @@ pub enum TuiAction {
         workspace: String,
         command: TuiTrustCommand,
     },
+    Logout {
+        workspace: String,
+    },
     Skills {
         command: TuiSkillsCommand,
     },
@@ -2863,6 +2882,13 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         aliases: &[],
         usage: "/trust [on|off|add <path>|remove <path>|list]",
         description: "Manage selected workspace trust mode and trusted external paths.",
+    },
+    TuiHelpCommandInfo {
+        category: "Config",
+        name: "logout",
+        aliases: &[],
+        usage: "/logout",
+        description: "Clear local API key state for the selected workspace.",
     },
     TuiHelpCommandInfo {
         category: "Config",
@@ -3369,6 +3395,7 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/trust remove ",
     "/trust on",
     "/trust off",
+    "/logout",
     "/skills",
     "/skill ",
     "/feedback",
@@ -6125,6 +6152,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_logout_command(&content) {
+                    match command {
+                        Ok(()) => {
+                            self.request_logout_command();
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) =
                     parse_tui_skills_command(&content).or_else(|| parse_tui_skill_command(&content))
                 {
@@ -6833,6 +6873,17 @@ impl TuiApp {
             match command {
                 Ok(command) => {
                     self.request_trust_command(command);
+                }
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_logout_command(command) {
+            match command {
+                Ok(()) => {
+                    self.request_logout_command();
                 }
                 Err(message) => {
                     self.status = message;
@@ -8303,6 +8354,17 @@ impl TuiApp {
             command,
         });
         self.status = format!("trust command queued: {workspace}");
+    }
+
+    fn request_logout_command(&mut self) {
+        let workspace = self
+            .selected_session()
+            .map(|session| session.workspace.clone())
+            .unwrap_or_else(|| ".".to_string());
+        self.pending_actions.push(TuiAction::Logout {
+            workspace: workspace.clone(),
+        });
+        self.status = format!("logout queued: {workspace}");
     }
 
     fn request_skills_command(&mut self, command: TuiSkillsCommand) {
@@ -9821,6 +9883,7 @@ impl TuiApp {
         let _ = writeln!(detail, "- /provider [name [model]|list]");
         let _ = writeln!(detail, "- /profile [name|list|clear]");
         let _ = writeln!(detail, "- /trust [on|off|add <path>|remove <path>|list]");
+        let _ = writeln!(detail, "- /logout");
         let _ = writeln!(detail, "- /network [list|allow|deny|remove|default]");
         let _ = writeln!(detail, "- /lsp [on|off|status]");
         let _ = writeln!(detail, "- /memory [show|path|clear|edit|help]");
@@ -17907,6 +17970,14 @@ mod tests {
             vec![TuiAction::Trust {
                 workspace: "/tmp/deepseek-trust".to_string(),
                 command: TuiTrustCommand::SetMode { enabled: false },
+            }]
+        );
+
+        run_palette_command(&mut app, "/logout");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Logout {
+                workspace: "/tmp/deepseek-trust".to_string(),
             }]
         );
 

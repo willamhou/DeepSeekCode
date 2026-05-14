@@ -16,11 +16,12 @@ use std::time::Duration;
 
 use crate::cli::app::{McpConfigScope, TuiArgs};
 use crate::cli::commands::config::{
-    diagnostics_config_summary_at, model_config_summary_at, network_policy_summary_at,
-    profile_config_summary_at, provider_config_summary_at, remove_network_rule_at,
-    set_diagnostics_post_edit_at, set_model_at, set_network_default_at, set_network_rule_at,
-    set_provider_at, switch_profile_at, DiagnosticsConfigSummary, ModelConfigSummary,
-    NetworkPolicySummary, NetworkRuleTarget, ProfileConfigSummary, ProviderConfigSummary,
+    diagnostics_config_summary_at, logout_credentials_at, model_config_summary_at,
+    network_policy_summary_at, profile_config_summary_at, provider_config_summary_at,
+    remove_network_rule_at, set_diagnostics_post_edit_at, set_model_at, set_network_default_at,
+    set_network_rule_at, set_provider_at, switch_profile_at, DiagnosticsConfigSummary,
+    LogoutCredentialSummary, ModelConfigSummary, NetworkPolicySummary, NetworkRuleTarget,
+    ProfileConfigSummary, ProviderConfigSummary,
 };
 use crate::cli::commands::mcp::{
     add_mcp_server_at, init_mcp_config_at, list_remote_prompts_summary,
@@ -650,6 +651,9 @@ fn handle_tui_http_action(
         }
         TuiAction::Trust { .. } => {
             app.set_status("trust commands require local file-backed TUI".to_string());
+        }
+        TuiAction::Logout { .. } => {
+            app.set_status("logout requires local file-backed TUI".to_string());
         }
         TuiAction::Skills { .. } => {
             app.set_status("skills commands require local file-backed TUI".to_string());
@@ -1284,6 +1288,7 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Provider => Err(app_error("provider details are not MCP details")),
         TuiMcpDetailKind::Profile => Err(app_error("profile details are not MCP details")),
         TuiMcpDetailKind::Trust => Err(app_error("trust details are not MCP details")),
+        TuiMcpDetailKind::Logout => Err(app_error("logout details are not MCP details")),
         TuiMcpDetailKind::Skills => Err(app_error("skill details are not MCP details")),
         TuiMcpDetailKind::Feedback => Err(app_error("feedback details are not MCP details")),
         TuiMcpDetailKind::Links => Err(app_error("link details are not MCP details")),
@@ -1712,6 +1717,38 @@ fn format_workspace_trust_summary(workspace: &Path, trust: &WorkspaceTrust) -> S
     out
 }
 
+fn format_logout_summary(summary: &LogoutCredentialSummary) -> String {
+    let mut out = String::new();
+    out.push_str("DeepSeekCode Logout\n");
+    out.push_str("===================\n\n");
+    out.push_str(&format!("Workspace: {}\n", summary.workspace.display()));
+    out.push_str(&format!(".env: {}\n\n", summary.dotenv_path.display()));
+    out.push_str("Current process environment:\n");
+    for entry in &summary.env_vars {
+        out.push_str(&format!(
+            "- {}: {}\n",
+            entry.name,
+            if entry.was_present {
+                "cleared"
+            } else {
+                "not set"
+            }
+        ));
+    }
+    out.push_str("\n.env assignments:\n");
+    if summary.dotenv_removed.is_empty() {
+        out.push_str("- none removed\n");
+    } else {
+        for key in &summary.dotenv_removed {
+            out.push_str(&format!("- {key}: removed\n"));
+        }
+    }
+    out.push_str(
+        "\nThis only affects the current TUI process and the selected workspace .env file. It cannot unset variables already exported in the parent shell.\n",
+    );
+    out
+}
+
 fn format_string_list(values: &[String]) -> String {
     if values.is_empty() {
         "[]".to_string()
@@ -2088,6 +2125,26 @@ fn handle_tui_action_with_live(
                 TuiMcpDetailKind::Trust,
                 format_workspace_trust_summary(workspace, &trust),
             );
+            app.set_status(status);
+        }
+        TuiAction::Logout { workspace } => {
+            let summary = logout_credentials_at(Path::new(&workspace))?;
+            let cleared = summary
+                .env_vars
+                .iter()
+                .filter(|entry| entry.was_present)
+                .map(|entry| entry.name.as_str())
+                .chain(summary.dotenv_removed.iter().map(String::as_str))
+                .collect::<std::collections::BTreeSet<_>>();
+            let status = if summary.changed() {
+                format!(
+                    "logged out: cleared {}",
+                    cleared.into_iter().collect::<Vec<_>>().join(", ")
+                )
+            } else {
+                "logout: no local API key state found".to_string()
+            };
+            app.set_mcp_detail(TuiMcpDetailKind::Logout, format_logout_summary(&summary));
             app.set_status(status);
         }
         TuiAction::Skills { command } => {
@@ -7415,6 +7472,64 @@ model.model = "deepseek-v4-flash"
                 .unwrap()
                 .contains("trusted path removed"));
         });
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handle_tui_action_logs_out_local_api_key_state() {
+        let _guard = env_lock();
+        let root = temp_root("logout-config");
+        fs::create_dir_all(root.join(".dscode")).unwrap();
+        fs::write(
+            root.join(".dscode/config.toml"),
+            r#"workspace.active_profile = "work"
+model.api_key_env = "DSCODE_TEST_LOGOUT_BASE_MODEL_KEY"
+vision.api_key_env = "DSCODE_TEST_LOGOUT_BASE_VISION_KEY"
+
+[profiles.work]
+model.api_key_env = "DSCODE_TEST_LOGOUT_MODEL_KEY"
+vision.api_key_env = "DSCODE_TEST_LOGOUT_VISION_KEY"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(".env"),
+            r#"DSCODE_TEST_LOGOUT_MODEL_KEY=model-secret
+DSCODE_TEST_LOGOUT_BASE_MODEL_KEY=base-model-secret
+KEEP_ME=1
+export DSCODE_TEST_LOGOUT_VISION_KEY="vision-secret"
+"#,
+        )
+        .unwrap();
+        std::env::set_var("DSCODE_TEST_LOGOUT_MODEL_KEY", "model-secret");
+        std::env::set_var("DSCODE_TEST_LOGOUT_VISION_KEY", "vision-secret");
+        let store = RuntimeStore::new(root.join("runtime"));
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::Logout {
+                workspace: root.display().to_string(),
+            },
+        )
+        .unwrap();
+
+        assert!(std::env::var_os("DSCODE_TEST_LOGOUT_MODEL_KEY").is_none());
+        assert!(std::env::var_os("DSCODE_TEST_LOGOUT_VISION_KEY").is_none());
+        let dotenv = fs::read_to_string(root.join(".env")).unwrap();
+        assert!(!dotenv.contains("DSCODE_TEST_LOGOUT_MODEL_KEY"));
+        assert!(!dotenv.contains("DSCODE_TEST_LOGOUT_VISION_KEY"));
+        assert!(dotenv.contains("DSCODE_TEST_LOGOUT_BASE_MODEL_KEY"));
+        assert!(dotenv.contains("KEEP_ME=1"));
+        let (kind, detail) = app.mcp_detail_for_test().expect("logout detail");
+        assert_eq!(kind, TuiMcpDetailKind::Logout);
+        assert!(detail.contains("DSCODE_TEST_LOGOUT_MODEL_KEY: cleared"));
+        assert!(render_once(&app, 120, 36)
+            .unwrap()
+            .contains("logged out: cleared"));
 
         let _ = fs::remove_dir_all(root);
     }

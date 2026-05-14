@@ -1,5 +1,5 @@
 use crate::cli::app::ConfigArgs;
-use crate::config::load::{config_assignments, load_or_default};
+use crate::config::load::{config_assignments, load_or_default, parse_dotenv_assignment};
 use crate::config::types::AppConfig;
 use crate::core::network_policy::{decide, normalize_host, NetworkDecision};
 use crate::error::app_error;
@@ -147,6 +147,27 @@ pub(crate) struct ProfileSwitchResult {
     pub(crate) profile: Option<String>,
     pub(crate) previous: Option<String>,
     pub(crate) changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LogoutCredentialSummary {
+    pub(crate) workspace: std::path::PathBuf,
+    pub(crate) dotenv_path: std::path::PathBuf,
+    pub(crate) env_vars: Vec<LogoutEnvVarSummary>,
+    pub(crate) dotenv_removed: Vec<String>,
+    pub(crate) dotenv_changed: bool,
+}
+
+impl LogoutCredentialSummary {
+    pub(crate) fn changed(&self) -> bool {
+        self.dotenv_changed || self.env_vars.iter().any(|entry| entry.was_present)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LogoutEnvVarSummary {
+    pub(crate) name: String,
+    pub(crate) was_present: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -476,6 +497,59 @@ pub(crate) fn switch_profile_at(
         profile,
         previous,
         changed,
+    })
+}
+
+pub(crate) fn logout_credentials_at(root: &std::path::Path) -> AppResult<LogoutCredentialSummary> {
+    let path = network_config_path_at(root);
+    let defaults = AppConfig::default();
+    let content = if path.exists() {
+        std::fs::read_to_string(&path)?
+    } else {
+        String::new()
+    };
+    let mut env_names = Vec::new();
+    env_names.push(
+        read_effective_assignment_string_key(&content, "model.api_key_env")
+            .unwrap_or(defaults.model.api_key_env),
+    );
+    env_names.push(
+        read_effective_assignment_string_key(&content, "vision.api_key_env")
+            .or_else(|| read_effective_assignment_string_key(&content, "vision_model.api_key_env"))
+            .unwrap_or(defaults.vision.api_key_env),
+    );
+    env_names.sort();
+    env_names.dedup();
+
+    let mut env_vars = Vec::new();
+    for name in &env_names {
+        let was_present = std::env::var_os(name).is_some();
+        std::env::remove_var(name);
+        env_vars.push(LogoutEnvVarSummary {
+            name: name.clone(),
+            was_present,
+        });
+    }
+
+    let dotenv_path = root.join(".env");
+    let (dotenv_removed, dotenv_changed) = if dotenv_path.exists() {
+        let content = std::fs::read_to_string(&dotenv_path)?;
+        let (updated, removed) = remove_dotenv_assignments(&content, &env_names);
+        let changed = !removed.is_empty();
+        if changed {
+            std::fs::write(&dotenv_path, updated)?;
+        }
+        (removed, changed)
+    } else {
+        (Vec::new(), false)
+    };
+
+    Ok(LogoutCredentialSummary {
+        workspace: root.to_path_buf(),
+        dotenv_path,
+        env_vars,
+        dotenv_removed,
+        dotenv_changed,
     })
 }
 
@@ -913,6 +987,48 @@ fn read_assignment_string_key(content: &str, requested_key: &str) -> Option<Stri
         .find_map(|(key, value)| {
             (key == requested_key).then(|| unquote_config_string(value.trim()))
         })
+}
+
+fn read_effective_assignment_string_key(content: &str, requested_key: &str) -> Option<String> {
+    let assignments = config_assignments(content);
+    let mut value = assignments.iter().find_map(|(key, value)| {
+        (key == requested_key).then(|| unquote_config_string(value.trim()))
+    });
+    let active_profile = assignments.iter().find_map(|(key, value)| {
+        (key == "workspace.active_profile")
+            .then(|| unquote_config_string(value.trim()))
+            .filter(|profile| !profile.trim().is_empty())
+    });
+    if let Some(profile) = active_profile {
+        let profile_key = format!("profiles.{profile}.{requested_key}");
+        if let Some(profile_value) = assignments.iter().find_map(|(key, value)| {
+            (key == &profile_key).then(|| unquote_config_string(value.trim()))
+        }) {
+            value = Some(profile_value);
+        }
+    }
+    value
+}
+
+fn remove_dotenv_assignments(content: &str, env_names: &[String]) -> (String, Vec<String>) {
+    let mut removed = Vec::new();
+    let mut kept = Vec::new();
+    for line in content.lines() {
+        if let Some((key, _)) = parse_dotenv_assignment(line) {
+            if env_names.iter().any(|name| name == &key) {
+                removed.push(key);
+                continue;
+            }
+        }
+        kept.push(line.to_string());
+    }
+    removed.sort();
+    removed.dedup();
+    let mut updated = kept.join("\n");
+    if content.ends_with('\n') || !updated.is_empty() {
+        updated.push('\n');
+    }
+    (updated, removed)
 }
 
 fn read_string_key(content: &str, key: &str) -> Option<String> {

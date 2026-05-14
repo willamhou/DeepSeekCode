@@ -83,6 +83,7 @@ Current surfaces:
 - workspace trust management with
   `trust [on|off|add <path>|remove <path>|list]` /
   `/trust [on|off|add <path>|remove <path>|list]`
+- local API key state cleanup with `logout` / `/logout`
 - workspace diff inspection with `diff` / `/diff`, showing changed tracked
   files and `git diff --stat` for the selected session workspace
 - slash quit aliases with `exit` / `/exit`, `quit` / `/quit`, and `q` / `/q`
@@ -355,6 +356,7 @@ Command palette commands currently implemented:
 | `review <target>`, `/review <target>` | Run deterministic local review for a file, diff, or supported target |
 | `profile [name|list|clear]`, `/profile [name|list|clear]` | Inspect or switch named project config profiles |
 | `trust [on|off|add <path>|remove <path>|list]`, `/trust [on|off|add <path>|remove <path>|list]` | Manage workspace trust mode and trusted external paths |
+| `logout`, `/logout` | Clear selected workspace API key env values from the current TUI process and `.env` |
 | `stash`, `stash list`, `/stash list` | List parked composer drafts in the right-side detail panel |
 | `stash pop`, `/stash pop` | Restore the most recently stashed composer draft |
 | `stash clear`, `/stash clear` | Clear all parked composer drafts |
@@ -447,6 +449,7 @@ Command palette commands currently implemented:
 | `trust off`, `/trust off` | Disable persisted all-path trust mode for the selected workspace |
 | `trust add <path>`, `/trust add <path>` | Add an existing trusted external path scoped to the selected workspace |
 | `trust remove <path>`, `/trust remove <path>` | Remove a trusted external path scoped to the selected workspace |
+| `logout`, `/logout` | Remove selected workspace `model.api_key_env` / `vision.api_key_env` values from the current TUI process and matching `.env` assignments |
 | `skills`, `/skills`, `skills <prefix>` | List configured TOML skills from repo and user skill directories |
 | `skill <name>`, `/skill <name>` | Show one configured TOML skill's description, triggers, tools, references, policy, and system append |
 | `feedback`, `/feedback` | Show DeepSeekCode feedback targets in the right-side detail panel |

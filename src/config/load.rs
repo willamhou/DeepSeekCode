@@ -42,7 +42,7 @@ fn load_dotenv_if_present() -> AppResult<()> {
     Ok(())
 }
 
-fn parse_dotenv_assignment(raw_line: &str) -> Option<(String, String)> {
+pub(crate) fn parse_dotenv_assignment(raw_line: &str) -> Option<(String, String)> {
     let line = raw_line.trim();
     if line.is_empty() || line.starts_with('#') {
         return None;

@@ -425,6 +425,11 @@ Landed first slice:
   trust store at `~/.config/dscode/workspace-trust.json`; trusted external
   paths and all-path trust mode are honored by shared local/MCP workspace path
   resolution
+- local file-backed TUI now supports DeepSeek-TUI-style `/logout`, adapted to
+  DeepSeekCode's env-based credential model by clearing the selected
+  workspace's model/vision API key env vars from the current TUI process and
+  removing matching assignments from the selected workspace `.env` file without
+  touching unrelated entries
 - local file-backed TUI now supports DeepSeek-TUI-style `/clear` conversation
   reset by creating and switching to a fresh empty active thread in the selected
   durable session without deleting older thread history
@@ -536,8 +541,8 @@ Landed first slice:
 
 Remaining:
 
-- source-level command audit still shows DeepSeek-TUI slash surfaces not yet
-  closed in DeepSeekCode: `/logout` and `/translate`
+- source-level command audit still shows DeepSeek-TUI slash surface not yet
+  closed in DeepSeekCode: `/translate`
 - harder cross-process/platform/external buckets remain: dedicated shell
   supervisor ownership after owner-process exit and attachable terminal replay
   beyond durable terminal attach snapshots now have an explicit
