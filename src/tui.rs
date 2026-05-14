@@ -1566,6 +1566,18 @@ enum TuiConfigCommand {
     Translation(TuiTranslationCommand),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiSetupCommand {
+    Show,
+    Provider,
+    Model,
+    Auth,
+    Trust,
+    Theme,
+    Language,
+    Settings,
+}
+
 fn parse_tui_stash_command(line: &str) -> Option<Result<TuiComposerStashCommand, String>> {
     let trimmed = line.trim();
     let rest = strip_tui_command_prefix(trimmed, "/stash")
@@ -2880,7 +2892,7 @@ fn parse_tui_settings_command(line: &str) -> Option<Result<(), String>> {
     }
 }
 
-fn parse_tui_setup_command(line: &str) -> Option<Result<(), String>> {
+fn parse_tui_setup_command(line: &str) -> Option<Result<TuiSetupCommand, String>> {
     let trimmed = line.trim();
     let rest = strip_tui_command_prefix(trimmed, "/setup")
         .or_else(|| strip_tui_command_prefix(trimmed, "setup"))
@@ -2890,9 +2902,20 @@ fn parse_tui_setup_command(line: &str) -> Option<Result<(), String>> {
         .or_else(|| strip_tui_command_prefix(trimmed, "doctor"))?;
     let args = rest.split_whitespace().collect::<Vec<_>>();
     match args.as_slice() {
-        [] | ["show" | "status" | "help" | "--help" | "-h"] => Some(Ok(())),
+        [] | ["show" | "status" | "help" | "--help" | "-h"] => Some(Ok(TuiSetupCommand::Show)),
+        ["provider" | "providers" | "api" | "api-key" | "apikey" | "credentials"] => {
+            Some(Ok(TuiSetupCommand::Provider))
+        }
+        ["model" | "models"] => Some(Ok(TuiSetupCommand::Model)),
+        ["auth" | "login" | "key" | "env"] => Some(Ok(TuiSetupCommand::Auth)),
+        ["trust" | "permissions"] => Some(Ok(TuiSetupCommand::Trust)),
+        ["theme" | "appearance"] => Some(Ok(TuiSetupCommand::Theme)),
+        ["language" | "locale" | "translate" | "translation"] => {
+            Some(Ok(TuiSetupCommand::Language))
+        }
+        ["settings" | "config"] => Some(Ok(TuiSetupCommand::Settings)),
         _ => Some(Err(
-            "usage: setup, onboarding, doctor, /setup, /onboarding, or /doctor".to_string(),
+            "usage: setup [provider|model|auth|trust|theme|language|settings]".to_string(),
         )),
     }
 }
@@ -3440,8 +3463,8 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         category: "Workbench",
         name: "setup",
         aliases: &["onboarding", "doctor"],
-        usage: "/setup",
-        description: "Show the read-only onboarding checklist for the selected workspace.",
+        usage: "/setup [provider|model|auth|trust|theme|language|settings]",
+        description: "Show onboarding status or jump into guided setup controls.",
     },
     TuiHelpCommandInfo {
         category: "Workbench",
@@ -3957,6 +3980,13 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "?",
     "settings",
     "setup",
+    "setup provider",
+    "setup model",
+    "setup auth",
+    "setup trust",
+    "setup theme",
+    "setup language",
+    "setup settings",
     "onboarding",
     "doctor",
     "config",
@@ -3990,6 +4020,13 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/task cancel ",
     "/settings",
     "/setup",
+    "/setup provider",
+    "/setup model",
+    "/setup auth",
+    "/setup trust",
+    "/setup theme",
+    "/setup language",
+    "/setup settings",
     "/onboarding",
     "/doctor",
     "/config",
@@ -6753,8 +6790,8 @@ impl TuiApp {
                 }
                 if let Some(command) = parse_tui_setup_command(&content) {
                     match command {
-                        Ok(()) => {
-                            self.show_setup_detail();
+                        Ok(command) => {
+                            self.handle_setup_command(command);
                             self.composer.clear();
                             self.composer_cursor = 0;
                         }
@@ -7696,8 +7733,8 @@ impl TuiApp {
         }
         if let Some(command) = parse_tui_setup_command(command) {
             match command {
-                Ok(()) => {
-                    self.show_setup_detail();
+                Ok(command) => {
+                    self.handle_setup_command(command);
                 }
                 Err(message) => {
                     self.status = message;
@@ -11506,6 +11543,22 @@ impl TuiApp {
         self.status = "settings shown".to_string();
     }
 
+    fn handle_setup_command(&mut self, command: TuiSetupCommand) {
+        match command {
+            TuiSetupCommand::Show => self.show_setup_detail(),
+            TuiSetupCommand::Provider => self.request_provider_command(TuiProviderCommand::Pick),
+            TuiSetupCommand::Model => self.request_model_command(TuiModelCommand::Pick),
+            TuiSetupCommand::Auth => {
+                self.show_setup_detail();
+                self.status = "setup auth guidance shown".to_string();
+            }
+            TuiSetupCommand::Trust => self.request_trust_command(TuiTrustCommand::Show),
+            TuiSetupCommand::Theme => self.show_theme_detail(),
+            TuiSetupCommand::Language => self.show_translation_detail(),
+            TuiSetupCommand::Settings => self.show_settings_detail(),
+        }
+    }
+
     fn show_setup_detail(&mut self) {
         let detail = self.render_setup_detail();
         self.set_mcp_detail(TuiMcpDetailKind::Setup, detail);
@@ -11587,6 +11640,19 @@ impl TuiApp {
         }
         let _ = writeln!(detail, "- deepseek doctor");
         let _ = writeln!(detail, "- deepseek smoke");
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Guided Setup Commands");
+        let _ = writeln!(detail, "---------------------");
+        let _ = writeln!(detail, "- /setup provider    Open provider picker");
+        let _ = writeln!(detail, "- /setup model       Open model picker");
+        let _ = writeln!(detail, "- /setup auth        Show API key/env guidance");
+        let _ = writeln!(detail, "- /setup trust       Inspect workspace trust");
+        let _ = writeln!(detail, "- /setup theme       Show theme controls");
+        let _ = writeln!(detail, "- /setup language    Show language-output controls");
+        let _ = writeln!(
+            detail,
+            "- /setup settings    Show all settings entry points"
+        );
         let _ = writeln!(detail);
         let _ = writeln!(detail, "TUI Commands");
         let _ = writeln!(detail, "------------");
@@ -17269,6 +17335,67 @@ api_key_env = "{env_name}"
         let (kind, detail) = app.mcp_detail.as_ref().expect("onboarding detail");
         assert_eq!(*kind, TuiMcpDetailKind::Setup);
         assert!(detail.contains("Read-only onboarding check"));
+        assert!(detail.contains("/setup provider"));
+        assert!(detail.contains("/setup language"));
+    }
+
+    #[test]
+    fn setup_subcommands_route_to_guided_controls() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: "/tmp/deepseek-guided-setup".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "running".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        run_palette_command(&mut app, "setup provider");
+        assert!(app.show_provider_picker);
+        assert_eq!(app.status, "provider picker opened");
+        assert!(app.drain_actions().is_empty());
+
+        app.show_provider_picker = false;
+        app.composer_focused = true;
+        app.composer = "/setup model".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        assert!(app.show_model_picker);
+        assert_eq!(app.composer, "");
+        assert_eq!(app.status, "model picker opened");
+
+        app.show_model_picker = false;
+        app.composer_focused = false;
+        run_palette_command(&mut app, "/setup trust");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Trust {
+                workspace: "/tmp/deepseek-guided-setup".to_string(),
+                command: TuiTrustCommand::Show,
+            }]
+        );
+
+        run_palette_command(&mut app, "setup theme");
+        let (kind, detail) = app.mcp_detail.as_ref().expect("theme detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Theme);
+        assert!(detail.contains("DeepSeekCode Theme"));
+
+        run_palette_command(&mut app, "setup language");
+        let (kind, detail) = app.mcp_detail.as_ref().expect("translation detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Translate);
+        assert!(detail.contains("DeepSeekCode Translate"));
     }
 
     #[test]
