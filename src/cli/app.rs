@@ -751,6 +751,7 @@ pub enum UpdateAction {
     Rollback(UpdateRollbackArgs),
     HomebrewFormula(UpdateHomebrewFormulaArgs),
     PublishStatus(UpdatePublishStatusArgs),
+    DownloadPlan(UpdateDownloadPlanArgs),
 }
 
 impl Default for UpdateAction {
@@ -813,6 +814,15 @@ pub struct UpdatePublishStatusArgs {
     pub dist: Option<String>,
     pub npm_dist: Option<String>,
     pub strict: bool,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdateDownloadPlanArgs {
+    pub version: Option<String>,
+    pub repo: Option<String>,
+    pub base_url: Option<String>,
+    pub platform: Option<String>,
     pub json: bool,
 }
 
@@ -1439,9 +1449,15 @@ fn parse_update_args(args: Vec<String>) -> Result<UpdateArgs, String> {
                 )?);
                 return Ok(parsed);
             }
+            "download-plan" => {
+                parsed.action = UpdateAction::DownloadPlan(parse_update_download_plan_args(
+                    args.into_iter().skip(index + 1).collect(),
+                )?);
+                return Ok(parsed);
+            }
             other => {
                 return Err(format!(
-                    "unknown update argument `{other}`; expected --check|--print-command|package|verify-install|install-package|rollback|homebrew-formula|publish-status"
+                    "unknown update argument `{other}`; expected --check|--print-command|package|verify-install|install-package|rollback|homebrew-formula|publish-status|download-plan"
                 ));
             }
         }
@@ -1650,6 +1666,51 @@ fn parse_update_publish_status_args(args: Vec<String>) -> Result<UpdatePublishSt
             other => {
                 return Err(format!(
                     "unknown flag for `update publish-status`: {other}; expected --dist|--npm-dist|--strict|--json"
+                ));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_update_download_plan_args(args: Vec<String>) -> Result<UpdateDownloadPlanArgs, String> {
+    let mut parsed = UpdateDownloadPlanArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--version" if index + 1 < args.len() => {
+                parsed.version = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--version" => {
+                return Err("update download-plan --version requires a value".to_string())
+            }
+            "--repo" if index + 1 < args.len() => {
+                parsed.repo = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--repo" => return Err("update download-plan --repo requires owner/name".to_string()),
+            "--base-url" if index + 1 < args.len() => {
+                parsed.base_url = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--base-url" => {
+                return Err("update download-plan --base-url requires a URL".to_string())
+            }
+            "--platform" if index + 1 < args.len() => {
+                parsed.platform = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--platform" => {
+                return Err("update download-plan --platform requires a value".to_string())
+            }
+            "--json" => {
+                parsed.json = true;
+                index += 1;
+            }
+            other => {
+                return Err(format!(
+                    "unknown flag for `update download-plan`: {other}; expected --version|--repo|--base-url|--platform|--json"
                 ));
             }
         }
@@ -5388,6 +5449,41 @@ mod tests {
                     assert!(status.json);
                 }
                 other => panic!("expected update publish-status, got {other:?}"),
+            },
+            other => panic!("expected Command::Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_update_download_plan() {
+        let cli = Cli::from_argv(vec![
+            "update".to_string(),
+            "download-plan".to_string(),
+            "--version".to_string(),
+            "v1.2.3".to_string(),
+            "--repo".to_string(),
+            "example/deepseek".to_string(),
+            "--base-url".to_string(),
+            "https://mirror.example/releases/v1.2.3".to_string(),
+            "--platform".to_string(),
+            "linux-x64".to_string(),
+            "--json".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Update(args)) => match args.action {
+                UpdateAction::DownloadPlan(plan) => {
+                    assert_eq!(plan.version.as_deref(), Some("v1.2.3"));
+                    assert_eq!(plan.repo.as_deref(), Some("example/deepseek"));
+                    assert_eq!(
+                        plan.base_url.as_deref(),
+                        Some("https://mirror.example/releases/v1.2.3")
+                    );
+                    assert_eq!(plan.platform.as_deref(), Some("linux-x64"));
+                    assert!(plan.json);
+                }
+                other => panic!("expected update download-plan, got {other:?}"),
             },
             other => panic!("expected Command::Update, got {other:?}"),
         }

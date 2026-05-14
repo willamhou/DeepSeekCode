@@ -106,6 +106,13 @@ deepseek dogfood report --limit 20 \
 GitHub Release 已经提供 `v0.1.1` 的 Linux x64、macOS x64、macOS arm64 和
 Windows x64 包，以及对应 `.sha256` 文件。例如 Linux x64：
 
+先让 CLI 根据当前平台打印下载、checksum 和解压命令：
+
+```bash
+deepseek update download-plan --version 0.1.1
+deepseek update download-plan --version 0.1.1 --json
+```
+
 ```bash
 curl -L -o deepseek-linux-x64.tar.gz \
   https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.1/deepseek-linux-x64.tar.gz
@@ -114,6 +121,14 @@ curl -L -o deepseek-linux-x64.tar.gz.sha256 \
 shasum -a 256 -c deepseek-linux-x64.tar.gz.sha256
 tar -xzf deepseek-linux-x64.tar.gz
 ./deepseek version
+```
+
+如果 GitHub Release 下载慢或不可达，可以把 release assets 同步到自有镜像，
+然后用同一个命令生成镜像 URL 版下载计划：
+
+```bash
+DSCODE_RELEASE_BASE_URL=https://<mirror>/<release-assets> \
+  deepseek update download-plan --version 0.1.1
 ```
 
 本地 release binary 路径固定为：
@@ -477,6 +492,7 @@ curl http://127.0.0.1:8765/runtime
 - `deepseek update package`：生成本地 release package（binary、manifest、install/rollback scripts）
 - `deepseek update verify-install`：在隔离目录验证 version/config/doctor/exec JSONL/benchmark sample
 - `deepseek update install-package` / `deepseek update rollback`：安装本地 release package 或回滚到备份 binary
+- `deepseek update download-plan [--version ... --base-url ... --platform ... --json]`：打印当前平台 release archive、checksum、验证和解压命令，可指向自有镜像目录
 - `deepseek update publish-status [--dist ... --npm-dist ... --strict --json]`：检查 npm/Homebrew 发布所需 token、tap 配置、平台包和 release checksum
 - `deepseek pr live-status <pr> [--require-write --json]`：只读检查真实 GitHub PR 是否具备 live review/retry fixture 前置条件
 - `deepseek config network allow|deny <host>`：把网络 host 策略写回项目 `.dscode/config.toml`，用于持久化 web/search/fetch 的允许或拒绝规则

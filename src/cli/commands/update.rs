@@ -2,14 +2,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use crate::cli::app::{
-    UpdateAction, UpdateArgs, UpdateHomebrewFormulaArgs, UpdateInstallPackageArgs,
-    UpdatePackageArgs, UpdatePublishStatusArgs, UpdateRollbackArgs, UpdateVerifyInstallArgs,
+    UpdateAction, UpdateArgs, UpdateDownloadPlanArgs, UpdateHomebrewFormulaArgs,
+    UpdateInstallPackageArgs, UpdatePackageArgs, UpdatePublishStatusArgs, UpdateRollbackArgs,
+    UpdateVerifyInstallArgs,
 };
 use crate::error::{app_error, AppResult};
 use crate::util::json::json_escape;
 
 const DEFAULT_RELEASE_DIR: &str = "target/deepseek-release";
 const DEFAULT_ROLLBACK_DIR: &str = ".local/bin/deepseek-rollback";
+const DEFAULT_RELEASE_REPO: &str = "willamhou/DeepSeekCode";
+const RELEASE_BASE_URL_ENV: &str = "DSCODE_RELEASE_BASE_URL";
+const RELEASE_VERSION_ENV: &str = "DSCODE_RELEASE_VERSION";
 
 pub fn run(args: UpdateArgs) -> AppResult<()> {
     match &args.action {
@@ -20,6 +24,7 @@ pub fn run(args: UpdateArgs) -> AppResult<()> {
         UpdateAction::Rollback(rollback_args) => run_rollback(rollback_args),
         UpdateAction::HomebrewFormula(formula_args) => run_homebrew_formula(formula_args),
         UpdateAction::PublishStatus(status_args) => run_publish_status(status_args),
+        UpdateAction::DownloadPlan(plan_args) => run_download_plan(plan_args),
     }
 }
 
@@ -221,6 +226,35 @@ fn run_publish_status(args: &UpdatePublishStatusArgs) -> AppResult<()> {
     Ok(())
 }
 
+fn run_download_plan(args: &UpdateDownloadPlanArgs) -> AppResult<()> {
+    let plan = build_release_download_plan(args, &env_value)?;
+    if args.json {
+        println!("{}", render_release_download_plan_json(&plan));
+        return Ok(());
+    }
+
+    println!("DeepSeekCode release download plan");
+    println!("  version: {}", plan.version);
+    println!("  repository: {}", plan.repo);
+    println!("  platform: {}", plan.platform);
+    println!("  archive: {}", plan.archive);
+    println!("  checksum: {}", plan.checksum);
+    println!("  archive_url: {}", plan.archive_url);
+    println!("  checksum_url: {}", plan.checksum_url);
+    println!("  verify:");
+    println!("    curl -L -o {} {}", plan.archive, plan.archive_url);
+    println!("    curl -L -o {} {}", plan.checksum, plan.checksum_url);
+    println!("    shasum -a 256 -c {}", plan.checksum);
+    println!("  extract:");
+    println!("    {}", plan.extract_command);
+    println!("  mirror:");
+    println!(
+        "    {}=https://<mirror>/<release-assets> deepseek update download-plan --version {}",
+        RELEASE_BASE_URL_ENV, plan.version
+    );
+    Ok(())
+}
+
 fn render_publish_status_json(report: &PublishStatusReport, strict: bool) -> String {
     let checks = report
         .checks
@@ -258,6 +292,135 @@ fn render_publish_status_json(report: &PublishStatusReport, strict: bool) -> Str
         checks,
         public_install
     )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReleaseDownloadPlan {
+    version: String,
+    repo: String,
+    platform: String,
+    archive: String,
+    checksum: String,
+    archive_url: String,
+    checksum_url: String,
+    extract_command: String,
+}
+
+fn build_release_download_plan(
+    args: &UpdateDownloadPlanArgs,
+    env: &impl Fn(&str) -> Option<String>,
+) -> AppResult<ReleaseDownloadPlan> {
+    let version = args
+        .version
+        .clone()
+        .or_else(|| env(RELEASE_VERSION_ENV))
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let version = normalize_release_version(&version)?;
+    let repo = args
+        .repo
+        .clone()
+        .unwrap_or_else(|| DEFAULT_RELEASE_REPO.to_string());
+    if !is_owner_repo(&repo) {
+        return Err(app_error(format!(
+            "update download-plan --repo must use owner/name, got {repo}"
+        )));
+    }
+    let platform = args
+        .platform
+        .clone()
+        .unwrap_or_else(current_release_platform);
+    let archive = release_archive_name(&platform)?;
+    let checksum = format!("{archive}.sha256");
+    let base_url = args
+        .base_url
+        .clone()
+        .or_else(|| env(RELEASE_BASE_URL_ENV))
+        .unwrap_or_else(|| github_release_base_url(&repo, &version));
+    let base_url = base_url.trim().trim_end_matches('/').to_string();
+    if base_url.is_empty() {
+        return Err(app_error(
+            "update download-plan --base-url must not be empty",
+        ));
+    }
+    let archive_url = format!("{base_url}/{archive}");
+    let checksum_url = format!("{base_url}/{checksum}");
+    let extract_command = if archive.ends_with(".zip") {
+        format!("unzip -o {archive}")
+    } else {
+        format!("tar -xzf {archive}")
+    };
+
+    Ok(ReleaseDownloadPlan {
+        version,
+        repo,
+        platform,
+        archive,
+        checksum,
+        archive_url,
+        checksum_url,
+        extract_command,
+    })
+}
+
+fn render_release_download_plan_json(plan: &ReleaseDownloadPlan) -> String {
+    format!(
+        "{{\"kind\":\"deepseek.update_download_plan.v1\",\"version\":\"{}\",\"repository\":\"{}\",\"platform\":\"{}\",\"archive\":\"{}\",\"checksum\":\"{}\",\"archive_url\":\"{}\",\"checksum_url\":\"{}\",\"extract_command\":\"{}\"}}",
+        json_escape(&plan.version),
+        json_escape(&plan.repo),
+        json_escape(&plan.platform),
+        json_escape(&plan.archive),
+        json_escape(&plan.checksum),
+        json_escape(&plan.archive_url),
+        json_escape(&plan.checksum_url),
+        json_escape(&plan.extract_command)
+    )
+}
+
+fn normalize_release_version(version: &str) -> AppResult<String> {
+    let version = version.trim().trim_start_matches('v').to_string();
+    if version.is_empty() {
+        return Err(app_error("release version must not be empty"));
+    }
+    if version
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+    {
+        Ok(version)
+    } else {
+        Err(app_error(format!(
+            "release version contains unsupported characters: {version}"
+        )))
+    }
+}
+
+fn current_release_platform() -> String {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "linux-x64",
+        ("macos", "x86_64") => "macos-x64",
+        ("macos", "aarch64") => "macos-arm64",
+        ("windows", "x86_64") => "windows-x64",
+        _ => "unsupported",
+    }
+    .to_string()
+}
+
+fn release_archive_name(platform: &str) -> AppResult<String> {
+    let archive = match platform {
+        "linux-x64" => "deepseek-linux-x64.tar.gz",
+        "macos-x64" => "deepseek-macos-x64.tar.gz",
+        "macos-arm64" => "deepseek-macos-arm64.tar.gz",
+        "windows-x64" => "deepseek-windows-x64.zip",
+        other => {
+            return Err(app_error(format!(
+                "unsupported release platform `{other}`; expected linux-x64, macos-x64, macos-arm64, or windows-x64"
+            )))
+        }
+    };
+    Ok(archive.to_string())
+}
+
+fn github_release_base_url(repo: &str, version: &str) -> String {
+    format!("https://github.com/{repo}/releases/download/v{version}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1447,6 +1610,77 @@ mod tests {
     #[test]
     fn shell_quote_quotes_spaces() {
         assert_eq!(shell_quote("/tmp/Deepseek Code"), "'/tmp/Deepseek Code'");
+    }
+
+    #[test]
+    fn release_download_plan_uses_github_release_assets_by_default() {
+        let plan = build_release_download_plan(
+            &UpdateDownloadPlanArgs {
+                version: Some("v1.2.3".to_string()),
+                repo: Some("example/deepseek".to_string()),
+                platform: Some("linux-x64".to_string()),
+                ..UpdateDownloadPlanArgs::default()
+            },
+            &|_| None,
+        )
+        .unwrap();
+
+        assert_eq!(plan.version, "1.2.3");
+        assert_eq!(plan.repo, "example/deepseek");
+        assert_eq!(plan.platform, "linux-x64");
+        assert_eq!(plan.archive, "deepseek-linux-x64.tar.gz");
+        assert_eq!(
+            plan.archive_url,
+            "https://github.com/example/deepseek/releases/download/v1.2.3/deepseek-linux-x64.tar.gz"
+        );
+        assert_eq!(
+            plan.checksum_url,
+            "https://github.com/example/deepseek/releases/download/v1.2.3/deepseek-linux-x64.tar.gz.sha256"
+        );
+        assert_eq!(plan.extract_command, "tar -xzf deepseek-linux-x64.tar.gz");
+    }
+
+    #[test]
+    fn release_download_plan_accepts_mirror_base_url_and_windows_zip() {
+        let plan = build_release_download_plan(
+            &UpdateDownloadPlanArgs {
+                version: Some("0.1.1".to_string()),
+                base_url: Some("https://mirror.example/releases/v0.1.1/".to_string()),
+                platform: Some("windows-x64".to_string()),
+                ..UpdateDownloadPlanArgs::default()
+            },
+            &|_| None,
+        )
+        .unwrap();
+
+        assert_eq!(plan.repo, DEFAULT_RELEASE_REPO);
+        assert_eq!(plan.archive, "deepseek-windows-x64.zip");
+        assert_eq!(
+            plan.archive_url,
+            "https://mirror.example/releases/v0.1.1/deepseek-windows-x64.zip"
+        );
+        assert_eq!(plan.extract_command, "unzip -o deepseek-windows-x64.zip");
+    }
+
+    #[test]
+    fn release_download_plan_json_renders_verify_fields() {
+        let plan = build_release_download_plan(
+            &UpdateDownloadPlanArgs {
+                version: Some("0.1.1".to_string()),
+                platform: Some("macos-arm64".to_string()),
+                ..UpdateDownloadPlanArgs::default()
+            },
+            &|name| {
+                (name == RELEASE_BASE_URL_ENV).then(|| "https://mirror.example/v0.1.1".to_string())
+            },
+        )
+        .unwrap();
+        let json = render_release_download_plan_json(&plan);
+
+        assert!(json.contains("\"kind\":\"deepseek.update_download_plan.v1\""));
+        assert!(json.contains("\"platform\":\"macos-arm64\""));
+        assert!(json.contains("deepseek-macos-arm64.tar.gz.sha256"));
+        assert!(json.contains("https://mirror.example/v0.1.1/deepseek-macos-arm64.tar.gz"));
     }
 
     #[test]

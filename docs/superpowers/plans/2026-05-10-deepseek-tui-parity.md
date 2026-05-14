@@ -44,6 +44,10 @@ the deterministic URL-template test hook. Durable runtime approval requests now
 also include stable input-sensitive fingerprints, adapting DeepSeek-TUI's
 generic-tool denial fingerprint fix to DeepSeekCode's request-id-based approval
 event model.
+The release/install surface also now has a local `deepseek update download-plan`
+command that prints platform-specific archive/checksum URLs and mirror-base
+fallback instructions, adapting DeepSeek-TUI's China-friendly release fallback
+work without taking on the full Feishu/Lighthouse bridge in one slice.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
 - native supervisor-owned PTY attach/stdin/resize/replay/wait/cancel polish and

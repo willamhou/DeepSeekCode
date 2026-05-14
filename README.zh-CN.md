@@ -51,6 +51,7 @@ deepseek doctor --json
 或者下载 release archive：
 
 ```bash
+deepseek update download-plan --version 0.1.1
 curl -L -o deepseek-linux-x64.tar.gz \
   https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.1/deepseek-linux-x64.tar.gz
 curl -L -o deepseek-linux-x64.tar.gz.sha256 \

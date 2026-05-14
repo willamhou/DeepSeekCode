@@ -262,8 +262,19 @@ publishes.
 Verify downloaded release artifacts with:
 
 ```bash
+deepseek update download-plan --version <version>
+deepseek update download-plan --version <version> --json
 gh attestation verify deepseek-macos-arm64.tar.gz --repo <owner>/<repo>
 gh attestation verify deepseek-macos-arm64.tar.gz.sha256 --repo <owner>/<repo>
+```
+
+If GitHub release downloads are slow or blocked for an operator, mirror the
+release archive and `.sha256` files to a private/static asset host and point the
+plan generator at that directory:
+
+```bash
+DSCODE_RELEASE_BASE_URL=https://<mirror>/<release-assets> \
+  deepseek update download-plan --version <version>
 ```
 
 For the Homebrew formula:
