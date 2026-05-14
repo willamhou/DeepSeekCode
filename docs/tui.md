@@ -18,6 +18,8 @@ Current surfaces:
 - busy-turn follow-up queue with `queue` / `/queue`, including
   `queue list|edit|drop|clear`; plain composer input is queued while an
   assistant message is still running and dispatched when the turn becomes idle
+- active thread sharing with `share` / `/share`, rendering the durable
+  transcript to standalone HTML and attempting a public GitHub Gist via `gh`
 - hook inspection with `hooks` / `/hooks`, including `hooks list` and
   `hooks events` over the configured project/user hook roots
 - composer and command palette custom slash commands from project
@@ -334,6 +336,8 @@ Command palette commands currently implemented:
 | `queue`, `/queue`, `queue list`, `/queue list` | List follow-up messages queued while the active assistant turn is busy |
 | `queue edit <n>`, `/queue edit <n>` | Move a queued follow-up into the composer for editing; Enter requeues or sends it |
 | `queue drop <n>`, `queue clear` | Remove one queued follow-up or clear the whole queue |
+| `share`, `/share` | Export the active durable thread transcript as HTML and try to upload it with `gh gist create --public` |
+| `share help`, `/share help` | Show share export requirements and current-thread export metadata |
 | `hooks`, `/hooks`, `hooks list`, `/hooks list` | Show hook enabled state, timeout, project/user roots, event directories, and executable scripts |
 | `hooks events`, `/hooks events`, `hook events`, `/hook events` | Show supported hook event directory names |
 | `network`, `network list`, `/network list` | Show `network.default`, `network.allow`, and `network.deny` in the right-side detail panel |

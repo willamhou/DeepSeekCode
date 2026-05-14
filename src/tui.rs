@@ -578,6 +578,7 @@ pub enum TuiMcpDetailKind {
     Goal,
     Anchor,
     Queue,
+    Share,
     Mode,
     Help,
     Settings,
@@ -617,6 +618,7 @@ impl TuiMcpDetailKind {
             Self::Goal => "goal",
             Self::Anchor => "anchor",
             Self::Queue => "queue",
+            Self::Share => "share",
             Self::Mode => "mode",
             Self::Help => "help",
             Self::Settings => "settings",
@@ -656,6 +658,7 @@ impl TuiMcpDetailKind {
             Self::Goal => "Goal",
             Self::Anchor => "Anchor",
             Self::Queue => "Queue",
+            Self::Share => "Share",
             Self::Mode => "Mode",
             Self::Help => "Help",
             Self::Settings => "Settings",
@@ -695,6 +698,7 @@ impl TuiMcpDetailKind {
             Self::Goal => Self::Manager,
             Self::Anchor => Self::Manager,
             Self::Queue => Self::Manager,
+            Self::Share => Self::Manager,
             Self::Mode => Self::Manager,
             Self::Help => Self::Manager,
             Self::Settings => Self::Manager,
@@ -734,6 +738,7 @@ impl TuiMcpDetailKind {
             Self::Goal => Self::Manager,
             Self::Anchor => Self::Manager,
             Self::Queue => Self::Manager,
+            Self::Share => Self::Manager,
             Self::Mode => Self::Manager,
             Self::Help => Self::Manager,
             Self::Settings => Self::Manager,
@@ -946,6 +951,12 @@ pub enum TuiQueueCommand {
     Edit { index: usize },
     Drop { index: usize },
     Clear,
+    Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiShareCommand {
+    Export,
     Help,
 }
 
@@ -1501,6 +1512,20 @@ fn parse_tui_queue_command(line: &str) -> Option<Result<TuiQueueCommand, String>
     }
 }
 
+fn parse_tui_share_command(line: &str) -> Option<Result<TuiShareCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/share")
+        .or_else(|| strip_tui_command_prefix(trimmed, "share"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] => Some(Ok(TuiShareCommand::Export)),
+        ["help" | "--help" | "-h"] => Some(Ok(TuiShareCommand::Help)),
+        _ => Some(Err(
+            "usage: share or /share; use share help for details".to_string()
+        )),
+    }
+}
+
 fn parse_note_index_arg(value: &str) -> Option<usize> {
     value.parse::<usize>().ok().filter(|index| *index > 0)
 }
@@ -1643,6 +1668,9 @@ pub enum TuiAction {
     Anchor {
         workspace: String,
         command: TuiAnchorCommand,
+    },
+    ShareSession {
+        thread_id: String,
     },
     Hooks {
         command: TuiHooksCommand,
@@ -1857,6 +1885,13 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         aliases: &["queued"],
         usage: "/queue [list|edit <n>|drop <n>|clear]",
         description: "Manage follow-up messages queued while the active turn is busy.",
+    },
+    TuiHelpCommandInfo {
+        category: "Interaction",
+        name: "share",
+        aliases: &[],
+        usage: "/share",
+        description: "Export the active thread transcript as shareable HTML/Gist.",
     },
     TuiHelpCommandInfo {
         category: "Config",
@@ -2153,6 +2188,8 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "queue drop ",
     "queue clear",
     "queued",
+    "share",
+    "share help",
     "hooks",
     "hooks list",
     "hooks events",
@@ -2311,6 +2348,8 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/queue drop ",
     "/queue clear",
     "/queued",
+    "/share",
+    "/share help",
     "/hooks",
     "/hooks list",
     "/hooks events",
@@ -4653,6 +4692,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_share_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.handle_share_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = parse_tui_hooks_command(&content) {
                     match command {
                         Ok(command) => {
@@ -5215,6 +5267,15 @@ impl TuiApp {
         if let Some(command) = parse_tui_queue_command(command) {
             match command {
                 Ok(command) => self.handle_queue_command(command),
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_share_command(command) {
+            match command {
+                Ok(command) => self.handle_share_command(command),
                 Err(message) => {
                     self.status = message;
                 }
@@ -6124,7 +6185,7 @@ impl TuiApp {
             }
             ["cancel"] | ["stop"] => self.request_cancel_run(),
             ["help"] => {
-                self.status = "commands: mode plan|agent|yolo, goal [objective|clear], sessions [filter], threads [filter], task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], anchor [text|list|remove], queue [list|edit|drop|clear], mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
+                self.status = "commands: mode plan|agent|yolo, goal [objective|clear], sessions [filter], threads [filter], task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], anchor [text|list|remove], queue [list|edit|drop|clear], share, mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
             }
             _ => {
                 self.status = format!("unknown command: {command}");
@@ -6930,6 +6991,66 @@ impl TuiApp {
         detail
     }
 
+    fn handle_share_command(&mut self, command: TuiShareCommand) {
+        match command {
+            TuiShareCommand::Export => self.request_share_session(),
+            TuiShareCommand::Help => {
+                self.set_mcp_detail(TuiMcpDetailKind::Share, self.render_share_help_detail());
+                self.status = "share help shown".to_string();
+            }
+        }
+    }
+
+    fn request_share_session(&mut self) {
+        let Some(thread_id) = self.selected_thread_id.clone() else {
+            self.status = "no active durable thread to share".to_string();
+            return;
+        };
+        self.pending_actions
+            .push(TuiAction::ShareSession { thread_id });
+        self.status =
+            "share export queued; requires local runtime and authenticated gh CLI".to_string();
+    }
+
+    fn render_share_help_detail(&self) -> String {
+        let mut detail = String::new();
+        let _ = writeln!(detail, "DeepSeekCode Share");
+        let _ = writeln!(detail, "==================");
+        let _ = writeln!(detail);
+        let _ = writeln!(
+            detail,
+            "/share exports the active durable thread transcript as standalone HTML."
+        );
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Upload");
+        let _ = writeln!(detail, "------");
+        let _ = writeln!(
+            detail,
+            "- Uses `gh gist create --public` when the GitHub CLI is installed and authenticated."
+        );
+        let _ = writeln!(
+            detail,
+            "- Keeps the local HTML export path in the detail panel even if upload fails."
+        );
+        let _ = writeln!(detail);
+        match self.active_thread() {
+            Some(thread) => {
+                push_status_row(
+                    &mut detail,
+                    "Thread:",
+                    &format!("{} [{}]", thread.title, thread.id),
+                );
+                push_status_row(
+                    &mut detail,
+                    "Transcript items:",
+                    &self.active_thread_items().len().to_string(),
+                );
+            }
+            None => push_status_row(&mut detail, "Thread:", "none selected"),
+        }
+        detail
+    }
+
     fn handle_goal_command(&mut self, command: TuiGoalCommand) {
         match command {
             TuiGoalCommand::Show => {
@@ -7113,6 +7234,7 @@ impl TuiApp {
         let _ = writeln!(detail, "- /memory [show|path|clear|edit|help]");
         let _ = writeln!(detail, "- /anchor [add|list|remove|path]");
         let _ = writeln!(detail, "- /queue [list|edit <n>|drop <n>|clear]");
+        let _ = writeln!(detail, "- /share");
         let _ = writeln!(detail, "- /hooks [list|events]");
         let _ = writeln!(
             detail,
@@ -13714,6 +13836,47 @@ mod tests {
         );
         assert!(app.queued_messages.is_empty());
         assert!(app.status.contains("submitted queued message"));
+    }
+
+    #[test]
+    fn share_command_queues_active_thread_export() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: "/workspace/project".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        run_palette_command(&mut app, "share");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::ShareSession {
+                thread_id: "thread-one".to_string(),
+            }]
+        );
+
+        app.composer_focused = true;
+        app.composer = "/share help".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        let (kind, detail) = app.mcp_detail.as_ref().expect("share help detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Share);
+        assert!(detail.contains("gh gist create --public"));
+        assert_eq!(app.composer, "");
     }
 
     #[test]

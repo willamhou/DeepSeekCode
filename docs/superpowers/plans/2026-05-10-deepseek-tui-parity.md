@@ -378,6 +378,10 @@ Landed first slice:
   message management, including automatic composer queueing while an assistant
   item is running, list/edit/drop/clear commands, and idle-transition dispatch
   for the next queued message
+- local file-backed TUI now supports DeepSeek-TUI-style `/share` active-thread
+  export, rendering durable thread items as standalone HTML and attempting a
+  public GitHub Gist upload through the authenticated `gh` CLI while preserving
+  a local HTML export path on upload failure
 - local file-backed TUI now supports DeepSeek-TUI-style `/hooks` read-only
   inspection, listing the configured hook enabled state, timeout, project/user
   hook roots, executable scripts by event directory, and supported event names

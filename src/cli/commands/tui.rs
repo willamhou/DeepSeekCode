@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -40,8 +41,8 @@ use crate::core::loop_runtime::{
 use crate::core::rollback::{RestorePlan, RollbackStore, SnapshotRecord};
 use crate::core::runtime::{
     json_object, parse_automation_record, parse_item_record, parse_runtime_event,
-    parse_session_record, parse_task_record, parse_thread_record, parse_usage_record, RuntimeEvent,
-    RuntimeStore,
+    parse_session_record, parse_task_record, parse_thread_record, parse_usage_record, ItemRecord,
+    RuntimeEvent, RuntimeStore, SessionRecord, ThreadRecord,
 };
 use crate::error::{app_error, AppResult};
 use crate::repl::slash::load_custom_slash_command_from_config;
@@ -770,6 +771,9 @@ fn handle_tui_http_action(
         TuiAction::Anchor { .. } => {
             app.set_status("anchor commands require local file-backed TUI".to_string());
         }
+        TuiAction::ShareSession { .. } => {
+            app.set_status("share commands require local file-backed TUI".to_string());
+        }
         TuiAction::Hooks { .. } => {
             app.set_status("hooks commands require local file-backed TUI".to_string());
         }
@@ -1209,6 +1213,7 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Note => Err(app_error("note details are not MCP details")),
         TuiMcpDetailKind::Anchor => Err(app_error("anchor details are not MCP details")),
         TuiMcpDetailKind::Queue => Err(app_error("queue details are not MCP details")),
+        TuiMcpDetailKind::Share => Err(app_error("share details are not MCP details")),
         TuiMcpDetailKind::Hooks => Err(app_error("hooks details are not MCP details")),
         TuiMcpDetailKind::Goal => Err(app_error("goal details are not MCP details")),
         TuiMcpDetailKind::Mode => Err(app_error("mode details are not MCP details")),
@@ -1830,6 +1835,9 @@ fn handle_tui_action_with_live(
         }
         TuiAction::Anchor { workspace, command } => {
             run_tui_anchor_command(app, Path::new(&workspace), command);
+        }
+        TuiAction::ShareSession { thread_id } => {
+            run_tui_share_session(store, app, &thread_id)?;
         }
         TuiAction::Hooks { command } => {
             run_tui_hooks_command(app, config, command);
@@ -2648,6 +2656,187 @@ fn render_tui_anchors_list(path: &Path, anchors: &[String]) -> String {
         detail.push_str("\nUse /anchor remove <n> to remove an anchor.\n");
     }
     detail
+}
+
+fn run_tui_share_session(store: &RuntimeStore, app: &mut TuiApp, thread_id: &str) -> AppResult<()> {
+    let thread = store.load_thread(thread_id)?;
+    let session = thread
+        .session_id
+        .as_deref()
+        .and_then(|session_id| store.load_session(session_id).ok());
+    let items = store.list_items(thread_id, None)?;
+    if items.is_empty() {
+        app.set_status("nothing to share: active thread has no transcript items".to_string());
+        app.set_mcp_detail(
+            TuiMcpDetailKind::Share,
+            format!(
+                "Share export skipped\n\nThread: {}\nNo transcript items.",
+                thread.title
+            ),
+        );
+        return Ok(());
+    }
+
+    let html = render_tui_share_html(session.as_ref(), &thread, &items);
+    let path = write_tui_share_html(&html)?;
+    match upload_tui_share_gist(&path) {
+        Ok(url) => {
+            app.set_status(format!("share gist created: {url}"));
+            app.set_mcp_detail(
+                TuiMcpDetailKind::Share,
+                format!(
+                    "Share export complete\n\nURL: {url}\nLocal HTML: {}\nItems: {}",
+                    path.display(),
+                    items.len()
+                ),
+            );
+        }
+        Err(error) => {
+            app.set_status(format!(
+                "share gist upload failed; local export kept: {error}"
+            ));
+            app.set_mcp_detail(
+                TuiMcpDetailKind::Share,
+                format!(
+                    "Share export written\n\nLocal HTML: {}\nItems: {}\n\nGist upload failed:\n{}",
+                    path.display(),
+                    items.len(),
+                    error
+                ),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn render_tui_share_html(
+    session: Option<&SessionRecord>,
+    thread: &ThreadRecord,
+    items: &[ItemRecord],
+) -> String {
+    let session_title = session
+        .map(|session| session.title.as_str())
+        .unwrap_or("No session");
+    let workspace = session
+        .map(|session| session.workspace.as_str())
+        .unwrap_or(thread.workspace.as_str());
+    let mut body = String::new();
+    for item in items {
+        let role = item.role.as_deref().unwrap_or(item.item_type.as_str());
+        let class = match role {
+            "user" => "user",
+            "assistant" => "assistant",
+            "tool" => "tool",
+            _ => "item",
+        };
+        let _ = writeln!(
+            body,
+            "<section class=\"message {class}\"><div class=\"meta\">#{index} {role} · {kind} · {status}</div><pre>{content}</pre></section>",
+            index = item.index,
+            kind = html_escape(&item.item_type),
+            status = html_escape(&item.status),
+            content = html_escape(&item.content)
+        );
+    }
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepSeekCode TUI Session Export</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; background: #0d1117; color: #c9d1d9; }}
+  h1 {{ color: #58a6ff; border-bottom: 1px solid #30363d; padding-bottom: 0.5rem; }}
+  .meta {{ color: #8b949e; font-size: 0.9rem; margin-bottom: 0.5rem; }}
+  .message {{ margin: 1rem 0; padding: 0.85rem; border-radius: 6px; border: 1px solid #30363d; }}
+  .user {{ background: #1f2937; border-left: 3px solid #58a6ff; }}
+  .assistant {{ background: #161b22; border-left: 3px solid #3fb950; }}
+  .tool {{ background: #0d1117; border-left: 3px solid #d29922; }}
+  pre {{ white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }}
+  footer {{ margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #30363d; color: #8b949e; font-size: 0.85rem; }}
+</style>
+</head>
+<body>
+<h1>DeepSeekCode TUI Session</h1>
+<div class="meta"><strong>Session:</strong> {session}</div>
+<div class="meta"><strong>Thread:</strong> {thread_title} · <strong>Mode:</strong> {mode} · <strong>Status:</strong> {status}</div>
+<div class="meta"><strong>Workspace:</strong> {workspace}</div>
+<main>
+{body}
+</main>
+<footer>Generated by DeepSeekCode · https://github.com/willamhou/DeepSeekCode</footer>
+</body>
+</html>"#,
+        session = html_escape(session_title),
+        thread_title = html_escape(&thread.title),
+        mode = html_escape(&thread.mode),
+        status = html_escape(&thread.status),
+        workspace = html_escape(workspace),
+    )
+}
+
+fn write_tui_share_html(html: &str) -> AppResult<PathBuf> {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "deepseekcode-share-{}-{}.html",
+        std::process::id(),
+        epoch_millis_label()
+    ));
+    std::fs::write(&path, html)?;
+    Ok(path)
+}
+
+fn upload_tui_share_gist(path: &Path) -> Result<String, String> {
+    let path_string = path.to_string_lossy().to_string();
+    let output = Command::new("gh")
+        .args([
+            "gist",
+            "create",
+            "--public",
+            path_string.as_str(),
+            "--filename",
+            "session-export.html",
+            "--desc",
+            "DeepSeekCode TUI Session Export",
+        ])
+        .output()
+        .map_err(|error| format!("failed to run `gh gist create`: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "`gh gist create` failed without stderr".to_string()
+        } else {
+            format!("`gh gist create` failed: {stderr}")
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return Err("`gh gist create` returned no URL".to_string());
+    }
+    Ok(stdout)
+}
+
+fn html_escape(value: &str) -> String {
+    let mut escaped = String::new();
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn epoch_millis_label() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
 }
 
 fn run_tui_hooks_command(app: &mut TuiApp, config: Option<&AppConfig>, command: TuiHooksCommand) {
@@ -4917,6 +5106,25 @@ description = "Review pull requests."
     }
 
     #[test]
+    fn handle_tui_http_action_rejects_share_commands_as_local_only() {
+        let client = RuntimeHttpClient::from_url("http://127.0.0.1:9").unwrap();
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_http_action(
+            &client,
+            &mut app,
+            TuiAction::ShareSession {
+                thread_id: "thread-one".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert!(render_once(&app, 120, 36)
+            .unwrap()
+            .contains("share commands require local file-backed TUI"));
+    }
+
+    #[test]
     fn handle_tui_http_action_rejects_session_rename_as_local_only() {
         let client = RuntimeHttpClient::from_url("http://127.0.0.1:9").unwrap();
         let mut app = TuiApp::new(Vec::new());
@@ -6535,6 +6743,83 @@ shell_allowlist = ["git diff"]
         assert!(output.contains(".dscode/anchors.md"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handle_tui_action_skips_empty_share_without_upload() {
+        let root = temp_root("share-empty-action");
+        fs::create_dir_all(&root).unwrap();
+        let store = RuntimeStore::new(root.join(".dscode/runtime"));
+        let thread = store
+            .create_thread(
+                "Share me".to_string(),
+                root.display().to_string(),
+                "deepseek-v4-pro".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::ShareSession {
+                thread_id: thread.id,
+            },
+        )
+        .unwrap();
+
+        let output = render_once(&app, 160, 48).unwrap();
+        assert!(output.contains("Share export skipped"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn render_tui_share_html_escapes_transcript_content() {
+        let thread = ThreadRecord {
+            id: "thread-one".to_string(),
+            session_id: Some("session-one".to_string()),
+            created_at: "0".to_string(),
+            updated_at: "1".to_string(),
+            title: "Share <thread>".to_string(),
+            workspace: "/tmp/share".to_string(),
+            model: "deepseek-v4-pro".to_string(),
+            mode: "agent".to_string(),
+            status: "active".to_string(),
+            latest_turn_id: Some("turn-one".to_string()),
+            event_seq: 1,
+        };
+        let session = SessionRecord {
+            id: "session-one".to_string(),
+            created_at: "0".to_string(),
+            updated_at: "1".to_string(),
+            title: "Session & Co".to_string(),
+            workspace: "/tmp/share".to_string(),
+            status: "active".to_string(),
+            active_thread_id: Some("thread-one".to_string()),
+            thread_count: 1,
+        };
+        let items = vec![ItemRecord {
+            id: "item-one".to_string(),
+            thread_id: "thread-one".to_string(),
+            turn_id: Some("turn-one".to_string()),
+            index: 1,
+            item_type: "message".to_string(),
+            role: Some("user".to_string()),
+            content: "<script>alert('x')</script>".to_string(),
+            status: "completed".to_string(),
+            created_at: "1".to_string(),
+        }];
+
+        let html = render_tui_share_html(Some(&session), &thread, &items);
+
+        assert!(html.contains("DeepSeekCode TUI Session"));
+        assert!(html.contains("Session &amp; Co"));
+        assert!(html.contains("Share &lt;thread&gt;"));
+        assert!(html.contains("&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;"));
+        assert!(!html.contains("<script>alert"));
     }
 
     #[test]
