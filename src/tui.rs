@@ -564,6 +564,7 @@ pub enum TuiMcpDetailKind {
     Memory,
     Network,
     Lsp,
+    Change,
     Status,
     Tokens,
     Cost,
@@ -614,6 +615,7 @@ impl TuiMcpDetailKind {
             Self::Memory => "memory",
             Self::Network => "network",
             Self::Lsp => "lsp",
+            Self::Change => "change",
             Self::Status => "status",
             Self::Tokens => "tokens",
             Self::Cost => "cost",
@@ -664,6 +666,7 @@ impl TuiMcpDetailKind {
             Self::Memory => "Memory",
             Self::Network => "Network",
             Self::Lsp => "LSP",
+            Self::Change => "Changelog",
             Self::Status => "Status",
             Self::Tokens => "Tokens",
             Self::Cost => "Cost",
@@ -714,6 +717,7 @@ impl TuiMcpDetailKind {
             Self::Memory => Self::Manager,
             Self::Network => Self::Manager,
             Self::Lsp => Self::Manager,
+            Self::Change => Self::Manager,
             Self::Status => Self::Manager,
             Self::Tokens => Self::Manager,
             Self::Cost => Self::Manager,
@@ -764,6 +768,7 @@ impl TuiMcpDetailKind {
             Self::Memory => Self::Manager,
             Self::Network => Self::Manager,
             Self::Lsp => Self::Manager,
+            Self::Change => Self::Manager,
             Self::Status => Self::Manager,
             Self::Tokens => Self::Manager,
             Self::Cost => Self::Manager,
@@ -1038,6 +1043,12 @@ pub enum TuiLoadCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiAttachCommand {
     Attach { path: String },
+    Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiChangeCommand {
+    Show,
     Help,
 }
 
@@ -1728,6 +1739,61 @@ fn unquote_tui_path(value: &str) -> String {
         .to_string()
 }
 
+const DEEPSEEKCODE_CHANGELOG: &str = include_str!("../CHANGELOG.md");
+const TUI_CHANGELOG_MAX_CHARS: usize = 4096;
+
+fn latest_changelog_section(content: &str) -> Option<String> {
+    let lines = content.lines().collect::<Vec<_>>();
+    let start = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("## "))?;
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find(|(_, line)| line.trim_start().starts_with("## "))
+        .map_or(lines.len(), |(index, _)| index);
+    let section = lines[start..end].join("\n").trim().to_string();
+    if section.is_empty() {
+        None
+    } else {
+        Some(section)
+    }
+}
+
+fn inline_changelog_section(section: &str) -> String {
+    let char_count = section.chars().count();
+    if char_count <= TUI_CHANGELOG_MAX_CHARS {
+        return section.to_string();
+    }
+    let truncated = section
+        .chars()
+        .take(TUI_CHANGELOG_MAX_CHARS)
+        .collect::<String>();
+    format!(
+        "{truncated}\n\n[... {} characters omitted from bundled changelog]",
+        char_count - TUI_CHANGELOG_MAX_CHARS
+    )
+}
+
+fn parse_tui_change_command(line: &str) -> Option<Result<TuiChangeCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/change")
+        .or_else(|| strip_tui_command_prefix(trimmed, "change"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "/changes"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "changes"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "/changelog"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "changelog"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] | ["latest"] | ["show"] => Some(Ok(TuiChangeCommand::Show)),
+        ["help" | "--help" | "-h"] => Some(Ok(TuiChangeCommand::Help)),
+        _ => Some(Err(
+            "usage: change or /change; use change help for details".to_string()
+        )),
+    }
+}
+
 fn parse_tui_clear_command(line: &str) -> Option<Result<TuiClearCommand, String>> {
     let trimmed = line.trim();
     let rest = strip_tui_command_prefix(trimmed, "/clear")
@@ -2397,6 +2463,13 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         description: "Show prompt-cache telemetry and read-only cache notes.",
     },
     TuiHelpCommandInfo {
+        category: "Runtime",
+        name: "change",
+        aliases: &["changes", "changelog"],
+        usage: "/change",
+        description: "Show the latest bundled DeepSeekCode changelog entry.",
+    },
+    TuiHelpCommandInfo {
         category: "Config",
         name: "model",
         aliases: &[],
@@ -2669,6 +2742,9 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "cache",
     "cache inspect",
     "cache warmup",
+    "change",
+    "change help",
+    "changelog",
     "model",
     "model auto",
     "model deepseek-v4-flash",
@@ -2862,6 +2938,9 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/cache",
     "/cache inspect",
     "/cache warmup",
+    "/change",
+    "/change help",
+    "/changelog",
     "/mode",
     "/mode agent",
     "/mode plan",
@@ -5290,6 +5369,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_change_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.handle_change_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = parse_tui_clear_command(&content) {
                     match command {
                         Ok(command) => {
@@ -5965,6 +6057,15 @@ impl TuiApp {
         if let Some(command) = parse_tui_attach_command(command) {
             match command {
                 Ok(command) => self.handle_attach_command(command),
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_change_command(command) {
+            match command {
+                Ok(command) => self.handle_change_command(command),
                 Err(message) => {
                     self.status = message;
                 }
@@ -6901,7 +7002,7 @@ impl TuiApp {
             }
             ["cancel"] | ["stop"] => self.request_cancel_run(),
             ["help"] => {
-                self.status = "commands: mode plan|agent|yolo, diff, clear, goal [objective|clear], sessions [filter], threads [filter], agent [N] <task>, subagents, rlm [N] <file_or_text>, relay [focus], task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], anchor [text|list|remove], queue [list|edit|drop|clear], share, export [path], mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
+                self.status = "commands: mode plan|agent|yolo, diff, clear, change, goal [objective|clear], sessions [filter], threads [filter], agent [N] <task>, subagents, rlm [N] <file_or_text>, relay [focus], task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], anchor [text|list|remove], queue [list|edit|drop|clear], share, export [path], mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
             }
             _ => {
                 self.status = format!("unknown command: {command}");
@@ -8419,6 +8520,49 @@ impl TuiApp {
         detail
     }
 
+    fn handle_change_command(&mut self, command: TuiChangeCommand) {
+        let detail = match command {
+            TuiChangeCommand::Show => {
+                self.status = "changelog shown".to_string();
+                self.render_change_detail()
+            }
+            TuiChangeCommand::Help => {
+                self.status = "change help shown".to_string();
+                self.render_change_help_detail()
+            }
+        };
+        self.set_mcp_detail(TuiMcpDetailKind::Change, detail);
+    }
+
+    fn render_change_detail(&self) -> String {
+        let mut detail = String::new();
+        let _ = writeln!(detail, "DeepSeekCode Changelog");
+        let _ = writeln!(detail, "======================");
+        let _ = writeln!(detail);
+        match latest_changelog_section(DEEPSEEKCODE_CHANGELOG) {
+            Some(section) => detail.push_str(&inline_changelog_section(&section)),
+            None => detail.push_str("No changelog version section found."),
+        }
+        detail
+    }
+
+    fn render_change_help_detail(&self) -> String {
+        let mut detail = String::new();
+        let _ = writeln!(detail, "DeepSeekCode Change");
+        let _ = writeln!(detail, "===================");
+        let _ = writeln!(detail);
+        let _ = writeln!(
+            detail,
+            "/change shows the latest bundled DeepSeekCode changelog entry."
+        );
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Aliases");
+        let _ = writeln!(detail, "-------");
+        let _ = writeln!(detail, "- /changes");
+        let _ = writeln!(detail, "- /changelog");
+        detail
+    }
+
     fn handle_clear_command(&mut self, command: TuiClearCommand) {
         match command {
             TuiClearCommand::Clear => self.request_clear_conversation(),
@@ -8704,6 +8848,7 @@ impl TuiApp {
         let _ = writeln!(detail, "- /clear");
         let _ = writeln!(detail, "- /theme [dark|light|grayscale|system]");
         let _ = writeln!(detail, "- /verbose [on|off|toggle|show]");
+        let _ = writeln!(detail, "- /change");
         let _ = writeln!(detail, "- /goal [objective [budget: N]|clear]");
         let _ = writeln!(detail, "- /model [name|list]");
         let _ = writeln!(detail, "- /provider [name [model]|list]");
@@ -15629,6 +15774,47 @@ mod tests {
         assert!(app.status.contains("unsupported attachment type"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn change_command_renders_latest_changelog() {
+        let mut app = TuiApp::new(Vec::new());
+
+        run_palette_command(&mut app, "change");
+        let (kind, detail) = app.mcp_detail.as_ref().expect("change detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Change);
+        assert!(detail.contains("DeepSeekCode Changelog"));
+        assert!(detail.contains("## 0.1.0 - 2026-05-09"));
+        assert_eq!(app.status, "changelog shown");
+
+        app.composer_focused = true;
+        app.composer = "/changelog help".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        let (kind, detail) = app.mcp_detail.as_ref().expect("change help detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Change);
+        assert!(detail.contains("/change shows the latest"));
+        assert!(detail.contains("/changelog"));
+        assert_eq!(app.composer, "");
+
+        app.composer_focused = false;
+        run_palette_command(&mut app, "change extra");
+        assert_eq!(
+            app.status,
+            "usage: change or /change; use change help for details"
+        );
+    }
+
+    #[test]
+    fn latest_changelog_section_extracts_first_version_section() {
+        let content =
+            "# Changelog\n\n## 1.2.0 - Today\n\nLatest\n\n## 1.1.0 - Yesterday\n\nOlder\n";
+
+        let section = latest_changelog_section(content).expect("latest section");
+
+        assert!(section.contains("1.2.0"));
+        assert!(section.contains("Latest"));
+        assert!(!section.contains("1.1.0"));
     }
 
     #[test]

@@ -396,6 +396,9 @@ Landed first slice:
 - local file-backed TUI now supports DeepSeek-TUI-style `/lsp [on|off|status]`,
   mapping the command to the selected workspace `diagnostics.post_edit` config
   and rendering the current diagnostics state in the detail panel
+- TUI now supports DeepSeek-TUI-style `/change`, `/changes`, and `/changelog`
+  aliases, rendering the latest bundled DeepSeekCode changelog entry in the
+  detail panel
 - local file-backed TUI now supports DeepSeek-TUI-style `/clear` conversation
   reset by creating and switching to a fresh empty active thread in the selected
   durable session without deleting older thread history
