@@ -61,6 +61,9 @@ Current surfaces:
 - verbose transcript switching with `verbose` / `/verbose` and
   `verbose on|off|show`, keeping reasoning compact by default while allowing
   full live thinking text on demand
+- locale output switching with `translate` / `/translate` and
+  `translate on|off|show`, adding a language-output requirement to future
+  local agent turns
 - context inspection with `context` / `/context` and `ctx` / `/ctx`, showing
   active-thread context window, compaction strategy, token/cache telemetry, and
   reasoning replay state
@@ -323,6 +326,8 @@ Command palette commands currently implemented:
 | `statusline`, `/statusline` | Show command bar items, shortcuts, and related status/config commands |
 | `verbose`, `/verbose` | Toggle whether live reasoning text is rendered in full in the transcript |
 | `verbose on|off|show`, `/verbose on|off|show` | Enable, disable, or inspect verbose transcript mode |
+| `translate`, `/translate` | Toggle locale-targeted model output for future local agent turns |
+| `translate on|off|show`, `/translate on|off|show` | Enable, disable, or inspect the session-local translation prompt instruction |
 | `context`, `/context`, `ctx`, `/ctx` | Show active-thread context window, token/cache, item, and reasoning replay state |
 | `goal`, `/goal` | Show the current TUI session goal and token budget progress |
 | `goal <objective> [budget: N]`, `/goal <objective> [budget: N]` | Set or replace the current TUI session goal |
@@ -424,6 +429,7 @@ Command palette commands currently implemented:
 | `lsp off`, `/lsp off` | Disable post-edit diagnostics for successful file edits in the selected workspace project config |
 | `status`, `/status` | Show selected session, active thread, task/input, usage, cache, context, and cost status in the right-side detail panel |
 | `tokens`, `/tokens` | Show active-thread context, last input/output tokens, cache hit/miss, cumulative token usage, and approximate cost |
+| `translate`, `/translate`, `translation`, `/translation`, `transale`, `/transale` | Toggle future local agent turns to answer natural-language prose in the detected UI locale while preserving code, paths, URLs, and identifiers |
 | `cost`, `/cost` | Show active-thread approximate total, input, and output cost with telemetry caveats |
 | `cache`, `/cache`, `cache <count>` | Show active-thread durable cache hit/miss summary, hit rate, cache chart, context, and approximate cost |
 | `cache inspect`, `cache warmup` | Explain durable read-only cache limits: no persisted prompt layer hashes and no TUI-issued warmup request |
@@ -450,6 +456,7 @@ Command palette commands currently implemented:
 | `trust add <path>`, `/trust add <path>` | Add an existing trusted external path scoped to the selected workspace |
 | `trust remove <path>`, `/trust remove <path>` | Remove a trusted external path scoped to the selected workspace |
 | `logout`, `/logout` | Remove selected workspace `model.api_key_env` / `vision.api_key_env` values from the current TUI process and matching `.env` assignments |
+| `translate`, `/translate`, `translation`, `/translation`, `transale`, `/transale` | Toggle the session-local language-output requirement for future local agent turns |
 | `skills`, `/skills`, `skills <prefix>` | List configured TOML skills from repo and user skill directories |
 | `skill <name>`, `/skill <name>` | Show one configured TOML skill's description, triggers, tools, references, policy, and system append |
 | `feedback`, `/feedback` | Show DeepSeekCode feedback targets in the right-side detail panel |

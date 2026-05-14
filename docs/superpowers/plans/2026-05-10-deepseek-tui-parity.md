@@ -531,6 +531,11 @@ Landed first slice:
 - TUI now supports DeepSeek-TUI-style `/verbose [on|off]`, keeping reasoning
   transcript entries compact by default while allowing full live thinking text
   through command-palette or composer toggles
+- TUI now supports DeepSeek-TUI-style `/translate` plus `translation` and
+  `transale` aliases as a session-local output-language toggle; when enabled,
+  future local agent turns add a `## Language Output Requirement` system prompt
+  block for the detected UI locale while preserving code, paths, URLs, and
+  identifiers
 - TUI now supports DeepSeek-TUI-style `/context` plus `/ctx`, rendering an
   active-thread context inspector with context window, compaction strategy,
   token/cache telemetry, item counts, and reasoning replay state
@@ -541,8 +546,10 @@ Landed first slice:
 
 Remaining:
 
-- source-level command audit still shows DeepSeek-TUI slash surface not yet
-  closed in DeepSeekCode: `/translate`
+- source-level command audit no longer shows unmatched DeepSeek-TUI slash
+  command names in DeepSeekCode's built-in TUI command layer; `/translate` now
+  has prompt-level locale-output parity, while DeepSeek-TUI's second-stage
+  post-hoc translation API fallback remains a semantic refinement gap
 - harder cross-process/platform/external buckets remain: dedicated shell
   supervisor ownership after owner-process exit and attachable terminal replay
   beyond durable terminal attach snapshots now have an explicit

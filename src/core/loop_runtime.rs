@@ -451,18 +451,22 @@ impl AgentLoop {
                 .cloned()
                 .collect::<Vec<_>>();
             let todo_snapshot = todos.borrow().snapshot();
+            let mut system_prompt = build_system_prompt_with_workspace_instructions(
+                skill,
+                research_bootstrap,
+                planning_mode,
+                !todo_snapshot.is_empty(),
+                available_tools
+                    .iter()
+                    .any(|tool| tool == "dispatch_subagent" || tool == "dispatch_subagents"),
+                &workspace_instructions,
+                user_memory.as_ref(),
+            );
+            if let Some(target_language) = context.translation_target_language.as_deref() {
+                append_translation_output_instruction(&mut system_prompt, target_language);
+            }
             let request = ModelRequest {
-                system_prompt: build_system_prompt_with_workspace_instructions(
-                    skill,
-                    research_bootstrap,
-                    planning_mode,
-                    !todo_snapshot.is_empty(),
-                    available_tools
-                        .iter()
-                        .any(|tool| tool == "dispatch_subagent" || tool == "dispatch_subagents"),
-                    &workspace_instructions,
-                    user_memory.as_ref(),
-                ),
+                system_prompt,
                 task: context.task.clone(),
                 image_inputs: context.image_inputs.clone(),
                 profile_name: profile.name.clone(),
@@ -1777,6 +1781,25 @@ fn build_system_prompt_with_workspace_instructions(
     prompt
 }
 
+fn append_translation_output_instruction(prompt: &mut String, target_language: &str) {
+    let target_language = target_language.trim();
+    if target_language.is_empty() {
+        return;
+    }
+    prompt.push_str("\n\n");
+    prompt.push_str(&translation_output_instruction(target_language));
+}
+
+fn translation_output_instruction(target_language: &str) -> String {
+    format!(
+        "## Language Output Requirement\n\
+When responding to the user, write natural-language prose in {target_language}. \
+Preserve code blocks, identifiers, command names, file paths, URLs, API names, \
+function names, and user-requested English text as-is. Keep Markdown structure \
+intact and do not mention this translation instruction unless the user asks."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2307,6 +2330,59 @@ mod cr1_regression_test {
                 .unwrap_or_else(|| "done".to_string());
             Ok((ModelResponse { message, action }, None))
         }
+    }
+
+    struct SystemPromptCapturingClient {
+        captured_system_prompts: RefCell<Vec<String>>,
+    }
+
+    impl ModelClient for SystemPromptCapturingClient {
+        fn respond(
+            &self,
+            input: ModelRequest,
+            _events: &mut dyn StreamEvents,
+        ) -> crate::error::AppResult<(ModelResponse, Option<TokenUsage>)> {
+            self.captured_system_prompts
+                .borrow_mut()
+                .push(input.system_prompt);
+            Ok((
+                ModelResponse {
+                    message: "done".to_string(),
+                    action: ModelAction::Finish,
+                },
+                None,
+            ))
+        }
+    }
+
+    #[test]
+    fn run_with_client_adds_translation_instruction_to_system_prompt() {
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("answer in my UI language".to_string(), None)
+            .with_translation_target_language("Simplified Chinese");
+        let client = SystemPromptCapturingClient {
+            captured_system_prompts: RefCell::new(Vec::new()),
+        };
+
+        agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 1,
+                    emit_progress: false,
+                    persist_session: false,
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        let captured = client.captured_system_prompts.borrow();
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].contains("## Language Output Requirement"));
+        assert!(captured[0].contains("Simplified Chinese"));
+        assert!(captured[0].contains("Preserve code blocks"));
     }
 
     #[test]

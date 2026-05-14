@@ -1280,6 +1280,7 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Review => Err(app_error("review details are not MCP details")),
         TuiMcpDetailKind::Status => Err(app_error("status details are not MCP details")),
         TuiMcpDetailKind::Tokens => Err(app_error("token details are not MCP details")),
+        TuiMcpDetailKind::Translate => Err(app_error("translate details are not MCP details")),
         TuiMcpDetailKind::Cost => Err(app_error("cost details are not MCP details")),
         TuiMcpDetailKind::Cache => Err(app_error("cache details are not MCP details")),
         TuiMcpDetailKind::Diff => Err(app_error("diff details are not MCP details")),
@@ -1898,6 +1899,7 @@ fn handle_tui_action_with_live(
                 content,
                 app.reasoning_replay_limit(),
                 app.reasoning_replay_pinned_turn_ids(),
+                app.translation_target_language_for_agent(),
                 live_tx,
             );
             app.set_status(format!(
@@ -2753,6 +2755,7 @@ fn run_tui_submit_user_message(
             content,
             app.reasoning_replay_limit(),
             app.reasoning_replay_pinned_turn_ids(),
+            app.translation_target_language_for_agent(),
             live_tx,
         );
         app.set_status(format!("started agent run for {thread_id}"));
@@ -5191,6 +5194,7 @@ fn start_tui_agent_run(
     prompt: String,
     reasoning_replay_limit: usize,
     reasoning_replay_pinned_turn_ids: Vec<String>,
+    translation_target_language: Option<String>,
     live_tx: Option<Sender<TuiLiveEvent>>,
 ) {
     let _ = thread::spawn(move || {
@@ -5201,6 +5205,7 @@ fn start_tui_agent_run(
             prompt,
             reasoning_replay_limit,
             reasoning_replay_pinned_turn_ids,
+            translation_target_language,
             live_tx,
         ) {
             let _ = record_tui_agent_failure(&store, &thread_id, &error.to_string());
@@ -5215,6 +5220,7 @@ fn run_tui_agent_turn(
     prompt: String,
     reasoning_replay_limit: usize,
     reasoning_replay_pinned_turn_ids: Vec<String>,
+    translation_target_language: Option<String>,
     live_tx: Option<Sender<TuiLiveEvent>>,
 ) -> AppResult<()> {
     let model = config.model.model.clone();
@@ -5287,8 +5293,12 @@ fn run_tui_agent_turn(
         live_tx,
     );
     let agent = AgentLoop::new(config);
+    let mut context = TaskContext::new(prompt, None);
+    if let Some(target_language) = translation_target_language {
+        context = context.with_translation_target_language(target_language);
+    }
     let result = match agent.run_with(
-        TaskContext::new(prompt, None),
+        context,
         AgentLoopOptions {
             emit_progress: false,
             initial_recent_steps: store.reasoning_replay_entries_with_pinned_turns(

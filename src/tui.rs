@@ -574,6 +574,7 @@ pub enum TuiMcpDetailKind {
     Review,
     Status,
     Tokens,
+    Translate,
     Cost,
     Cache,
     Diff,
@@ -635,6 +636,7 @@ impl TuiMcpDetailKind {
             Self::Review => "review",
             Self::Status => "status",
             Self::Tokens => "tokens",
+            Self::Translate => "translate",
             Self::Cost => "cost",
             Self::Cache => "cache",
             Self::Diff => "diff",
@@ -696,6 +698,7 @@ impl TuiMcpDetailKind {
             Self::Review => "Review",
             Self::Status => "Status",
             Self::Tokens => "Tokens",
+            Self::Translate => "Translate",
             Self::Cost => "Cost",
             Self::Cache => "Cache",
             Self::Diff => "Diff",
@@ -757,6 +760,7 @@ impl TuiMcpDetailKind {
             Self::Review => Self::Manager,
             Self::Status => Self::Manager,
             Self::Tokens => Self::Manager,
+            Self::Translate => Self::Manager,
             Self::Cost => Self::Manager,
             Self::Cache => Self::Manager,
             Self::Diff => Self::Manager,
@@ -818,6 +822,7 @@ impl TuiMcpDetailKind {
             Self::Review => Self::Manager,
             Self::Status => Self::Manager,
             Self::Tokens => Self::Manager,
+            Self::Translate => Self::Manager,
             Self::Cost => Self::Manager,
             Self::Cache => Self::Manager,
             Self::Diff => Self::Manager,
@@ -1178,6 +1183,13 @@ pub enum TuiVerboseCommand {
     Set(bool),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiTranslationCommand {
+    Show,
+    Toggle,
+    Set(bool),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiProviderCommand {
     Show,
@@ -1345,6 +1357,26 @@ fn parse_tui_verbose_command(line: &str) -> Option<Result<TuiVerboseCommand, Str
         ["off" | "false" | "0" | "no"] => Some(Ok(TuiVerboseCommand::Set(false))),
         _ => Some(Err(
             "usage: verbose [on|off|toggle|show] or /verbose [on|off|toggle|show]".to_string(),
+        )),
+    }
+}
+
+fn parse_tui_translation_command(line: &str) -> Option<Result<TuiTranslationCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/translate")
+        .or_else(|| strip_tui_command_prefix(trimmed, "translate"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "/translation"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "translation"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "/transale"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "transale"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] | ["toggle"] => Some(Ok(TuiTranslationCommand::Toggle)),
+        ["show" | "status" | "help" | "--help" | "-h"] => Some(Ok(TuiTranslationCommand::Show)),
+        ["on" | "true" | "1" | "yes"] => Some(Ok(TuiTranslationCommand::Set(true))),
+        ["off" | "false" | "0" | "no"] => Some(Ok(TuiTranslationCommand::Set(false))),
+        _ => Some(Err(
+            "usage: translate [on|off|toggle|show] or /translate [on|off|toggle|show]".to_string(),
         )),
     }
 }
@@ -2794,6 +2826,13 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
     },
     TuiHelpCommandInfo {
         category: "Runtime",
+        name: "translate",
+        aliases: &["translation", "transale"],
+        usage: "/translate [on|off|toggle|show]",
+        description: "Toggle locale-targeted model output for future local turns.",
+    },
+    TuiHelpCommandInfo {
+        category: "Runtime",
         name: "status",
         aliases: &[],
         usage: "/status",
@@ -3335,6 +3374,10 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/verbose on",
     "/verbose off",
     "/verbose show",
+    "/translate",
+    "/translate on",
+    "/translate off",
+    "/translation",
     "/tokens",
     "/context",
     "/ctx",
@@ -3558,6 +3601,55 @@ fn composer_stash_preview(text: &str, max_chars: usize) -> String {
     preview
 }
 
+fn detect_tui_translation_target_language() -> String {
+    let locale = ["LC_ALL", "LANGUAGE", "LC_MESSAGES", "LANG"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find_map(|value| normalized_translation_locale(&value))
+        .unwrap_or_else(|| "en".to_string());
+    translation_target_language_for_locale(&locale)
+}
+
+fn normalized_translation_locale(value: &str) -> Option<String> {
+    value.split(':').find_map(|candidate| {
+        let normalized = candidate
+            .trim()
+            .split('.')
+            .next()
+            .unwrap_or(candidate)
+            .split('@')
+            .next()
+            .unwrap_or(candidate)
+            .replace('-', "_")
+            .to_ascii_lowercase();
+        if normalized.is_empty() || matches!(normalized.as_str(), "c" | "posix") {
+            None
+        } else {
+            Some(normalized)
+        }
+    })
+}
+
+fn translation_target_language_for_locale(locale: &str) -> String {
+    if locale.starts_with("zh_tw")
+        || locale.starts_with("zh_hk")
+        || locale.starts_with("zh_mo")
+        || locale.contains("hant")
+    {
+        "Traditional Chinese".to_string()
+    } else if locale.starts_with("zh") {
+        "Simplified Chinese".to_string()
+    } else if locale.starts_with("ja") {
+        "Japanese".to_string()
+    } else if locale.starts_with("pt_br") {
+        "Brazilian Portuguese".to_string()
+    } else if locale.starts_with("pt") {
+        "Portuguese".to_string()
+    } else {
+        "English".to_string()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TuiApp {
     mode: TuiMode,
@@ -3607,6 +3699,8 @@ pub struct TuiApp {
     composer_stash_path: Option<PathBuf>,
     transcript_scroll: usize,
     verbose_transcript: bool,
+    translation_enabled: bool,
+    translation_target_language: String,
     goal_objective: Option<String>,
     goal_token_budget: Option<u64>,
     goal_started_at: Option<SystemTime>,
@@ -3778,6 +3872,8 @@ impl TuiApp {
             composer_stash_path: None,
             transcript_scroll: 0,
             verbose_transcript: false,
+            translation_enabled: false,
+            translation_target_language: detect_tui_translation_target_language(),
             goal_objective: None,
             goal_token_budget: None,
             goal_started_at: None,
@@ -6022,6 +6118,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_translation_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.handle_translation_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = parse_tui_context_command(&content) {
                     match command {
                         Ok(()) => {
@@ -6763,6 +6872,17 @@ impl TuiApp {
             match command {
                 Ok(command) => {
                     self.handle_verbose_command(command);
+                }
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_translation_command(command) {
+            match command {
+                Ok(command) => {
+                    self.handle_translation_command(command);
                 }
                 Err(message) => {
                     self.status = message;
@@ -9848,6 +9968,15 @@ impl TuiApp {
             "Verbose transcript:",
             if self.verbose_transcript { "on" } else { "off" },
         );
+        push_status_row(
+            &mut detail,
+            "Translation:",
+            if self.translation_enabled {
+                "on"
+            } else {
+                "off"
+            },
+        );
         match self.selected_session() {
             Some(session) => {
                 push_status_row(&mut detail, "Workspace:", &session.workspace);
@@ -9871,6 +10000,7 @@ impl TuiApp {
         let _ = writeln!(detail, "- /clear");
         let _ = writeln!(detail, "- /theme [dark|light|grayscale|system]");
         let _ = writeln!(detail, "- /verbose [on|off|toggle|show]");
+        let _ = writeln!(detail, "- /translate [on|off|toggle|show]");
         let _ = writeln!(detail, "- /change");
         let _ = writeln!(detail, "- /system");
         let _ = writeln!(detail, "- /edit");
@@ -10045,6 +10175,15 @@ impl TuiApp {
             &mut detail,
             "Verbose transcript:",
             if self.verbose_transcript { "on" } else { "off" },
+        );
+        push_status_row(
+            &mut detail,
+            "Translation:",
+            if self.translation_enabled {
+                "on"
+            } else {
+                "off"
+            },
         );
         match self.active_thread() {
             Some(thread) => {
@@ -10246,6 +10385,95 @@ impl TuiApp {
         detail
     }
 
+    fn handle_translation_command(&mut self, command: TuiTranslationCommand) {
+        match command {
+            TuiTranslationCommand::Show => {
+                self.show_translation_detail();
+            }
+            TuiTranslationCommand::Toggle => {
+                self.translation_enabled = !self.translation_enabled;
+                self.show_translation_detail();
+                self.status = self.translation_status_message();
+            }
+            TuiTranslationCommand::Set(enabled) => {
+                self.translation_enabled = enabled;
+                self.show_translation_detail();
+                self.status = self.translation_status_message();
+            }
+        }
+    }
+
+    fn show_translation_detail(&mut self) {
+        let detail = self.render_translation_detail();
+        self.set_mcp_detail(TuiMcpDetailKind::Translate, detail);
+        self.status = "translation output shown".to_string();
+    }
+
+    fn translation_status_message(&self) -> String {
+        if self.translation_enabled {
+            format!(
+                "translation output on: {}",
+                self.translation_target_language
+            )
+        } else {
+            "translation output off".to_string()
+        }
+    }
+
+    pub(crate) fn translation_target_language_for_agent(&self) -> Option<String> {
+        self.translation_enabled
+            .then(|| self.translation_target_language.clone())
+    }
+
+    fn render_translation_detail(&self) -> String {
+        let mut detail = String::new();
+        let _ = writeln!(detail, "DeepSeekCode Translate");
+        let _ = writeln!(detail, "======================");
+        let _ = writeln!(detail);
+        push_status_row(
+            &mut detail,
+            "Current:",
+            if self.translation_enabled {
+                "on"
+            } else {
+                "off"
+            },
+        );
+        push_status_row(
+            &mut detail,
+            "Target language:",
+            &self.translation_target_language,
+        );
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Commands");
+        let _ = writeln!(detail, "--------");
+        let _ = writeln!(
+            detail,
+            "- /translate          Toggle translated model output"
+        );
+        let _ = writeln!(
+            detail,
+            "- /translate on       Add a language requirement to future local turns"
+        );
+        let _ = writeln!(
+            detail,
+            "- /translate off      Use original model output behavior"
+        );
+        let _ = writeln!(detail, "- /translate show     Show this panel");
+        let _ = writeln!(detail);
+        let _ = writeln!(
+            detail,
+            "When enabled, future local agent turns include a system prompt instruction to write natural-language prose in the target language while preserving code, paths, URLs, and identifiers."
+        );
+        let _ = writeln!(
+            detail,
+            "This is a session-local toggle; existing transcript items are not rewritten."
+        );
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Aliases: translate, translation, transale");
+        detail
+    }
+
     fn render_statusline_detail(&self) -> String {
         let mut detail = String::new();
         let _ = writeln!(detail, "DeepSeekCode Statusline");
@@ -10258,6 +10486,15 @@ impl TuiApp {
             &mut detail,
             "Verbose transcript:",
             if self.verbose_transcript { "on" } else { "off" },
+        );
+        push_status_row(
+            &mut detail,
+            "Translation:",
+            if self.translation_enabled {
+                "on"
+            } else {
+                "off"
+            },
         );
         push_status_row(
             &mut detail,
@@ -13549,6 +13786,13 @@ fn draw_sidebar(frame: &mut Frame, app: &TuiApp, area: Rect) {
                 Style::default().fg(app.theme.hint_color()),
             ),
         ]),
+        Line::from(vec![
+            Span::styled("Translate: ", Style::default().fg(app.theme.label_color())),
+            Span::styled(
+                if app.translation_enabled { "on" } else { "off" },
+                Style::default().fg(app.theme.hint_color()),
+            ),
+        ]),
         Line::from(""),
         Line::from("Runtime session"),
     ];
@@ -14531,6 +14775,59 @@ mod tests {
             .transcript
             .iter()
             .any(|line| line.contains("UNIQUE_VERBOSE_SUFFIX")));
+    }
+
+    #[test]
+    fn translate_command_toggles_locale_output_requirement() {
+        let mut app = TuiApp::new(Vec::new());
+        app.translation_target_language = "Simplified Chinese".to_string();
+
+        assert!(!app.translation_enabled);
+        run_palette_command(&mut app, "/translate");
+
+        assert!(app.translation_enabled);
+        assert_eq!(app.status, "translation output on: Simplified Chinese");
+        assert_eq!(
+            app.translation_target_language_for_agent(),
+            Some("Simplified Chinese".to_string())
+        );
+        let (kind, detail) = app.mcp_detail.as_ref().expect("translate detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Translate);
+        assert!(detail.contains("DeepSeekCode Translate"));
+        assert!(detail.contains("Target language: Simplified Chinese"));
+
+        run_palette_command(&mut app, "translation off");
+
+        assert!(!app.translation_enabled);
+        assert_eq!(app.status, "translation output off");
+        assert_eq!(app.translation_target_language_for_agent(), None);
+
+        app.composer_focused = true;
+        app.composer = "/transale on".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert!(app.translation_enabled);
+        assert_eq!(app.composer, "");
+        assert_eq!(app.status, "translation output on: Simplified Chinese");
+    }
+
+    #[test]
+    fn translation_locale_detection_skips_c_locale_and_language_fallbacks() {
+        assert_eq!(normalized_translation_locale("C.UTF-8"), None);
+        assert_eq!(
+            normalized_translation_locale("zh_CN.UTF-8:zh"),
+            Some("zh_cn".to_string())
+        );
+        assert_eq!(
+            translation_target_language_for_locale("zh_cn"),
+            "Simplified Chinese"
+        );
+        assert_eq!(
+            translation_target_language_for_locale("zh_tw"),
+            "Traditional Chinese"
+        );
+        assert_eq!(translation_target_language_for_locale("ja_jp"), "Japanese");
     }
 
     #[test]
