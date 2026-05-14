@@ -49,8 +49,8 @@ gate already used elsewhere is serial test execution.
   after the tag workflow queued indefinitely on `macos-13`.
 - Updated `docs/release.md` to use the same serial test command in the local
   release gate.
-- Published tag `v0.1.0` from commit
-  `2a270e7aae926e11d4cf4f7491ce6c18b66bfb29`.
+- Published tag `v0.1.0`; final Release Matrix run `25855954581`
+  completed successfully and generated release notes from the tagged commit.
 
 ## Verification
 
@@ -78,7 +78,7 @@ gate already used elsewhere is serial test execution.
   - `cargo test handle_tui_action_renders_hooks_inventory --lib -- --test-threads=1`
 - `docker build -t deepseek-code:ci .`
 - `docker run --rm deepseek-code:ci version`
-- `gh run watch 25854373712 --repo willamhou/DeepSeekCode --interval 30 --exit-status`
+- `gh run watch 25855954581 --repo willamhou/DeepSeekCode --interval 30 --exit-status`
 - `gh release view v0.1.0 --repo willamhou/DeepSeekCode`
 - `git ls-remote https://github.com/willamhou/DeepSeekCode.git HEAD`
 - `docker pull ghcr.io/willamhou/deepseekcode:0.1.0`
