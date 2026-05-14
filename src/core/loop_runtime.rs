@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::config::types::AppConfig;
@@ -74,6 +74,109 @@ pub struct RunResult {
     pub final_message: String,
     pub tool_events: Vec<ToolEvent>,
     pub usage: crate::model::protocol::TokenUsage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemPromptPreview {
+    pub workspace: PathBuf,
+    pub profile_name: String,
+    pub task: Option<String>,
+    pub prompt: String,
+    pub available_tools: Vec<String>,
+    pub planning_mode: bool,
+    pub research_bootstrap: bool,
+    pub skill_name: Option<String>,
+    pub skill_resolution: Option<String>,
+    pub workspace_instruction_paths: Vec<PathBuf>,
+    pub user_memory_path: Option<PathBuf>,
+    pub user_memory_truncated: bool,
+}
+
+pub fn preview_system_prompt_for_workspace(
+    config: &AppConfig,
+    workspace: &Path,
+    task: Option<&str>,
+    has_plan: bool,
+    subagent_depth: usize,
+) -> AppResult<SystemPromptPreview> {
+    let workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let workspace_str = workspace.to_string_lossy().to_string();
+    let task = task
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let task_ref = task.as_deref().unwrap_or("");
+
+    let profile = detect_profile(&workspace_str)?;
+    let workspace_instructions =
+        crate::core::instructions::load_workspace_instructions(&workspace, &config.workspace)?;
+    let user_memory =
+        crate::core::memory::load_user_memory(config.memory.enabled, &config.memory.memory_path())?;
+    let todos = Rc::new(RefCell::new(crate::core::todos::TodoList::default()));
+    let registry = crate::tools::registry::default_registry_with_context(
+        config.clone(),
+        subagent_depth,
+        todos,
+    );
+    let user_skills_dir = crate::skills::tilde::expand_tilde(&config.workspace.user_skills_dir);
+    let repo_skills_dir = crate::skills::paths::resolve_repo_skills_dir();
+    let (skills, _stats) =
+        SkillRegistry::load_dirs(&[repo_skills_dir.as_path(), user_skills_dir.as_path()])?;
+    let resolved_skill = if task_ref.is_empty() {
+        None
+    } else {
+        resolve_skill(&skills, None, task_ref)
+    };
+    let skill = resolved_skill.as_ref().map(|resolved| resolved.spec);
+    let policy = ExecutionPolicy::with_network(&config.approval, &config.network, skill);
+    let available_tools = registry
+        .names_for_policy(&policy)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let research_bootstrap = !task_ref.is_empty()
+        && should_apply_research_bootstrap(task_ref, workspace.as_path(), &available_tools);
+    let planning_mode = !task_ref.is_empty()
+        && !research_bootstrap
+        && should_use_explicit_planning(task_ref, skill, &available_tools);
+    let subagent_available = available_tools
+        .iter()
+        .any(|tool| tool == "dispatch_subagent" || tool == "dispatch_subagents");
+    let prompt = build_system_prompt_with_workspace_instructions(
+        skill,
+        research_bootstrap,
+        planning_mode,
+        has_plan,
+        subagent_available,
+        &workspace_instructions,
+        user_memory.as_ref(),
+    );
+
+    Ok(SystemPromptPreview {
+        workspace,
+        profile_name: profile.name,
+        task,
+        prompt,
+        available_tools,
+        planning_mode,
+        research_bootstrap,
+        skill_name: skill.map(|spec| spec.name.clone()),
+        skill_resolution: resolved_skill.map(|resolved| match resolved.resolution {
+            SkillResolution::Explicit => "explicit".to_string(),
+            SkillResolution::Auto => "auto".to_string(),
+        }),
+        workspace_instruction_paths: workspace_instructions
+            .iter()
+            .map(|file| file.path.clone())
+            .collect(),
+        user_memory_path: user_memory.as_ref().map(|memory| memory.path.clone()),
+        user_memory_truncated: user_memory
+            .as_ref()
+            .map(|memory| memory.truncated)
+            .unwrap_or(false),
+    })
 }
 
 pub type SharedAgentRunEvents = Rc<RefCell<dyn AgentRunEvents>>;
@@ -1728,6 +1831,46 @@ mod tests {
         assert!(prompt.contains("User memory"));
         assert!(prompt.contains("memory.md"));
         assert!(prompt.contains("prefer cargo test"));
+    }
+
+    #[test]
+    fn preview_system_prompt_includes_workspace_context() {
+        let dir = unique_tmp("system_prompt_preview");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "Run cargo test before committing.").unwrap();
+        let memory_path = dir.join("memory.md");
+        std::fs::write(&memory_path, "prefer narrow diffs").unwrap();
+        let mut config = AppConfig::default();
+        config.workspace.user_instructions_file =
+            dir.join("missing-user-agents.md").display().to_string();
+        config.workspace.user_skills_dir = dir.join("missing-skills").display().to_string();
+        config.memory.enabled = true;
+        config.memory.memory_path = memory_path.display().to_string();
+
+        let preview = preview_system_prompt_for_workspace(
+            &config,
+            &dir,
+            Some("inspect this project"),
+            false,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(preview.workspace, dir.canonicalize().unwrap());
+        assert_eq!(preview.profile_name, "generic");
+        assert_eq!(preview.task.as_deref(), Some("inspect this project"));
+        assert!(preview.prompt.contains("Workspace instructions"));
+        assert!(preview.prompt.contains("Run cargo test before committing."));
+        assert!(preview.prompt.contains("User memory"));
+        assert!(preview.prompt.contains("prefer narrow diffs"));
+        assert_eq!(preview.workspace_instruction_paths.len(), 1);
+        assert_eq!(
+            preview.user_memory_path.as_deref(),
+            Some(memory_path.as_path())
+        );
+        assert!(!preview.user_memory_truncated);
+        assert!(!preview.available_tools.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

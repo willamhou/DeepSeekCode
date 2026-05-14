@@ -33,10 +33,10 @@ use crate::core::context::TaskContext;
 use crate::core::hooks::HookEvent;
 use crate::core::instructions::init_project_instructions_at;
 use crate::core::loop_runtime::{
-    AgentApprovalDecision, AgentApprovalRequest, AgentApprovalResolver, AgentCancelCheck,
-    AgentLoop, AgentLoopOptions, AgentUserInputRequest, AgentUserInputResolver,
-    AgentUserInputResponse, RunResult, SharedAgentApprovalResolver, SharedAgentCancelCheck,
-    SharedAgentUserInputResolver, ToolEvent,
+    preview_system_prompt_for_workspace, AgentApprovalDecision, AgentApprovalRequest,
+    AgentApprovalResolver, AgentCancelCheck, AgentLoop, AgentLoopOptions, AgentUserInputRequest,
+    AgentUserInputResolver, AgentUserInputResponse, RunResult, SharedAgentApprovalResolver,
+    SharedAgentCancelCheck, SharedAgentUserInputResolver, SystemPromptPreview, ToolEvent,
 };
 use crate::core::rollback::{RestorePlan, RollbackStore, SnapshotRecord};
 use crate::core::runtime::{
@@ -61,9 +61,9 @@ use crate::tui::{
     discover_custom_slash_commands_dir, render_once, run_interactive,
     run_interactive_with_refresh_actions_and_live, TuiAction, TuiAnchorCommand, TuiApp,
     TuiApprovalRequest, TuiAutomationRecord, TuiHooksCommand, TuiItem, TuiLiveEvent, TuiLspCommand,
-    TuiMcpConfigScope, TuiMcpDetailKind, TuiMemoryCommand, TuiModelCommand, TuiNetworkCommand,
-    TuiNoteCommand, TuiProviderCommand, TuiSession, TuiSkillsCommand, TuiTaskRecord, TuiThread,
-    TuiUsageSummary, TuiUserInputRequest,
+    TuiMcpConfigScope, TuiMcpDetailKind, TuiMemoryCommand, TuiMode, TuiModelCommand,
+    TuiNetworkCommand, TuiNoteCommand, TuiProviderCommand, TuiSession, TuiSkillsCommand,
+    TuiTaskRecord, TuiThread, TuiUsageSummary, TuiUserInputRequest,
 };
 use crate::ui::stream::StreamEvents;
 use crate::util::json::{
@@ -627,6 +627,9 @@ fn handle_tui_http_action(
         }
         TuiAction::Lsp { .. } => {
             app.set_status("lsp commands require local file-backed TUI".to_string());
+        }
+        TuiAction::ShowSystemPrompt { .. } => {
+            app.set_status("system prompt preview requires local file-backed TUI".to_string());
         }
         TuiAction::Model { .. } => {
             app.set_status("model commands require local file-backed TUI".to_string());
@@ -1241,6 +1244,7 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Network => Err(app_error("network details are not MCP details")),
         TuiMcpDetailKind::Lsp => Err(app_error("lsp details are not MCP details")),
         TuiMcpDetailKind::Change => Err(app_error("change details are not MCP details")),
+        TuiMcpDetailKind::System => Err(app_error("system details are not MCP details")),
         TuiMcpDetailKind::Status => Err(app_error("status details are not MCP details")),
         TuiMcpDetailKind::Tokens => Err(app_error("token details are not MCP details")),
         TuiMcpDetailKind::Cost => Err(app_error("cost details are not MCP details")),
@@ -1416,6 +1420,93 @@ fn empty_as_placeholder(value: &str) -> &str {
         "(none)"
     } else {
         trimmed
+    }
+}
+
+const TUI_SYSTEM_PROMPT_MAX_CHARS: usize = 12_000;
+
+fn format_system_prompt_preview(preview: &SystemPromptPreview, mode: TuiMode) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "DeepSeekCode System Prompt");
+    let _ = writeln!(out, "==========================");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Mode: {}", tui_mode_label(mode));
+    let _ = writeln!(out, "Workspace: {}", preview.workspace.display());
+    let _ = writeln!(out, "Profile: {}", preview.profile_name);
+    let _ = writeln!(
+        out,
+        "Task: {}",
+        preview
+            .task
+            .as_deref()
+            .unwrap_or("(no selected user message)")
+    );
+    let _ = writeln!(out, "Planning mode: {}", preview.planning_mode);
+    let _ = writeln!(out, "Research bootstrap: {}", preview.research_bootstrap);
+    let _ = writeln!(
+        out,
+        "Skill: {}",
+        match (
+            preview.skill_name.as_deref(),
+            preview.skill_resolution.as_deref(),
+        ) {
+            (Some(name), Some(resolution)) => format!("{name} ({resolution})"),
+            (Some(name), None) => name.to_string(),
+            _ => "none".to_string(),
+        }
+    );
+    let _ = writeln!(out, "Available tools: {}", preview.available_tools.len());
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Workspace Instructions");
+    let _ = writeln!(out, "----------------------");
+    if preview.workspace_instruction_paths.is_empty() {
+        let _ = writeln!(out, "- none");
+    } else {
+        for path in &preview.workspace_instruction_paths {
+            let _ = writeln!(out, "- {}", path.display());
+        }
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "User Memory");
+    let _ = writeln!(out, "-----------");
+    match &preview.user_memory_path {
+        Some(path) if preview.user_memory_truncated => {
+            let _ = writeln!(out, "{} (truncated)", path.display());
+        }
+        Some(path) => {
+            let _ = writeln!(out, "{}", path.display());
+        }
+        None => {
+            let _ = writeln!(out, "none loaded");
+        }
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Prompt");
+    let _ = writeln!(out, "------");
+    out.push_str(&truncate_prompt_preview(
+        &preview.prompt,
+        TUI_SYSTEM_PROMPT_MAX_CHARS,
+    ));
+    out
+}
+
+fn truncate_prompt_preview(value: &str, max_chars: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_string();
+    }
+    let truncated = value.chars().take(max_chars).collect::<String>();
+    format!(
+        "{truncated}\n\n[... {} characters omitted from system prompt preview]",
+        char_count - max_chars
+    )
+}
+
+fn tui_mode_label(mode: TuiMode) -> &'static str {
+    match mode {
+        TuiMode::Plan => "Plan",
+        TuiMode::Agent => "Agent",
+        TuiMode::Yolo => "YOLO",
     }
 }
 
@@ -1707,6 +1798,28 @@ fn handle_tui_action_with_live(
             let summary = diagnostics_config_summary_at(workspace)?;
             app.set_mcp_detail(TuiMcpDetailKind::Lsp, format_lsp_summary(&summary));
             app.set_status(status);
+        }
+        TuiAction::ShowSystemPrompt {
+            workspace,
+            mode,
+            task,
+        } => {
+            let Some(config) = config else {
+                app.set_status("system prompt preview requires local config".to_string());
+                return Ok(());
+            };
+            let preview = preview_system_prompt_for_workspace(
+                config,
+                Path::new(&workspace),
+                task.as_deref(),
+                false,
+                0,
+            )?;
+            app.set_mcp_detail(
+                TuiMcpDetailKind::System,
+                format_system_prompt_preview(&preview, mode),
+            );
+            app.set_status("system prompt shown".to_string());
         }
         TuiAction::Model { workspace, command } => {
             let workspace = Path::new(&workspace);
@@ -6645,6 +6758,47 @@ description = "Review pull requests."
         assert!(output.contains("diagnostics.post_edit = false"));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handle_tui_action_renders_system_prompt_preview() {
+        let root = temp_root("system-prompt");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("AGENTS.md"), "Prefer cargo test before commit.").unwrap();
+        let memory_path = root.join("memory.md");
+        fs::write(&memory_path, "prefer short answers").unwrap();
+        let store = RuntimeStore::new(root.join("runtime"));
+        let mut config = temp_config(&root);
+        config.workspace.user_instructions_file =
+            root.join("missing-user-agents.md").display().to_string();
+        config.workspace.user_skills_dir = root.join("missing-skills").display().to_string();
+        config.memory.enabled = true;
+        config.memory.memory_path = memory_path.display().to_string();
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::ShowSystemPrompt {
+                workspace: root.display().to_string(),
+                mode: TuiMode::Agent,
+                task: Some("inspect current repo".to_string()),
+            },
+        )
+        .unwrap();
+
+        let (kind, detail) = app.mcp_detail_for_test().expect("system detail");
+        assert_eq!(kind, TuiMcpDetailKind::System);
+        assert!(detail.contains("DeepSeekCode System Prompt"));
+        assert!(detail.contains("Task: inspect current repo"));
+        assert!(detail.contains("Prefer cargo test before commit."));
+        assert!(detail.contains("prefer short answers"));
+        assert!(render_once(&app, 120, 36)
+            .unwrap()
+            .contains("system prompt shown"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

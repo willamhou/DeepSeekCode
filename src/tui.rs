@@ -565,6 +565,7 @@ pub enum TuiMcpDetailKind {
     Network,
     Lsp,
     Change,
+    System,
     Status,
     Tokens,
     Cost,
@@ -616,6 +617,7 @@ impl TuiMcpDetailKind {
             Self::Network => "network",
             Self::Lsp => "lsp",
             Self::Change => "change",
+            Self::System => "system",
             Self::Status => "status",
             Self::Tokens => "tokens",
             Self::Cost => "cost",
@@ -667,6 +669,7 @@ impl TuiMcpDetailKind {
             Self::Network => "Network",
             Self::Lsp => "LSP",
             Self::Change => "Changelog",
+            Self::System => "System Prompt",
             Self::Status => "Status",
             Self::Tokens => "Tokens",
             Self::Cost => "Cost",
@@ -718,6 +721,7 @@ impl TuiMcpDetailKind {
             Self::Network => Self::Manager,
             Self::Lsp => Self::Manager,
             Self::Change => Self::Manager,
+            Self::System => Self::Manager,
             Self::Status => Self::Manager,
             Self::Tokens => Self::Manager,
             Self::Cost => Self::Manager,
@@ -769,6 +773,7 @@ impl TuiMcpDetailKind {
             Self::Network => Self::Manager,
             Self::Lsp => Self::Manager,
             Self::Change => Self::Manager,
+            Self::System => Self::Manager,
             Self::Status => Self::Manager,
             Self::Tokens => Self::Manager,
             Self::Cost => Self::Manager,
@@ -1048,6 +1053,12 @@ pub enum TuiAttachCommand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TuiChangeCommand {
+    Show,
+    Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiSystemCommand {
     Show,
     Help,
 }
@@ -1794,6 +1805,20 @@ fn parse_tui_change_command(line: &str) -> Option<Result<TuiChangeCommand, Strin
     }
 }
 
+fn parse_tui_system_command(line: &str) -> Option<Result<TuiSystemCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/system")
+        .or_else(|| strip_tui_command_prefix(trimmed, "system"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] | ["show"] | ["prompt"] => Some(Ok(TuiSystemCommand::Show)),
+        ["help" | "--help" | "-h"] => Some(Ok(TuiSystemCommand::Help)),
+        _ => Some(Err(
+            "usage: system or /system; use system help for details".to_string()
+        )),
+    }
+}
+
 fn parse_tui_clear_command(line: &str) -> Option<Result<TuiClearCommand, String>> {
     let trimmed = line.trim();
     let rest = strip_tui_command_prefix(trimmed, "/clear")
@@ -2061,6 +2086,11 @@ pub enum TuiAction {
     Lsp {
         workspace: String,
         command: TuiLspCommand,
+    },
+    ShowSystemPrompt {
+        workspace: String,
+        mode: TuiMode,
+        task: Option<String>,
     },
     Model {
         workspace: String,
@@ -2470,6 +2500,13 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         description: "Show the latest bundled DeepSeekCode changelog entry.",
     },
     TuiHelpCommandInfo {
+        category: "Runtime",
+        name: "system",
+        aliases: &[],
+        usage: "/system",
+        description: "Show the selected workspace runtime system prompt preview.",
+    },
+    TuiHelpCommandInfo {
         category: "Config",
         name: "model",
         aliases: &[],
@@ -2745,6 +2782,8 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "change",
     "change help",
     "changelog",
+    "system",
+    "system help",
     "model",
     "model auto",
     "model deepseek-v4-flash",
@@ -2941,6 +2980,8 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/change",
     "/change help",
     "/changelog",
+    "/system",
+    "/system help",
     "/mode",
     "/mode agent",
     "/mode plan",
@@ -5382,6 +5423,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_system_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.handle_system_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = parse_tui_clear_command(&content) {
                     match command {
                         Ok(command) => {
@@ -6066,6 +6120,15 @@ impl TuiApp {
         if let Some(command) = parse_tui_change_command(command) {
             match command {
                 Ok(command) => self.handle_change_command(command),
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_system_command(command) {
+            match command {
+                Ok(command) => self.handle_system_command(command),
                 Err(message) => {
                     self.status = message;
                 }
@@ -7002,7 +7065,7 @@ impl TuiApp {
             }
             ["cancel"] | ["stop"] => self.request_cancel_run(),
             ["help"] => {
-                self.status = "commands: mode plan|agent|yolo, diff, clear, change, goal [objective|clear], sessions [filter], threads [filter], agent [N] <task>, subagents, rlm [N] <file_or_text>, relay [focus], task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], anchor [text|list|remove], queue [list|edit|drop|clear], share, export [path], mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
+                self.status = "commands: mode plan|agent|yolo, diff, clear, change, system, goal [objective|clear], sessions [filter], threads [filter], agent [N] <task>, subagents, rlm [N] <file_or_text>, relay [focus], task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], anchor [text|list|remove], queue [list|edit|drop|clear], share, export [path], mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
             }
             _ => {
                 self.status = format!("unknown command: {command}");
@@ -8563,6 +8626,69 @@ impl TuiApp {
         detail
     }
 
+    fn handle_system_command(&mut self, command: TuiSystemCommand) {
+        match command {
+            TuiSystemCommand::Show => self.request_system_prompt_preview(),
+            TuiSystemCommand::Help => {
+                self.set_mcp_detail(TuiMcpDetailKind::System, self.render_system_help_detail());
+                self.status = "system help shown".to_string();
+            }
+        }
+    }
+
+    fn request_system_prompt_preview(&mut self) {
+        let workspace = self
+            .selected_session()
+            .map(|session| session.workspace.clone())
+            .unwrap_or_else(|| ".".to_string());
+        let task = self.latest_selected_user_message();
+        self.pending_actions.push(TuiAction::ShowSystemPrompt {
+            workspace: workspace.clone(),
+            mode: self.mode,
+            task,
+        });
+        self.status = format!("system prompt queued: {workspace}");
+    }
+
+    fn latest_selected_user_message(&self) -> Option<String> {
+        let thread_id = self.selected_thread_id.as_deref()?;
+        self.items
+            .iter()
+            .filter(|item| {
+                item.thread_id == thread_id
+                    && item.item_type == "message"
+                    && item.role.as_deref() == Some("user")
+                    && !item.content.trim().is_empty()
+            })
+            .max_by_key(|item| item.index)
+            .map(|item| item.content.clone())
+    }
+
+    fn render_system_help_detail(&self) -> String {
+        let mut detail = String::new();
+        let _ = writeln!(detail, "DeepSeekCode System Prompt");
+        let _ = writeln!(detail, "==========================");
+        let _ = writeln!(detail);
+        let _ = writeln!(
+            detail,
+            "/system shows the selected workspace runtime system prompt preview."
+        );
+        let _ = writeln!(
+            detail,
+            "The preview uses the latest selected user message when one exists."
+        );
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Commands");
+        let _ = writeln!(detail, "--------");
+        let _ = writeln!(detail, "- /system");
+        let _ = writeln!(detail, "- /system help");
+        if let Some(session) = self.selected_session() {
+            let _ = writeln!(detail);
+            push_status_row(&mut detail, "Selected workspace:", &session.workspace);
+        }
+        detail
+    }
+
     fn handle_clear_command(&mut self, command: TuiClearCommand) {
         match command {
             TuiClearCommand::Clear => self.request_clear_conversation(),
@@ -8849,6 +8975,7 @@ impl TuiApp {
         let _ = writeln!(detail, "- /theme [dark|light|grayscale|system]");
         let _ = writeln!(detail, "- /verbose [on|off|toggle|show]");
         let _ = writeln!(detail, "- /change");
+        let _ = writeln!(detail, "- /system");
         let _ = writeln!(detail, "- /goal [objective [budget: N]|clear]");
         let _ = writeln!(detail, "- /model [name|list]");
         let _ = writeln!(detail, "- /provider [name [model]|list]");
@@ -15815,6 +15942,80 @@ mod tests {
         assert!(section.contains("1.2.0"));
         assert!(section.contains("Latest"));
         assert!(!section.contains("1.1.0"));
+    }
+
+    #[test]
+    fn system_command_queues_prompt_preview_and_renders_help() {
+        let sessions = vec![TuiSession {
+            id: "session-1".to_string(),
+            title: "Session".to_string(),
+            workspace: "/tmp/deepseek-system".to_string(),
+            status: "active".to_string(),
+            active_thread_id: Some("thread-1".to_string()),
+            thread_count: 1,
+        }];
+        let threads = vec![TuiThread {
+            id: "thread-1".to_string(),
+            session_id: Some("session-1".to_string()),
+            title: "Thread".to_string(),
+            mode: "agent".to_string(),
+            status: "idle".to_string(),
+            latest_turn_id: Some("turn-2".to_string()),
+            event_seq: 0,
+        }];
+        let items = vec![
+            TuiItem {
+                id: "item-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                index: 1,
+                item_type: "message".to_string(),
+                role: Some("user".to_string()),
+                content: "older request".to_string(),
+                status: "completed".to_string(),
+            },
+            TuiItem {
+                id: "item-2".to_string(),
+                thread_id: "thread-1".to_string(),
+                turn_id: Some("turn-2".to_string()),
+                index: 2,
+                item_type: "message".to_string(),
+                role: Some("user".to_string()),
+                content: "latest request".to_string(),
+                status: "completed".to_string(),
+            },
+        ];
+        let mut app = TuiApp::with_runtime(sessions, threads, items);
+
+        run_palette_command(&mut app, "system");
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::ShowSystemPrompt {
+                workspace: "/tmp/deepseek-system".to_string(),
+                mode: TuiMode::Plan,
+                task: Some("latest request".to_string()),
+            }]
+        );
+        assert_eq!(app.status, "system prompt queued: /tmp/deepseek-system");
+
+        app.composer_focused = true;
+        app.composer = "/system help".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        let (kind, detail) = app.mcp_detail.as_ref().expect("system help detail");
+        assert_eq!(*kind, TuiMcpDetailKind::System);
+        assert!(detail.contains("/system shows the selected workspace"));
+        assert!(detail.contains("/tmp/deepseek-system"));
+        assert_eq!(app.status, "system help shown");
+        assert_eq!(app.composer, "");
+
+        app.composer_focused = false;
+        run_palette_command(&mut app, "system extra");
+        assert_eq!(
+            app.status,
+            "usage: system or /system; use system help for details"
+        );
     }
 
     #[test]

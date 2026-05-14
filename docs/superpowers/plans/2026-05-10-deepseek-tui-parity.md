@@ -399,6 +399,10 @@ Landed first slice:
 - TUI now supports DeepSeek-TUI-style `/change`, `/changes`, and `/changelog`
   aliases, rendering the latest bundled DeepSeekCode changelog entry in the
   detail panel
+- local file-backed TUI now supports DeepSeek-TUI-style `/system`, rendering a
+  selected-workspace runtime system prompt preview with workspace instructions,
+  user memory, selected latest user message, skill/planning metadata, and prompt
+  text in the detail panel
 - local file-backed TUI now supports DeepSeek-TUI-style `/clear` conversation
   reset by creating and switching to a fresh empty active thread in the selected
   durable session without deleting older thread history
