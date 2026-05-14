@@ -579,6 +579,7 @@ pub enum TuiMcpDetailKind {
     Anchor,
     Queue,
     Share,
+    Export,
     Mode,
     Help,
     Settings,
@@ -619,6 +620,7 @@ impl TuiMcpDetailKind {
             Self::Anchor => "anchor",
             Self::Queue => "queue",
             Self::Share => "share",
+            Self::Export => "export",
             Self::Mode => "mode",
             Self::Help => "help",
             Self::Settings => "settings",
@@ -659,6 +661,7 @@ impl TuiMcpDetailKind {
             Self::Anchor => "Anchor",
             Self::Queue => "Queue",
             Self::Share => "Share",
+            Self::Export => "Export",
             Self::Mode => "Mode",
             Self::Help => "Help",
             Self::Settings => "Settings",
@@ -698,6 +701,7 @@ impl TuiMcpDetailKind {
             Self::Goal => Self::Manager,
             Self::Anchor => Self::Manager,
             Self::Queue => Self::Manager,
+            Self::Export => Self::Manager,
             Self::Share => Self::Manager,
             Self::Mode => Self::Manager,
             Self::Help => Self::Manager,
@@ -738,6 +742,7 @@ impl TuiMcpDetailKind {
             Self::Goal => Self::Manager,
             Self::Anchor => Self::Manager,
             Self::Queue => Self::Manager,
+            Self::Export => Self::Manager,
             Self::Share => Self::Manager,
             Self::Mode => Self::Manager,
             Self::Help => Self::Manager,
@@ -957,6 +962,12 @@ pub enum TuiQueueCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TuiShareCommand {
     Export,
+    Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuiExportCommand {
+    Export { path: Option<String> },
     Help,
 }
 
@@ -1526,6 +1537,20 @@ fn parse_tui_share_command(line: &str) -> Option<Result<TuiShareCommand, String>
     }
 }
 
+fn parse_tui_export_command(line: &str) -> Option<Result<TuiExportCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/export")
+        .or_else(|| strip_tui_command_prefix(trimmed, "export"))?;
+    let path = rest.trim();
+    match path {
+        "" => Some(Ok(TuiExportCommand::Export { path: None })),
+        "help" | "--help" | "-h" => Some(Ok(TuiExportCommand::Help)),
+        value => Some(Ok(TuiExportCommand::Export {
+            path: Some(value.to_string()),
+        })),
+    }
+}
+
 fn parse_note_index_arg(value: &str) -> Option<usize> {
     value.parse::<usize>().ok().filter(|index| *index > 0)
 }
@@ -1671,6 +1696,10 @@ pub enum TuiAction {
     },
     ShareSession {
         thread_id: String,
+    },
+    ExportThread {
+        thread_id: String,
+        path: Option<String>,
     },
     Hooks {
         command: TuiHooksCommand,
@@ -1892,6 +1921,13 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         aliases: &[],
         usage: "/share",
         description: "Export the active thread transcript as shareable HTML/Gist.",
+    },
+    TuiHelpCommandInfo {
+        category: "Interaction",
+        name: "export",
+        aliases: &[],
+        usage: "/export [path]",
+        description: "Write the active thread transcript to a local Markdown file.",
     },
     TuiHelpCommandInfo {
         category: "Config",
@@ -2190,6 +2226,9 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "queued",
     "share",
     "share help",
+    "export",
+    "export ",
+    "export help",
     "hooks",
     "hooks list",
     "hooks events",
@@ -2350,6 +2389,9 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/queued",
     "/share",
     "/share help",
+    "/export",
+    "/export ",
+    "/export help",
     "/hooks",
     "/hooks list",
     "/hooks events",
@@ -4705,6 +4747,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_export_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.handle_export_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = parse_tui_hooks_command(&content) {
                     match command {
                         Ok(command) => {
@@ -5276,6 +5331,15 @@ impl TuiApp {
         if let Some(command) = parse_tui_share_command(command) {
             match command {
                 Ok(command) => self.handle_share_command(command),
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_export_command(command) {
+            match command {
+                Ok(command) => self.handle_export_command(command),
                 Err(message) => {
                     self.status = message;
                 }
@@ -6185,7 +6249,7 @@ impl TuiApp {
             }
             ["cancel"] | ["stop"] => self.request_cancel_run(),
             ["help"] => {
-                self.status = "commands: mode plan|agent|yolo, goal [objective|clear], sessions [filter], threads [filter], task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], anchor [text|list|remove], queue [list|edit|drop|clear], share, mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
+                self.status = "commands: mode plan|agent|yolo, goal [objective|clear], sessions [filter], threads [filter], task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], anchor [text|list|remove], queue [list|edit|drop|clear], share, export [path], mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
             }
             _ => {
                 self.status = format!("unknown command: {command}");
@@ -7047,6 +7111,73 @@ impl TuiApp {
                 );
             }
             None => push_status_row(&mut detail, "Thread:", "none selected"),
+        }
+        detail
+    }
+
+    fn handle_export_command(&mut self, command: TuiExportCommand) {
+        match command {
+            TuiExportCommand::Export { path } => self.request_export_thread(path),
+            TuiExportCommand::Help => {
+                self.set_mcp_detail(TuiMcpDetailKind::Export, self.render_export_help_detail());
+                self.status = "export help shown".to_string();
+            }
+        }
+    }
+
+    fn request_export_thread(&mut self, path: Option<String>) {
+        let Some(thread_id) = self.selected_thread_id.clone() else {
+            self.status = "no active durable thread to export".to_string();
+            return;
+        };
+        self.pending_actions.push(TuiAction::ExportThread {
+            thread_id,
+            path: path.clone(),
+        });
+        self.status = match path {
+            Some(path) => format!("markdown export queued: {path}"),
+            None => "markdown export queued".to_string(),
+        };
+    }
+
+    fn render_export_help_detail(&self) -> String {
+        let mut detail = String::new();
+        let _ = writeln!(detail, "DeepSeekCode Export");
+        let _ = writeln!(detail, "===================");
+        let _ = writeln!(detail);
+        let _ = writeln!(
+            detail,
+            "/export [path] writes the active durable thread transcript to Markdown."
+        );
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Paths");
+        let _ = writeln!(detail, "-----");
+        let _ = writeln!(
+            detail,
+            "- No path: writes chat_export_<timestamp>.md in the selected workspace."
+        );
+        let _ = writeln!(
+            detail,
+            "- Relative path: resolved inside the selected workspace."
+        );
+        let _ = writeln!(detail, "- Absolute path or ~/path: used directly.");
+        let _ = writeln!(detail);
+        match self.active_thread() {
+            Some(thread) => {
+                push_status_row(
+                    &mut detail,
+                    "Thread:",
+                    &format!("{} [{}]", thread.title, thread.id),
+                );
+                push_status_row(
+                    &mut detail,
+                    "Transcript items:",
+                    &self.active_thread_items().len().to_string(),
+                );
+            }
+            None => {
+                let _ = writeln!(detail, "No active durable thread selected.");
+            }
         }
         detail
     }
@@ -13876,6 +14007,58 @@ mod tests {
         let (kind, detail) = app.mcp_detail.as_ref().expect("share help detail");
         assert_eq!(*kind, TuiMcpDetailKind::Share);
         assert!(detail.contains("gh gist create --public"));
+        assert_eq!(app.composer, "");
+    }
+
+    #[test]
+    fn export_command_queues_active_thread_markdown_export() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: "/workspace/project".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            vec![TuiItem {
+                id: "item-one".to_string(),
+                thread_id: "thread-one".to_string(),
+                turn_id: None,
+                index: 1,
+                item_type: "message".to_string(),
+                role: Some("user".to_string()),
+                content: "hello".to_string(),
+                status: "completed".to_string(),
+            }],
+        );
+
+        run_palette_command(&mut app, "export exports/thread.md");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::ExportThread {
+                thread_id: "thread-one".to_string(),
+                path: Some("exports/thread.md".to_string()),
+            }]
+        );
+
+        app.composer_focused = true;
+        app.composer = "/export help".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        let (kind, detail) = app.mcp_detail.as_ref().expect("export help detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Export);
+        assert!(detail.contains("/export [path]"));
+        assert!(detail.contains("Transcript items:"));
         assert_eq!(app.composer, "");
     }
 

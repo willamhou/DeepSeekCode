@@ -382,6 +382,9 @@ Landed first slice:
   export, rendering durable thread items as standalone HTML and attempting a
   public GitHub Gist upload through the authenticated `gh` CLI while preserving
   a local HTML export path on upload failure
+- local file-backed TUI now supports DeepSeek-TUI-style `/export [path]`
+  active-thread Markdown export, resolving relative paths inside the selected
+  workspace and defaulting to `chat_export_<timestamp>.md`
 - local file-backed TUI now supports DeepSeek-TUI-style `/hooks` read-only
   inspection, listing the configured hook enabled state, timeout, project/user
   hook roots, executable scripts by event directory, and supported event names

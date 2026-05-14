@@ -774,6 +774,9 @@ fn handle_tui_http_action(
         TuiAction::ShareSession { .. } => {
             app.set_status("share commands require local file-backed TUI".to_string());
         }
+        TuiAction::ExportThread { .. } => {
+            app.set_status("export commands require local file-backed TUI".to_string());
+        }
         TuiAction::Hooks { .. } => {
             app.set_status("hooks commands require local file-backed TUI".to_string());
         }
@@ -1214,6 +1217,7 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Anchor => Err(app_error("anchor details are not MCP details")),
         TuiMcpDetailKind::Queue => Err(app_error("queue details are not MCP details")),
         TuiMcpDetailKind::Share => Err(app_error("share details are not MCP details")),
+        TuiMcpDetailKind::Export => Err(app_error("export details are not MCP details")),
         TuiMcpDetailKind::Hooks => Err(app_error("hooks details are not MCP details")),
         TuiMcpDetailKind::Goal => Err(app_error("goal details are not MCP details")),
         TuiMcpDetailKind::Mode => Err(app_error("mode details are not MCP details")),
@@ -1838,6 +1842,9 @@ fn handle_tui_action_with_live(
         }
         TuiAction::ShareSession { thread_id } => {
             run_tui_share_session(store, app, &thread_id)?;
+        }
+        TuiAction::ExportThread { thread_id, path } => {
+            run_tui_export_thread(store, app, &thread_id, path.as_deref())?;
         }
         TuiAction::Hooks { command } => {
             run_tui_hooks_command(app, config, command);
@@ -2815,6 +2822,151 @@ fn upload_tui_share_gist(path: &Path) -> Result<String, String> {
         return Err("`gh gist create` returned no URL".to_string());
     }
     Ok(stdout)
+}
+
+fn run_tui_export_thread(
+    store: &RuntimeStore,
+    app: &mut TuiApp,
+    thread_id: &str,
+    requested_path: Option<&str>,
+) -> AppResult<()> {
+    let thread = store.load_thread(thread_id)?;
+    let session = thread
+        .session_id
+        .as_deref()
+        .and_then(|session_id| store.load_session(session_id).ok());
+    let items = store.list_items(thread_id, None)?;
+    let path = resolve_tui_export_path(session.as_ref(), &thread, requested_path);
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let markdown = render_tui_export_markdown(session.as_ref(), &thread, &items);
+    std::fs::write(&path, markdown)?;
+    app.set_status(format!("exported thread markdown: {}", path.display()));
+    app.set_mcp_detail(
+        TuiMcpDetailKind::Export,
+        format!(
+            "Export complete\n\nPath: {}\nItems: {}\nThread: {}\nWorkspace: {}",
+            path.display(),
+            items.len(),
+            thread.title,
+            tui_export_workspace(session.as_ref(), &thread).display()
+        ),
+    );
+    Ok(())
+}
+
+fn resolve_tui_export_path(
+    session: Option<&SessionRecord>,
+    thread: &ThreadRecord,
+    requested_path: Option<&str>,
+) -> PathBuf {
+    let workspace = tui_export_workspace(session, thread);
+    let Some(requested_path) = requested_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return workspace.join(format!("chat_export_{}.md", epoch_millis_label()));
+    };
+    let expanded = expand_tilde(requested_path);
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        workspace.join(expanded)
+    }
+}
+
+fn tui_export_workspace(session: Option<&SessionRecord>, thread: &ThreadRecord) -> PathBuf {
+    session
+        .map(|session| PathBuf::from(&session.workspace))
+        .unwrap_or_else(|| PathBuf::from(&thread.workspace))
+}
+
+fn render_tui_export_markdown(
+    session: Option<&SessionRecord>,
+    thread: &ThreadRecord,
+    items: &[ItemRecord],
+) -> String {
+    let session_title = session
+        .map(|session| session.title.as_str())
+        .unwrap_or("No session");
+    let workspace = session
+        .map(|session| session.workspace.as_str())
+        .unwrap_or(thread.workspace.as_str());
+    let mut content = String::new();
+    let _ = writeln!(content, "# Chat Export");
+    let _ = writeln!(content);
+    let _ = writeln!(content, "**Session:** {session_title}");
+    let _ = writeln!(content, "**Thread:** {}", thread.title);
+    let _ = writeln!(content, "**Model:** {}", thread.model);
+    let _ = writeln!(content, "**Mode:** {}", thread.mode);
+    let _ = writeln!(content, "**Workspace:** {workspace}");
+    let _ = writeln!(content, "**Date:** {}", epoch_millis_label());
+    let _ = writeln!(content);
+    let _ = writeln!(content, "---");
+    let _ = writeln!(content);
+
+    if items.is_empty() {
+        let _ = writeln!(content, "No transcript items.");
+        return content;
+    }
+
+    for item in items {
+        let _ = writeln!(content, "{}", tui_export_item_label(item));
+        let _ = writeln!(content);
+        let body = item.content.trim();
+        if body.is_empty() {
+            let _ = writeln!(content, "_No content._");
+        } else {
+            let _ = writeln!(content, "{body}");
+        }
+        let _ = writeln!(content);
+        let _ = writeln!(
+            content,
+            "_Item #{}, type: {}, status: {}_",
+            item.index, item.item_type, item.status
+        );
+        let _ = writeln!(content);
+        let _ = writeln!(content, "---");
+        let _ = writeln!(content);
+    }
+    content
+}
+
+fn tui_export_item_label(item: &ItemRecord) -> String {
+    let key = item.role.as_deref().unwrap_or(item.item_type.as_str());
+    match key {
+        "user" => "**You:**".to_string(),
+        "assistant" => "**Assistant:**".to_string(),
+        "system" => "*System:*".to_string(),
+        "tool" | "tool_result" | "function_call" | "function_result" => "**Tool:**".to_string(),
+        "reasoning" | "thinking" => "*Thinking:*".to_string(),
+        value => format!("**{}:**", tui_export_title(value)),
+    }
+}
+
+fn tui_export_title(value: &str) -> String {
+    let words = value
+        .split(['_', '-', ' '])
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        return "Item".to_string();
+    }
+    words
+        .into_iter()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn html_escape(value: &str) -> String {
@@ -5125,6 +5277,26 @@ description = "Review pull requests."
     }
 
     #[test]
+    fn handle_tui_http_action_rejects_export_commands_as_local_only() {
+        let client = RuntimeHttpClient::from_url("http://127.0.0.1:9").unwrap();
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_http_action(
+            &client,
+            &mut app,
+            TuiAction::ExportThread {
+                thread_id: "thread-one".to_string(),
+                path: Some("chat.md".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert!(render_once(&app, 120, 36)
+            .unwrap()
+            .contains("export commands require local file-backed TUI"));
+    }
+
+    #[test]
     fn handle_tui_http_action_rejects_session_rename_as_local_only() {
         let client = RuntimeHttpClient::from_url("http://127.0.0.1:9").unwrap();
         let mut app = TuiApp::new(Vec::new());
@@ -6820,6 +6992,98 @@ shell_allowlist = ["git diff"]
         assert!(html.contains("Share &lt;thread&gt;"));
         assert!(html.contains("&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;"));
         assert!(!html.contains("<script>alert"));
+    }
+
+    #[test]
+    fn handle_tui_action_exports_thread_markdown() {
+        let root = temp_root("export-action");
+        fs::create_dir_all(&root).unwrap();
+        let store = RuntimeStore::new(root.join(".dscode/runtime"));
+        let session = store
+            .create_session("Daily work".to_string(), root.display().to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Export me".to_string(),
+                root.display().to_string(),
+                "deepseek-v4-pro".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let user_turn = store
+            .append_turn(&thread.id, "user".to_string(), "hello".to_string())
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                Some(&user_turn.id),
+                "message".to_string(),
+                Some("user".to_string()),
+                "hello from user".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                None,
+                "message".to_string(),
+                Some("assistant".to_string()),
+                "hello from assistant".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        let mut app = app_from_store(&store).unwrap();
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::ExportThread {
+                thread_id: thread.id,
+                path: Some("exports/chat.md".to_string()),
+            },
+        )
+        .unwrap();
+
+        let export_path = root.join("exports/chat.md");
+        let markdown = fs::read_to_string(&export_path).unwrap();
+        assert!(markdown.contains("# Chat Export"));
+        assert!(markdown.contains("**Session:** Daily work"));
+        assert!(markdown.contains("**Model:** deepseek-v4-pro"));
+        assert!(markdown.contains("**You:**"));
+        assert!(markdown.contains("hello from user"));
+        assert!(markdown.contains("**Assistant:**"));
+        assert!(markdown.contains("hello from assistant"));
+        let output = render_once(&app, 160, 48).unwrap();
+        assert!(output.contains("Export complete"));
+        assert!(output.contains("exports/chat.md"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn render_tui_export_markdown_includes_empty_transcript_note() {
+        let thread = ThreadRecord {
+            id: "thread-one".to_string(),
+            session_id: None,
+            created_at: "0".to_string(),
+            updated_at: "1".to_string(),
+            title: "Empty export".to_string(),
+            workspace: "/tmp/export".to_string(),
+            model: "deepseek-v4-pro".to_string(),
+            mode: "agent".to_string(),
+            status: "active".to_string(),
+            latest_turn_id: None,
+            event_seq: 1,
+        };
+
+        let markdown = render_tui_export_markdown(None, &thread, &[]);
+
+        assert!(markdown.contains("# Chat Export"));
+        assert!(markdown.contains("**Thread:** Empty export"));
+        assert!(markdown.contains("No transcript items."));
     }
 
     #[test]
