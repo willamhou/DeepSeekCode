@@ -265,6 +265,12 @@ deepseek doctor
 如果确实要覆盖已有配置，可以显式运行 `deepseek config init --force`。
 它也会创建 `.dscode/mcp.json`，用于记录项目级 MCP server 定义。
 
+`deepseek doctor` 会输出 `[onboarding]` checklist：配置文件是否存在、当前 provider
+的 API key 环境变量是否存在，以及下一步应该运行 `deepseek config init`、
+`export DEEPSEEK_API_KEY=...`、`deepseek smoke` 还是 `deepseek tui`。自动化环境可以用
+`deepseek doctor --json` 读取同名 `onboarding` 对象；该对象只包含 env var 名称和下一步命令，
+不会回显密钥值。
+
 `deepseek` 会自动读取当前工作目录下的 `.env`，并在变量尚未存在于进程环境时注入。常用 DeepSeek/OpenAI-compatible 配置：
 
 ```bash

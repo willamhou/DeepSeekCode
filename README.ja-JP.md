@@ -104,7 +104,7 @@ DeepSeekCode は自身の開発に使える段階ですが、Claude Code CLI / C
 - ネイティブ supervisor-owned PTY の attach/stdin/resize/replay/wait/cancel。
 - 実リポジトリを使った live external write-fixture 検証。
 - npm registry 公開と Homebrew tap。どちらも資格情報が未設定です。
-- onboarding、auth、model/provider 設定、より充実した demo 表示まわりの製品化。
+- 完全な対話型 onboarding、auth、model/provider 設定、より充実した demo 表示まわりの製品化。
 
 ## Demo 素材
 

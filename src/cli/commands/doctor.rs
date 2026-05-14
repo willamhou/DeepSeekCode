@@ -22,6 +22,7 @@ pub fn run(args: DoctorArgs) -> AppResult<()> {
     print_model_section(&config);
     print_capabilities_section(&config);
     print_api_key_section(&config);
+    print_onboarding_section(&config);
     print_network_section(&config);
     print_github_section();
     print_hints_section(&config);
@@ -59,6 +60,10 @@ fn build_json_report(config: &AppConfig) -> BTreeMap<String, JsonValue> {
         JsonValue::Object(build_skills_json(config)),
     );
     root.insert("mcp".to_string(), JsonValue::Object(build_mcp_json(config)));
+    root.insert(
+        "onboarding".to_string(),
+        JsonValue::Object(build_onboarding_json(config)),
+    );
     root.insert(
         "network".to_string(),
         JsonValue::Object(object([
@@ -184,6 +189,58 @@ fn build_api_key_json(config: &AppConfig) -> BTreeMap<String, JsonValue> {
             ("masked", JsonValue::String(String::new())),
         ]),
     }
+}
+
+fn build_onboarding_json(config: &AppConfig) -> BTreeMap<String, JsonValue> {
+    let config_present = config.workspace.config_path().exists();
+    let api_key_present = model_api_key_present(config);
+    let next_commands = onboarding_next_commands(config, config_present, api_key_present);
+    object([
+        ("config_present", JsonValue::Bool(config_present)),
+        ("api_key_present", JsonValue::Bool(api_key_present)),
+        (
+            "api_key_env",
+            JsonValue::String(config.model.api_key_env.clone()),
+        ),
+        (
+            "ready_for_live_model",
+            JsonValue::Bool(config_present && api_key_present),
+        ),
+        (
+            "steps",
+            JsonValue::Array(vec![
+                onboarding_step_json(
+                    "config",
+                    if config_present { "done" } else { "missing" },
+                    "Create project config and runtime directories.",
+                    "deepseek config init",
+                ),
+                onboarding_step_json(
+                    "api_key",
+                    if api_key_present { "done" } else { "missing" },
+                    "Export the provider API key for live model calls.",
+                    &format!("export {}=...", config.model.api_key_env),
+                ),
+                onboarding_step_json(
+                    "smoke",
+                    if api_key_present { "ready" } else { "blocked" },
+                    "Send one live request once credentials are present.",
+                    "deepseek smoke",
+                ),
+                onboarding_step_json(
+                    "tui",
+                    if config_present && api_key_present {
+                        "ready"
+                    } else {
+                        "blocked"
+                    },
+                    "Open the terminal workbench.",
+                    "deepseek tui",
+                ),
+            ]),
+        ),
+        ("next_commands", json_string_array(next_commands)),
+    ])
 }
 
 fn build_skills_json(config: &AppConfig) -> BTreeMap<String, JsonValue> {
@@ -352,6 +409,43 @@ fn print_api_key_section(config: &AppConfig) {
     }
 }
 
+fn print_onboarding_section(config: &AppConfig) {
+    let config_present = config.workspace.config_path().exists();
+    let api_key_present = model_api_key_present(config);
+    let next_commands = onboarding_next_commands(config, config_present, api_key_present);
+
+    println!();
+    println!("[onboarding]");
+    if config_present && api_key_present {
+        println!(
+            "  ready: project config and {} are present",
+            config.model.api_key_env
+        );
+        println!("  next: deepseek smoke");
+        println!("  next: deepseek tui");
+        return;
+    }
+
+    if config_present {
+        println!("  ok: project config exists");
+    } else {
+        println!("  missing: project config");
+    }
+
+    if api_key_present {
+        println!("  ok: {} is present", config.model.api_key_env);
+    } else {
+        println!(
+            "  missing: {} for live model calls",
+            config.model.api_key_env
+        );
+    }
+
+    for command in next_commands {
+        println!("  next: {command}");
+    }
+}
+
 fn print_network_section(config: &AppConfig) {
     println!();
     println!("[network]");
@@ -423,6 +517,44 @@ fn print_hints_section(config: &AppConfig) {
     println!(
         "  Run `deepseek smoke` (or `deepseek smoke --flavor anthropic`) to send a single live request."
     );
+}
+
+fn onboarding_step_json(
+    id: &'static str,
+    status: &'static str,
+    note: &str,
+    command: &str,
+) -> JsonValue {
+    JsonValue::Object(object([
+        ("id", JsonValue::String(id.to_string())),
+        ("status", JsonValue::String(status.to_string())),
+        ("note", JsonValue::String(note.to_string())),
+        ("command", JsonValue::String(command.to_string())),
+    ]))
+}
+
+fn onboarding_next_commands(
+    config: &AppConfig,
+    config_present: bool,
+    api_key_present: bool,
+) -> Vec<String> {
+    let mut commands = Vec::new();
+    if !config_present {
+        commands.push("deepseek config init".to_string());
+    }
+    if !api_key_present {
+        commands.push(format!("export {}=...", config.model.api_key_env));
+    }
+    commands.push("deepseek doctor".to_string());
+    if api_key_present {
+        commands.push("deepseek smoke".to_string());
+        commands.push("deepseek tui".to_string());
+    }
+    commands
+}
+
+fn model_api_key_present(config: &AppConfig) -> bool {
+    env::var(&config.model.api_key_env).is_ok_and(|value| !value.trim().is_empty())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -648,10 +780,14 @@ fn object<const N: usize>(items: [(&str, JsonValue); N]) -> BTreeMap<String, Jso
     map
 }
 
+fn json_string_array(values: Vec<String>) -> JsonValue {
+    JsonValue::Array(values.into_iter().map(JsonValue::String).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::json::{json_as_object, json_as_string, parse_root_object};
+    use crate::util::json::{json_as_array, json_as_object, json_as_string, parse_root_object};
 
     #[test]
     fn detects_anthropic_base_url() {
@@ -754,8 +890,73 @@ mod tests {
         assert!(root.get("api_key").and_then(json_as_object).is_some());
         assert!(root.get("skills").and_then(json_as_object).is_some());
         assert!(root.get("mcp").and_then(json_as_object).is_some());
+        assert!(root.get("onboarding").and_then(json_as_object).is_some());
         assert!(root.get("network").and_then(json_as_object).is_some());
         assert!(root.get("binaries").and_then(json_as_object).is_some());
+    }
+
+    #[test]
+    fn json_report_includes_onboarding_next_steps_without_secret() {
+        let env_name = format!(
+            "DSCODE_DOCTOR_ONBOARDING_TEST_KEY_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        );
+        std::env::remove_var(&env_name);
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root_dir = std::env::temp_dir().join(format!(
+            "deepseek-doctor-onboarding-{}-{suffix}",
+            std::process::id()
+        ));
+        let mut config = AppConfig::default();
+        config.model.api_key_env = env_name.clone();
+        config.workspace.config_dir = root_dir.join(".dscode").display().to_string();
+        config.workspace.session_dir = root_dir.join(".dscode/sessions").display().to_string();
+
+        let report = render_json_report(&config);
+        let root = parse_root_object(&report).expect("doctor json should parse");
+        let onboarding = root
+            .get("onboarding")
+            .and_then(json_as_object)
+            .expect("onboarding object should exist");
+
+        assert!(matches!(
+            onboarding.get("ready_for_live_model"),
+            Some(JsonValue::Bool(false))
+        ));
+        assert!(matches!(
+            onboarding.get("api_key_present"),
+            Some(JsonValue::Bool(false))
+        ));
+        let commands = onboarding
+            .get("next_commands")
+            .and_then(json_as_array)
+            .expect("next_commands should be an array");
+        let expected_export = format!("export {env_name}=...");
+        assert!(commands
+            .iter()
+            .any(|value| json_as_string(value) == Some(expected_export.as_str())));
+        let steps = onboarding
+            .get("steps")
+            .and_then(json_as_array)
+            .expect("steps should be an array");
+        assert_eq!(steps.len(), 4);
+        let smoke_step = steps
+            .iter()
+            .filter_map(json_as_object)
+            .find(|step| step.get("id").and_then(json_as_string) == Some("smoke"))
+            .expect("smoke step should exist");
+        assert_eq!(
+            smoke_step.get("status").and_then(json_as_string),
+            Some("blocked")
+        );
+        assert!(
+            !json_value_to_string(&JsonValue::Object(onboarding.clone()))
+                .contains("sk-test-secret-tail-123456")
+        );
     }
 
     #[test]
