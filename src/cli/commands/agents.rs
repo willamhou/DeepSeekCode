@@ -9,7 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::cli::app::{
     AgentsAction, AgentsRlmCancelArgs, AgentsRlmDrainArgs, AgentsRlmEventsArgs,
     AgentsRlmRecoverArgs, AgentsRlmRunNextArgs, AgentsRlmStatusArgs, AgentsRlmStopArgs,
-    AgentsRlmWaitArgs, AgentsServiceArgs, AgentsServiceKind, AgentsShellSupervisorArgs,
+    AgentsRlmWaitArgs, AgentsServiceArgs, AgentsServiceKind, AgentsShellAction, AgentsShellArgs,
+    AgentsShellSupervisorArgs,
 };
 use crate::config::load::load_or_default;
 use crate::config::types::AppConfig;
@@ -68,6 +69,7 @@ pub fn run(action: AgentsAction) -> AppResult<()> {
         AgentsAction::RlmStop(args) => run_rlm_stop(config, args),
         AgentsAction::RlmRunNext(args) => run_rlm_run_next(config, args),
         AgentsAction::RlmDrain(args) => run_rlm_drain(config, args),
+        AgentsAction::Shell(args) => run_shell_control(args),
         AgentsAction::ShellSupervisor(args) => run_shell_supervisor(args),
         AgentsAction::Service(args) => render_agent_services(args),
         AgentsAction::Threads => list_threads(&config.workspace.config_dir),
@@ -75,6 +77,260 @@ pub fn run(action: AgentsAction) -> AppResult<()> {
         AgentsAction::SwitchThread { id } => switch_thread(&config.workspace.config_dir, &id),
         AgentsAction::CurrentThread => current_thread(&config.workspace.config_dir),
         AgentsAction::ClearThread => clear_thread(&config.workspace.config_dir),
+    }
+}
+
+fn run_shell_control(args: AgentsShellArgs) -> AppResult<()> {
+    let cwd = std::env::current_dir()?;
+    let request = agents_shell_request_json(&args);
+    let response = send_shell_supervisor_cli_request(&cwd, &request)?;
+    print_shell_control_response(&args, response)
+}
+
+fn agents_shell_request_json(args: &AgentsShellArgs) -> JsonValue {
+    let mut object = BTreeMap::new();
+    match &args.action {
+        AgentsShellAction::Status => {
+            object.insert(
+                "method".to_string(),
+                JsonValue::String("status".to_string()),
+            );
+        }
+        AgentsShellAction::Show => {
+            object.insert("method".to_string(), JsonValue::String("show".to_string()));
+        }
+        AgentsShellAction::Start {
+            command,
+            cwd,
+            tty,
+            tty_rows,
+            tty_cols,
+        } => {
+            object.insert("method".to_string(), JsonValue::String("start".to_string()));
+            object.insert("command".to_string(), JsonValue::String(command.clone()));
+            if let Some(cwd) = cwd {
+                object.insert("cwd".to_string(), JsonValue::String(cwd.clone()));
+            }
+            if *tty {
+                object.insert("tty".to_string(), JsonValue::Bool(true));
+            }
+            insert_optional_number(&mut object, "tty_rows", *tty_rows);
+            insert_optional_number(&mut object, "tty_cols", *tty_cols);
+        }
+        AgentsShellAction::Wait {
+            task_id,
+            timeout_ms,
+        } => {
+            object.insert("method".to_string(), JsonValue::String("wait".to_string()));
+            object.insert("task_id".to_string(), JsonValue::String(task_id.clone()));
+            insert_optional_number(&mut object, "timeout_ms", *timeout_ms);
+        }
+        AgentsShellAction::Replay {
+            task_id,
+            stream,
+            cursor,
+            offset,
+            limit_bytes,
+            tail,
+        } => {
+            object.insert(
+                "method".to_string(),
+                JsonValue::String("replay".to_string()),
+            );
+            object.insert("task_id".to_string(), JsonValue::String(task_id.clone()));
+            if let Some(stream) = stream {
+                object.insert("stream".to_string(), JsonValue::String(stream.clone()));
+            }
+            insert_optional_number(&mut object, "cursor", *cursor);
+            insert_optional_number(&mut object, "offset", *offset);
+            insert_optional_number(&mut object, "limit_bytes", *limit_bytes);
+            if *tail {
+                object.insert("tail".to_string(), JsonValue::Bool(true));
+            }
+        }
+        AgentsShellAction::Attach {
+            task_id,
+            cursor,
+            wait_ms,
+            limit_bytes,
+            tail,
+        } => {
+            object.insert(
+                "method".to_string(),
+                JsonValue::String("attach".to_string()),
+            );
+            object.insert("task_id".to_string(), JsonValue::String(task_id.clone()));
+            insert_optional_number(&mut object, "cursor", *cursor);
+            insert_optional_number(&mut object, "wait_ms", *wait_ms);
+            insert_optional_number(&mut object, "limit_bytes", *limit_bytes);
+            if *tail {
+                object.insert("tail".to_string(), JsonValue::Bool(true));
+            }
+        }
+        AgentsShellAction::Stdin {
+            task_id,
+            input,
+            close_stdin,
+            timeout_ms,
+        } => {
+            object.insert("method".to_string(), JsonValue::String("stdin".to_string()));
+            object.insert("task_id".to_string(), JsonValue::String(task_id.clone()));
+            if let Some(input) = input {
+                object.insert("input".to_string(), JsonValue::String(input.clone()));
+            }
+            if *close_stdin {
+                object.insert("close_stdin".to_string(), JsonValue::Bool(true));
+            }
+            insert_optional_number(&mut object, "timeout_ms", *timeout_ms);
+        }
+        AgentsShellAction::Resize {
+            task_id,
+            tty_rows,
+            tty_cols,
+        } => {
+            object.insert(
+                "method".to_string(),
+                JsonValue::String("resize".to_string()),
+            );
+            object.insert("task_id".to_string(), JsonValue::String(task_id.clone()));
+            object.insert(
+                "tty_rows".to_string(),
+                JsonValue::Number(tty_rows.to_string()),
+            );
+            object.insert(
+                "tty_cols".to_string(),
+                JsonValue::Number(tty_cols.to_string()),
+            );
+        }
+        AgentsShellAction::Cancel { task_id, all } => {
+            object.insert(
+                "method".to_string(),
+                JsonValue::String("cancel".to_string()),
+            );
+            if *all {
+                object.insert("all".to_string(), JsonValue::Bool(true));
+            }
+            if let Some(task_id) = task_id {
+                object.insert("task_id".to_string(), JsonValue::String(task_id.clone()));
+            }
+        }
+        AgentsShellAction::Shutdown => {
+            object.insert(
+                "method".to_string(),
+                JsonValue::String("shutdown".to_string()),
+            );
+        }
+    }
+    JsonValue::Object(object)
+}
+
+fn insert_optional_number(object: &mut BTreeMap<String, JsonValue>, key: &str, value: Option<u64>) {
+    if let Some(value) = value {
+        object.insert(key.to_string(), JsonValue::Number(value.to_string()));
+    }
+}
+
+#[cfg(unix)]
+fn send_shell_supervisor_cli_request(cwd: &Path, request: &JsonValue) -> AppResult<JsonValue> {
+    use std::os::unix::net::UnixStream;
+
+    let socket = cwd.join(".dscode/shell-supervisor/supervisor.sock");
+    let mut stream = UnixStream::connect(&socket).map_err(|error| {
+        app_error(format!(
+            "shell supervisor socket is not active at {}: {error}. Start it with `deepseek agents shell-supervisor --json`.",
+            socket.display()
+        ))
+    })?;
+    stream.write_all(json_value_to_string(request).as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line)?;
+    parse_json_value(line.trim()).map_err(|error| {
+        app_error(format!(
+            "shell supervisor returned invalid response JSON: {error}"
+        ))
+    })
+}
+
+#[cfg(not(unix))]
+fn send_shell_supervisor_cli_request(_cwd: &Path, _request: &JsonValue) -> AppResult<JsonValue> {
+    Err(app_error(
+        "agents shell control currently requires the Unix shell supervisor socket",
+    ))
+}
+
+fn print_shell_control_response(args: &AgentsShellArgs, response: JsonValue) -> AppResult<()> {
+    if args.json {
+        println!("{}", json_value_to_string(&response));
+        return Ok(());
+    }
+    let Some(object) = json_as_object(&response) else {
+        return Err(app_error("shell supervisor response must be a JSON object"));
+    };
+    let status = object
+        .get("status")
+        .and_then(json_as_string)
+        .unwrap_or("unknown");
+    if status == "error" || status == "unsupported" {
+        let error = object
+            .get("error")
+            .and_then(json_as_string)
+            .unwrap_or("shell supervisor request failed");
+        return Err(app_error(error.to_string()));
+    }
+    let summary_key = match args.action {
+        AgentsShellAction::Show => Some("job_inventory"),
+        AgentsShellAction::Start { .. } => Some("start_summary"),
+        AgentsShellAction::Wait { .. } => Some("wait_summary"),
+        AgentsShellAction::Replay { .. } => Some("replay_summary"),
+        AgentsShellAction::Attach { .. } => Some("attach_summary"),
+        AgentsShellAction::Stdin { .. } => Some("stdin_summary"),
+        AgentsShellAction::Resize { .. } => Some("resize_summary"),
+        AgentsShellAction::Cancel { .. } => Some("cancel_summary"),
+        AgentsShellAction::Status | AgentsShellAction::Shutdown => None,
+    };
+    if let Some(key) = summary_key {
+        if let Some(summary) = object.get(key).and_then(json_as_string) {
+            println!("{summary}");
+            return Ok(());
+        }
+    }
+    print_shell_control_status(object);
+    Ok(())
+}
+
+fn print_shell_control_status(object: &BTreeMap<String, JsonValue>) {
+    let method = object
+        .get("method")
+        .and_then(json_as_string)
+        .unwrap_or("status");
+    let status = object
+        .get("status")
+        .and_then(json_as_string)
+        .unwrap_or("unknown");
+    println!("shell supervisor {method}: {status}");
+    for key in [
+        "cwd",
+        "supervisor_pid",
+        "supervisor_socket",
+        "supervisor_epoch",
+        "protocol",
+        "native_pty",
+        "active_jobs",
+    ] {
+        if let Some(value) = object.get(key) {
+            println!("{key}: {}", shell_control_scalar(value));
+        }
+    }
+}
+
+fn shell_control_scalar(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(value) | JsonValue::Number(value) => value.clone(),
+        JsonValue::Bool(value) => value.to_string(),
+        JsonValue::Null => "null".to_string(),
+        JsonValue::Array(_) | JsonValue::Object(_) => json_value_to_string(value),
     }
 }
 
@@ -3006,6 +3262,66 @@ mod tests {
 
         assert_eq!(valid.len(), 1);
         assert_eq!(valid[0].name, "reviewer");
+    }
+
+    #[test]
+    fn agents_shell_cli_args_build_protocol_requests() {
+        let start = agents_shell_request_json(&AgentsShellArgs {
+            action: AgentsShellAction::Start {
+                command: "echo hello".to_string(),
+                cwd: Some("subdir".to_string()),
+                tty: true,
+                tty_rows: Some(33),
+                tty_cols: Some(101),
+            },
+            json: true,
+        });
+        let start = json_as_object(&start).unwrap();
+        assert_eq!(start.get("method").and_then(json_as_string), Some("start"));
+        assert_eq!(
+            start.get("command").and_then(json_as_string),
+            Some("echo hello")
+        );
+        assert_eq!(start.get("cwd").and_then(json_as_string), Some("subdir"));
+        assert!(matches!(start.get("tty"), Some(JsonValue::Bool(true))));
+        assert_eq!(start.get("tty_rows").and_then(json_as_u64), Some(33));
+        assert_eq!(start.get("tty_cols").and_then(json_as_u64), Some(101));
+
+        let stdin = agents_shell_request_json(&AgentsShellArgs {
+            action: AgentsShellAction::Stdin {
+                task_id: "task-1".to_string(),
+                input: Some("probe\n".to_string()),
+                close_stdin: true,
+                timeout_ms: Some(100),
+            },
+            json: false,
+        });
+        let stdin = json_as_object(&stdin).unwrap();
+        assert_eq!(stdin.get("method").and_then(json_as_string), Some("stdin"));
+        assert_eq!(
+            stdin.get("task_id").and_then(json_as_string),
+            Some("task-1")
+        );
+        assert_eq!(stdin.get("input").and_then(json_as_string), Some("probe\n"));
+        assert!(matches!(
+            stdin.get("close_stdin"),
+            Some(JsonValue::Bool(true))
+        ));
+        assert_eq!(stdin.get("timeout_ms").and_then(json_as_u64), Some(100));
+
+        let cancel = agents_shell_request_json(&AgentsShellArgs {
+            action: AgentsShellAction::Cancel {
+                task_id: None,
+                all: true,
+            },
+            json: false,
+        });
+        let cancel = json_as_object(&cancel).unwrap();
+        assert_eq!(
+            cancel.get("method").and_then(json_as_string),
+            Some("cancel")
+        );
+        assert!(matches!(cancel.get("all"), Some(JsonValue::Bool(true))));
     }
 
     #[test]

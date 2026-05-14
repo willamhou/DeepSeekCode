@@ -279,7 +279,9 @@ Landed first slice:
   through `supervisor_socket`, including a child-side `stty size` assertion
   that observes resized `33 101` geometry inside the PTY; `deepseek agents
   service` and packaged systemd/launchd templates include that
-  shell-supervisor service;
+  shell-supervisor service; `deepseek agents shell ...` now provides
+  human-facing status/show/start/wait/replay/attach/stdin/resize/cancel/shutdown
+  wrappers over the same supervisor protocol;
   `exec_shell_supervisor_status` now probes socket health before reporting a
   daemon as ready, reads healthy daemon `status` active-job counts backed by
   durable shell manifests, refreshes the workspace supervisor manifest during

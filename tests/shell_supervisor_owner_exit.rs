@@ -110,6 +110,92 @@ fn shell_supervisor_native_pty_survives_start_connection_exit() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn agents_shell_cli_controls_supervised_native_pty() {
+    let root = temp_root("shell-supervisor-cli-control");
+    fs::create_dir_all(&root).unwrap();
+    let socket = root.join(".dscode/shell-supervisor/supervisor.sock");
+    let supervisor = spawn_shell_supervisor(&root);
+    wait_for_socket(&socket);
+
+    let start = deepseek_cli(
+        &root,
+        &[
+            "agents",
+            "shell",
+            "start",
+            "--tty",
+            "--rows",
+            "24",
+            "--cols",
+            "80",
+            "--json",
+            "--",
+            r#"echo cli-ready; while read line; do stty size; echo "$line"; done"#,
+        ],
+    );
+    assert_contains(&start, r#""status":"ok""#);
+    assert_contains(&start, r#""job_pty_backend":"native-supervisor""#);
+    let task_id =
+        json_string_field(&start, "task_id").expect("start response should contain task_id");
+
+    let replay = poll_until(Duration::from_secs(3), || {
+        let response = deepseek_cli(
+            &root,
+            &[
+                "agents", "shell", "replay", &task_id, "--stream", "terminal", "--cursor", "0",
+            ],
+        );
+        response.contains("cli-ready").then_some(response)
+    })
+    .unwrap_or_else(|| panic!("agents shell replay never observed PTY output for {task_id}"));
+    assert_contains(&replay, "stream: terminal");
+    assert_contains(&replay, "cli-ready");
+
+    let resize = deepseek_cli(&root, &["agents", "shell", "resize", &task_id, "31", "99"]);
+    assert_contains(&resize, "meta.live_resize=native_tiocswinsz");
+
+    let stdin = deepseek_cli(
+        &root,
+        &[
+            "agents",
+            "shell",
+            "stdin",
+            &task_id,
+            "--input",
+            "cli-probe\n",
+            "--timeout-ms",
+            "100",
+        ],
+    );
+    assert_contains(&stdin, "status: running");
+
+    let replay = poll_until(Duration::from_secs(3), || {
+        let response = deepseek_cli(
+            &root,
+            &[
+                "agents", "shell", "replay", &task_id, "--stream", "terminal", "--cursor", "0",
+            ],
+        );
+        (response.contains("31 99") && response.contains("cli-probe")).then_some(response)
+    })
+    .unwrap_or_else(|| {
+        panic!("agents shell replay never observed CLI child resize output for {task_id}")
+    });
+    assert_contains(&replay, "31 99");
+    assert_contains(&replay, "cli-probe");
+
+    let cancel = deepseek_cli(&root, &["agents", "shell", "cancel", &task_id]);
+    assert_contains(&cancel, "Canceled background shell job");
+
+    let shutdown = request(&socket, r#"{"method":"shutdown"}"#);
+    assert_contains(&shutdown, r#""status":"ok""#);
+    let status = supervisor.wait().unwrap();
+    assert!(status.success(), "supervisor exited with {status}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
 struct SupervisorGuard {
     child: Option<Child>,
 }
@@ -156,6 +242,23 @@ fn request(socket: &Path, body: &str) -> String {
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).unwrap();
     line
+}
+
+fn deepseek_cli(root: &Path, args: &[&str]) -> String {
+    let output = Command::new(deepseek_bin())
+        .args(args)
+        .current_dir(root)
+        .output()
+        .unwrap_or_else(|error| panic!("run deepseek {}: {error}", args.join(" ")));
+    assert!(
+        output.status.success(),
+        "deepseek {} failed with {}\nstdout:\n{}\nstderr:\n{}",
+        args.join(" "),
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).to_string()
 }
 
 fn wait_for_socket(socket: &Path) {

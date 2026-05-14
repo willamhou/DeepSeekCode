@@ -1087,8 +1087,9 @@ diagnostics watch worker (`deepseek diagnostics --watch --changed --json`), and
 the workspace shell supervisor protocol bridge
 (`deepseek agents shell-supervisor --json`). The shell supervisor currently
 publishes workspace-local status/show/start/wait/replay/attach/stdin/resize/cancel
-over the socket and controls durable safe shell jobs; native PTY sessions are
-still a later implementation slice.
+over the socket and controls durable safe shell jobs, including supervisor-owned
+native PTY sessions on Linux. Use `deepseek agents shell ...` as the human CLI
+wrapper for those protocol controls.
 The agents daemon triggers due automations, executes pending runtime tasks,
 recovers stale live RLM ownership, and runs one queued live RLM turn per tick.
 Review the generated WorkingDirectory, bind address, poll interval, and budget

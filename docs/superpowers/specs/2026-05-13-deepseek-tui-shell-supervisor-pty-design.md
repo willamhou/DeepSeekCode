@@ -168,12 +168,17 @@ Attach is an API-level terminal stream, not a full UI widget:
    - detached tool-level stdin/resize/cancel now forward through
      `supervisor_socket` for running native-supervisor manifests
    - status: daemon/socket owner-exit smoke, detached tool forwarding, and
-     child-observed resize verification landed; dedicated human-facing CLI
-     wrappers remain open
-6. Service packaging:
+     child-observed resize verification landed
+6. Human CLI wrapper:
+   - `deepseek agents shell ...` forwards status/show/start/wait/replay/attach/
+     stdin/resize/cancel/shutdown requests to the workspace supervisor socket
+   - non-JSON mode prints relevant tool summaries; `--json` prints raw protocol
+     responses
+   - status: first slice landed
+7. Service packaging:
    - systemd/launchd templates can supervise the shell supervisor alongside
      runtime and diagnostics services
-7. Windows ConPTY:
+8. Windows ConPTY:
    - separate platform design and tests
 
 ## Verification Plan
@@ -197,5 +202,5 @@ the first Linux `native-supervisor` PTY backend have landed. Normal
 `exec_shell tty=true` still uses `script`; shell-supervisor `tty=true` starts
 own a native PTY master, write `terminal-events.jsonl`, and support live
 `TIOCSWINSZ` resize through the in-process supervisor. Remaining hard slices
-are dedicated human-facing shell wrappers, streaming MCP/ACP attach frames,
-service-manager lifecycle coverage, and Windows ConPTY.
+are streaming MCP/ACP attach frames, service-manager lifecycle coverage, and
+Windows ConPTY.

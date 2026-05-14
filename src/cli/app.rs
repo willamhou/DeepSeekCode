@@ -492,6 +492,7 @@ pub enum AgentsAction {
     RlmStop(AgentsRlmStopArgs),
     RlmRunNext(AgentsRlmRunNextArgs),
     RlmDrain(AgentsRlmDrainArgs),
+    Shell(AgentsShellArgs),
     ShellSupervisor(AgentsShellSupervisorArgs),
     Service(AgentsServiceArgs),
     Threads,
@@ -503,6 +504,60 @@ pub enum AgentsAction {
     },
     CurrentThread,
     ClearThread,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentsShellArgs {
+    pub action: AgentsShellAction,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentsShellAction {
+    Status,
+    Show,
+    Start {
+        command: String,
+        cwd: Option<String>,
+        tty: bool,
+        tty_rows: Option<u64>,
+        tty_cols: Option<u64>,
+    },
+    Wait {
+        task_id: String,
+        timeout_ms: Option<u64>,
+    },
+    Replay {
+        task_id: String,
+        stream: Option<String>,
+        cursor: Option<u64>,
+        offset: Option<u64>,
+        limit_bytes: Option<u64>,
+        tail: bool,
+    },
+    Attach {
+        task_id: String,
+        cursor: Option<u64>,
+        wait_ms: Option<u64>,
+        limit_bytes: Option<u64>,
+        tail: bool,
+    },
+    Stdin {
+        task_id: String,
+        input: Option<String>,
+        close_stdin: bool,
+        timeout_ms: Option<u64>,
+    },
+    Resize {
+        task_id: String,
+        tty_rows: u64,
+        tty_cols: u64,
+    },
+    Cancel {
+        task_id: Option<String>,
+        all: bool,
+    },
+    Shutdown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1876,6 +1931,7 @@ fn parse_agents_subcommand(args: Vec<String>) -> Result<AgentsAction, String> {
         "rlm-stop" => parse_agents_rlm_stop_args(args.into_iter().skip(1).collect()),
         "rlm-run-next" => parse_agents_rlm_run_next_args(args.into_iter().skip(1).collect()),
         "rlm-drain" => parse_agents_rlm_drain_args(args.into_iter().skip(1).collect()),
+        "shell" => parse_agents_shell_args(args.into_iter().skip(1).collect()),
         "shell-supervisor" => {
             parse_agents_shell_supervisor_args(args.into_iter().skip(1).collect())
         }
@@ -1915,9 +1971,425 @@ fn parse_agents_subcommand(args: Vec<String>) -> Result<AgentsAction, String> {
             Ok(AgentsAction::ClearThread)
         }
         other => Err(format!(
-            "unknown agents sub-action `{other}`; expected list|show|validate|run-task|daemon|rlm-status|rlm-events|rlm-wait|rlm-cancel|rlm-recover|rlm-stop|rlm-run-next|rlm-drain|shell-supervisor|service|threads|show-thread|switch|current|clear-current"
+            "unknown agents sub-action `{other}`; expected list|show|validate|run-task|daemon|rlm-status|rlm-events|rlm-wait|rlm-cancel|rlm-recover|rlm-stop|rlm-run-next|rlm-drain|shell|shell-supervisor|service|threads|show-thread|switch|current|clear-current"
         )),
     }
+}
+
+fn parse_agents_shell_args(args: Vec<String>) -> Result<AgentsAction, String> {
+    if args.is_empty() {
+        return Err("agents shell requires an action: status|show|start|wait|replay|attach|stdin|send|resize|cancel|shutdown".to_string());
+    }
+    let action = args[0].clone();
+    let rest = args.into_iter().skip(1).collect::<Vec<_>>();
+    match action.as_str() {
+        "status" | "health" => {
+            parse_agents_shell_empty_args(&action, rest, AgentsShellAction::Status)
+        }
+        "show" => parse_agents_shell_empty_args(&action, rest, AgentsShellAction::Show),
+        "start" => parse_agents_shell_start_args(rest),
+        "wait" => parse_agents_shell_wait_args(rest),
+        "replay" => parse_agents_shell_replay_args(rest),
+        "attach" => parse_agents_shell_attach_args(rest),
+        "stdin" | "send" => parse_agents_shell_stdin_args(&action, rest),
+        "resize" => parse_agents_shell_resize_args(rest),
+        "cancel" => parse_agents_shell_cancel_args(rest),
+        "shutdown" => parse_agents_shell_empty_args(&action, rest, AgentsShellAction::Shutdown),
+        other => Err(format!(
+            "unknown agents shell action `{other}`; expected status|show|start|wait|replay|attach|stdin|send|resize|cancel|shutdown"
+        )),
+    }
+}
+
+fn parse_agents_shell_empty_args(
+    action_name: &str,
+    args: Vec<String>,
+    action: AgentsShellAction,
+) -> Result<AgentsAction, String> {
+    let mut json = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            other => {
+                return Err(format!(
+                    "unknown flag for `agents shell {action_name}`: {other}; expected --json"
+                ));
+            }
+        }
+    }
+    Ok(AgentsAction::Shell(AgentsShellArgs { action, json }))
+}
+
+fn parse_agents_shell_start_args(args: Vec<String>) -> Result<AgentsAction, String> {
+    let mut json = false;
+    let mut cwd = None;
+    let mut tty = false;
+    let mut tty_rows = None;
+    let mut tty_cols = None;
+    let mut command_parts = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json = true,
+            "--tty" => tty = true,
+            "--cwd" => {
+                i += 1;
+                cwd = Some(require_agents_shell_value(&args, i, "start", "--cwd")?);
+            }
+            "--rows" | "--tty-rows" => {
+                i += 1;
+                tty_rows = Some(parse_agents_shell_u64(&args, i, "start", "--rows")?);
+            }
+            "--cols" | "--tty-cols" => {
+                i += 1;
+                tty_cols = Some(parse_agents_shell_u64(&args, i, "start", "--cols")?);
+            }
+            "--" => {
+                command_parts.extend(args.iter().skip(i + 1).cloned());
+                break;
+            }
+            value if value.starts_with("--") => {
+                return Err(format!(
+                    "unknown flag for `agents shell start`: {value}; expected --tty|--cwd|--rows|--cols|--json|--"
+                ));
+            }
+            value => command_parts.push(value.to_string()),
+        }
+        i += 1;
+    }
+    let command = command_parts.join(" ").trim().to_string();
+    if command.is_empty() {
+        return Err("agents shell start requires a command".to_string());
+    }
+    Ok(AgentsAction::Shell(AgentsShellArgs {
+        action: AgentsShellAction::Start {
+            command,
+            cwd,
+            tty,
+            tty_rows,
+            tty_cols,
+        },
+        json,
+    }))
+}
+
+fn parse_agents_shell_wait_args(args: Vec<String>) -> Result<AgentsAction, String> {
+    let mut json = false;
+    let mut task_id = None;
+    let mut timeout_ms = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json = true,
+            "--timeout-ms" => {
+                i += 1;
+                timeout_ms = Some(parse_agents_shell_u64(&args, i, "wait", "--timeout-ms")?);
+            }
+            value if value.starts_with("--") => {
+                return Err(format!(
+                    "unknown flag for `agents shell wait`: {value}; expected --timeout-ms|--json"
+                ));
+            }
+            value => set_agents_shell_task_id(&mut task_id, value, "wait")?,
+        }
+        i += 1;
+    }
+    let task_id = task_id.ok_or_else(|| "agents shell wait requires a task id".to_string())?;
+    Ok(AgentsAction::Shell(AgentsShellArgs {
+        action: AgentsShellAction::Wait {
+            task_id,
+            timeout_ms,
+        },
+        json,
+    }))
+}
+
+fn parse_agents_shell_replay_args(args: Vec<String>) -> Result<AgentsAction, String> {
+    let mut json = false;
+    let mut task_id = None;
+    let mut stream = None;
+    let mut cursor = None;
+    let mut offset = None;
+    let mut limit_bytes = None;
+    let mut tail = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json = true,
+            "--tail" => tail = true,
+            "--stream" => {
+                i += 1;
+                stream = Some(require_agents_shell_value(&args, i, "replay", "--stream")?);
+            }
+            "--cursor" => {
+                i += 1;
+                cursor = Some(parse_agents_shell_u64(&args, i, "replay", "--cursor")?);
+            }
+            "--offset" => {
+                i += 1;
+                offset = Some(parse_agents_shell_u64(&args, i, "replay", "--offset")?);
+            }
+            "--limit-bytes" => {
+                i += 1;
+                limit_bytes = Some(parse_agents_shell_u64(&args, i, "replay", "--limit-bytes")?);
+            }
+            value if value.starts_with("--") => {
+                return Err(format!(
+                    "unknown flag for `agents shell replay`: {value}; expected --stream|--cursor|--offset|--limit-bytes|--tail|--json"
+                ));
+            }
+            value => set_agents_shell_task_id(&mut task_id, value, "replay")?,
+        }
+        i += 1;
+    }
+    let task_id = task_id.ok_or_else(|| "agents shell replay requires a task id".to_string())?;
+    Ok(AgentsAction::Shell(AgentsShellArgs {
+        action: AgentsShellAction::Replay {
+            task_id,
+            stream,
+            cursor,
+            offset,
+            limit_bytes,
+            tail,
+        },
+        json,
+    }))
+}
+
+fn parse_agents_shell_attach_args(args: Vec<String>) -> Result<AgentsAction, String> {
+    let mut json = false;
+    let mut task_id = None;
+    let mut cursor = None;
+    let mut wait_ms = None;
+    let mut limit_bytes = None;
+    let mut tail = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json = true,
+            "--tail" => tail = true,
+            "--cursor" => {
+                i += 1;
+                cursor = Some(parse_agents_shell_u64(&args, i, "attach", "--cursor")?);
+            }
+            "--wait-ms" => {
+                i += 1;
+                wait_ms = Some(parse_agents_shell_u64(&args, i, "attach", "--wait-ms")?);
+            }
+            "--limit-bytes" => {
+                i += 1;
+                limit_bytes = Some(parse_agents_shell_u64(&args, i, "attach", "--limit-bytes")?);
+            }
+            value if value.starts_with("--") => {
+                return Err(format!(
+                    "unknown flag for `agents shell attach`: {value}; expected --cursor|--wait-ms|--limit-bytes|--tail|--json"
+                ));
+            }
+            value => set_agents_shell_task_id(&mut task_id, value, "attach")?,
+        }
+        i += 1;
+    }
+    let task_id = task_id.ok_or_else(|| "agents shell attach requires a task id".to_string())?;
+    Ok(AgentsAction::Shell(AgentsShellArgs {
+        action: AgentsShellAction::Attach {
+            task_id,
+            cursor,
+            wait_ms,
+            limit_bytes,
+            tail,
+        },
+        json,
+    }))
+}
+
+fn parse_agents_shell_stdin_args(
+    action_name: &str,
+    args: Vec<String>,
+) -> Result<AgentsAction, String> {
+    let mut json = false;
+    let mut task_id = None;
+    let mut input = None;
+    let mut close_stdin = false;
+    let mut timeout_ms = None;
+    let mut positional_input = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json = true,
+            "--close-stdin" => close_stdin = true,
+            "--input" | "--stdin" | "--data" => {
+                i += 1;
+                input = Some(require_agents_shell_value(
+                    &args,
+                    i,
+                    action_name,
+                    "--input",
+                )?);
+            }
+            "--timeout-ms" => {
+                i += 1;
+                timeout_ms = Some(parse_agents_shell_u64(
+                    &args,
+                    i,
+                    action_name,
+                    "--timeout-ms",
+                )?);
+            }
+            "--" => {
+                positional_input.extend(args.iter().skip(i + 1).cloned());
+                break;
+            }
+            value if value.starts_with("--") => {
+                return Err(format!(
+                    "unknown flag for `agents shell {action_name}`: {value}; expected --input|--close-stdin|--timeout-ms|--json|--"
+                ));
+            }
+            value if task_id.is_none() => task_id = Some(value.to_string()),
+            value => positional_input.push(value.to_string()),
+        }
+        i += 1;
+    }
+    if input.is_none() && !positional_input.is_empty() {
+        input = Some(positional_input.join(" "));
+    }
+    if input.is_none() && !close_stdin {
+        return Err(format!(
+            "agents shell {action_name} requires --input, positional input, or --close-stdin"
+        ));
+    }
+    let task_id =
+        task_id.ok_or_else(|| format!("agents shell {action_name} requires a task id"))?;
+    Ok(AgentsAction::Shell(AgentsShellArgs {
+        action: AgentsShellAction::Stdin {
+            task_id,
+            input,
+            close_stdin,
+            timeout_ms,
+        },
+        json,
+    }))
+}
+
+fn parse_agents_shell_resize_args(args: Vec<String>) -> Result<AgentsAction, String> {
+    let mut json = false;
+    let mut task_id = None;
+    let mut tty_rows = None;
+    let mut tty_cols = None;
+    let mut positional_sizes = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json = true,
+            "--rows" | "--tty-rows" => {
+                i += 1;
+                tty_rows = Some(parse_agents_shell_u64(&args, i, "resize", "--rows")?);
+            }
+            "--cols" | "--tty-cols" => {
+                i += 1;
+                tty_cols = Some(parse_agents_shell_u64(&args, i, "resize", "--cols")?);
+            }
+            value if value.starts_with("--") => {
+                return Err(format!(
+                    "unknown flag for `agents shell resize`: {value}; expected --rows|--cols|--json"
+                ));
+            }
+            value if task_id.is_none() => task_id = Some(value.to_string()),
+            value => positional_sizes.push(value.to_string()),
+        }
+        i += 1;
+    }
+    if tty_rows.is_none() && !positional_sizes.is_empty() {
+        tty_rows = Some(parse_agents_shell_u64_value(
+            &positional_sizes[0],
+            "resize",
+            "rows",
+        )?);
+    }
+    if tty_cols.is_none() && positional_sizes.len() > 1 {
+        tty_cols = Some(parse_agents_shell_u64_value(
+            &positional_sizes[1],
+            "resize",
+            "cols",
+        )?);
+    }
+    if positional_sizes.len() > 2 {
+        return Err("agents shell resize accepts at most rows and cols after task id".to_string());
+    }
+    let task_id = task_id.ok_or_else(|| "agents shell resize requires a task id".to_string())?;
+    let tty_rows = tty_rows.ok_or_else(|| "agents shell resize requires --rows".to_string())?;
+    let tty_cols = tty_cols.ok_or_else(|| "agents shell resize requires --cols".to_string())?;
+    Ok(AgentsAction::Shell(AgentsShellArgs {
+        action: AgentsShellAction::Resize {
+            task_id,
+            tty_rows,
+            tty_cols,
+        },
+        json,
+    }))
+}
+
+fn parse_agents_shell_cancel_args(args: Vec<String>) -> Result<AgentsAction, String> {
+    let mut json = false;
+    let mut all = false;
+    let mut task_id = None;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--all" => all = true,
+            value if value.starts_with("--") => {
+                return Err(format!(
+                    "unknown flag for `agents shell cancel`: {value}; expected --all|--json"
+                ));
+            }
+            value => set_agents_shell_task_id(&mut task_id, value, "cancel")?,
+        }
+    }
+    if !all && task_id.is_none() {
+        return Err("agents shell cancel requires a task id or --all".to_string());
+    }
+    Ok(AgentsAction::Shell(AgentsShellArgs {
+        action: AgentsShellAction::Cancel { task_id, all },
+        json,
+    }))
+}
+
+fn set_agents_shell_task_id(
+    task_id: &mut Option<String>,
+    value: &str,
+    action: &str,
+) -> Result<(), String> {
+    if task_id.is_some() {
+        return Err(format!("agents shell {action} accepts exactly one task id"));
+    }
+    *task_id = Some(value.to_string());
+    Ok(())
+}
+
+fn require_agents_shell_value(
+    args: &[String],
+    index: usize,
+    action: &str,
+    flag: &str,
+) -> Result<String, String> {
+    args.get(index)
+        .cloned()
+        .ok_or_else(|| format!("agents shell {action} {flag} requires a value"))
+}
+
+fn parse_agents_shell_u64(
+    args: &[String],
+    index: usize,
+    action: &str,
+    flag: &str,
+) -> Result<u64, String> {
+    let value = require_agents_shell_value(args, index, action, flag)?;
+    parse_agents_shell_u64_value(&value, action, flag)
+}
+
+fn parse_agents_shell_u64_value(value: &str, action: &str, name: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .map_err(|_| format!("agents shell {action} {name} must be a number"))
 }
 
 fn parse_agents_shell_supervisor_args(args: Vec<String>) -> Result<AgentsAction, String> {
@@ -4230,6 +4702,99 @@ mod tests {
                     json: true,
                 }
             )))
+        ));
+
+        let shell_start = Cli::from_argv(vec![
+            "agents".to_string(),
+            "shell".to_string(),
+            "start".to_string(),
+            "--tty".to_string(),
+            "--rows".to_string(),
+            "33".to_string(),
+            "--cols".to_string(),
+            "101".to_string(),
+            "--json".to_string(),
+            "--".to_string(),
+            "echo".to_string(),
+            "hello".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            shell_start.command,
+            Some(Command::Agents(AgentsAction::Shell(AgentsShellArgs {
+                action: AgentsShellAction::Start {
+                    ref command,
+                    cwd: None,
+                    tty: true,
+                    tty_rows: Some(33),
+                    tty_cols: Some(101),
+                },
+                json: true,
+            }))) if command == "echo hello"
+        ));
+
+        let shell_stdin = Cli::from_argv(vec![
+            "agents".to_string(),
+            "shell".to_string(),
+            "stdin".to_string(),
+            "task-1".to_string(),
+            "--input".to_string(),
+            "hello".to_string(),
+            "--timeout-ms".to_string(),
+            "100".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            shell_stdin.command,
+            Some(Command::Agents(AgentsAction::Shell(AgentsShellArgs {
+                action: AgentsShellAction::Stdin {
+                    ref task_id,
+                    input: Some(ref input),
+                    close_stdin: false,
+                    timeout_ms: Some(100),
+                },
+                json: false,
+            }))) if task_id == "task-1" && input == "hello"
+        ));
+
+        let shell_resize = Cli::from_argv(vec![
+            "agents".to_string(),
+            "shell".to_string(),
+            "resize".to_string(),
+            "task-1".to_string(),
+            "40".to_string(),
+            "120".to_string(),
+            "--json".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            shell_resize.command,
+            Some(Command::Agents(AgentsAction::Shell(AgentsShellArgs {
+                action: AgentsShellAction::Resize {
+                    ref task_id,
+                    tty_rows: 40,
+                    tty_cols: 120,
+                },
+                json: true,
+            }))) if task_id == "task-1"
+        ));
+
+        let shell_cancel_all = Cli::from_argv(vec![
+            "agents".to_string(),
+            "shell".to_string(),
+            "cancel".to_string(),
+            "--all".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            shell_cancel_all.command,
+            Some(Command::Agents(AgentsAction::Shell(AgentsShellArgs {
+                action: AgentsShellAction::Cancel {
+                    task_id: None,
+                    all: true,
+                },
+                json: false,
+            })))
         ));
 
         let service = Cli::from_argv(vec![

@@ -78,6 +78,8 @@ fn agents_words() -> &'static [&'static str] {
         "rlm-stop",
         "rlm-run-next",
         "rlm-drain",
+        "shell",
+        "shell-supervisor",
         "service",
         "threads",
         "show-thread",

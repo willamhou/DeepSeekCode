@@ -60,6 +60,4 @@ This is not the final PTY parity endpoint. Still open:
 - broader service-manager lifecycle coverage for packaged systemd/launchd
   supervisors and restarted controller CLIs;
 - streaming attach frames over MCP/ACP/HTTP instead of single-response replay;
-- dedicated human-facing shell subcommands for detached native PTY control,
-  beyond tool-level forwarding and low-level protocol integration;
 - Windows ConPTY.
