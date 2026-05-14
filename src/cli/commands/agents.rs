@@ -1186,7 +1186,7 @@ fn shell_supervisor_protocol_response_for_request(
         response.insert(
             "error".to_string(),
             JsonValue::String(format!(
-                "shell supervisor method `{method}` is not implemented before native PTY support"
+                "shell supervisor method `{method}` is not supported by this protocol"
             )),
         );
     } else {
@@ -2034,7 +2034,7 @@ fn systemd_shell_supervisor_service(config: &ServiceTemplateConfig) -> String {
     format!(
         "[Unit]\n\
 Description=DeepSeekCode shell supervisor protocol bridge\n\
-# Exposes workspace-local shell status/show/start/control; native PTY sessions are not implemented yet.\n\
+# Exposes workspace-local shell status/show/start/control, including native-supervisor PTY jobs where supported.\n\
 After=network.target\n\
 \n\
 [Service]\n\
@@ -2129,7 +2129,7 @@ fn launchd_shell_supervisor_service(config: &ServiceTemplateConfig) -> String {
         "/tmp/deepseek-shell-supervisor.out.log",
         "/tmp/deepseek-shell-supervisor.err.log",
         Some(
-            "Exposes workspace-local shell status/show/start/control; native PTY sessions are not implemented yet.",
+            "Exposes workspace-local shell status/show/start/control, including native-supervisor PTY jobs where supported.",
         ),
     )
 }
@@ -3528,7 +3528,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_supervisor_protocol_reports_unsupported_before_native_pty() {
+    fn shell_supervisor_protocol_reports_unsupported_unknown_method() {
         let response = shell_supervisor_protocol_response(
             "native_pty",
             Path::new("/work/repo"),
@@ -3555,7 +3555,7 @@ mod tests {
         ));
         assert!(json_as_string(object.get("error").unwrap())
             .unwrap()
-            .contains("not implemented before native PTY support"));
+            .contains("is not supported by this protocol"));
     }
 
     #[test]
@@ -4226,6 +4226,9 @@ mod tests {
         assert!(templates[3].body.contains("agents shell-supervisor --json"));
         assert!(templates[3]
             .body
+            .contains("including native-supervisor PTY jobs where supported"));
+        assert!(!templates[3]
+            .body
             .contains("native PTY sessions are not implemented yet"));
         assert!(templates[4]
             .body
@@ -4244,6 +4247,12 @@ mod tests {
         assert!(templates[7]
             .body
             .contains("<string>shell-supervisor</string>"));
+        assert!(templates[7]
+            .body
+            .contains("including native-supervisor PTY jobs where supported"));
+        assert!(!templates[7]
+            .body
+            .contains("native PTY sessions are not implemented yet"));
     }
 
     #[test]
