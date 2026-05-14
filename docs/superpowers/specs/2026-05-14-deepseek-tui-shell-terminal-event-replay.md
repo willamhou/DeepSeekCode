@@ -33,5 +33,6 @@ event logs instead of only stdout/stderr byte logs.
 ## Residual
 
 This replay/attach plumbing now has a Linux native PTY producer, but streaming
-attach frames, owner-exit survival verification, child-observed resize checks,
-and Windows ConPTY remain open implementation slices.
+attach push frames over MCP/ACP, broader service-manager lifecycle coverage,
+and Windows ConPTY remain open implementation slices. HTTP runtime shell
+terminal SSE is now covered separately.

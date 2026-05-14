@@ -26,9 +26,10 @@ use crate::tools::apply_patch::ApplyPatchTool;
 use crate::tools::diagnostics::DiagnosticsTool;
 use crate::tools::document::{ImageOcrTool, PandocConvertTool};
 use crate::tools::exec_shell::{
-    ExecShellAttachTool, ExecShellCancelTool, ExecShellInteractTool, ExecShellListTool,
-    ExecShellReplayTool, ExecShellResizeTool, ExecShellShowTool, ExecShellSupervisorStatusTool,
-    ExecShellTool, ExecShellWaitTool, TaskShellStartTool, TaskShellWaitTool,
+    shell_terminal_events_snapshot, ExecShellAttachTool, ExecShellCancelTool,
+    ExecShellInteractTool, ExecShellListTool, ExecShellReplayTool, ExecShellResizeTool,
+    ExecShellShowTool, ExecShellSupervisorStatusTool, ExecShellTool, ExecShellWaitTool,
+    ShellTerminalEvent, ShellTerminalEventSnapshot, TaskShellStartTool, TaskShellWaitTool,
 };
 use crate::tools::file_search::FileSearchTool;
 use crate::tools::file_write::EditFileTool;
@@ -6416,6 +6417,9 @@ fn handle_sse_follow_request(
     if path == "/v1/events/stream" {
         return handle_global_sse_follow_request(request_target, stream, &state.store);
     }
+    if shell_terminal_event_stream_task_id(path).is_some() {
+        return handle_shell_terminal_sse_follow_request(request_target, stream);
+    }
     if rlm_live_event_stream_session_id(path).is_some() {
         return handle_rlm_live_sse_follow_request(request_target, stream, &state.config);
     }
@@ -6569,6 +6573,89 @@ fn handle_rlm_live_sse_follow_request(
             }
         }
     }
+}
+
+fn handle_shell_terminal_sse_follow_request(
+    request_target: &str,
+    stream: &mut TcpStream,
+) -> AppResult<bool> {
+    let path = request_target.split('?').next().unwrap_or(request_target);
+    let Some(task_id) = shell_terminal_event_stream_task_id(path) else {
+        return Ok(false);
+    };
+    let cwd = match shell_terminal_event_cwd(request_target) {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            stream.write_all(error_response(error.to_string()).to_http_bytes().as_bytes())?;
+            stream.flush()?;
+            return Ok(true);
+        }
+    };
+    let mut cursor = shell_terminal_event_cursor_from_query(request_target);
+    let limit_bytes = shell_terminal_event_limit_bytes(request_target);
+    if let Err(error) = validate_record_id(task_id).and_then(|_| {
+        shell_terminal_events_snapshot(&cwd, task_id, cursor, limit_bytes, false).map(|_| ())
+    }) {
+        stream.write_all(error_response(error.to_string()).to_http_bytes().as_bytes())?;
+        stream.flush()?;
+        return Ok(true);
+    }
+
+    write_sse_stream_headers(stream)?;
+
+    let poll_ms = query_param_u64(request_target, "poll_ms")
+        .unwrap_or(100)
+        .clamp(SSE_MIN_POLL_MS, SSE_MAX_POLL_MS);
+    let max_events = query_param_u64(request_target, "max_events")
+        .unwrap_or(u64::MAX)
+        .max(1);
+    let deadline = query_param_u64(request_target, "max_ms")
+        .filter(|max_ms| *max_ms > 0)
+        .map(|max_ms| Instant::now() + Duration::from_millis(max_ms));
+    let mut sent_events = 0_u64;
+
+    loop {
+        let snapshot =
+            match shell_terminal_events_snapshot(&cwd, task_id, cursor, limit_bytes, false) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    stream.write_all(sse_error_frame(&error.to_string()).as_bytes())?;
+                    stream.flush()?;
+                    return Ok(true);
+                }
+            };
+        if snapshot.events.is_empty() {
+            if !snapshot.running {
+                stream.write_all(b": shell terminal stream ended\n\n")?;
+                stream.flush()?;
+                return Ok(true);
+            }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                stream.write_all(b": follow timeout reached\n\n")?;
+                stream.flush()?;
+                return Ok(true);
+            }
+            thread::sleep(Duration::from_millis(poll_ms));
+            continue;
+        }
+        for event in &snapshot.events {
+            let frame = sse_shell_terminal_event_frame(&snapshot, event);
+            stream.write_all(frame.as_bytes())?;
+            stream.flush()?;
+            cursor = event.seq;
+            sent_events = sent_events.saturating_add(1);
+            if sent_events >= max_events {
+                return Ok(true);
+            }
+        }
+    }
+}
+
+fn write_sse_stream_headers(stream: &mut TcpStream) -> std::io::Result<()> {
+    stream.write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nX-Accel-Buffering: no\r\nConnection: close\r\n\r\n",
+    )?;
+    stream.flush()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6758,6 +6845,7 @@ fn try_response_for_request(request: &str, state: &RuntimeHttpState) -> AppResul
         _ if path.starts_with("/v1/rlm/live/") => {
             route_rlm_live_path(method, request_target, path, state)?
         }
+        _ if path.starts_with("/v1/shell/") => route_shell_path(method, request_target, path)?,
         _ if path.starts_with("/v1/automations/") => {
             route_automation_path(method, path, &state.store, body)?
         }
@@ -6826,6 +6914,7 @@ fn runtime_response() -> HttpResponse {
                         "/v1/tasks/{id}/pause",
                         "/v1/tasks/{id}/resume",
                         "/v1/events/stream",
+                        "/v1/shell/jobs/{task_id}/events/stream",
                         "/v1/rlm/live/{session_id}/events/stream",
                         "/v1/threads",
                         "/v1/threads/{id}",
@@ -6868,6 +6957,9 @@ fn runtime_response() -> HttpResponse {
                     ("events_sse_follow", JsonValue::Bool(true)),
                     ("events_global_sse", JsonValue::Bool(true)),
                     ("events_global_sse_follow", JsonValue::Bool(true)),
+                    ("shell_terminal_events_sse", JsonValue::Bool(true)),
+                    ("shell_terminal_events_sse_wait", JsonValue::Bool(true)),
+                    ("shell_terminal_events_sse_follow", JsonValue::Bool(true)),
                     ("diagnostics", JsonValue::Bool(true)),
                     ("diagnostics_changed", JsonValue::Bool(true)),
                     ("diagnostics_broker", JsonValue::Bool(true)),
@@ -7564,6 +7656,33 @@ fn route_rlm_live_path(
     }
 }
 
+fn route_shell_path(method: &str, request_target: &str, path: &str) -> AppResult<HttpResponse> {
+    let Some(task_id) = shell_terminal_event_stream_task_id(path) else {
+        return Ok(not_found(path));
+    };
+    match method {
+        "GET" | "HEAD" => {
+            validate_record_id(task_id)?;
+            let cwd = shell_terminal_event_cwd(request_target)?;
+            let cursor = shell_terminal_event_cursor_from_query(request_target);
+            let wait_ms = query_param_u64(request_target, "wait_ms").unwrap_or(0);
+            let poll_ms = query_param_u64(request_target, "poll_ms").unwrap_or(100);
+            let limit_bytes = shell_terminal_event_limit_bytes(request_target);
+            let tail = query_param_bool(request_target, "tail");
+            shell_terminal_events_stream_response(
+                &cwd,
+                task_id,
+                cursor,
+                limit_bytes,
+                tail,
+                wait_ms,
+                poll_ms,
+            )
+        }
+        _ => Ok(not_found(path)),
+    }
+}
+
 fn route_thread_path(
     method: &str,
     request_target: &str,
@@ -8050,6 +8169,40 @@ fn rlm_live_events_stream_response(
     Ok(HttpResponse::sse(body))
 }
 
+fn shell_terminal_events_stream_response(
+    cwd: &str,
+    task_id: &str,
+    cursor: u64,
+    limit_bytes: usize,
+    tail: bool,
+    wait_ms: u64,
+    poll_ms: u64,
+) -> AppResult<HttpResponse> {
+    let snapshot = read_shell_terminal_events_with_wait(
+        cwd,
+        task_id,
+        cursor,
+        limit_bytes,
+        tail,
+        wait_ms.min(SSE_MAX_WAIT_MS),
+        poll_ms.clamp(SSE_MIN_POLL_MS, SSE_MAX_POLL_MS),
+    )?;
+    let mut body = String::new();
+    for event in &snapshot.events {
+        body.push_str(&sse_shell_terminal_event_frame(&snapshot, event));
+    }
+    if body.is_empty() {
+        if !snapshot.running {
+            body.push_str(": shell terminal stream ended\n\n");
+        } else if wait_ms == 0 {
+            body.push_str(": no shell terminal events after cursor\n\n");
+        } else {
+            body.push_str(": no shell terminal events after cursor before wait timeout\n\n");
+        }
+    }
+    Ok(HttpResponse::sse(body))
+}
+
 const SSE_MAX_WAIT_MS: u64 = 30_000;
 const SSE_MIN_POLL_MS: u64 = 10;
 const SSE_MAX_POLL_MS: u64 = 1_000;
@@ -8163,6 +8316,58 @@ fn rlm_live_event_cursor_from_query(request_target: &str) -> u64 {
         .unwrap_or(0)
 }
 
+fn shell_terminal_event_stream_task_id(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/v1/shell/jobs/")?;
+    let parts = rest.split('/').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [task_id, "events", "stream"] => Some(task_id),
+        _ => None,
+    }
+}
+
+fn shell_terminal_event_cursor_from_query(request_target: &str) -> u64 {
+    query_param_u64(request_target, "cursor")
+        .or_else(|| query_param_u64(request_target, "since_seq"))
+        .unwrap_or(0)
+}
+
+fn shell_terminal_event_limit_bytes(request_target: &str) -> usize {
+    query_param_u64(request_target, "limit_bytes")
+        .unwrap_or(20_000)
+        .clamp(1, 100_000) as usize
+}
+
+fn shell_terminal_event_cwd(request_target: &str) -> AppResult<String> {
+    if let Some(cwd) = query_param_string(request_target, "cwd") {
+        return Ok(cwd);
+    }
+    Ok(std::env::current_dir()?.display().to_string())
+}
+
+fn read_shell_terminal_events_with_wait(
+    cwd: &str,
+    task_id: &str,
+    cursor: u64,
+    limit_bytes: usize,
+    tail: bool,
+    wait_ms: u64,
+    poll_ms: u64,
+) -> AppResult<ShellTerminalEventSnapshot> {
+    let deadline = Instant::now() + Duration::from_millis(wait_ms);
+    loop {
+        let snapshot = shell_terminal_events_snapshot(cwd, task_id, cursor, limit_bytes, tail)?;
+        if !snapshot.events.is_empty() || wait_ms == 0 || !snapshot.running {
+            return Ok(snapshot);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(snapshot);
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        thread::sleep(remaining.min(Duration::from_millis(poll_ms)));
+    }
+}
+
 fn sse_event_frame(event: &RuntimeEvent) -> String {
     sse_event_frame_with_id(event, &event.seq.to_string())
 }
@@ -8197,6 +8402,87 @@ fn sse_rlm_live_event_frame(event: &JsonValue) -> String {
     frame.push('\n');
     frame.push_str("data: ");
     frame.push_str(&json_value_to_string(event));
+    frame.push_str("\n\n");
+    frame
+}
+
+fn sse_shell_terminal_event_frame(
+    snapshot: &ShellTerminalEventSnapshot,
+    event: &ShellTerminalEvent,
+) -> String {
+    let mut frame = String::new();
+    frame.push_str("id: ");
+    frame.push_str(&event.seq.to_string());
+    frame.push('\n');
+    frame.push_str("event: ");
+    frame.push_str(&shell_terminal_sse_event_name(&event.kind));
+    frame.push('\n');
+    frame.push_str("data: ");
+    frame.push_str(&json_value_to_string(&shell_terminal_event_json(
+        snapshot, event,
+    )));
+    frame.push_str("\n\n");
+    frame
+}
+
+fn shell_terminal_event_json(
+    snapshot: &ShellTerminalEventSnapshot,
+    event: &ShellTerminalEvent,
+) -> JsonValue {
+    json_object([
+        (
+            "schema",
+            JsonValue::String("deepseek.exec_shell.terminal_event.v1".to_string()),
+        ),
+        ("task_id", JsonValue::String(snapshot.task_id.clone())),
+        ("status", JsonValue::String(snapshot.status.clone())),
+        ("cursor", JsonValue::Number(snapshot.cursor.to_string())),
+        (
+            "next_cursor",
+            JsonValue::Number(snapshot.next_cursor.to_string()),
+        ),
+        ("seq", JsonValue::Number(event.seq.to_string())),
+        ("kind", JsonValue::String(event.kind.clone())),
+        (
+            "timestamp",
+            event
+                .timestamp
+                .as_ref()
+                .map(|value| JsonValue::String(value.clone()))
+                .unwrap_or(JsonValue::Null),
+        ),
+        ("preview", JsonValue::String(event.preview.clone())),
+        ("truncated", JsonValue::Bool(snapshot.truncated)),
+        ("running", JsonValue::Bool(snapshot.running)),
+    ])
+}
+
+fn shell_terminal_sse_event_name(kind: &str) -> String {
+    let safe_kind = kind
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if safe_kind.trim_matches('_').is_empty() {
+        "terminal_event".to_string()
+    } else {
+        format!("terminal_{safe_kind}")
+    }
+}
+
+fn sse_error_frame(message: &str) -> String {
+    let mut frame = String::new();
+    frame.push_str("event: error\n");
+    frame.push_str("data: ");
+    frame.push_str(&json_value_to_string(&object([
+        ("error", JsonValue::String("runtime_error".to_string())),
+        ("message", JsonValue::String(message.to_string())),
+    ])));
     frame.push_str("\n\n");
     frame
 }
@@ -8467,7 +8753,7 @@ fn not_found(path: &str) -> HttpResponse {
 
 fn error_response(message: String) -> HttpResponse {
     let lower = message.to_ascii_lowercase();
-    if lower.contains("not found") {
+    if lower.contains("not found") || lower.contains("unknown background shell task") {
         return HttpResponse::json(
             404,
             "Not Found",
@@ -8482,6 +8768,7 @@ fn error_response(message: String) -> HttpResponse {
         || lower.contains("request field")
         || lower.contains("must be")
         || lower.contains("missing")
+        || lower.contains("has no terminal event log")
     {
         return HttpResponse::json(
             400,
@@ -8530,6 +8817,10 @@ fn query_param_string(request_target: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn query_param_bool(request_target: &str, key: &str) -> bool {
+    query_param_string(request_target, key).is_some_and(|value| truthy_str(&value))
 }
 
 fn json_optional_string_field(
@@ -12554,6 +12845,92 @@ shell_allowlist = ["cargo test"]
         );
         assert_eq!(replay.status, 200);
         assert!(replay.body.contains(": no live RLM events after cursor"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shell_terminal_event_stream_endpoint_replays_sse_frames() {
+        let root = temp_dir("shell-terminal-event-stream");
+        let store = RuntimeStore::new(root.join(".dscode/runtime"));
+        let task_id = "shell-sse-1";
+        let job_dir = root.join(".dscode/shell-jobs").join(task_id);
+        fs::create_dir_all(&job_dir).unwrap();
+        fs::write(
+            job_dir.join("terminal-events.jsonl"),
+            "{\"seq\":1,\"kind\":\"output\",\"timestamp\":\"epoch+1\",\"preview\":\"hello from pty\"}\n{\"seq\":2,\"kind\":\"resize\",\"timestamp\":\"epoch+2\",\"rows\":33,\"cols\":101}\n",
+        )
+        .unwrap();
+        let manifest = json_object([
+            (
+                "kind",
+                JsonValue::String("deepseek.exec_shell.job.v1".to_string()),
+            ),
+            ("id", JsonValue::String(task_id.to_string())),
+            ("command", JsonValue::String("printf hello".to_string())),
+            ("cwd", JsonValue::String(root.display().to_string())),
+            ("tty", JsonValue::Bool(true)),
+            (
+                "pty_backend",
+                JsonValue::String("native-supervisor".to_string()),
+            ),
+            ("attachable", JsonValue::Bool(true)),
+            ("resizable", JsonValue::Bool(true)),
+            ("supervisor_pid", JsonValue::Null),
+            ("supervisor_socket", JsonValue::Null),
+            ("supervisor_epoch", JsonValue::String("epoch+1".to_string())),
+            (
+                "terminal_event_log",
+                JsonValue::String("terminal-events.jsonl".to_string()),
+            ),
+            ("terminal_event_seq", JsonValue::Number("2".to_string())),
+            ("control_token_hash", JsonValue::Null),
+            ("tty_rows", JsonValue::Number("24".to_string())),
+            ("tty_cols", JsonValue::Number("80".to_string())),
+            ("status", JsonValue::String("exited".to_string())),
+            ("exit_code", JsonValue::Number("0".to_string())),
+            ("pid", JsonValue::Number("0".to_string())),
+            ("owner_pid", JsonValue::Null),
+            ("process_group", JsonValue::Null),
+            ("stdin_path", JsonValue::Null),
+            ("stdin_keeper_pid", JsonValue::Null),
+            ("stdin_closed", JsonValue::Bool(true)),
+            ("started_at", JsonValue::String("epoch+1".to_string())),
+            ("updated_at", JsonValue::String("epoch+2".to_string())),
+            ("stdout_total_bytes", JsonValue::Number("0".to_string())),
+            ("stderr_total_bytes", JsonValue::Number("0".to_string())),
+        ]);
+        fs::write(
+            job_dir.join("manifest.json"),
+            json_value_to_string(&manifest),
+        )
+        .unwrap();
+
+        let stream = response_for_request(
+            &format!(
+                "GET /v1/shell/jobs/{task_id}/events/stream?cwd={}&cursor=0 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                root.display()
+            ),
+            &store,
+        );
+        assert_eq!(stream.status, 200);
+        assert_eq!(stream.content_type, "text/event-stream; charset=utf-8");
+        assert!(stream.body.contains("id: 1\n"));
+        assert!(stream.body.contains("event: terminal_output\n"));
+        assert!(stream.body.contains("event: terminal_resize\n"));
+        assert!(stream.body.contains("\"task_id\":\"shell-sse-1\""));
+        assert!(stream.body.contains("\"preview\":\"hello from pty\""));
+        assert!(stream.body.contains("\"preview\":\"rows=33 cols=101\""));
+
+        let replay = response_for_request(
+            &format!(
+                "GET /v1/shell/jobs/{task_id}/events/stream?cwd={}&since_seq=1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                root.display()
+            ),
+            &store,
+        );
+        assert_eq!(replay.status, 200);
+        assert!(!replay.body.contains("event: terminal_output\n"));
+        assert!(replay.body.contains("event: terminal_resize\n"));
         let _ = fs::remove_dir_all(root);
     }
 

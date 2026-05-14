@@ -281,7 +281,9 @@ Landed first slice:
   service` and packaged systemd/launchd templates include that
   shell-supervisor service; `deepseek agents shell ...` now provides
   human-facing status/show/start/wait/replay/attach/stdin/resize/cancel/shutdown
-  wrappers over the same supervisor protocol;
+  wrappers over the same supervisor protocol; HTTP runtime now exposes
+  `/v1/shell/jobs/<task_id>/events/stream` for replay, bounded wait, and
+  follow-mode SSE over the same durable terminal event logs;
   `exec_shell_supervisor_status` now probes socket health before reporting a
   daemon as ready, reads healthy daemon `status` active-job counts backed by
   durable shell manifests, refreshes the workspace supervisor manifest during

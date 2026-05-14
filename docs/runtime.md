@@ -117,6 +117,7 @@ Endpoints:
 | `/v1/tasks/{id}/pause` | `POST` | Pause a pending task before it is claimed |
 | `/v1/tasks/{id}/resume` | `POST` | Resume a paused task back to pending |
 | `/v1/events/stream` | `GET`, `HEAD` | Aggregate SSE replay, bounded wait, or follow-mode streaming across runtime threads |
+| `/v1/shell/jobs/{task_id}/events/stream` | `GET`, `HEAD` | SSE replay, bounded wait, or follow-mode streaming for one shell-supervisor terminal event log |
 | `/v1/rlm/live/{session_id}/events/stream` | `GET`, `HEAD` | SSE replay, bounded wait, or follow-mode streaming for one live RLM session event log |
 | `/v1/threads` | `GET`, `POST` | File-backed durable thread records |
 | `/v1/threads/{id}` | `GET`, `HEAD` | Thread detail with recorded turns and items |
@@ -218,6 +219,8 @@ flags:
     "/v1/tasks/{id}/pause",
     "/v1/tasks/{id}/resume",
     "/v1/events/stream",
+    "/v1/shell/jobs/{task_id}/events/stream",
+    "/v1/rlm/live/{session_id}/events/stream",
     "/v1/threads",
     "/v1/threads/{id}",
     "/v1/threads/{id}/automations",
@@ -252,6 +255,9 @@ flags:
     "events_sse_follow": true,
     "events_global_sse": true,
     "events_global_sse_follow": true,
+    "shell_terminal_events_sse": true,
+    "shell_terminal_events_sse_wait": true,
+    "shell_terminal_events_sse_follow": true,
     "diagnostics": true,
     "diagnostics_changed": true,
     "diagnostics_broker": true,
@@ -871,6 +877,16 @@ resumes each known thread independently, while `since_seq=N` applies one default
 cursor to threads not listed in `since`. Aggregate frames use `thread_id:seq` as
 the SSE `id`, so a connected TUI can receive newly created thread events without
 first discovering and subscribing to that thread.
+
+`GET /v1/shell/jobs/{task_id}/events/stream?cwd=/path/to/workspace&cursor=N`
+streams durable shell-supervisor terminal events as `text/event-stream`.
+`cursor` and `since_seq` resume from the last terminal event sequence, and
+`limit_bytes` bounds replay payload size. Add `wait_ms`/`poll_ms` for a bounded
+wait or `follow=1` with `max_events`/`max_ms` for a live connection. Each frame
+uses the terminal event sequence as the SSE `id`, `terminal_<kind>` as the SSE
+event name, and schema `deepseek.exec_shell.terminal_event.v1` as the JSON
+`data` payload. If `cwd` is omitted, the HTTP runtime process current directory
+is used.
 
 `GET /v1/tasks?session_id={id}&thread_id={id}&limit=50`,
 `GET /v1/sessions/{id}/tasks`, and `GET /v1/threads/{id}/tasks` return schema

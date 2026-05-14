@@ -57,6 +57,25 @@ pub struct ExecShellAttachTool;
 
 pub struct ExecShellSupervisorStatusTool;
 
+#[derive(Debug, Clone)]
+pub struct ShellTerminalEvent {
+    pub seq: u64,
+    pub kind: String,
+    pub timestamp: Option<String>,
+    pub preview: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellTerminalEventSnapshot {
+    pub task_id: String,
+    pub status: String,
+    pub cursor: u64,
+    pub next_cursor: u64,
+    pub events: Vec<ShellTerminalEvent>,
+    pub truncated: bool,
+    pub running: bool,
+}
+
 pub struct ExecShellResizeTool;
 
 pub struct ExecShellInteractTool {
@@ -3159,6 +3178,48 @@ fn render_shell_attach(
         }
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+pub fn shell_terminal_events_snapshot(
+    cwd: &str,
+    task_id: &str,
+    cursor: u64,
+    limit_bytes: usize,
+    tail: bool,
+) -> AppResult<ShellTerminalEventSnapshot> {
+    let manifest = shell_job_manifest_path(cwd, task_id);
+    if !manifest.is_file() {
+        return Err(app_error(format!(
+            "unknown background shell task: {task_id}"
+        )));
+    }
+    let mut record = read_durable_shell_job_manifest(&manifest)?;
+    refresh_durable_running_status(cwd, &mut record)?;
+    if record.terminal_event_log.is_none() {
+        return Err(app_error(format!(
+            "background shell task {task_id} has no terminal event log"
+        )));
+    }
+    let record_dir = shell_job_record_dir(cwd, task_id);
+    let (events, next_cursor, truncated) =
+        terminal_events_after_cursor(&record, &record_dir, cursor, limit_bytes, tail)?;
+    Ok(ShellTerminalEventSnapshot {
+        task_id: record.id,
+        status: record.status.clone(),
+        cursor,
+        next_cursor,
+        events: events
+            .into_iter()
+            .map(|event| ShellTerminalEvent {
+                seq: event.seq,
+                kind: event.kind,
+                timestamp: event.timestamp,
+                preview: event.preview,
+            })
+            .collect(),
+        truncated,
+        running: record.status == "running",
+    })
 }
 
 fn render_shell_attach_snapshot(

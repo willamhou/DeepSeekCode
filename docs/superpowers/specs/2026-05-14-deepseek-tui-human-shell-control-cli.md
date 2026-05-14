@@ -48,5 +48,6 @@ usability gap was a human-facing CLI entry point for those protocol controls.
 ## Residual
 
 This is a command/response wrapper, not a full-screen terminal UI. Remaining
-shell-supervisor parity work is streaming attach frames over MCP/ACP/HTTP,
-broader service-manager lifecycle coverage, and Windows ConPTY.
+shell-supervisor parity work is MCP/ACP attach push frames beyond the HTTP shell
+terminal SSE endpoint, broader service-manager lifecycle coverage, and Windows
+ConPTY.
