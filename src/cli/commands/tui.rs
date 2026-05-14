@@ -2844,7 +2844,7 @@ fn format_model_catalog_summary(summary: &ModelConfigSummary) -> String {
 
 fn format_provider_config_summary(summary: &ProviderConfigSummary) -> String {
     format!(
-        "DeepSeekCode Provider Config ({})\n\nprovider = {} ({})\nmodel.base_url = {}\nmodel.api_key_env = {}\nmodel.model = {}\nmodel.reasoning_effort = {}\n\nUse provider <name> [model] to update this project config. Use provider list for supported presets.",
+        "DeepSeekCode Provider Config ({})\n\nprovider = {} ({})\nmodel.base_url = {}\nmodel.api_key_env = {}\nmodel.model = {}\nmodel.reasoning_effort = {}\n\nUse provider to open the picker, provider <name> [model] to update this project config, or provider list for supported presets.",
         summary.path.display(),
         summary.provider,
         summary.label,
@@ -2884,7 +2884,7 @@ fn format_provider_catalog_summary(summary: &ProviderConfigSummary) -> String {
         }
     }
     out.push_str(
-        "\nThis command updates model.base_url/api_key_env/model.model. DeepSeek-TUI's picker UI remains a separate parity gap.\n",
+        "\nUse /provider to open the interactive picker, or provider <name> [model] to update model.base_url/api_key_env/model.model directly.\n",
     );
     out
 }
@@ -3277,6 +3277,7 @@ fn handle_tui_action_with_live(
         TuiAction::Provider { workspace, command } => {
             let workspace = Path::new(&workspace);
             let status = match &command {
+                TuiProviderCommand::Pick => "provider picker shown".to_string(),
                 TuiProviderCommand::Show => "provider config shown".to_string(),
                 TuiProviderCommand::List => "provider catalog shown".to_string(),
                 TuiProviderCommand::Set { provider, model } => {
@@ -3293,7 +3294,9 @@ fn handle_tui_action_with_live(
             };
             let summary = provider_config_summary_at(workspace)?;
             let detail = match command {
-                TuiProviderCommand::List => format_provider_catalog_summary(&summary),
+                TuiProviderCommand::Pick | TuiProviderCommand::List => {
+                    format_provider_catalog_summary(&summary)
+                }
                 TuiProviderCommand::Show | TuiProviderCommand::Set { .. } => {
                     format_provider_config_summary(&summary)
                 }

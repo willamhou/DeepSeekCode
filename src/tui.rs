@@ -1199,6 +1199,7 @@ pub enum TuiSessionsCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiProviderCommand {
+    Pick,
     Show,
     List,
     Set {
@@ -1206,6 +1207,149 @@ pub enum TuiProviderCommand {
         model: Option<String>,
     },
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiProviderPickerFocus {
+    Provider,
+    Model,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TuiProviderPickerModel {
+    label: &'static str,
+    model: &'static str,
+    hint: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TuiProviderPickerSpec {
+    name: &'static str,
+    label: &'static str,
+    api_key_env: &'static str,
+    base_url: &'static str,
+    models: &'static [TuiProviderPickerModel],
+}
+
+const DEEPSEEK_PROVIDER_MODELS: &[TuiProviderPickerModel] = &[
+    TuiProviderPickerModel {
+        label: "pro",
+        model: "pro",
+        hint: "DeepSeek V4 Pro",
+    },
+    TuiProviderPickerModel {
+        label: "flash",
+        model: "flash",
+        hint: "DeepSeek V4 Flash",
+    },
+    TuiProviderPickerModel {
+        label: "chat",
+        model: "chat",
+        hint: "DeepSeek Chat",
+    },
+    TuiProviderPickerModel {
+        label: "reasoner",
+        model: "reasoner",
+        hint: "DeepSeek Reasoner",
+    },
+];
+
+const DEEPSEEK_REMOTE_PROVIDER_MODELS: &[TuiProviderPickerModel] = &[
+    TuiProviderPickerModel {
+        label: "pro",
+        model: "pro",
+        hint: "provider-native DeepSeek V4 Pro",
+    },
+    TuiProviderPickerModel {
+        label: "flash",
+        model: "flash",
+        hint: "provider-native DeepSeek V4 Flash",
+    },
+];
+
+const OPENAI_PROVIDER_MODELS: &[TuiProviderPickerModel] = &[TuiProviderPickerModel {
+    label: "gpt-4.1",
+    model: "gpt-4.1",
+    hint: "OpenAI-compatible default",
+}];
+
+const OLLAMA_PROVIDER_MODELS: &[TuiProviderPickerModel] = &[TuiProviderPickerModel {
+    label: "coder",
+    model: "deepseek-coder:1.3b",
+    hint: "local Ollama DeepSeek Coder",
+}];
+
+const TUI_PROVIDER_PICKER_SPECS: &[TuiProviderPickerSpec] = &[
+    TuiProviderPickerSpec {
+        name: "deepseek",
+        label: "DeepSeek",
+        api_key_env: "DEEPSEEK_API_KEY",
+        base_url: "https://api.deepseek.com",
+        models: DEEPSEEK_PROVIDER_MODELS,
+    },
+    TuiProviderPickerSpec {
+        name: "nvidia-nim",
+        label: "NVIDIA NIM",
+        api_key_env: "NVIDIA_API_KEY",
+        base_url: "https://integrate.api.nvidia.com/v1",
+        models: DEEPSEEK_REMOTE_PROVIDER_MODELS,
+    },
+    TuiProviderPickerSpec {
+        name: "openai",
+        label: "OpenAI-compatible",
+        api_key_env: "OPENAI_API_KEY",
+        base_url: "https://api.openai.com/v1",
+        models: OPENAI_PROVIDER_MODELS,
+    },
+    TuiProviderPickerSpec {
+        name: "atlascloud",
+        label: "AtlasCloud",
+        api_key_env: "ATLASCLOUD_API_KEY",
+        base_url: "https://api.atlascloud.ai/v1",
+        models: DEEPSEEK_REMOTE_PROVIDER_MODELS,
+    },
+    TuiProviderPickerSpec {
+        name: "openrouter",
+        label: "OpenRouter",
+        api_key_env: "OPENROUTER_API_KEY",
+        base_url: "https://openrouter.ai/api/v1",
+        models: DEEPSEEK_REMOTE_PROVIDER_MODELS,
+    },
+    TuiProviderPickerSpec {
+        name: "novita",
+        label: "Novita AI",
+        api_key_env: "NOVITA_API_KEY",
+        base_url: "https://api.novita.ai/v1",
+        models: DEEPSEEK_REMOTE_PROVIDER_MODELS,
+    },
+    TuiProviderPickerSpec {
+        name: "fireworks",
+        label: "Fireworks AI",
+        api_key_env: "FIREWORKS_API_KEY",
+        base_url: "https://api.fireworks.ai/inference/v1",
+        models: DEEPSEEK_REMOTE_PROVIDER_MODELS,
+    },
+    TuiProviderPickerSpec {
+        name: "sglang",
+        label: "SGLang local",
+        api_key_env: "DEEPSEEK_API_KEY",
+        base_url: "http://localhost:30000/v1",
+        models: DEEPSEEK_REMOTE_PROVIDER_MODELS,
+    },
+    TuiProviderPickerSpec {
+        name: "vllm",
+        label: "vLLM local",
+        api_key_env: "DEEPSEEK_API_KEY",
+        base_url: "http://localhost:8000/v1",
+        models: DEEPSEEK_REMOTE_PROVIDER_MODELS,
+    },
+    TuiProviderPickerSpec {
+        name: "ollama",
+        label: "Ollama local",
+        api_key_env: "OLLAMA_API_KEY",
+        base_url: "http://localhost:11434/v1",
+        models: OLLAMA_PROVIDER_MODELS,
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiProfileCommand {
@@ -1655,8 +1799,9 @@ fn parse_tui_provider_command(line: &str) -> Option<Result<TuiProviderCommand, S
         .or_else(|| strip_tui_command_prefix(trimmed, "provider"))?;
     let args = rest.split_whitespace().collect::<Vec<_>>();
     match args.as_slice() {
-        [] => Some(Ok(TuiProviderCommand::Show)),
-        ["list" | "ls" | "show"] => Some(Ok(TuiProviderCommand::List)),
+        [] | ["pick" | "picker"] => Some(Ok(TuiProviderCommand::Pick)),
+        ["list" | "ls"] => Some(Ok(TuiProviderCommand::List)),
+        ["show" | "status"] => Some(Ok(TuiProviderCommand::Show)),
         [provider] if !provider.starts_with('-') => Some(Ok(TuiProviderCommand::Set {
             provider: (*provider).to_string(),
             model: None,
@@ -1668,7 +1813,7 @@ fn parse_tui_provider_command(line: &str) -> Option<Result<TuiProviderCommand, S
             }))
         }
         _ => Some(Err(
-            "usage: provider [name [model]|list] or /provider [name [model]|list]".to_string(),
+            "usage: provider [pick|show|list|name [model]] or /provider [pick|show|list|name [model]]".to_string(),
         )),
     }
 }
@@ -2465,6 +2610,7 @@ fn parse_tui_config_args(rest: &str) -> Result<TuiConfigCommand, String> {
             }))
         }
         ["provider"] => Ok(TuiConfigCommand::Provider(TuiProviderCommand::Show)),
+        ["provider", "pick" | "picker"] => Ok(TuiConfigCommand::Provider(TuiProviderCommand::Pick)),
         ["provider", "list" | "ls"] => Ok(TuiConfigCommand::Provider(TuiProviderCommand::List)),
         ["provider", "show" | "status"] => Ok(TuiConfigCommand::Provider(TuiProviderCommand::Show)),
         ["provider", provider] if !provider.starts_with('-') => {
@@ -3187,8 +3333,8 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         category: "Config",
         name: "provider",
         aliases: &[],
-        usage: "/provider [name [model]|list]",
-        description: "Inspect or update the selected workspace provider preset.",
+        usage: "/provider [pick|show|list|name [model]]",
+        description: "Pick, inspect, or update the selected workspace provider preset.",
     },
     TuiHelpCommandInfo {
         category: "Config",
@@ -3479,6 +3625,8 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "model deepseek-v4-pro",
     "models",
     "provider",
+    "provider show",
+    "provider pick",
     "provider list",
     "provider deepseek",
     "provider nvidia-nim",
@@ -3747,6 +3895,8 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/model deepseek-v4-pro",
     "/models",
     "/provider",
+    "/provider show",
+    "/provider pick",
     "/provider list",
     "/provider deepseek",
     "/provider nvidia-nim",
@@ -4011,6 +4161,10 @@ pub struct TuiApp {
     show_command_palette: bool,
     show_session_picker: bool,
     show_thread_picker: bool,
+    show_provider_picker: bool,
+    provider_picker_provider_index: usize,
+    provider_picker_model_index: usize,
+    provider_picker_focus: TuiProviderPickerFocus,
     show_approval_modal: bool,
     show_user_input_modal: bool,
     show_mcp_manager: bool,
@@ -4184,6 +4338,10 @@ impl TuiApp {
             show_command_palette: false,
             show_session_picker: false,
             show_thread_picker: false,
+            show_provider_picker: false,
+            provider_picker_provider_index: 0,
+            provider_picker_model_index: 0,
+            provider_picker_focus: TuiProviderPickerFocus::Provider,
             show_approval_modal: false,
             show_user_input_modal: false,
             show_mcp_manager: false,
@@ -5497,6 +5655,7 @@ impl TuiApp {
         self.composer.clear();
         self.composer_cursor = 0;
         self.edit_pending_thread_id = None;
+        self.show_provider_picker = false;
         self.transcript_scroll = 0;
         self.mcp_detail = None;
         self.mcp_detail_scroll = 0;
@@ -5748,6 +5907,9 @@ impl TuiApp {
         if self.show_thread_picker && self.handle_thread_picker_mouse(mouse.column, mouse.row) {
             return true;
         }
+        if self.show_provider_picker {
+            return true;
+        }
         if self.handle_mode_tab_mouse(mouse.column, mouse.row) {
             return true;
         }
@@ -5985,6 +6147,9 @@ impl TuiApp {
         }
         if self.show_thread_picker {
             return self.handle_thread_picker_key(code);
+        }
+        if self.show_provider_picker {
+            return self.handle_provider_picker_key(code);
         }
         if self.show_user_input_modal {
             return self.handle_user_input_key(code);
@@ -8402,6 +8567,66 @@ impl TuiApp {
         true
     }
 
+    fn handle_provider_picker_key(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Esc => {
+                self.show_provider_picker = false;
+                self.status = "provider picker closed".to_string();
+            }
+            KeyCode::Enter => self.apply_provider_picker_selection(),
+            KeyCode::Tab => self.toggle_provider_picker_focus(),
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.provider_picker_focus = TuiProviderPickerFocus::Provider;
+                self.status = "provider picker focus: providers".to_string();
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                self.provider_picker_focus = TuiProviderPickerFocus::Model;
+                self.status = "provider picker focus: models".to_string();
+            }
+            KeyCode::Down | KeyCode::Char('j') => match self.provider_picker_focus {
+                TuiProviderPickerFocus::Provider => {
+                    self.select_relative_provider_picker_provider(1)
+                }
+                TuiProviderPickerFocus::Model => self.select_relative_provider_picker_model(1),
+            },
+            KeyCode::Up | KeyCode::Char('k') => match self.provider_picker_focus {
+                TuiProviderPickerFocus::Provider => {
+                    self.select_relative_provider_picker_provider(-1)
+                }
+                TuiProviderPickerFocus::Model => self.select_relative_provider_picker_model(-1),
+            },
+            KeyCode::Home => match self.provider_picker_focus {
+                TuiProviderPickerFocus::Provider => {
+                    self.provider_picker_provider_index = 0;
+                    self.provider_picker_model_index = 0;
+                    self.status = "provider picker selected provider: deepseek".to_string();
+                }
+                TuiProviderPickerFocus::Model => {
+                    self.provider_picker_model_index = 0;
+                    let model = self.selected_provider_picker_model();
+                    self.status = format!("provider picker selected model: {}", model.model);
+                }
+            },
+            KeyCode::End => match self.provider_picker_focus {
+                TuiProviderPickerFocus::Provider => {
+                    self.provider_picker_provider_index =
+                        TUI_PROVIDER_PICKER_SPECS.len().saturating_sub(1);
+                    self.provider_picker_model_index = 0;
+                    let spec = self.selected_provider_picker_spec();
+                    self.status = format!("provider picker selected provider: {}", spec.name);
+                }
+                TuiProviderPickerFocus::Model => {
+                    let spec = self.selected_provider_picker_spec();
+                    self.provider_picker_model_index = spec.models.len().saturating_sub(1);
+                    let model = self.selected_provider_picker_model();
+                    self.status = format!("provider picker selected model: {}", model.model);
+                }
+            },
+            _ => {}
+        }
+        true
+    }
+
     fn handle_approval_key(&mut self, code: KeyCode) -> bool {
         if self.pending_shell_approval.is_some() {
             match code {
@@ -8957,6 +9182,10 @@ impl TuiApp {
     }
 
     fn request_provider_command(&mut self, command: TuiProviderCommand) {
+        if command == TuiProviderCommand::Pick {
+            self.open_provider_picker();
+            return;
+        }
         let workspace = self
             .selected_session()
             .map(|session| session.workspace.clone())
@@ -8966,6 +9195,89 @@ impl TuiApp {
             command,
         });
         self.status = format!("provider command queued: {workspace}");
+    }
+
+    fn open_provider_picker(&mut self) {
+        self.show_provider_picker = true;
+        self.show_session_picker = false;
+        self.show_thread_picker = false;
+        self.show_command_palette = false;
+        self.provider_picker_provider_index = self
+            .provider_picker_provider_index
+            .min(TUI_PROVIDER_PICKER_SPECS.len().saturating_sub(1));
+        self.provider_picker_model_index = 0;
+        self.provider_picker_focus = TuiProviderPickerFocus::Provider;
+        self.status = "provider picker opened".to_string();
+    }
+
+    fn selected_provider_picker_spec(&self) -> &'static TuiProviderPickerSpec {
+        &TUI_PROVIDER_PICKER_SPECS[self
+            .provider_picker_provider_index
+            .min(TUI_PROVIDER_PICKER_SPECS.len() - 1)]
+    }
+
+    fn selected_provider_picker_model(&self) -> &'static TuiProviderPickerModel {
+        let spec = self.selected_provider_picker_spec();
+        &spec.models[self.provider_picker_model_index.min(spec.models.len() - 1)]
+    }
+
+    fn select_relative_provider_picker_provider(&mut self, delta: isize) {
+        let len = TUI_PROVIDER_PICKER_SPECS.len();
+        if len == 0 {
+            self.status = "provider picker has no providers".to_string();
+            return;
+        }
+        self.provider_picker_provider_index =
+            relative_picker_index(self.provider_picker_provider_index.min(len - 1), len, delta);
+        self.provider_picker_model_index = 0;
+        let spec = self.selected_provider_picker_spec();
+        self.status = format!("provider picker selected provider: {}", spec.name);
+    }
+
+    fn select_relative_provider_picker_model(&mut self, delta: isize) {
+        let spec = self.selected_provider_picker_spec();
+        let len = spec.models.len();
+        if len == 0 {
+            self.status = format!("provider {} has no model choices", spec.name);
+            return;
+        }
+        self.provider_picker_model_index =
+            relative_picker_index(self.provider_picker_model_index.min(len - 1), len, delta);
+        let model = self.selected_provider_picker_model();
+        self.status = format!("provider picker selected model: {}", model.model);
+    }
+
+    fn toggle_provider_picker_focus(&mut self) {
+        self.provider_picker_focus = match self.provider_picker_focus {
+            TuiProviderPickerFocus::Provider => TuiProviderPickerFocus::Model,
+            TuiProviderPickerFocus::Model => TuiProviderPickerFocus::Provider,
+        };
+        self.status = match self.provider_picker_focus {
+            TuiProviderPickerFocus::Provider => "provider picker focus: providers",
+            TuiProviderPickerFocus::Model => "provider picker focus: models",
+        }
+        .to_string();
+    }
+
+    fn apply_provider_picker_selection(&mut self) {
+        let spec = self.selected_provider_picker_spec();
+        let model = self.selected_provider_picker_model();
+        let workspace = self
+            .selected_session()
+            .map(|session| session.workspace.clone())
+            .unwrap_or_else(|| ".".to_string());
+        self.pending_actions.push(TuiAction::Provider {
+            workspace: workspace.clone(),
+            command: TuiProviderCommand::Set {
+                provider: spec.name.to_string(),
+                model: Some(model.model.to_string()),
+            },
+        });
+        self.show_provider_picker = false;
+        self.status = format!(
+            "provider picker queued: {} {} ({workspace})",
+            spec.name, model.model
+        );
     }
 
     fn request_profile_command(&mut self, command: TuiProfileCommand) {
@@ -10471,7 +10783,7 @@ impl TuiApp {
             "DeepSeekCode currently exposes config editing through focused commands:"
         );
         let _ = writeln!(detail, "- /config model [list|<name>]");
-        let _ = writeln!(detail, "- /config provider [list|<name> [model]]");
+        let _ = writeln!(detail, "- /config provider [pick|show|list|<name> [model]]");
         let _ = writeln!(detail, "- /config profile [list|clear|<name>]");
         let _ = writeln!(detail, "- /config mode [agent|plan|yolo]");
         let _ = writeln!(detail, "- /config theme [dark|light|grayscale|system]");
@@ -10570,7 +10882,7 @@ impl TuiApp {
         let _ = writeln!(detail, "- /review <target>");
         let _ = writeln!(detail, "- /goal [objective [budget: N]|clear]");
         let _ = writeln!(detail, "- /model [name|list]");
-        let _ = writeln!(detail, "- /provider [name [model]|list]");
+        let _ = writeln!(detail, "- /provider [pick|show|list|name [model]]");
         let _ = writeln!(detail, "- /profile [name|list|clear]");
         let _ = writeln!(detail, "- /trust [on|off|add <path>|remove <path>|list]");
         let _ = writeln!(detail, "- /logout");
@@ -14319,6 +14631,9 @@ fn draw(frame: &mut Frame, app: &TuiApp) {
     if app.show_thread_picker {
         draw_thread_picker(frame, app);
     }
+    if app.show_provider_picker {
+        draw_provider_picker(frame, app);
+    }
     if app.mcp_remove_confirmation.is_some() {
         draw_mcp_remove_confirmation_modal(frame, app);
     }
@@ -14410,6 +14725,9 @@ fn draw_sidebar(frame: &mut Frame, app: &TuiApp, area: Rect) {
     if app.show_mcp_manager {
         lines.push(Line::from("PgUp/PgDn: scroll MCP manager"));
         lines.push(Line::from("Esc: close MCP manager"));
+    } else if app.show_provider_picker {
+        lines.push(Line::from("Enter: apply provider"));
+        lines.push(Line::from("Esc: close provider picker"));
     } else if app.mcp_detail.is_some() {
         lines.push(Line::from("PgUp/PgDn: scroll detail"));
         lines.push(Line::from("Esc: close detail"));
@@ -14773,6 +15091,115 @@ fn draw_thread_picker(frame: &mut Frame, app: &TuiApp) {
     frame.render_widget(picker, area);
 }
 
+fn draw_provider_picker(frame: &mut Frame, app: &TuiApp) {
+    let area = top_center_rect(frame.area(), 96, 20);
+    frame.render_widget(Clear, area);
+    let layout = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Min(10),
+        Constraint::Length(4),
+    ])
+    .split(area);
+    let header = Paragraph::new(vec![
+        Line::from("Provider Picker"),
+        Line::from("Up/Down select, Left/Right or Tab switch pane, Enter apply, Esc close"),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Provider Picker"),
+    );
+    frame.render_widget(header, layout[0]);
+
+    let columns = Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(layout[1]);
+    let providers = TUI_PROVIDER_PICKER_SPECS
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            let selected = index == app.provider_picker_provider_index;
+            let marker = if selected { "> " } else { "  " };
+            let item = ListItem::new(format!("{marker}{:<13} {}", spec.name, spec.label));
+            if selected && app.provider_picker_focus == TuiProviderPickerFocus::Provider {
+                item.style(
+                    Style::default()
+                        .fg(app.theme.accent_color())
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else if selected {
+                item.style(Style::default().fg(app.theme.hint_color()))
+            } else {
+                item
+            }
+        })
+        .collect::<Vec<_>>();
+    let provider_title = if app.provider_picker_focus == TuiProviderPickerFocus::Provider {
+        "Providers [active]"
+    } else {
+        "Providers"
+    };
+    frame.render_widget(
+        List::new(providers).block(Block::default().borders(Borders::ALL).title(provider_title)),
+        columns[0],
+    );
+
+    let spec = app.selected_provider_picker_spec();
+    let models = spec
+        .models
+        .iter()
+        .enumerate()
+        .map(|(index, model)| {
+            let selected = index == app.provider_picker_model_index;
+            let marker = if selected { "> " } else { "  " };
+            let item = ListItem::new(format!(
+                "{marker}{:<9} {:<28} {}",
+                model.label, model.model, model.hint
+            ));
+            if selected && app.provider_picker_focus == TuiProviderPickerFocus::Model {
+                item.style(
+                    Style::default()
+                        .fg(app.theme.accent_color())
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else if selected {
+                item.style(Style::default().fg(app.theme.hint_color()))
+            } else {
+                item
+            }
+        })
+        .collect::<Vec<_>>();
+    let model_title = if app.provider_picker_focus == TuiProviderPickerFocus::Model {
+        "Models [active]"
+    } else {
+        "Models"
+    };
+    frame.render_widget(
+        List::new(models).block(Block::default().borders(Borders::ALL).title(model_title)),
+        columns[1],
+    );
+
+    let model = app.selected_provider_picker_model();
+    let workspace = app
+        .selected_session()
+        .map(|session| session.workspace.as_str())
+        .unwrap_or(".");
+    let footer = Paragraph::new(vec![
+        Line::from(format!("Selection: provider {} {}", spec.name, model.model)),
+        Line::from(format!(
+            "API key env: {} | Base URL: {}",
+            spec.api_key_env, spec.base_url
+        )),
+        Line::from(format!("Workspace: {workspace}")),
+    ])
+    .wrap(Wrap { trim: true })
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Action Preview"),
+    );
+    frame.render_widget(footer, layout[2]);
+}
+
 fn draw_command_palette(frame: &mut Frame, app: &TuiApp) {
     let area = top_center_rect(frame.area(), 76, 8);
     frame.render_widget(Clear, area);
@@ -14978,6 +15405,18 @@ fn body_columns(area: Rect) -> std::rc::Rc<[Rect]> {
         Constraint::Length(32),
     ])
     .split(area)
+}
+
+fn relative_picker_index(current: usize, len: usize, delta: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    if delta >= 0 {
+        (current + delta as usize) % len
+    } else {
+        let steps = delta.unsigned_abs() % len;
+        (current + len - steps) % len
+    }
 }
 
 fn session_picker_rect(area: Rect) -> Rect {
@@ -15575,7 +16014,7 @@ mod tests {
         assert_eq!(*kind, TuiMcpDetailKind::Settings);
         assert!(detail.contains("DeepSeekCode Settings"));
         assert!(detail.contains("/tmp/deepseek-settings/.dscode/config.toml"));
-        assert!(detail.contains("/provider [name [model]|list]"));
+        assert!(detail.contains("/provider [pick|show|list|name [model]]"));
         assert!(detail.contains("/mcp manager"));
 
         app.composer_focused = true;
@@ -18891,12 +19330,38 @@ mod tests {
             Vec::new(),
         );
 
-        run_palette_command(&mut app, "provider");
+        run_palette_command(&mut app, "provider show");
         assert_eq!(
             app.drain_actions(),
             vec![TuiAction::Provider {
                 workspace: "/tmp/deepseek-provider".to_string(),
                 command: TuiProviderCommand::Show,
+            }]
+        );
+
+        run_palette_command(&mut app, "provider");
+        assert!(app.show_provider_picker);
+        assert_eq!(app.status, "provider picker opened");
+        assert!(app.drain_actions().is_empty());
+        let output = render_once(&app, 120, 36).unwrap();
+        assert!(output.contains("Provider Picker"));
+        assert!(output.contains("Providers [active]"));
+        assert!(output.contains("Models"));
+        assert!(output.contains("provider deepseek pro"));
+
+        assert!(app.handle_key(KeyCode::Down));
+        assert!(app.handle_key(KeyCode::Right));
+        assert!(app.handle_key(KeyCode::Down));
+        assert!(app.handle_key(KeyCode::Enter));
+        assert!(!app.show_provider_picker);
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Provider {
+                workspace: "/tmp/deepseek-provider".to_string(),
+                command: TuiProviderCommand::Set {
+                    provider: "nvidia-nim".to_string(),
+                    model: Some("flash".to_string()),
+                },
             }]
         );
 
@@ -18920,6 +19385,41 @@ mod tests {
                 command: TuiProviderCommand::List,
             }]
         );
+    }
+
+    #[test]
+    fn composer_provider_slash_opens_picker() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: "/tmp/deepseek-provider-composer".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        app.composer_focused = true;
+        for ch in "/provider".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert!(app.show_provider_picker);
+        assert!(app.composer.is_empty());
+        assert_eq!(app.status, "provider picker opened");
+        assert!(app.drain_actions().is_empty());
     }
 
     #[test]

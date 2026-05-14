@@ -520,10 +520,11 @@ Landed first slice:
   DeepSeekCode model catalog; online API model fetching and a two-pane picker
   remain separate UI parity gaps
 - TUI now supports DeepSeek-TUI-style `/provider [name] [model]` plus
-  command-palette `provider`, showing the selected workspace provider inferred
-  from `model.base_url` and switching local provider presets by updating
-  `model.base_url`, `model.api_key_env`, and `model.model`; the interactive
-  provider picker and remote-runtime provider mutation remain separate gaps
+  command-palette `provider`, opening an interactive two-pane provider/model
+  picker, showing the selected workspace provider inferred from
+  `model.base_url`, and switching local provider presets by updating
+  `model.base_url`, `model.api_key_env`, and `model.model`; remote-runtime
+  provider mutation remains a separate gap
 - TUI now supports DeepSeek-TUI-style `/skills [prefix]`, `/skill <name>`,
   `/skill trust <name>`, and `/skill uninstall <name>` plus command-palette
   `skills` / `skill`, listing and inspecting DeepSeekCode's configured

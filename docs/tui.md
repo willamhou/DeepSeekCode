@@ -119,8 +119,9 @@ Current surfaces:
   records
 - model configuration inspection and switching with `model` / `/model`,
   `model <name>` / `/model <name>`, and offline `models` / `/models`
-- provider preset inspection and switching with `provider` / `/provider`,
-  `provider list`, and `provider <name> [model]`
+- provider preset picker, inspection, and switching with `provider` /
+  `/provider`, `provider show`, `provider list`, and
+  `provider <name> [model]`
 - skill registry inspection and local user-skill management with
   `skills [prefix]` / `/skills [prefix]`, `/skills --remote`,
   `/skills sync`,
@@ -337,7 +338,7 @@ Command palette commands currently implemented:
 | `settings`, `/settings`, `config`, `/config` | Show mode, config file locations, and focused configuration command entry points |
 | `config tui`, `config native`, `config web`, `/config tui`, `/config native`, `/config web` | Show the requested config surface and focused DeepSeekCode config commands |
 | `config model [list\|<name>]`, `/config model [list\|<name>]` | Route to selected workspace model config commands |
-| `config provider [list\|<name> [model]]`, `/config provider [list\|<name> [model]]` | Route to provider preset inspection or updates |
+| `config provider [pick\|show\|list\|<name> [model]]`, `/config provider [pick\|show\|list\|<name> [model]]` | Route to provider preset picker, inspection, or updates |
 | `config profile [list\|clear\|<name>]`, `/config profile [list\|clear\|<name>]` | Route to active project profile inspection or switching |
 | `config mode [agent\|plan\|yolo]`, `/config mode [agent\|plan\|yolo]` | Show or switch the current TUI mode |
 | `config theme [dark\|light\|grayscale\|system]`, `/config theme [dark\|light\|grayscale\|system]` | Show or switch the current TUI theme |
@@ -469,7 +470,8 @@ Command palette commands currently implemented:
 | `model`, `/model` | Show selected workspace model config in the right-side detail panel |
 | `model <name>`, `/model <name>` | Update selected workspace `model.model`; aliases include `auto`, `flash`, `pro`, `chat`, `coder`, and `reasoner` |
 | `models`, `/models`, `model list` | Show the offline DeepSeekCode model catalog and current project model |
-| `provider`, `/provider` | Show selected workspace provider preset inferred from `model.base_url` |
+| `provider`, `/provider` | Open the provider/model picker for the selected workspace |
+| `provider show`, `/provider show` | Show selected workspace provider preset inferred from `model.base_url` |
 | `provider list` | Show supported provider presets: DeepSeek, NVIDIA NIM, OpenAI-compatible, AtlasCloud, OpenRouter, Novita, Fireworks, SGLang, vLLM, and Ollama |
 | `provider <name> [model]`, `/provider <name> [model]` | Update selected workspace `model.base_url`, `model.api_key_env`, and `model.model` with provider defaults or an optional model override |
 | `profile`, `/profile` | Show selected workspace active config profile and configured profile entries |

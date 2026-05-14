@@ -12,8 +12,8 @@ had no provider command. Users had to edit `.dscode/config.toml` directly.
 
 ## Implementation
 
-- Added built-in `provider` / `/provider`, `provider list`, and
-  `provider <name> [model]` / `/provider <name> [model]` parsing before
+- Added built-in `provider` / `/provider`, `provider show`, `provider list`,
+  and `provider <name> [model]` / `/provider <name> [model]` parsing before
   custom slash-command fallback.
 - Added `TuiProviderCommand`, `TuiAction::Provider`, and
   `TuiMcpDetailKind::Provider`.
@@ -26,10 +26,12 @@ had no provider command. Users had to edit `.dscode/config.toml` directly.
 - Provider switching updates the selected workspace's `model.base_url`,
   `model.api_key_env`, and `model.model`. Optional `flash` / `pro` model
   shorthand is mapped to provider-specific DeepSeek V4 model ids where needed.
-- Rendered `provider` as a right-side detail panel showing inferred provider,
-  base URL, API-key env var, model, reasoning effort, and config path.
+- Rendered `provider show` as a right-side detail panel showing inferred
+  provider, base URL, API-key env var, model, reasoning effort, and config path.
 - Rendered `provider list` as an offline provider preset catalog with the
   current provider highlighted.
+- Added a follow-up `provider` / `/provider` interactive picker in
+  `2026-05-14-deepseek-tui-tui-provider-picker.md`.
 - Kept HTTP-runtime TUI provider commands local-only because they mutate local
   project config, not remote runtime state.
 - Updated TUI documentation and the DeepSeek-TUI parity plan.
@@ -46,7 +48,6 @@ had no provider command. Users had to edit `.dscode/config.toml` directly.
 
 ## Remaining
 
-DeepSeekCode does not yet have DeepSeek-TUI's interactive provider picker or a
-remote runtime API for provider mutation. API-key persistence remains outside
-this TUI command; users still set provider keys through environment variables
-referenced by `model.api_key_env`.
+DeepSeekCode does not yet have a remote runtime API for provider mutation.
+API-key persistence remains outside this TUI command; users still set provider
+keys through environment variables referenced by `model.api_key_env`.
