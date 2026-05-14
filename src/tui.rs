@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs, io};
 
 use crossterm::{
+    cursor::Show,
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
         MouseButton, MouseEvent, MouseEventKind,
@@ -38,6 +40,10 @@ use crate::workspace_trust::WorkspaceTrust;
 const USER_INPUT_OTHER_MAX_CHARS: usize = 200;
 const TUI_AUTH_SECRET_MAX_CHARS: usize = 4096;
 const DEEPSEEK_CODE_REPO_URL: &str = "https://github.com/willamhou/DeepSeekCode";
+static TUI_TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+static TUI_SIGNAL_CLEANUP_INSTALLED: AtomicBool = AtomicBool::new(false);
 const DEEPSEEK_CODE_BUG_URL: &str =
     "https://github.com/willamhou/DeepSeekCode/issues/new?labels=bug";
 const DEEPSEEK_CODE_FEATURE_URL: &str =
@@ -16100,7 +16106,9 @@ where
     A: FnMut(&mut TuiApp, TuiAction) -> AppResult<()>,
     L: FnMut(&mut TuiApp) -> AppResult<()>,
 {
+    install_terminal_signal_cleanup_once();
     enable_raw_mode()?;
+    let mut terminal_guard = TerminalRestoreGuard::arm();
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
@@ -16113,6 +16121,39 @@ where
         &mut action,
         &mut live,
     );
+    restore_interactive_terminal(&mut terminal)?;
+    terminal_guard.disarm();
+    result
+}
+
+struct TerminalRestoreGuard {
+    active: bool,
+}
+
+impl TerminalRestoreGuard {
+    fn arm() -> Self {
+        TUI_TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
+        Self { active: true }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+        TUI_TERMINAL_ACTIVE.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Drop for TerminalRestoreGuard {
+    fn drop(&mut self) {
+        if self.active {
+            TUI_TERMINAL_ACTIVE.store(false, Ordering::SeqCst);
+            emergency_restore_terminal();
+        }
+    }
+}
+
+fn restore_interactive_terminal(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> AppResult<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -16120,7 +16161,44 @@ where
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
-    result
+    Ok(())
+}
+
+pub(crate) fn emergency_restore_terminal() {
+    let mut stdout = io::stdout();
+    let _ = disable_raw_mode();
+    let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen, Show);
+    let _ = std::io::Write::flush(&mut stdout);
+}
+
+#[cfg(unix)]
+fn install_terminal_signal_cleanup_once() {
+    use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
+    use signal_hook::iterator::Signals;
+
+    if TUI_SIGNAL_CLEANUP_INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let Ok(mut signals) = Signals::new([SIGINT, SIGTERM, SIGHUP]) else {
+        TUI_SIGNAL_CLEANUP_INSTALLED.store(false, Ordering::SeqCst);
+        return;
+    };
+    std::thread::spawn(move || {
+        if let Some(signal) = signals.forever().next() {
+            TUI_TERMINAL_ACTIVE.store(false, Ordering::SeqCst);
+            emergency_restore_terminal();
+            std::process::exit(terminating_signal_exit_code(signal));
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn install_terminal_signal_cleanup_once() {}
+
+#[cfg(unix)]
+fn terminating_signal_exit_code(signal: i32) -> i32 {
+    128 + signal
 }
 
 fn run_loop(
@@ -17398,6 +17476,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn terminal_restore_guard_tracks_active_state_until_disarmed() {
+        TUI_TERMINAL_ACTIVE.store(false, Ordering::SeqCst);
+        {
+            let mut guard = TerminalRestoreGuard::arm();
+            assert!(TUI_TERMINAL_ACTIVE.load(Ordering::SeqCst));
+            guard.disarm();
+        }
+        assert!(!TUI_TERMINAL_ACTIVE.load(Ordering::SeqCst));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_signal_exit_codes_follow_shell_convention() {
+        assert_eq!(terminating_signal_exit_code(2), 130);
+        assert_eq!(terminating_signal_exit_code(15), 143);
+        assert_eq!(terminating_signal_exit_code(1), 129);
     }
 
     fn left_click(column: u16, row: u16) -> MouseEvent {

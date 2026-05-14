@@ -145,6 +145,7 @@ dependencies = [
  "crossterm",
  "flate2",
  "ratatui",
+ "signal-hook",
  "tar",
  "zip",
 ]

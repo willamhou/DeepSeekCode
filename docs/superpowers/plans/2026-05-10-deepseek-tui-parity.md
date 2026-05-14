@@ -1,7 +1,7 @@
 # DeepSeek-TUI Parity Plan
 
 **Status:** active
-**Source comparison:** `Hmbown/DeepSeek-TUI` refreshed at `/tmp/deepseek-tui-compare-20260514`, HEAD `9483248a9f35b5f2b56c34b5b84fbc5334473c9d`.
+**Source comparison:** `Hmbown/DeepSeek-TUI` refreshed at `/tmp/deepseek-tui-compare-20260514`; original local HEAD `9483248a9f35b5f2b56c34b5b84fbc5334473c9d`, latest fetched `origin/main` `13e7957621448792beda06ec8615e33cb374adce`.
 **Current repo:** `willamhou/DeepSeekCode` (`PUBLIC` after 2026-05-12 repo publication), release command `deepseek`, compatibility alias `dscode`.
 
 ## Objective
@@ -20,10 +20,14 @@ Recent parity slices landed public repo metadata, multilingual README/demo
 surface, TUI `/setup` onboarding, guided setup controls, CLI stdin auth
 persistence, a masked in-TUI credential wizard, a first-run setup stepper,
 strict dogfood report evidence gates for live external fixture/readiness proof,
-and a repo-native model-backed README demo capture workflow.
+and a repo-native model-backed README demo capture workflow. A latest upstream
+refresh also showed DeepSeek-TUI's new terminal stability fixes; DeepSeekCode
+now has a TUI emergency terminal restore guard plus Unix SIGINT/SIGTERM/SIGHUP
+cleanup for raw-mode/alternate-screen recovery.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
-- native supervisor-owned PTY attach/stdin/resize/replay/wait/cancel polish;
+- native supervisor-owned PTY attach/stdin/resize/replay/wait/cancel polish and
+  broader platform proof beyond the current Unix/Linux coverage;
 - live external write-fixture sample depth across disposable real repositories;
 - release-channel proof for npm and Homebrew once credentials are available;
 - a committed reviewed model-backed README media asset beyond deterministic TUI
