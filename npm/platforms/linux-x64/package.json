@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-code/cli-linux-x64",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Linux x64 binary for the DeepSeek Code CLI",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://github.com/willamhou/DeepSeekCode",

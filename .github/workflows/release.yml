@@ -161,7 +161,8 @@ jobs:
           printf '%064d  deepseek-linux-x64.tar.gz\n' 1 > target/homebrew-shas/deepseek-linux-x64.tar.gz.sha256
           printf '%064d  deepseek-macos-x64.tar.gz\n' 2 > target/homebrew-shas/deepseek-macos-x64.tar.gz.sha256
           printf '%064d  deepseek-macos-arm64.tar.gz\n' 3 > target/homebrew-shas/deepseek-macos-arm64.tar.gz.sha256
-          cargo run --bin deepseek -- update homebrew-formula --version 0.1.0 --repo willamhou/DeepSeekCode --dist target/homebrew-shas --formula packaging/homebrew/deepseek.rb --out target/deepseek.rb
+          version="$(node -e "const fs = require('fs'); process.stdout.write(fs.readFileSync('Cargo.toml', 'utf8').match(/^version = \"([^\"]+)\"/m)[1])")"
+          cargo run --bin deepseek -- update homebrew-formula --version "$version" --repo willamhou/DeepSeekCode --dist target/homebrew-shas --formula packaging/homebrew/deepseek.rb --out target/deepseek.rb
           ruby -c target/deepseek.rb
 
       - name: Docker Artifact Smoke
