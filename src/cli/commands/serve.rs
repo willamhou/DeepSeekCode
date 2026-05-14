@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -69,6 +69,7 @@ use crate::util::json::{
     json_as_array, json_as_object, json_as_string, json_as_u64, json_value_to_string,
     parse_root_object, JsonValue,
 };
+use crate::workspace_trust::resolve_workspace_path;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const ACP_PROTOCOL_VERSION: u64 = 1;
@@ -2314,60 +2315,7 @@ fn safe_mcp_workspace_path(
     raw_path: &str,
     tool_name: &str,
 ) -> AppResult<PathBuf> {
-    let raw = Path::new(raw_path);
-    if raw.as_os_str().is_empty() || raw.is_absolute() {
-        return Err(app_error(format!("unsafe {tool_name} path `{raw_path}`")));
-    }
-    let mut relative = PathBuf::new();
-    for component in raw.components() {
-        match component {
-            Component::Normal(part) => relative.push(part),
-            Component::CurDir => {}
-            _ => return Err(app_error(format!("unsafe {tool_name} path `{raw_path}`"))),
-        }
-    }
-    if relative.as_os_str().is_empty() {
-        return Err(app_error(format!("unsafe {tool_name} path `{raw_path}`")));
-    }
-    let target = workspace.join(relative);
-    ensure_mcp_path_parent_within_workspace(workspace, &target, tool_name)?;
-    Ok(target)
-}
-
-fn ensure_mcp_path_parent_within_workspace(
-    workspace: &Path,
-    target: &Path,
-    tool_name: &str,
-) -> AppResult<()> {
-    let workspace_root = fs::canonicalize(workspace).map_err(|error| {
-        app_error(format!(
-            "could not resolve MCP workspace `{}`: {error}",
-            workspace.display()
-        ))
-    })?;
-    let mut ancestor = target.parent();
-    while let Some(path) = ancestor {
-        if path.exists() {
-            let parent = fs::canonicalize(path).map_err(|error| {
-                app_error(format!(
-                    "could not resolve {tool_name} parent `{}`: {error}",
-                    path.display()
-                ))
-            })?;
-            if parent.starts_with(&workspace_root) {
-                return Ok(());
-            }
-            return Err(app_error(format!(
-                "{tool_name} parent escapes MCP workspace: {}",
-                path.display()
-            )));
-        }
-        ancestor = path.parent();
-    }
-    Err(app_error(format!(
-        "{tool_name} target has no existing workspace ancestor: {}",
-        target.display()
-    )))
+    resolve_workspace_path(workspace, raw_path, tool_name)
 }
 
 fn execute_mcp_run_shell(input: ToolInput, state: &McpStdioState) -> AppResult<String> {

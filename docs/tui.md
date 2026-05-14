@@ -80,6 +80,9 @@ Current surfaces:
 - deterministic local review with `review <target>` / `/review <target>`
 - named config profile switching with `profile [name|list|clear]` /
   `/profile [name|list|clear]`
+- workspace trust management with
+  `trust [on|off|add <path>|remove <path>|list]` /
+  `/trust [on|off|add <path>|remove <path>|list]`
 - workspace diff inspection with `diff` / `/diff`, showing changed tracked
   files and `git diff --stat` for the selected session workspace
 - slash quit aliases with `exit` / `/exit`, `quit` / `/quit`, and `q` / `/q`
@@ -351,6 +354,7 @@ Command palette commands currently implemented:
 | `recall <query>`, `/recall <query>` | Search durable runtime archives with `recall_archive` |
 | `review <target>`, `/review <target>` | Run deterministic local review for a file, diff, or supported target |
 | `profile [name|list|clear]`, `/profile [name|list|clear]` | Inspect or switch named project config profiles |
+| `trust [on|off|add <path>|remove <path>|list]`, `/trust [on|off|add <path>|remove <path>|list]` | Manage workspace trust mode and trusted external paths |
 | `stash`, `stash list`, `/stash list` | List parked composer drafts in the right-side detail panel |
 | `stash pop`, `/stash pop` | Restore the most recently stashed composer draft |
 | `stash clear`, `/stash clear` | Clear all parked composer drafts |
@@ -438,6 +442,11 @@ Command palette commands currently implemented:
 | `profile list`, `/profile list` | List configured profiles from `profiles.<name>.*` or `[profiles.name]` config sections |
 | `profile <name>`, `/profile <name>` | Persist `workspace.active_profile` so future local TUI turns reload that profile |
 | `profile clear`, `/profile clear` | Clear the persisted active config profile |
+| `trust`, `/trust`, `trust list` | Show selected workspace trust mode and trusted external paths |
+| `trust on`, `/trust on` | Enable persisted all-path trust mode for the selected workspace |
+| `trust off`, `/trust off` | Disable persisted all-path trust mode for the selected workspace |
+| `trust add <path>`, `/trust add <path>` | Add an existing trusted external path scoped to the selected workspace |
+| `trust remove <path>`, `/trust remove <path>` | Remove a trusted external path scoped to the selected workspace |
 | `skills`, `/skills`, `skills <prefix>` | List configured TOML skills from repo and user skill directories |
 | `skill <name>`, `/skill <name>` | Show one configured TOML skill's description, triggers, tools, references, policy, and system append |
 | `feedback`, `/feedback` | Show DeepSeekCode feedback targets in the right-side detail panel |

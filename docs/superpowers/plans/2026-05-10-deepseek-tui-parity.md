@@ -420,6 +420,11 @@ Landed first slice:
   `profile list` and `profile clear`, backed by `workspace.active_profile` and
   `profiles.<name>.*` / `[profiles.name]` config overlays applied before env
   overrides
+- local file-backed TUI now supports DeepSeek-TUI-style
+  `/trust [on|off|add <path>|remove <path>|list]`, backed by a per-workspace
+  trust store at `~/.config/dscode/workspace-trust.json`; trusted external
+  paths and all-path trust mode are honored by shared local/MCP workspace path
+  resolution
 - local file-backed TUI now supports DeepSeek-TUI-style `/clear` conversation
   reset by creating and switching to a fresh empty active thread in the selected
   durable session without deleting older thread history
@@ -532,7 +537,7 @@ Landed first slice:
 Remaining:
 
 - source-level command audit still shows DeepSeek-TUI slash surfaces not yet
-  closed in DeepSeekCode: `/trust`, `/logout`, and `/translate`
+  closed in DeepSeekCode: `/logout` and `/translate`
 - harder cross-process/platform/external buckets remain: dedicated shell
   supervisor ownership after owner-process exit and attachable terminal replay
   beyond durable terminal attach snapshots now have an explicit

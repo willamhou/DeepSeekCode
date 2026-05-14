@@ -1,9 +1,10 @@
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::error::{app_error, AppResult};
 use crate::tools::types::{Tool, ToolInput, ToolOutput};
+use crate::workspace_trust::resolve_workspace_path;
 
 const SUPPORTED_TARGET_FORMATS: &[&str] = &[
     "markdown",
@@ -64,7 +65,7 @@ impl Tool for PandocConvertTool {
         let resolved_output = match output_path {
             Some(path) => {
                 let output = safe_workspace_path(&base, path, "pandoc_convert output")?;
-                refuse_symlink_components(&base, path, "pandoc_convert")?;
+                refuse_symlink_components(&output, "pandoc_convert")?;
                 if let Ok(metadata) = fs::symlink_metadata(&output) {
                     if metadata.file_type().is_symlink() {
                         return Err(app_error(format!(
@@ -201,32 +202,13 @@ fn workspace_base(input: &ToolInput) -> PathBuf {
 }
 
 fn safe_workspace_path(base: &Path, raw_path: &str, tool_name: &str) -> AppResult<PathBuf> {
-    let path = Path::new(raw_path);
-    if raw_path.trim().is_empty() || path.is_absolute() {
-        return Err(app_error(format!(
-            "unsafe {tool_name} path outside workspace: {raw_path}"
-        )));
-    }
-    for component in path.components() {
-        match component {
-            Component::Normal(_) | Component::CurDir => {}
-            Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
-                return Err(app_error(format!(
-                    "unsafe {tool_name} path outside workspace: {raw_path}"
-                )));
-            }
-        }
-    }
-    Ok(base.join(path))
+    resolve_workspace_path(base, raw_path, tool_name)
 }
 
-fn refuse_symlink_components(base: &Path, raw_path: &str, tool_name: &str) -> AppResult<()> {
-    let mut current = base.to_path_buf();
-    for component in Path::new(raw_path).components() {
-        let Component::Normal(part) = component else {
-            continue;
-        };
-        current.push(part);
+fn refuse_symlink_components(target: &Path, tool_name: &str) -> AppResult<()> {
+    let mut current = PathBuf::new();
+    for component in target.components() {
+        current.push(component.as_os_str());
         if let Ok(metadata) = fs::symlink_metadata(&current) {
             if metadata.file_type().is_symlink() {
                 return Err(app_error(format!(

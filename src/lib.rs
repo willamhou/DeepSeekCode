@@ -11,6 +11,7 @@ pub mod tools;
 pub mod tui;
 pub mod ui;
 pub mod util;
+pub mod workspace_trust;
 
 pub use error::AppResult;
 

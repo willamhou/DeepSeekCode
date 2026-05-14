@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::config::types::{AppConfig, VisionConfig};
@@ -9,6 +9,7 @@ use crate::tools::types::{Tool, ToolInput, ToolOutput};
 use crate::util::json::{
     json_as_array, json_as_object, json_as_string, json_escape, parse_json_value,
 };
+use crate::workspace_trust::resolve_workspace_path;
 
 pub struct ImageAnalyzeTool {
     vision: VisionConfig,
@@ -153,23 +154,7 @@ fn workspace_base(input: &ToolInput) -> PathBuf {
 }
 
 fn safe_workspace_path(base: &Path, raw_path: &str, tool_name: &str) -> AppResult<PathBuf> {
-    let path = Path::new(raw_path);
-    if raw_path.trim().is_empty() || path.is_absolute() {
-        return Err(app_error(format!(
-            "unsafe {tool_name} path outside workspace: {raw_path}"
-        )));
-    }
-    for component in path.components() {
-        match component {
-            Component::Normal(_) | Component::CurDir => {}
-            Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
-                return Err(app_error(format!(
-                    "unsafe {tool_name} path outside workspace: {raw_path}"
-                )));
-            }
-        }
-    }
-    Ok(base.join(path))
+    resolve_workspace_path(base, raw_path, tool_name)
 }
 
 fn detect_mime_type(path: &Path) -> AppResult<&'static str> {

@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::config::types::{AppConfig, ModelConfig};
@@ -8,6 +8,7 @@ use crate::tools::types::{Tool, ToolInput, ToolOutput};
 use crate::util::json::{
     json_as_array, json_as_object, json_as_string, json_escape, parse_json_value,
 };
+use crate::workspace_trust::resolve_workspace_path;
 
 pub struct WriteFileTool;
 pub struct EditFileTool;
@@ -35,7 +36,7 @@ impl Tool for WriteFileTool {
             .ok_or_else(|| app_error("write_file requires `content`"))?;
         let base = workspace_base(&input);
         let target = safe_workspace_path(&base, &raw_path, "write_file")?;
-        refuse_symlink_components(&base, &raw_path, "write_file")?;
+        refuse_symlink_components(&target, "write_file")?;
         if let Ok(metadata) = fs::symlink_metadata(&target) {
             if metadata.file_type().is_symlink() {
                 return Err(app_error(format!(
@@ -84,7 +85,7 @@ impl Tool for EditFileTool {
         }
         let base = workspace_base(&input);
         let target = safe_workspace_path(&base, &raw_path, "edit_file")?;
-        refuse_symlink_components(&base, &raw_path, "edit_file")?;
+        refuse_symlink_components(&target, "edit_file")?;
         let metadata = fs::symlink_metadata(&target).map_err(|error| {
             app_error(format!(
                 "edit_file failed to inspect `{}`: {error}",
@@ -132,7 +133,7 @@ impl Tool for FimEditTool {
         let max_tokens = parse_u32_arg(&input, "max_tokens", 1024).clamp(1, 16_384);
         let base = workspace_base(&input);
         let target = safe_workspace_path(&base, &raw_path, "fim_edit")?;
-        refuse_symlink_components(&base, &raw_path, "fim_edit")?;
+        refuse_symlink_components(&target, "fim_edit")?;
         let metadata = fs::symlink_metadata(&target).map_err(|error| {
             app_error(format!(
                 "fim_edit failed to inspect `{}`: {error}",
@@ -330,32 +331,13 @@ fn workspace_base(input: &ToolInput) -> PathBuf {
 }
 
 fn safe_workspace_path(base: &Path, raw_path: &str, tool_name: &str) -> AppResult<PathBuf> {
-    let path = Path::new(raw_path);
-    if raw_path.trim().is_empty() || path.is_absolute() {
-        return Err(app_error(format!(
-            "unsafe {tool_name} path outside workspace: {raw_path}"
-        )));
-    }
-    for component in path.components() {
-        match component {
-            Component::Normal(_) | Component::CurDir => {}
-            Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
-                return Err(app_error(format!(
-                    "unsafe {tool_name} path outside workspace: {raw_path}"
-                )));
-            }
-        }
-    }
-    Ok(base.join(path))
+    resolve_workspace_path(base, raw_path, tool_name)
 }
 
-fn refuse_symlink_components(base: &Path, raw_path: &str, tool_name: &str) -> AppResult<()> {
-    let mut current = base.to_path_buf();
-    for component in Path::new(raw_path).components() {
-        let Component::Normal(part) = component else {
-            continue;
-        };
-        current.push(part);
+fn refuse_symlink_components(target: &Path, tool_name: &str) -> AppResult<()> {
+    let mut current = PathBuf::new();
+    for component in target.components() {
+        current.push(component.as_os_str());
         if let Ok(metadata) = fs::symlink_metadata(&current) {
             if metadata.file_type().is_symlink() {
                 return Err(app_error(format!(

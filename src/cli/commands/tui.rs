@@ -66,7 +66,8 @@ use crate::tui::{
     TuiApprovalRequest, TuiAutomationRecord, TuiHooksCommand, TuiItem, TuiLiveEvent, TuiLspCommand,
     TuiMcpConfigScope, TuiMcpDetailKind, TuiMemoryCommand, TuiMode, TuiModelCommand,
     TuiNetworkCommand, TuiNoteCommand, TuiProfileCommand, TuiProviderCommand, TuiSession,
-    TuiSkillsCommand, TuiTaskRecord, TuiThread, TuiUsageSummary, TuiUserInputRequest,
+    TuiSkillsCommand, TuiTaskRecord, TuiThread, TuiTrustCommand, TuiUsageSummary,
+    TuiUserInputRequest,
 };
 use crate::ui::stream::StreamEvents;
 use crate::util::json::{
@@ -74,6 +75,10 @@ use crate::util::json::{
     parse_root_object, JsonValue,
 };
 use crate::util::sse;
+use crate::workspace_trust::{
+    add as add_workspace_trust_path, remove as remove_workspace_trust_path, render_trust_file_hint,
+    resolve_trust_command_path, set_trust_mode, WorkspaceTrust,
+};
 
 pub fn run(args: TuiArgs) -> AppResult<()> {
     if args.demo {
@@ -642,6 +647,9 @@ fn handle_tui_http_action(
         }
         TuiAction::Profile { .. } => {
             app.set_status("profile commands require local file-backed TUI".to_string());
+        }
+        TuiAction::Trust { .. } => {
+            app.set_status("trust commands require local file-backed TUI".to_string());
         }
         TuiAction::Skills { .. } => {
             app.set_status("skills commands require local file-backed TUI".to_string());
@@ -1275,6 +1283,7 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Model => Err(app_error("model details are not MCP details")),
         TuiMcpDetailKind::Provider => Err(app_error("provider details are not MCP details")),
         TuiMcpDetailKind::Profile => Err(app_error("profile details are not MCP details")),
+        TuiMcpDetailKind::Trust => Err(app_error("trust details are not MCP details")),
         TuiMcpDetailKind::Skills => Err(app_error("skill details are not MCP details")),
         TuiMcpDetailKind::Feedback => Err(app_error("feedback details are not MCP details")),
         TuiMcpDetailKind::Links => Err(app_error("link details are not MCP details")),
@@ -1675,6 +1684,34 @@ fn format_profile_config_summary(summary: &ProfileConfigSummary) -> String {
     out
 }
 
+fn format_workspace_trust_summary(workspace: &Path, trust: &WorkspaceTrust) -> String {
+    let mut out = String::new();
+    out.push_str("DeepSeekCode Workspace Trust\n");
+    out.push_str("============================\n\n");
+    out.push_str(&format!("Workspace: {}\n", workspace.display()));
+    out.push_str(&format!("Trust file: {}\n", render_trust_file_hint()));
+    out.push_str(&format!(
+        "Workspace trust mode: {}\n",
+        if trust.trust_mode() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    ));
+    out.push_str("\nTrusted external paths:\n");
+    if trust.paths().is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for path in trust.paths() {
+            out.push_str(&format!("- {}\n", path.display()));
+        }
+    }
+    out.push_str(
+        "\nCommands:\n- trust on/off toggles all-path trust for this workspace.\n- trust add <path> adds an existing external path.\n- trust remove <path> removes one trusted path.\n- trust list shows only this workspace's trust state.\n",
+    );
+    out
+}
+
 fn format_string_list(values: &[String]) -> String {
     if values.is_empty() {
         "[]".to_string()
@@ -2009,6 +2046,47 @@ fn handle_tui_action_with_live(
             app.set_mcp_detail(
                 TuiMcpDetailKind::Profile,
                 format_profile_config_summary(&summary),
+            );
+            app.set_status(status);
+        }
+        TuiAction::Trust { workspace, command } => {
+            let workspace = Path::new(&workspace);
+            let status = match &command {
+                TuiTrustCommand::Show => "workspace trust shown".to_string(),
+                TuiTrustCommand::List => "trusted paths listed".to_string(),
+                TuiTrustCommand::SetMode { enabled } => {
+                    let changed = set_trust_mode(workspace, *enabled)?;
+                    match (*enabled, changed) {
+                        (true, true) => "workspace trust mode enabled".to_string(),
+                        (true, false) => "workspace trust mode already enabled".to_string(),
+                        (false, true) => "workspace trust mode disabled".to_string(),
+                        (false, false) => "workspace trust mode already disabled".to_string(),
+                    }
+                }
+                TuiTrustCommand::Add { path } => {
+                    let target = resolve_trust_command_path(workspace, path);
+                    if !target.exists() {
+                        return Err(app_error(format!(
+                            "trust path not found: {}",
+                            target.display()
+                        )));
+                    }
+                    let stored = add_workspace_trust_path(workspace, &target)?;
+                    format!("trusted path added: {}", stored.display())
+                }
+                TuiTrustCommand::Remove { path } => {
+                    let target = resolve_trust_command_path(workspace, path);
+                    if remove_workspace_trust_path(workspace, &target)? {
+                        format!("trusted path removed: {}", target.display())
+                    } else {
+                        format!("trusted path not present: {}", target.display())
+                    }
+                }
+            };
+            let trust = WorkspaceTrust::load_for(workspace);
+            app.set_mcp_detail(
+                TuiMcpDetailKind::Trust,
+                format_workspace_trust_summary(workspace, &trust),
             );
             app.set_status(status);
         }
@@ -5721,6 +5799,7 @@ mod tests {
     use std::net::TcpListener;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_root(label: &str) -> PathBuf {
@@ -5736,6 +5815,24 @@ mod tests {
 
     fn temp_store(label: &str) -> RuntimeStore {
         RuntimeStore::new(temp_root(label))
+    }
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn with_workspace_trust_file<F: FnOnce()>(path: &Path, f: F) {
+        let _guard = env_lock();
+        let previous = std::env::var("DSCODE_WORKSPACE_TRUST_FILE").ok();
+        std::env::set_var("DSCODE_WORKSPACE_TRUST_FILE", path);
+        f();
+        match previous {
+            Some(value) => std::env::set_var("DSCODE_WORKSPACE_TRUST_FILE", value),
+            None => std::env::remove_var("DSCODE_WORKSPACE_TRUST_FILE"),
+        }
     }
 
     fn temp_config(root: &Path) -> AppConfig {
@@ -7247,6 +7344,77 @@ model.model = "deepseek-v4-flash"
         assert!(render_once(&app, 120, 36)
             .unwrap()
             .contains("profile cleared: work"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handle_tui_action_manages_workspace_trust() {
+        let root = temp_root("trust-config");
+        let workspace = root.join("workspace");
+        let external = root.join("external");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        let trust_file = root.join("trust.json");
+        let store = RuntimeStore::new(root.join("runtime"));
+        let mut app = TuiApp::new(Vec::new());
+
+        with_workspace_trust_file(&trust_file, || {
+            handle_tui_action(
+                &store,
+                None,
+                &mut app,
+                TuiAction::Trust {
+                    workspace: workspace.display().to_string(),
+                    command: TuiTrustCommand::Add {
+                        path: external.display().to_string(),
+                    },
+                },
+            )
+            .unwrap();
+
+            let (kind, detail) = app.mcp_detail_for_test().expect("trust detail");
+            assert_eq!(kind, TuiMcpDetailKind::Trust);
+            assert!(detail.contains("Workspace trust mode: disabled"));
+            assert!(detail.contains(&external.canonicalize().unwrap().display().to_string()));
+            assert!(render_once(&app, 120, 36)
+                .unwrap()
+                .contains("trusted path added"));
+
+            handle_tui_action(
+                &store,
+                None,
+                &mut app,
+                TuiAction::Trust {
+                    workspace: workspace.display().to_string(),
+                    command: TuiTrustCommand::SetMode { enabled: true },
+                },
+            )
+            .unwrap();
+            let (_, detail) = app.mcp_detail_for_test().expect("trust detail");
+            assert!(detail.contains("Workspace trust mode: enabled"));
+            assert!(render_once(&app, 120, 36)
+                .unwrap()
+                .contains("workspace trust mode enabled"));
+
+            handle_tui_action(
+                &store,
+                None,
+                &mut app,
+                TuiAction::Trust {
+                    workspace: workspace.display().to_string(),
+                    command: TuiTrustCommand::Remove {
+                        path: external.display().to_string(),
+                    },
+                },
+            )
+            .unwrap();
+            let (_, detail) = app.mcp_detail_for_test().expect("trust detail");
+            assert!(!detail.contains(&external.canonicalize().unwrap().display().to_string()));
+            assert!(render_once(&app, 120, 36)
+                .unwrap()
+                .contains("trusted path removed"));
+        });
 
         let _ = fs::remove_dir_all(root);
     }

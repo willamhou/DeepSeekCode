@@ -581,6 +581,7 @@ pub enum TuiMcpDetailKind {
     Model,
     Provider,
     Profile,
+    Trust,
     Skills,
     Feedback,
     Links,
@@ -640,6 +641,7 @@ impl TuiMcpDetailKind {
             Self::Model => "model",
             Self::Provider => "provider",
             Self::Profile => "profile",
+            Self::Trust => "trust",
             Self::Skills => "skills",
             Self::Feedback => "feedback",
             Self::Links => "links",
@@ -699,6 +701,7 @@ impl TuiMcpDetailKind {
             Self::Model => "Model",
             Self::Provider => "Provider",
             Self::Profile => "Profile",
+            Self::Trust => "Trust",
             Self::Skills => "Skills",
             Self::Feedback => "Feedback",
             Self::Links => "Links",
@@ -758,6 +761,7 @@ impl TuiMcpDetailKind {
             Self::Model => Self::Manager,
             Self::Provider => Self::Manager,
             Self::Profile => Self::Manager,
+            Self::Trust => Self::Manager,
             Self::Skills => Self::Manager,
             Self::Feedback => Self::Manager,
             Self::Links => Self::Manager,
@@ -817,6 +821,7 @@ impl TuiMcpDetailKind {
             Self::Model => Self::Manager,
             Self::Provider => Self::Manager,
             Self::Profile => Self::Manager,
+            Self::Trust => Self::Manager,
             Self::Skills => Self::Manager,
             Self::Feedback => Self::Manager,
             Self::Links => Self::Manager,
@@ -1187,6 +1192,15 @@ pub enum TuiProfileCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuiTrustCommand {
+    Show,
+    List,
+    SetMode { enabled: bool },
+    Add { path: String },
+    Remove { path: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiSkillsCommand {
     List { prefix: Option<String> },
     Show { name: String },
@@ -1508,6 +1522,41 @@ fn parse_tui_profile_command(line: &str) -> Option<Result<TuiProfileCommand, Str
         })),
         _ => Some(Err(
             "usage: profile [name|list|clear] or /profile [name|list|clear]".to_string(),
+        )),
+    }
+}
+
+fn parse_tui_trust_command(line: &str) -> Option<Result<TuiTrustCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/trust")
+        .or_else(|| strip_tui_command_prefix(trimmed, "trust"))?;
+    let raw = rest.trim();
+    if raw.is_empty() || matches!(raw, "show" | "status" | "help" | "--help" | "-h") {
+        return Some(Ok(TuiTrustCommand::Show));
+    }
+    if matches!(raw, "list" | "ls") {
+        return Some(Ok(TuiTrustCommand::List));
+    }
+    let mut parts = raw.splitn(2, char::is_whitespace);
+    let subcommand = parts.next().unwrap_or("").to_ascii_lowercase();
+    let rest = parts.next().map(str::trim).unwrap_or("");
+    match subcommand.as_str() {
+        "on" | "enable" | "enabled" | "yes" | "y" | "true" | "1" => {
+            Some(Ok(TuiTrustCommand::SetMode { enabled: true }))
+        }
+        "off" | "disable" | "disabled" | "no" | "n" | "false" | "0" => {
+            Some(Ok(TuiTrustCommand::SetMode { enabled: false }))
+        }
+        "add" if !rest.is_empty() => Some(Ok(TuiTrustCommand::Add {
+            path: rest.to_string(),
+        })),
+        "remove" | "rm" | "del" | "delete" if !rest.is_empty() => {
+            Some(Ok(TuiTrustCommand::Remove {
+                path: rest.to_string(),
+            }))
+        }
+        _ => Some(Err(
+            "usage: trust [on|off|add <path>|remove <path>|list] or /trust [on|off|add <path>|remove <path>|list]".to_string(),
         )),
     }
 }
@@ -2321,6 +2370,10 @@ pub enum TuiAction {
         workspace: String,
         command: TuiProfileCommand,
     },
+    Trust {
+        workspace: String,
+        command: TuiTrustCommand,
+    },
     Skills {
         command: TuiSkillsCommand,
     },
@@ -2803,6 +2856,13 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         aliases: &[],
         usage: "/profile [name|list|clear]",
         description: "Inspect or switch the selected workspace config profile.",
+    },
+    TuiHelpCommandInfo {
+        category: "Config",
+        name: "trust",
+        aliases: &[],
+        usage: "/trust [on|off|add <path>|remove <path>|list]",
+        description: "Manage selected workspace trust mode and trusted external paths.",
     },
     TuiHelpCommandInfo {
         category: "Config",
@@ -3303,6 +3363,12 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/profile",
     "/profile list",
     "/profile clear",
+    "/trust",
+    "/trust list",
+    "/trust add ",
+    "/trust remove ",
+    "/trust on",
+    "/trust off",
     "/skills",
     "/skill ",
     "/feedback",
@@ -6046,6 +6112,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_trust_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.request_trust_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) =
                     parse_tui_skills_command(&content).or_else(|| parse_tui_skill_command(&content))
                 {
@@ -6743,6 +6822,17 @@ impl TuiApp {
             match command {
                 Ok(command) => {
                     self.request_profile_command(command);
+                }
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_trust_command(command) {
+            match command {
+                Ok(command) => {
+                    self.request_trust_command(command);
                 }
                 Err(message) => {
                     self.status = message;
@@ -8201,6 +8291,18 @@ impl TuiApp {
             command,
         });
         self.status = format!("profile command queued: {workspace}");
+    }
+
+    fn request_trust_command(&mut self, command: TuiTrustCommand) {
+        let workspace = self
+            .selected_session()
+            .map(|session| session.workspace.clone())
+            .unwrap_or_else(|| ".".to_string());
+        self.pending_actions.push(TuiAction::Trust {
+            workspace: workspace.clone(),
+            command,
+        });
+        self.status = format!("trust command queued: {workspace}");
     }
 
     fn request_skills_command(&mut self, command: TuiSkillsCommand) {
@@ -9718,6 +9820,7 @@ impl TuiApp {
         let _ = writeln!(detail, "- /model [name|list]");
         let _ = writeln!(detail, "- /provider [name [model]|list]");
         let _ = writeln!(detail, "- /profile [name|list|clear]");
+        let _ = writeln!(detail, "- /trust [on|off|add <path>|remove <path>|list]");
         let _ = writeln!(detail, "- /network [list|allow|deny|remove|default]");
         let _ = writeln!(detail, "- /lsp [on|off|status]");
         let _ = writeln!(detail, "- /memory [show|path|clear|edit|help]");
@@ -17751,6 +17854,73 @@ mod tests {
             vec![TuiAction::Profile {
                 workspace: "/tmp/deepseek-profile".to_string(),
                 command: TuiProfileCommand::Clear,
+            }]
+        );
+    }
+
+    #[test]
+    fn command_palette_requests_trust_actions() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: "/tmp/deepseek-trust".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        run_palette_command(&mut app, "trust");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Trust {
+                workspace: "/tmp/deepseek-trust".to_string(),
+                command: TuiTrustCommand::Show,
+            }]
+        );
+
+        run_palette_command(&mut app, "/trust add /tmp/shared");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Trust {
+                workspace: "/tmp/deepseek-trust".to_string(),
+                command: TuiTrustCommand::Add {
+                    path: "/tmp/shared".to_string(),
+                },
+            }]
+        );
+
+        run_palette_command(&mut app, "trust off");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Trust {
+                workspace: "/tmp/deepseek-trust".to_string(),
+                command: TuiTrustCommand::SetMode { enabled: false },
+            }]
+        );
+
+        app.composer_focused = true;
+        app.composer = "/trust remove /tmp/shared".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Trust {
+                workspace: "/tmp/deepseek-trust".to_string(),
+                command: TuiTrustCommand::Remove {
+                    path: "/tmp/shared".to_string(),
+                },
             }]
         );
     }
