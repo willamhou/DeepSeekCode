@@ -94,10 +94,26 @@ start services. Static placeholder templates also live under
 `packaging/systemd/` and `packaging/launchd/`, while release packages include
 them under `services/`.
 
+Before installing those files, run the static service doctor against the same
+binary/workspace/template directory:
+
+```sh
+deepseek agents service-doctor --kind all --out ./services --workdir "$PWD" --bin "$(command -v deepseek)"
+deepseek agents service-doctor --kind all --out ./services --workdir "$PWD" --bin "$(command -v deepseek)" --json
+```
+
+`service-doctor` does not start systemd or launchd services. It verifies the
+selected binary and workspace, checks that the rendered runtime, agents,
+diagnostics, and shell-supervisor templates contain the expected command
+topology, and reports stale or missing files under `--out` as blockers. Missing
+platform service-manager commands such as `systemctl` or `launchctl` are
+warnings so the same check can run in CI containers.
+
 The shell supervisor service runs `deepseek agents shell-supervisor --json`.
 It binds the workspace-local `.dscode/shell-supervisor/supervisor.sock` and
-writes a manifest for `exec_shell_supervisor_status`; native PTY sessions are
-still a later implementation slice.
+writes a manifest for `exec_shell_supervisor_status`; where the platform
+supports it, supervisor-owned native PTY jobs advertise attach/stdin/resize/
+replay/wait/cancel protocol capabilities through the same manifest.
 
 After a supervisor starts the agents daemon, use the RLM lifecycle commands to
 check live worker state:

@@ -102,6 +102,7 @@ cargo build --release
 ./target/release/deepseek update package --bin ./target/release/deepseek
 ./target/release/deepseek update verify-install --bin ./target/release/deepseek
 ./target/release/deepseek agents service --kind all --out target/service-smoke --bin ./target/release/deepseek --workdir "$PWD"
+./target/release/deepseek agents service-doctor --kind all --out target/service-smoke --bin ./target/release/deepseek --workdir "$PWD" --json
 test -f target/service-smoke/SERVICES.md
 ./target/release/deepseek agents rlm-status --json
 cargo package --allow-dirty
@@ -320,7 +321,8 @@ Release notes should include:
   prompt/resource/template client bridges
 - `release.json` from `deepseek update package`
 - `SERVICES.md`, generated service-template smoke output including
-  `target/service-smoke/SERVICES.md`, and
+  `target/service-smoke/SERVICES.md`, `deepseek agents service-doctor --json`
+  output showing zero blockers for rendered templates, and
   `deepseek agents rlm-status --json` output showing the live RLM service
   lifecycle surface
 - `npm test` output from `npm/`

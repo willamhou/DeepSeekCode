@@ -507,6 +507,7 @@ pub enum AgentsAction {
     Shell(AgentsShellArgs),
     ShellSupervisor(AgentsShellSupervisorArgs),
     Service(AgentsServiceArgs),
+    ServiceDoctor(AgentsServiceDoctorArgs),
     Threads,
     ShowThread {
         id: String,
@@ -664,6 +665,18 @@ pub struct AgentsServiceArgs {
     pub addr: String,
     pub interval_ms: u64,
     pub budget: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentsServiceDoctorArgs {
+    pub kind: AgentsServiceKind,
+    pub out: Option<String>,
+    pub bin: Option<String>,
+    pub workdir: Option<String>,
+    pub addr: String,
+    pub interval_ms: u64,
+    pub budget: Option<usize>,
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2009,6 +2022,7 @@ fn parse_agents_subcommand(args: Vec<String>) -> Result<AgentsAction, String> {
             parse_agents_shell_supervisor_args(args.into_iter().skip(1).collect())
         }
         "service" => parse_agents_service_args(args.into_iter().skip(1).collect()),
+        "service-doctor" => parse_agents_service_doctor_args(args.into_iter().skip(1).collect()),
         "threads" => {
             if args.len() > 1 {
                 return Err("agents threads accepts no arguments".to_string());
@@ -2044,7 +2058,7 @@ fn parse_agents_subcommand(args: Vec<String>) -> Result<AgentsAction, String> {
             Ok(AgentsAction::ClearThread)
         }
         other => Err(format!(
-            "unknown agents sub-action `{other}`; expected list|show|validate|run-task|daemon|rlm-status|rlm-events|rlm-wait|rlm-cancel|rlm-recover|rlm-stop|rlm-run-next|rlm-drain|shell|shell-supervisor|service|threads|show-thread|switch|current|clear-current"
+            "unknown agents sub-action `{other}`; expected list|show|validate|run-task|daemon|rlm-status|rlm-events|rlm-wait|rlm-cancel|rlm-recover|rlm-stop|rlm-run-next|rlm-drain|shell|shell-supervisor|service|service-doctor|threads|show-thread|switch|current|clear-current"
         )),
     }
 }
@@ -3088,6 +3102,87 @@ fn parse_agents_service_args(args: Vec<String>) -> Result<AgentsAction, String> 
         }
     }
     Ok(AgentsAction::Service(parsed))
+}
+
+fn parse_agents_service_doctor_args(args: Vec<String>) -> Result<AgentsAction, String> {
+    let mut parsed = AgentsServiceDoctorArgs {
+        kind: default_agents_service_kind(),
+        out: None,
+        bin: None,
+        workdir: None,
+        addr: "127.0.0.1:8765".to_string(),
+        interval_ms: 1_000,
+        budget: None,
+        json: false,
+    };
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--kind" if index + 1 < args.len() => {
+                parsed.kind = match args[index + 1].as_str() {
+                    "systemd" => AgentsServiceKind::Systemd,
+                    "launchd" => AgentsServiceKind::Launchd,
+                    "all" => AgentsServiceKind::All,
+                    value => {
+                        return Err(format!(
+                            "agents service-doctor --kind must be systemd, launchd, or all; got {value}"
+                        ));
+                    }
+                };
+                index += 2;
+            }
+            "--kind" => return Err("agents service-doctor --kind requires a value".to_string()),
+            "--out" if index + 1 < args.len() => {
+                parsed.out = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--out" => return Err("agents service-doctor --out requires a directory".to_string()),
+            "--bin" if index + 1 < args.len() => {
+                parsed.bin = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--bin" => return Err("agents service-doctor --bin requires a path".to_string()),
+            "--workdir" if index + 1 < args.len() => {
+                parsed.workdir = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--workdir" => {
+                return Err("agents service-doctor --workdir requires a path".to_string())
+            }
+            "--addr" if index + 1 < args.len() => {
+                parsed.addr = args[index + 1].clone();
+                index += 2;
+            }
+            "--addr" => return Err("agents service-doctor --addr requires a value".to_string()),
+            "--interval-ms" if index + 1 < args.len() => {
+                parsed.interval_ms = args[index + 1].parse::<u64>().map_err(|_| {
+                    "agents service-doctor --interval-ms must be a number".to_string()
+                })?;
+                index += 2;
+            }
+            "--interval-ms" => {
+                return Err("agents service-doctor --interval-ms requires a value".to_string());
+            }
+            "--budget" if index + 1 < args.len() => {
+                parsed.budget =
+                    Some(args[index + 1].parse::<usize>().map_err(|_| {
+                        "agents service-doctor --budget must be a number".to_string()
+                    })?);
+                index += 2;
+            }
+            "--budget" => return Err("agents service-doctor --budget requires a value".to_string()),
+            "--json" => {
+                parsed.json = true;
+                index += 1;
+            }
+            value => {
+                return Err(format!(
+                    "unknown flag for `agents service-doctor`: {value}; expected --kind|--out|--bin|--workdir|--addr|--interval-ms|--budget|--json"
+                ));
+            }
+        }
+    }
+    Ok(AgentsAction::ServiceDoctor(parsed))
 }
 
 fn default_agents_service_kind() -> AgentsServiceKind {
@@ -5029,6 +5124,43 @@ mod tests {
                 && addr == "127.0.0.1:9999"
         ));
 
+        let service_doctor = Cli::from_argv(vec![
+            "agents".to_string(),
+            "service-doctor".to_string(),
+            "--kind".to_string(),
+            "all".to_string(),
+            "--out".to_string(),
+            "target/services".to_string(),
+            "--bin".to_string(),
+            "/usr/local/bin/deepseek".to_string(),
+            "--workdir".to_string(),
+            "/work/repo".to_string(),
+            "--addr".to_string(),
+            "127.0.0.1:9999".to_string(),
+            "--interval-ms".to_string(),
+            "500".to_string(),
+            "--budget".to_string(),
+            "9".to_string(),
+            "--json".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            service_doctor.command,
+            Some(Command::Agents(AgentsAction::ServiceDoctor(AgentsServiceDoctorArgs {
+                kind: AgentsServiceKind::All,
+                ref out,
+                ref bin,
+                ref workdir,
+                ref addr,
+                interval_ms: 500,
+                budget: Some(9),
+                json: true,
+            }))) if out.as_deref() == Some("target/services")
+                && bin.as_deref() == Some("/usr/local/bin/deepseek")
+                && workdir.as_deref() == Some("/work/repo")
+                && addr == "127.0.0.1:9999"
+        ));
+
         let threads = Cli::from_argv(vec!["agents".to_string(), "threads".to_string()])
             .expect("parse should succeed");
         assert!(matches!(
@@ -5063,6 +5195,47 @@ mod tests {
         assert!(matches!(
             current.command,
             Some(Command::Agents(AgentsAction::CurrentThread))
+        ));
+    }
+
+    #[test]
+    fn cli_from_argv_routes_agents_service_doctor() {
+        let cli = Cli::from_argv(vec![
+            "agents".to_string(),
+            "service-doctor".to_string(),
+            "--kind".to_string(),
+            "systemd".to_string(),
+            "--out".to_string(),
+            "target/services".to_string(),
+            "--bin".to_string(),
+            "/usr/local/bin/deepseek".to_string(),
+            "--workdir".to_string(),
+            "/work/repo".to_string(),
+            "--addr".to_string(),
+            "127.0.0.1:9999".to_string(),
+            "--interval-ms".to_string(),
+            "500".to_string(),
+            "--budget".to_string(),
+            "9".to_string(),
+            "--json".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Agents(AgentsAction::ServiceDoctor(AgentsServiceDoctorArgs {
+                kind: AgentsServiceKind::Systemd,
+                ref out,
+                ref bin,
+                ref workdir,
+                ref addr,
+                interval_ms: 500,
+                budget: Some(9),
+                json: true,
+            }))) if out.as_deref() == Some("target/services")
+                && bin.as_deref() == Some("/usr/local/bin/deepseek")
+                && workdir.as_deref() == Some("/work/repo")
+                && addr == "127.0.0.1:9999"
         ));
     }
 

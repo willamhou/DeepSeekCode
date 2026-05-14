@@ -153,6 +153,7 @@ node npm/scripts/check-version-sync.js
 deepseek update publish-status
 deepseek update publish-status --dist dist-assets --npm-dist npm-dist --strict
 deepseek update publish-status --json
+deepseek agents service-doctor --kind all --workdir "$PWD" --bin "$(command -v deepseek)" --json
 ```
 
 PR/CI 工作流检查：

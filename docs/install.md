@@ -498,6 +498,8 @@ curl http://127.0.0.1:8765/runtime
 - `deepseek config network allow|deny <host>`：把网络 host 策略写回项目 `.dscode/config.toml`，用于持久化 web/search/fetch 的允许或拒绝规则
 - `deepseek agents run-task <task-id>`：认领并执行 pending durable runtime task，写回同一 thread 的 turns/items/usage/status
 - `deepseek agents daemon [--interval-ms 1000] [--budget N]`：本地轮询 `.dscode/runtime`，触发到期 automation、执行 thread-linked pending task，并自动追加 non-destructive compaction summary
+- `deepseek agents service --kind systemd|launchd|all --out <dir>`：渲染 workspace-specific runtime、agents daemon、diagnostics watch 和 shell-supervisor 常驻服务模板
+- `deepseek agents service-doctor --kind systemd|launchd|all [--out <dir> --json]`：静态验证服务模板拓扑、二进制、工作目录和可选 `--out` 目录中的已生成文件；缺失 service manager 只作为 warning，模板缺失或过期作为 blocker
 - `deepseek diagnostics [--changed] [--json] [paths...]` / `deepseek diagnostics --watch --json ...`：运行本地语言诊断；watch 模式会在同一进程内复用 warmed stdio LSP session，失败时回退到 compiler/type-check checker；JSON 模式输出 `deepseek.diagnostics.report.v1` 或 newline-delimited `deepseek.diagnostics.daemon_tick.v1`；`deepseek agents service` 可为 `diagnostics --watch --changed --json` 和 `agents shell-supervisor --json` 生成常驻 worker 模板
 - `deepseek restore snapshot [label]` / `list` / `show <id>` / `revert-turn <id> [--apply]`：管理 rollback snapshots（tracked diff + untracked files、目录 metadata、Unix special files）
 - `deepseek serve --http`：启动本地 runtime skeleton，提供 `/health` 与 `/runtime`

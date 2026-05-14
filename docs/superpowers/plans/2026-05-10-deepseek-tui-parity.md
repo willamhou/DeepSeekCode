@@ -48,6 +48,11 @@ The release/install surface also now has a local `deepseek update download-plan`
 command that prints platform-specific archive/checksum URLs and mirror-base
 fallback instructions, adapting DeepSeek-TUI's China-friendly release fallback
 work without taking on the full Feishu/Lighthouse bridge in one slice.
+DeepSeekCode service deployment now also has `deepseek agents service-doctor`,
+which adapts DeepSeek-TUI's Lighthouse doctor-script idea to the local
+systemd/launchd template model by checking the selected binary/workspace,
+template command topology, optional rendered `--out` files, and CI-friendly
+JSON evidence without starting services.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
 - native supervisor-owned PTY attach/stdin/resize/replay/wait/cancel polish and
@@ -1172,6 +1177,11 @@ Landed first slice:
 - `deepseek agents service --out <dir>` also writes a workspace-specific
   `SERVICES.md` with systemd/launchd install/start/status/log/restart/stop
   lifecycle commands and runtime health checks
+- `deepseek agents service-doctor` validates service template topology,
+  selected binary/workspace paths, optional rendered `--out` files, and emits
+  text or `deepseek.agents.service_doctor.v1` JSON evidence. Missing local
+  service-manager commands are warnings so release CI can still verify
+  generated systemd/launchd files before clean-machine installation.
 - `deepseek update package` includes `SERVICES.md` and packaged service templates under `services/`
 - Cargo registry distribution now has an explicit source-build/package-only
   decision: the release workflow skips Cargo registry publishing while
@@ -1201,6 +1211,7 @@ Remaining:
 - Tagged GitHub Release and GHCR image evidence for the public binary/container
   install channels
 - Actual installed systemd/launchd service smoke evidence on a clean machine
+  beyond the static `service-doctor` template and path checks
 
 ## Completion Audit Gate
 

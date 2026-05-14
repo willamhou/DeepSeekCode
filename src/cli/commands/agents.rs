@@ -9,8 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::cli::app::{
     AgentsAction, AgentsRlmCancelArgs, AgentsRlmDrainArgs, AgentsRlmEventsArgs,
     AgentsRlmRecoverArgs, AgentsRlmRunNextArgs, AgentsRlmStatusArgs, AgentsRlmStopArgs,
-    AgentsRlmWaitArgs, AgentsServiceArgs, AgentsServiceKind, AgentsShellAction, AgentsShellArgs,
-    AgentsShellSupervisorArgs,
+    AgentsRlmWaitArgs, AgentsServiceArgs, AgentsServiceDoctorArgs, AgentsServiceKind,
+    AgentsShellAction, AgentsShellArgs, AgentsShellSupervisorArgs,
 };
 use crate::config::load::load_or_default;
 use crate::config::types::AppConfig;
@@ -46,7 +46,7 @@ use crate::tools::types::{Tool, ToolInput};
 use crate::util::json::{
     json_as_array, json_as_object, json_as_string, json_as_u64, parse_json_value,
 };
-use crate::util::json::{json_value_to_string, JsonValue};
+use crate::util::json::{json_escape, json_value_to_string, JsonValue};
 
 pub fn run(action: AgentsAction) -> AppResult<()> {
     let config = load_or_default()?;
@@ -72,6 +72,7 @@ pub fn run(action: AgentsAction) -> AppResult<()> {
         AgentsAction::Shell(args) => run_shell_control(args),
         AgentsAction::ShellSupervisor(args) => run_shell_supervisor(args),
         AgentsAction::Service(args) => render_agent_services(args),
+        AgentsAction::ServiceDoctor(args) => run_service_doctor(args),
         AgentsAction::Threads => list_threads(&config.workspace.config_dir),
         AgentsAction::ShowThread { id } => show_thread(&config.workspace.config_dir, &id),
         AgentsAction::SwitchThread { id } => switch_thread(&config.workspace.config_dir, &id),
@@ -2211,6 +2212,530 @@ fn print_service_next_steps(kind: AgentsServiceKind, out: &Path) {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServiceDoctorCheck {
+    status: ServiceDoctorStatus,
+    name: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceDoctorStatus {
+    Ok,
+    Warn,
+    Blocker,
+}
+
+#[derive(Debug, Clone)]
+struct ServiceDoctorReport {
+    config: ServiceTemplateConfig,
+    checks: Vec<ServiceDoctorCheck>,
+}
+
+fn run_service_doctor(args: AgentsServiceDoctorArgs) -> AppResult<()> {
+    let json = args.json;
+    let config = service_template_config(AgentsServiceArgs {
+        kind: args.kind,
+        out: args.out,
+        bin: args.bin,
+        workdir: args.workdir,
+        addr: args.addr,
+        interval_ms: args.interval_ms,
+        budget: args.budget,
+    })?;
+    let report = build_service_doctor_report(config);
+    if json {
+        println!("{}", render_service_doctor_json(&report));
+    } else {
+        print!("{}", render_service_doctor_text(&report));
+    }
+    if report.blocker_count() > 0 {
+        return Err(app_error(format!(
+            "service doctor found {} blocker(s)",
+            report.blocker_count()
+        )));
+    }
+    Ok(())
+}
+
+impl ServiceDoctorReport {
+    fn blocker_count(&self) -> usize {
+        self.checks
+            .iter()
+            .filter(|check| check.status == ServiceDoctorStatus::Blocker)
+            .count()
+    }
+
+    fn warning_count(&self) -> usize {
+        self.checks
+            .iter()
+            .filter(|check| check.status == ServiceDoctorStatus::Warn)
+            .count()
+    }
+}
+
+fn build_service_doctor_report(config: ServiceTemplateConfig) -> ServiceDoctorReport {
+    let templates = service_templates(&config);
+    let mut checks = Vec::new();
+
+    service_doctor_check_binary(&config, &mut checks);
+    service_doctor_check_workdir(&config, &mut checks);
+    service_doctor_check_template_topology(&config, &templates, &mut checks);
+    service_doctor_check_platform_tools(config.kind, &mut checks);
+    service_doctor_check_output_dir(&config, &templates, &mut checks);
+
+    ServiceDoctorReport { config, checks }
+}
+
+fn service_doctor_check_binary(
+    config: &ServiceTemplateConfig,
+    checks: &mut Vec<ServiceDoctorCheck>,
+) {
+    let binary = config.bin.trim();
+    if binary.is_empty() {
+        push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Blocker,
+            "binary",
+            "service binary is empty",
+        );
+        return;
+    }
+    if service_value_is_path(binary) {
+        let path = Path::new(binary);
+        if path.is_file() {
+            push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Ok,
+                "binary",
+                format!("binary path exists: {binary}"),
+            );
+        } else {
+            push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Blocker,
+                "binary",
+                format!("binary path is missing or not a file: {binary}"),
+            );
+        }
+    } else if command_on_path(binary) {
+        push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Ok,
+            "binary",
+            format!("binary command is on PATH: {binary}"),
+        );
+    } else {
+        push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Blocker,
+            "binary",
+            format!("binary command is not on PATH: {binary}"),
+        );
+    }
+}
+
+fn service_doctor_check_workdir(
+    config: &ServiceTemplateConfig,
+    checks: &mut Vec<ServiceDoctorCheck>,
+) {
+    let workdir = config.workdir.trim();
+    if workdir.is_empty() {
+        push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Blocker,
+            "workdir",
+            "service workdir is empty",
+        );
+        return;
+    }
+    let path = Path::new(workdir);
+    if path.is_dir() {
+        push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Ok,
+            "workdir",
+            format!("workspace directory exists: {workdir}"),
+        );
+    } else {
+        push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Blocker,
+            "workdir",
+            format!("workspace directory is missing or not a directory: {workdir}"),
+        );
+    }
+}
+
+fn service_doctor_check_template_topology(
+    config: &ServiceTemplateConfig,
+    templates: &[ServiceTemplate],
+    checks: &mut Vec<ServiceDoctorCheck>,
+) {
+    let expected = expected_service_template_paths(config.kind);
+    for path in &expected {
+        if templates.iter().any(|template| template.path == *path) {
+            push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Ok,
+                "template_set",
+                format!("template is rendered: {path}"),
+            );
+        } else {
+            push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Blocker,
+                "template_set",
+                format!("template is missing from render set: {path}"),
+            );
+        }
+    }
+
+    service_doctor_check_template_command(
+        templates,
+        "runtime_service",
+        "runtime",
+        &["serve", "--http"],
+        checks,
+    );
+    service_doctor_check_template_command(
+        templates,
+        "agents_service",
+        "agents",
+        &["agents", "daemon"],
+        checks,
+    );
+    service_doctor_check_template_command(
+        templates,
+        "diagnostics_service",
+        "diagnostics",
+        &["diagnostics", "--watch"],
+        checks,
+    );
+    service_doctor_check_template_command(
+        templates,
+        "shell_supervisor_service",
+        "shell-supervisor",
+        &["agents", "shell-supervisor", "--json"],
+        checks,
+    );
+}
+
+fn service_doctor_check_template_command(
+    templates: &[ServiceTemplate],
+    name: &str,
+    path_marker: &str,
+    tokens: &[&str],
+    checks: &mut Vec<ServiceDoctorCheck>,
+) {
+    let matching = templates
+        .iter()
+        .filter(|template| template.path.contains(path_marker))
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Blocker,
+            name,
+            format!("no template path contains `{path_marker}`"),
+        );
+        return;
+    }
+    if matching
+        .iter()
+        .all(|template| tokens.iter().all(|token| template.body.contains(token)))
+    {
+        push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Ok,
+            name,
+            format!("all {path_marker} templates contain {}", tokens.join(" ")),
+        );
+    } else {
+        push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Blocker,
+            name,
+            format!(
+                "one or more {path_marker} templates are missing {}",
+                tokens.join(" ")
+            ),
+        );
+    }
+}
+
+fn service_doctor_check_platform_tools(
+    kind: AgentsServiceKind,
+    checks: &mut Vec<ServiceDoctorCheck>,
+) {
+    if matches!(kind, AgentsServiceKind::Systemd | AgentsServiceKind::All) {
+        if command_on_path("systemctl") {
+            push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Ok,
+                "systemd",
+                "systemctl is on PATH",
+            );
+        } else {
+            push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Warn,
+                "systemd",
+                "systemctl is not on PATH; generated systemd files can still be reviewed",
+            );
+        }
+    }
+    if matches!(kind, AgentsServiceKind::Launchd | AgentsServiceKind::All) {
+        if command_on_path("launchctl") {
+            push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Ok,
+                "launchd",
+                "launchctl is on PATH",
+            );
+        } else {
+            push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Warn,
+                "launchd",
+                "launchctl is not on PATH; generated launchd files can still be reviewed",
+            );
+        }
+    }
+}
+
+fn service_doctor_check_output_dir(
+    config: &ServiceTemplateConfig,
+    templates: &[ServiceTemplate],
+    checks: &mut Vec<ServiceDoctorCheck>,
+) {
+    let Some(out) = config.out.as_ref() else {
+        push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Ok,
+            "output",
+            "no --out directory supplied; on-disk template comparison skipped",
+        );
+        return;
+    };
+    if !out.is_dir() {
+        push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Blocker,
+            "output",
+            format!("service output directory is missing: {}", out.display()),
+        );
+        return;
+    }
+
+    for template in templates {
+        let path = out.join(template.path);
+        match std::fs::read_to_string(&path) {
+            Ok(content) if content == template.body => push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Ok,
+                "output",
+                format!(
+                    "generated template matches current render: {}",
+                    path.display()
+                ),
+            ),
+            Ok(_) => push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Blocker,
+                "output",
+                format!("generated template is stale or differs: {}", path.display()),
+            ),
+            Err(error) => push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Blocker,
+                "output",
+                format!(
+                    "generated template is missing or unreadable: {}: {error}",
+                    path.display()
+                ),
+            ),
+        }
+    }
+
+    let guide_path = out.join("SERVICES.md");
+    match std::fs::read_to_string(&guide_path) {
+        Ok(content)
+            if content.contains("DeepSeekCode Service Lifecycle")
+                && content.contains(&config.bin)
+                && content.contains(&config.workdir) =>
+        {
+            push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Ok,
+                "output",
+                format!(
+                    "SERVICES.md matches target metadata: {}",
+                    guide_path.display()
+                ),
+            );
+        }
+        Ok(_) => push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Blocker,
+            "output",
+            format!(
+                "SERVICES.md is stale or missing target metadata: {}",
+                guide_path.display()
+            ),
+        ),
+        Err(error) => push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Blocker,
+            "output",
+            format!(
+                "SERVICES.md is missing or unreadable: {}: {error}",
+                guide_path.display()
+            ),
+        ),
+    }
+}
+
+fn push_service_doctor_check(
+    checks: &mut Vec<ServiceDoctorCheck>,
+    status: ServiceDoctorStatus,
+    name: impl Into<String>,
+    message: impl Into<String>,
+) {
+    checks.push(ServiceDoctorCheck {
+        status,
+        name: name.into(),
+        message: message.into(),
+    });
+}
+
+fn expected_service_template_paths(kind: AgentsServiceKind) -> Vec<&'static str> {
+    let mut paths = Vec::new();
+    if matches!(kind, AgentsServiceKind::Systemd | AgentsServiceKind::All) {
+        paths.extend([
+            "systemd/deepseek-runtime.service",
+            "systemd/deepseek-agents.service",
+            "systemd/deepseek-diagnostics.service",
+            "systemd/deepseek-shell-supervisor.service",
+        ]);
+    }
+    if matches!(kind, AgentsServiceKind::Launchd | AgentsServiceKind::All) {
+        paths.extend([
+            "launchd/com.deepseek.runtime.plist",
+            "launchd/com.deepseek.agents.plist",
+            "launchd/com.deepseek.diagnostics.plist",
+            "launchd/com.deepseek.shell-supervisor.plist",
+        ]);
+    }
+    paths
+}
+
+fn service_value_is_path(value: &str) -> bool {
+    value.contains('/') || value.contains('\\')
+}
+
+fn command_on_path(command: &str) -> bool {
+    if command.trim().is_empty() || service_value_is_path(command) {
+        return false;
+    }
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| {
+        let candidate = dir.join(command);
+        if candidate.is_file() {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            let exe = dir.join(format!("{command}.exe"));
+            if exe.is_file() {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+fn render_service_doctor_text(report: &ServiceDoctorReport) -> String {
+    let mut out = String::new();
+    out.push_str("DeepSeekCode service doctor\n");
+    out.push_str(&format!(
+        "  kind: {}\n",
+        service_kind_label(report.config.kind)
+    ));
+    out.push_str(&format!("  binary: {}\n", report.config.bin));
+    out.push_str(&format!("  workdir: {}\n", report.config.workdir));
+    out.push_str(&format!("  runtime_addr: {}\n", report.config.addr));
+    if let Some(out_dir) = &report.config.out {
+        out.push_str(&format!("  output: {}\n", out_dir.display()));
+    }
+    out.push('\n');
+    for check in &report.checks {
+        out.push_str(&format!(
+            "[{}] {}: {}\n",
+            service_doctor_status_label(check.status),
+            check.name,
+            check.message
+        ));
+    }
+    out.push_str(&format!(
+        "\nsummary: {} blocker(s), {} warning(s)\n",
+        report.blocker_count(),
+        report.warning_count()
+    ));
+    out
+}
+
+fn render_service_doctor_json(report: &ServiceDoctorReport) -> String {
+    let out = report
+        .config
+        .out
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let checks = report
+        .checks
+        .iter()
+        .map(|check| {
+            format!(
+                "{{\"status\":\"{}\",\"name\":\"{}\",\"message\":\"{}\"}}",
+                service_doctor_status_label(check.status),
+                json_escape(&check.name),
+                json_escape(&check.message)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"kind\":\"deepseek.agents.service_doctor.v1\",\"service_kind\":\"{}\",\"binary\":\"{}\",\"workdir\":\"{}\",\"runtime_addr\":\"{}\",\"output_dir\":\"{}\",\"blockers\":{},\"warnings\":{},\"checks\":[{}]}}",
+        service_kind_label(report.config.kind),
+        json_escape(&report.config.bin),
+        json_escape(&report.config.workdir),
+        json_escape(&report.config.addr),
+        json_escape(&out),
+        report.blocker_count(),
+        report.warning_count(),
+        checks
+    )
+}
+
+fn service_kind_label(kind: AgentsServiceKind) -> &'static str {
+    match kind {
+        AgentsServiceKind::Systemd => "systemd",
+        AgentsServiceKind::Launchd => "launchd",
+        AgentsServiceKind::All => "all",
+    }
+}
+
+fn service_doctor_status_label(status: ServiceDoctorStatus) -> &'static str {
+    match status {
+        ServiceDoctorStatus::Ok => "ok",
+        ServiceDoctorStatus::Warn => "warn",
+        ServiceDoctorStatus::Blocker => "blocker",
+    }
+}
+
 fn run_runtime_daemon_tick(
     config: &AppConfig,
     store: &RuntimeStore,
@@ -4279,6 +4804,81 @@ mod tests {
         assert!(guide.contains("launchctl kickstart -k"));
         assert!(guide.contains("curl -fsS http://127.0.0.1:9876/v1/health"));
         assert!(guide.contains("/usr/local/bin/deepseek agents shell status --json"));
+    }
+
+    #[test]
+    fn service_doctor_reports_generated_service_health() {
+        let workdir = temp_root("service-doctor-workdir");
+        let out = workdir.join("services");
+        let bin = std::env::current_exe().unwrap();
+        render_agent_services(AgentsServiceArgs {
+            kind: AgentsServiceKind::Systemd,
+            out: Some(out.display().to_string()),
+            bin: Some(bin.display().to_string()),
+            workdir: Some(workdir.display().to_string()),
+            addr: "127.0.0.1:9876".to_string(),
+            interval_ms: 750,
+            budget: Some(6),
+        })
+        .unwrap();
+
+        let report = build_service_doctor_report(ServiceTemplateConfig {
+            kind: AgentsServiceKind::Systemd,
+            out: Some(out.clone()),
+            bin: bin.display().to_string(),
+            workdir: workdir.display().to_string(),
+            addr: "127.0.0.1:9876".to_string(),
+            interval_ms: 750,
+            budget: Some(6),
+        });
+
+        assert_eq!(report.blocker_count(), 0, "{:?}", report.checks);
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "shell_supervisor_service"
+                && check.status == ServiceDoctorStatus::Ok));
+        let json = render_service_doctor_json(&report);
+        assert!(json.contains("\"kind\":\"deepseek.agents.service_doctor.v1\""));
+        assert!(json.contains("\"service_kind\":\"systemd\""));
+        assert!(json.contains("\"blockers\":0"));
+    }
+
+    #[test]
+    fn service_doctor_detects_stale_generated_template() {
+        let workdir = temp_root("service-doctor-stale");
+        let out = workdir.join("services");
+        let bin = std::env::current_exe().unwrap();
+        render_agent_services(AgentsServiceArgs {
+            kind: AgentsServiceKind::Systemd,
+            out: Some(out.display().to_string()),
+            bin: Some(bin.display().to_string()),
+            workdir: Some(workdir.display().to_string()),
+            addr: "127.0.0.1:9876".to_string(),
+            interval_ms: 750,
+            budget: None,
+        })
+        .unwrap();
+        std::fs::write(out.join("systemd/deepseek-runtime.service"), "stale").unwrap();
+
+        let report = build_service_doctor_report(ServiceTemplateConfig {
+            kind: AgentsServiceKind::Systemd,
+            out: Some(out.clone()),
+            bin: bin.display().to_string(),
+            workdir: workdir.display().to_string(),
+            addr: "127.0.0.1:9876".to_string(),
+            interval_ms: 750,
+            budget: None,
+        });
+
+        assert!(report.blocker_count() >= 1, "{:?}", report.checks);
+        assert!(report.checks.iter().any(|check| {
+            check.status == ServiceDoctorStatus::Blocker
+                && check.message.contains("stale or differs")
+        }));
+        let text = render_service_doctor_text(&report);
+        assert!(text.contains("[blocker] output"));
+        assert!(text.contains("summary:"));
     }
 
     #[test]
