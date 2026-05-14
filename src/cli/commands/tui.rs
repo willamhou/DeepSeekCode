@@ -38,9 +38,10 @@ use crate::core::hooks::HookEvent;
 use crate::core::instructions::init_project_instructions_at;
 use crate::core::loop_runtime::{
     preview_system_prompt_for_workspace, AgentApprovalDecision, AgentApprovalRequest,
-    AgentApprovalResolver, AgentCancelCheck, AgentLoop, AgentLoopOptions, AgentUserInputRequest,
-    AgentUserInputResolver, AgentUserInputResponse, RunResult, SharedAgentApprovalResolver,
-    SharedAgentCancelCheck, SharedAgentUserInputResolver, SystemPromptPreview, ToolEvent,
+    AgentApprovalResolver, AgentCancelCheck, AgentLoop, AgentLoopOptions, AgentRunEvents,
+    AgentUserInputRequest, AgentUserInputResolver, AgentUserInputResponse, RunResult,
+    SharedAgentApprovalResolver, SharedAgentCancelCheck, SharedAgentRunEvents,
+    SharedAgentUserInputResolver, SystemPromptPreview, ToolEvent,
 };
 use crate::core::rollback::{RestorePlan, RollbackStore, SnapshotRecord};
 use crate::core::runtime::{
@@ -6629,8 +6630,16 @@ fn run_tui_agent_turn(
         thread_id.clone(),
         assistant.id.clone(),
         assistant_item.id.clone(),
-        live_tx,
+        live_tx.clone(),
     );
+    let live_tool_result_count = Rc::new(RefCell::new(0_usize));
+    let run_events: SharedAgentRunEvents = Rc::new(RefCell::new(RuntimeToolRunEvents::new(
+        store.clone(),
+        thread_id.clone(),
+        assistant.id.clone(),
+        live_tx,
+        Rc::clone(&live_tool_result_count),
+    )));
     let translation_config = config.clone();
     let agent = AgentLoop::new(config);
     let mut context = TaskContext::new(prompt, None);
@@ -6649,6 +6658,7 @@ fn run_tui_agent_turn(
             )?,
             persist_session: false,
             stream_events: Some(Box::new(stream_events)),
+            run_events: Some(run_events),
             approval_resolver: Some(resolver),
             user_input_resolver: Some(user_input_resolver),
             cancel_check: Some(cancel_check),
@@ -6683,6 +6693,7 @@ fn run_tui_agent_turn(
         &mut result,
         translation_target_for_result.as_deref(),
     );
+    let live_tool_results = *live_tool_result_count.borrow();
     record_tui_agent_result_into(
         &store,
         &thread_id,
@@ -6691,6 +6702,7 @@ fn run_tui_agent_turn(
         Some(&running_task.id),
         &model,
         &result,
+        live_tool_results,
     )?;
     Ok(())
 }
@@ -6871,6 +6883,108 @@ impl RuntimeItemStream {
         if let Some(tx) = self.live_tx.as_ref() {
             let _ = tx.send(TuiLiveEvent::UpsertItem(TuiItem::from(item)));
         }
+    }
+}
+
+struct RuntimeToolRunEvents {
+    store: RuntimeStore,
+    thread_id: String,
+    turn_id: String,
+    live_tx: Option<Sender<TuiLiveEvent>>,
+    active_tool_call_item_id: Option<String>,
+    persisted_tool_results: Rc<RefCell<usize>>,
+}
+
+impl RuntimeToolRunEvents {
+    fn new(
+        store: RuntimeStore,
+        thread_id: String,
+        turn_id: String,
+        live_tx: Option<Sender<TuiLiveEvent>>,
+        persisted_tool_results: Rc<RefCell<usize>>,
+    ) -> Self {
+        Self {
+            store,
+            thread_id,
+            turn_id,
+            live_tx,
+            active_tool_call_item_id: None,
+            persisted_tool_results,
+        }
+    }
+
+    fn emit_live_item(&self, item: ItemRecord) {
+        if let Some(tx) = self.live_tx.as_ref() {
+            let _ = tx.send(TuiLiveEvent::UpsertItem(TuiItem::from(item)));
+        }
+    }
+
+    fn update_active_tool_call(
+        &self,
+        tool_name: &str,
+        input: &BTreeMap<String, String>,
+        status: &str,
+        permission: Option<(&str, &str)>,
+    ) {
+        let Some(item_id) = self.active_tool_call_item_id.as_deref() else {
+            return;
+        };
+        if let Ok(item) = self.store.update_item(
+            &self.thread_id,
+            item_id,
+            format_live_tool_call_item(tool_name, input, status, permission),
+            status.to_string(),
+        ) {
+            self.emit_live_item(item);
+        }
+    }
+}
+
+impl AgentRunEvents for RuntimeToolRunEvents {
+    fn on_tool_call(&mut self, tool_name: &str, input: &BTreeMap<String, String>) {
+        match self.store.append_item(
+            &self.thread_id,
+            Some(&self.turn_id),
+            "tool_call".to_string(),
+            Some("tool".to_string()),
+            format_live_tool_call_item(tool_name, input, "running", None),
+            "running".to_string(),
+        ) {
+            Ok(item) => {
+                self.active_tool_call_item_id = Some(item.id.clone());
+                self.emit_live_item(item);
+            }
+            Err(_) => {
+                self.active_tool_call_item_id = None;
+            }
+        }
+    }
+
+    fn on_permission_request(
+        &mut self,
+        tool_name: &str,
+        input: &BTreeMap<String, String>,
+        kind: &str,
+        target: &str,
+    ) {
+        self.update_active_tool_call(tool_name, input, "pending", Some((kind, target)));
+    }
+
+    fn on_tool_result(&mut self, event: &ToolEvent) {
+        let status = tool_item_status(event);
+        self.update_active_tool_call(&event.tool_name, &event.input, &status, None);
+        if let Ok(item) = self.store.append_item(
+            &self.thread_id,
+            Some(&self.turn_id),
+            "tool_result".to_string(),
+            Some("tool".to_string()),
+            format_tool_event(event),
+            status,
+        ) {
+            *self.persisted_tool_results.borrow_mut() += 1;
+            self.emit_live_item(item);
+        }
+        self.active_tool_call_item_id = None;
     }
 }
 
@@ -7080,6 +7194,7 @@ fn record_tui_agent_result(
         None,
         model,
         result,
+        0,
     )
 }
 
@@ -7091,6 +7206,7 @@ fn record_tui_agent_result_into(
     task_id: Option<&str>,
     model: &str,
     result: &RunResult,
+    already_persisted_tool_results: usize,
 ) -> AppResult<()> {
     let message = non_empty_agent_message(&result.final_message);
     store.update_turn(
@@ -7105,7 +7221,11 @@ fn record_tui_agent_result_into(
         message.clone(),
         "completed".to_string(),
     )?;
-    for event in &result.tool_events {
+    for event in result
+        .tool_events
+        .iter()
+        .skip(already_persisted_tool_results)
+    {
         store.append_item(
             thread_id,
             Some(assistant_turn_id),
@@ -7274,20 +7394,132 @@ fn format_tool_event(event: &ToolEvent) -> String {
         crate::model::protocol::ObservationStatus::Ok => "ok",
         crate::model::protocol::ObservationStatus::Failed => "failed",
     };
-    let input = if event.input.is_empty() {
-        "{}".to_string()
-    } else {
-        event
-            .input
-            .iter()
-            .map(|(key, value)| format!("{key}={value}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
+    let input = format_tool_input(&event.input);
     format!(
         "tool: {}\nstatus: {status}\ninput: {input}\n{}",
         event.tool_name, event.output
     )
+}
+
+fn format_live_tool_call_item(
+    tool_name: &str,
+    input: &BTreeMap<String, String>,
+    status: &str,
+    permission: Option<(&str, &str)>,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "tool: {tool_name}");
+    if let Some(target) = live_tool_target(tool_name, input) {
+        let _ = writeln!(out, "target: {target}");
+    }
+    let _ = writeln!(out, "status: {status}");
+    if let Some((kind, target)) = permission {
+        let _ = writeln!(out, "approval: {kind} {}", clip_cli_line(target, 120));
+    }
+    let _ = write!(out, "input: {}", format_tool_input(input));
+    out
+}
+
+fn live_tool_target(tool_name: &str, input: &BTreeMap<String, String>) -> Option<String> {
+    if matches!(tool_name, "run_shell" | "exec_shell" | "task_shell_start") {
+        return input
+            .get("command")
+            .map(|command| concise_shell_command_label(command, 100));
+    }
+    input
+        .get("path")
+        .or_else(|| input.get("target"))
+        .or_else(|| input.get("query"))
+        .map(|value| clip_cli_line(value, 100))
+}
+
+fn concise_shell_command_label(command: &str, max_chars: usize) -> String {
+    let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some(label) = concise_gh_command_label(&normalized) {
+        return clip_cli_line(&label, max_chars);
+    }
+    let segmented = normalized
+        .replace("&&", "\n")
+        .replace("||", "\n")
+        .replace('|', "\n");
+    let segment = segmented
+        .split(['\n', ';'])
+        .map(str::trim)
+        .find(|segment| {
+            !segment.is_empty()
+                && !segment.starts_with("cd ")
+                && !segment.starts_with("sleep ")
+                && !segment.starts_with("export ")
+                && *segment != "true"
+                && *segment != ":"
+        })
+        .unwrap_or(&normalized);
+    clip_cli_line(segment, max_chars)
+}
+
+fn concise_gh_command_label(command: &str) -> Option<String> {
+    let tokens = command
+        .split_whitespace()
+        .map(|token| {
+            token
+                .trim_matches(|ch: char| matches!(ch, '\'' | '"' | '(' | ')' | ';' | ','))
+                .to_string()
+        })
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    for index in 0..tokens.len() {
+        let token = tokens[index].as_str();
+        if token != "gh" && !token.ends_with("/gh") {
+            continue;
+        }
+        let Some(area) = tokens.get(index + 1).map(String::as_str) else {
+            continue;
+        };
+        let Some(action) = tokens.get(index + 2).map(String::as_str) else {
+            continue;
+        };
+        if !matches!(area, "pr" | "run")
+            || !matches!(
+                action,
+                "checks" | "view" | "status" | "list" | "watch" | "rerun"
+            )
+        {
+            continue;
+        }
+        let mut label = format!("gh {area} {action}");
+        if let Some(target) = tokens
+            .iter()
+            .skip(index + 3)
+            .map(String::as_str)
+            .find(|token| !token.starts_with('-') && *token != "&&" && *token != ";")
+        {
+            label.push(' ');
+            label.push_str(target);
+        }
+        return Some(label);
+    }
+    None
+}
+
+fn format_tool_input(input: &BTreeMap<String, String>) -> String {
+    if input.is_empty() {
+        "{}".to_string()
+    } else {
+        input
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn clip_cli_line(value: &str, max_chars: usize) -> String {
+    let line = value.lines().next().unwrap_or("").trim();
+    if line.chars().count() <= max_chars {
+        line.to_string()
+    } else {
+        format!("{}...", line.chars().take(max_chars).collect::<String>())
+    }
 }
 
 fn tool_item_status(event: &ToolEvent) -> String {
@@ -12356,6 +12588,154 @@ shell_allowlist = ["git diff"]
             TuiLiveEvent::UpsertItem(item)
                 if item.item_type == "reasoning" && item.content == "thinking"
         )));
+    }
+
+    #[test]
+    fn runtime_tool_run_events_persist_and_emit_live_tool_updates() {
+        let store = temp_store("tool-run-live");
+        let session = store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Runtime tools".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let turn = store
+            .append_turn(
+                &thread.id,
+                "assistant".to_string(),
+                "(assistant response running)".to_string(),
+            )
+            .unwrap();
+        let (tx, rx) = mpsc::channel();
+        let persisted = Rc::new(RefCell::new(0_usize));
+        let mut events = RuntimeToolRunEvents::new(
+            store.clone(),
+            thread.id.clone(),
+            turn.id.clone(),
+            Some(tx),
+            Rc::clone(&persisted),
+        );
+        let input = BTreeMap::from([(
+            "command".to_string(),
+            "cd /tmp/repo && sleep 15 && gh pr checks 1611 --repo Hmbown/DeepSeek-TUI".to_string(),
+        )]);
+
+        events.on_tool_call("run_shell", &input);
+        events.on_permission_request("run_shell", &input, "shell", "gh pr checks 1611");
+        events.on_tool_result(&ToolEvent {
+            tool_name: "run_shell".to_string(),
+            input: input.clone(),
+            output: "2 checks pending".to_string(),
+            status: crate::model::protocol::ObservationStatus::Ok,
+        });
+
+        assert_eq!(*persisted.borrow(), 1);
+        let items = store.list_items(&thread.id, Some(&turn.id)).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].item_type, "tool_call");
+        assert_eq!(items[0].status, "completed");
+        assert!(items[0].content.contains("target: gh pr checks 1611"));
+        assert!(!items[0].content.contains("target: cd /tmp"));
+        assert_eq!(items[1].item_type, "tool_result");
+        assert_eq!(items[1].status, "completed");
+        assert!(items[1].content.contains("tool: run_shell"));
+        assert!(items[1].content.contains("2 checks pending"));
+
+        let live_items = rx
+            .try_iter()
+            .filter_map(|event| match event {
+                TuiLiveEvent::UpsertItem(item) => Some(item),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(live_items.iter().any(|item| {
+            item.item_type == "tool_call"
+                && item.status == "running"
+                && item.content.contains("gh pr checks 1611")
+        }));
+        assert!(live_items.iter().any(|item| {
+            item.item_type == "tool_call"
+                && item.status == "pending"
+                && item.content.contains("approval: shell gh pr checks 1611")
+        }));
+        assert!(live_items
+            .iter()
+            .any(|item| item.item_type == "tool_result" && item.status == "completed"));
+    }
+
+    #[test]
+    fn record_tui_agent_result_skips_live_persisted_tool_results() {
+        let store = temp_store("agent-result-live-skip");
+        let session = store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Runtime agent".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let assistant = store
+            .append_turn(&thread.id, "assistant".to_string(), "running".to_string())
+            .unwrap();
+        let assistant_item = store
+            .append_item(
+                &thread.id,
+                Some(&assistant.id),
+                "message".to_string(),
+                Some("assistant".to_string()),
+                "".to_string(),
+                "running".to_string(),
+            )
+            .unwrap();
+        let mut usage = crate::model::protocol::TokenUsage::new(3, 4);
+        usage.model = Some("deepseek-v4-flash".to_string());
+        let result = RunResult {
+            final_message: "done from agent".to_string(),
+            tool_events: vec![
+                ToolEvent {
+                    tool_name: "run_shell".to_string(),
+                    input: BTreeMap::from([("command".to_string(), "pwd".to_string())]),
+                    output: "exit_code: 0".to_string(),
+                    status: crate::model::protocol::ObservationStatus::Ok,
+                },
+                ToolEvent {
+                    tool_name: "posthoc_translate".to_string(),
+                    input: BTreeMap::from([("target_language".to_string(), "Chinese".to_string())]),
+                    output: "translated".to_string(),
+                    status: crate::model::protocol::ObservationStatus::Ok,
+                },
+            ],
+            usage,
+        };
+
+        record_tui_agent_result_into(
+            &store,
+            &thread.id,
+            &assistant.id,
+            &assistant_item.id,
+            None,
+            "deepseek-coder",
+            &result,
+            1,
+        )
+        .unwrap();
+
+        let items = store.list_items(&thread.id, Some(&assistant.id)).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].item_type, "message");
+        assert_eq!(items[1].item_type, "tool_result");
+        assert!(!items[1].content.contains("tool: run_shell"));
+        assert!(items[1].content.contains("tool: posthoc_translate"));
     }
 
     #[test]

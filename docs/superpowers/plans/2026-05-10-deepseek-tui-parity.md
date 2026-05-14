@@ -35,7 +35,10 @@ absolute slash-prefixed filesystem paths such as `/usr/lib/...` as ordinary
 user messages while keeping registered path-like custom slash commands such as
 `/pr/fix` executable. Opening the TUI MCP manager now also refreshes MCP
 discovery/health output so the manager surface does not show stale server-tool
-state.
+state. TUI-started agent runs now also persist live `tool_call` items as tools
+begin, update them through pending approval and terminal statuses, and stream
+`tool_result` upserts without duplicating those results again at turn
+completion.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
 - native supervisor-owned PTY attach/stdin/resize/replay/wait/cancel polish and
