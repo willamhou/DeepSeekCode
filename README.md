@@ -7,9 +7,9 @@ workbench. It is built for the loop you actually use while programming:
 inspect a repository, edit files, run checks, review the result, and keep
 iterating from the same terminal.
 
-> Status: usable for dogfooding and repository work. It is not yet a polished
-> hosted product, and the native PTY supervisor/release channels are still in
-> progress.
+> Status: usable for dogfooding and repository work. `v0.1.0` has GitHub
+> Release binaries and a GHCR image; npm and Homebrew publishing still need
+> registry/tap credentials, and native PTY/product polish remains in progress.
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui.svg" alt="DeepSeekCode TUI demo snapshot" width="100%">
@@ -32,8 +32,8 @@ iterating from the same terminal.
 - RLM helpers for recursive/long-input analysis, model-session context, live
   queue status, event replay, cancellation, recovery, and drain controls.
 - LSP-backed and fallback diagnostics runners with JSON/JSONL watch output.
-- Release packaging scaffolding for Cargo, npm wrappers, Docker, Homebrew
-  formula rendering, and GitHub release assets.
+- Release assets for Linux x64, macOS x64, macOS arm64, and Windows x64,
+  plus a GHCR image and npm/Homebrew packaging metadata.
 
 ## Quick Start
 
@@ -43,6 +43,24 @@ Install from source:
 cargo install --git https://github.com/willamhou/DeepSeekCode.git --locked
 deepseek version
 deepseek doctor --json
+```
+
+Or download a release archive:
+
+```bash
+curl -L -o deepseek-linux-x64.tar.gz \
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.0/deepseek-linux-x64.tar.gz
+curl -L -o deepseek-linux-x64.tar.gz.sha256 \
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.0/deepseek-linux-x64.tar.gz.sha256
+shasum -a 256 -c deepseek-linux-x64.tar.gz.sha256
+tar -xzf deepseek-linux-x64.tar.gz
+./deepseek version
+```
+
+Or run the published container:
+
+```bash
+docker run --rm ghcr.io/willamhou/deepseekcode:0.1.0 version
 ```
 
 Or use a local checkout:
@@ -83,7 +101,7 @@ Claude Code CLI / Codex CLI polish. The largest remaining gaps are:
 
 - native supervisor-owned PTY attach/stdin/resize/replay/wait/cancel;
 - live external write-fixture validation across real repositories;
-- public release evidence for binary, npm, Homebrew, and container channels;
+- npm registry publishing and a Homebrew tap, both blocked on credentials;
 - product polish around onboarding, auth, model/provider setup, and demos.
 
 ## Demo Asset

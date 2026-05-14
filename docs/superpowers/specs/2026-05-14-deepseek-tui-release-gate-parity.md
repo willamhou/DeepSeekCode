@@ -8,9 +8,11 @@ Date: 2026-05-14
 DeepSeek-TUI has public release evidence for installable versions. On
 2026-05-14, `Hmbown/DeepSeek-TUI` reported latest release `v0.8.36`, public
 topics `cli`, `deepseek`, `llm`, `rust`, `terminal`, and `tui`, and a public
-Cargo/npm install story. DeepSeekCode is now public with matching core topics,
-but `willamhou/DeepSeekCode` still had no tagged GitHub Release, GHCR image,
-npm package, or Homebrew tap evidence.
+Cargo/npm install story. DeepSeekCode is now public with matching core topics.
+At the start of this work, `willamhou/DeepSeekCode` still had no tagged GitHub
+Release, GHCR image, npm package, or Homebrew tap evidence. The `v0.1.0`
+release now provides public GitHub Release assets and a GHCR image; npm and
+Homebrew remain blocked on registry/tap credentials.
 
 Before creating a public tag, the local release gate exposed a blocker:
 `cargo test` with default parallelism failed due existing process-global test
@@ -47,12 +49,15 @@ gate already used elsewhere is serial test execution.
   after the tag workflow queued indefinitely on `macos-13`.
 - Updated `docs/release.md` to use the same serial test command in the local
   release gate.
+- Published tag `v0.1.0` from commit
+  `2a270e7aae926e11d4cf4f7491ce6c18b66bfb29`.
 
 ## Verification
 
 - `cargo test` with default parallelism reproduced the release blocker:
   `1400 passed; 6 failed`.
-- `cargo test -- --test-threads=1`
+- `cargo test -- --test-threads=1` (`1407 passed`)
+- `cargo check --all-targets`
 - `cargo metadata --no-deps --format-version 1`
 - `cargo package --allow-dirty`
 - `node npm/scripts/check-version-sync.js`
@@ -73,15 +78,22 @@ gate already used elsewhere is serial test execution.
   - `cargo test handle_tui_action_renders_hooks_inventory --lib -- --test-threads=1`
 - `docker build -t deepseek-code:ci .`
 - `docker run --rm deepseek-code:ci version`
+- `gh run watch 25854373712 --repo willamhou/DeepSeekCode --interval 30 --exit-status`
+- `gh release view v0.1.0 --repo willamhou/DeepSeekCode`
+- `git ls-remote https://github.com/willamhou/DeepSeekCode.git HEAD`
+- `docker pull ghcr.io/willamhou/deepseekcode:0.1.0`
+- `docker run --rm ghcr.io/willamhou/deepseekcode:0.1.0 version`
+- `npm view @deepseek-code/cli version` returned `E404`, matching the release
+  workflow log line `NPM_TOKEN is not configured; skipping npm publish.`
 - Local Homebrew formula syntax smoke was not run because `ruby` is not
   installed in this workspace image; the GitHub-hosted release runner still
   performs `ruby -c packaging/homebrew/deepseek.rb`.
+- The `Publish Homebrew Tap` job skipped its tap write because
+  `HOMEBREW_TAP_REPOSITORY` and `HOMEBREW_TAP_TOKEN` were not configured.
 
 ## Remaining Gap
 
-This stabilizes the release gate, but it is not itself public release evidence.
-The next packaging step is to retag `v0.1.0`, let the release workflow publish
-GitHub Release assets and the GHCR image, then re-run `deepseek update
-publish-status --json` against downloaded artifacts. npm and Homebrew still
-require registry/tap credentials before they can match DeepSeek-TUI's public
-install channels.
+DeepSeekCode now has public source, release assets, and a runnable GHCR image.
+npm and Homebrew still require registry/tap credentials before they can match
+DeepSeek-TUI's public install channels. Cargo registry distribution remains
+source-only by policy because `Cargo.toml` has `publish = false`.
