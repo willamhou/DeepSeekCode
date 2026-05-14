@@ -161,8 +161,12 @@ Attach is an API-level terminal stream, not a full UI widget:
    - tests verify the native supervisor resize path and event log; an
      end-to-end `stty size` assertion inside the child PTY remains open
 5. Owner-exit integration:
-   - integration test that starts a supervised job through a short-lived CLI
-     process, exits the owner, then shows/waits/cancels through a new process
+   - integration test that starts the real shell-supervisor daemon, starts a
+     supervised native PTY job through one socket connection, drops that
+     connection, then replays/resizes/attaches/cancels through fresh socket
+     connections
+   - status: daemon/socket owner-exit smoke landed; restarted controller CLI
+     wrappers remain open
 6. Service packaging:
    - systemd/launchd templates can supervise the shell supervisor alongside
      runtime and diagnostics services
@@ -176,7 +180,7 @@ Future implementation should add these gates:
 - `cargo test exec_shell_supervisor_protocol --lib`
 - `cargo test exec_shell_supervisor_replay_terminal_events --lib`
 - `cargo test exec_shell_supervisor_resize_updates_tty_size --lib`
-- `cargo test exec_shell_supervisor_survives_owner_exit --test integration`
+- `cargo test --test shell_supervisor_owner_exit`
 - `cargo test serve --lib`
 - `cargo fmt --check`
 - `cargo check`
@@ -190,6 +194,6 @@ the first Linux `native-supervisor` PTY backend have landed. Normal
 `exec_shell tty=true` still uses `script`; shell-supervisor `tty=true` starts
 own a native PTY master, write `terminal-events.jsonl`, and support live
 `TIOCSWINSZ` resize through the in-process supervisor. Remaining hard slices
-are owner-exit integration tests against a separately launched daemon,
-streaming MCP/ACP attach frames, stronger child-observed resize verification,
-and Windows ConPTY.
+are restarted controller CLI wrappers, streaming MCP/ACP attach frames,
+stronger child-observed resize verification, service-manager lifecycle
+coverage, and Windows ConPTY.

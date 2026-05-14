@@ -271,8 +271,12 @@ Landed first slice:
   includes durable `.dscode/shell-jobs` inventory in `show` responses, can
   `start` safe workspace-contained `task_shell_start` background jobs owned by
   the supervisor process, and bridges wait/replay/attach/stdin/resize/cancel
-  control requests through the durable shell job tools; `deepseek agents service`
-  and packaged systemd/launchd templates include that shell-supervisor service;
+  control requests through the durable shell job tools; the
+  `shell_supervisor_owner_exit` integration test launches the real daemon,
+  starts a native PTY job through one socket connection, drops that connection,
+  then replays/resizes/attaches/cancels through fresh connections; `deepseek
+  agents service` and packaged systemd/launchd templates include that
+  shell-supervisor service;
   `exec_shell_supervisor_status` now probes socket health before reporting a
   daemon as ready, reads healthy daemon `status` active-job counts backed by
   durable shell manifests, refreshes the workspace supervisor manifest during

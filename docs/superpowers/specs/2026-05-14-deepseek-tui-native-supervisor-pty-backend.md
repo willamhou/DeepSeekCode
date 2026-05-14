@@ -28,6 +28,10 @@ instead of the short-lived command caller.
   supervisor jobs, while ordinary `script` jobs keep the prior `stty` fallback.
 - Ordinary `exec_shell tty=true` and `task_shell_start tty=true` outside the
   supervisor still use the conservative `script` backend.
+- A Linux integration test launches the real `deepseek agents shell-supervisor
+  --json` daemon, starts a native PTY job over one socket connection, drops that
+  connection, then uses fresh socket connections to replay, resize, attach, and
+  cancel the same job.
 
 ## Verification
 
@@ -37,6 +41,7 @@ instead of the short-lived command caller.
 - `cargo test task_shell_start_tty_uses_script_pty_backend --lib`
 - `cargo test exec_shell_replay_reads_terminal_event_log_by_cursor --lib`
 - `cargo test exec_shell_resize_updates_running_tty_geometry --lib`
+- `cargo test --test shell_supervisor_owner_exit`
 - `cargo fmt --check`
 - `cargo check`
 
@@ -44,9 +49,10 @@ instead of the short-lived command caller.
 
 This is not the final PTY parity endpoint. Still open:
 
-- owner-exit integration against a separately launched supervisor daemon;
+- broader service-manager lifecycle coverage for packaged systemd/launchd
+  supervisors and restarted controller CLIs;
 - streaming attach frames over MCP/ACP/HTTP instead of single-response replay;
 - child-observed resize verification such as `stty size` from inside the PTY;
-- detached native PTY control from a fresh process through the supervisor
-  socket;
+- user-facing CLI wrappers for detached native PTY control through the
+  supervisor socket, beyond the low-level protocol integration test;
 - Windows ConPTY.
