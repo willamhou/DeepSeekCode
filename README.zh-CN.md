@@ -100,7 +100,8 @@ Codex CLI 的产品成熟度。最大差距集中在：
 - 原生 supervisor-owned PTY 的 attach/stdin/resize/replay/wait/cancel；
 - 真实外部仓库上的 live write-fixture 验证；
 - npm registry 发布和 Homebrew tap，这两项还缺少对应凭据；
-- 完整交互式 onboarding、auth、model/provider 配置和更完整 demo 展示的产品化打磨。
+- API key/auth 凭据录入与持久化、比 guided `/setup` 更完整的 first-run wizard，
+  以及更真实的 model-backed demo 展示。
 
 ## Demo 素材
 

@@ -102,8 +102,8 @@ Claude Code CLI / Codex CLI polish. The largest remaining gaps are:
 - native supervisor-owned PTY attach/stdin/resize/replay/wait/cancel;
 - live external write-fixture validation across real repositories;
 - npm registry publishing and a Homebrew tap, both blocked on credentials;
-- product polish around full interactive onboarding, auth, model/provider setup,
-  and richer demos.
+- product polish around credential entry/persistence, a fuller first-run wizard
+  beyond guided `/setup`, and richer model-backed demos.
 
 ## Demo Asset
 
