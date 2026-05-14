@@ -578,6 +578,7 @@ pub enum TuiMcpDetailKind {
     Note,
     Subagents,
     Rlm,
+    Relay,
     Hooks,
     Goal,
     Anchor,
@@ -623,6 +624,7 @@ impl TuiMcpDetailKind {
             Self::Note => "note",
             Self::Subagents => "subagents",
             Self::Rlm => "rlm",
+            Self::Relay => "relay",
             Self::Hooks => "hooks",
             Self::Goal => "goal",
             Self::Anchor => "anchor",
@@ -668,6 +670,7 @@ impl TuiMcpDetailKind {
             Self::Note => "Note",
             Self::Subagents => "Subagents",
             Self::Rlm => "RLM",
+            Self::Relay => "Relay",
             Self::Hooks => "Hooks",
             Self::Goal => "Goal",
             Self::Anchor => "Anchor",
@@ -713,6 +716,7 @@ impl TuiMcpDetailKind {
             Self::Note => Self::Manager,
             Self::Subagents => Self::Manager,
             Self::Rlm => Self::Manager,
+            Self::Relay => Self::Manager,
             Self::Hooks => Self::Manager,
             Self::Goal => Self::Manager,
             Self::Anchor => Self::Manager,
@@ -758,6 +762,7 @@ impl TuiMcpDetailKind {
             Self::Note => Self::Manager,
             Self::Subagents => Self::Manager,
             Self::Rlm => Self::Manager,
+            Self::Relay => Self::Manager,
             Self::Hooks => Self::Manager,
             Self::Goal => Self::Manager,
             Self::Anchor => Self::Manager,
@@ -1013,6 +1018,12 @@ pub enum TuiSubagentsCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiRlmCommand {
     Start { max_depth: usize, target: String },
+    Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuiRelayCommand {
+    Create { focus: Option<String> },
     Help,
 }
 
@@ -1714,6 +1725,27 @@ fn parse_tui_rlm_command(line: &str) -> Option<Result<TuiRlmCommand, String>> {
     }))
 }
 
+fn parse_tui_relay_command(line: &str) -> Option<Result<TuiRelayCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/relay")
+        .or_else(|| strip_tui_command_prefix(trimmed, "relay"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "/batonpass"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "batonpass"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "/接力"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "接力"))?;
+    let focus = rest.trim();
+    if matches!(focus, "help" | "--help" | "-h") {
+        return Some(Ok(TuiRelayCommand::Help));
+    }
+    Some(Ok(TuiRelayCommand::Create {
+        focus: if focus.is_empty() {
+            None
+        } else {
+            Some(focus.to_string())
+        },
+    }))
+}
+
 fn parse_note_index_arg(value: &str) -> Option<usize> {
     value.parse::<usize>().ok().filter(|index| *index > 0)
 }
@@ -2091,6 +2123,13 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         description: "Ask the active agent to open a persistent RLM process.",
     },
     TuiHelpCommandInfo {
+        category: "Runtime Work",
+        name: "relay",
+        aliases: &["batonpass", "接力"],
+        usage: "/relay [focus]",
+        description: "Ask the active agent to write a compact session relay.",
+    },
+    TuiHelpCommandInfo {
         category: "Interaction",
         name: "note",
         aliases: &[],
@@ -2424,6 +2463,8 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "agent ",
     "rlm ",
     "recursive ",
+    "relay ",
+    "batonpass ",
     "note ",
     "note add ",
     "note list",
@@ -2596,6 +2637,9 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/agent ",
     "/rlm ",
     "/recursive ",
+    "/relay ",
+    "/batonpass ",
+    "/接力 ",
     "/note ",
     "/note add ",
     "/note list",
@@ -4972,6 +5016,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_relay_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.handle_relay_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = parse_tui_anchor_command(&content) {
                     match command {
                         Ok(command) => {
@@ -5617,6 +5674,15 @@ impl TuiApp {
         if let Some(command) = parse_tui_rlm_command(command) {
             match command {
                 Ok(command) => self.handle_rlm_command(command),
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_relay_command(command) {
+            match command {
+                Ok(command) => self.handle_relay_command(command),
                 Err(message) => {
                     self.status = message;
                 }
@@ -6580,7 +6646,7 @@ impl TuiApp {
             }
             ["cancel"] | ["stop"] => self.request_cancel_run(),
             ["help"] => {
-                self.status = "commands: mode plan|agent|yolo, diff, clear, goal [objective|clear], sessions [filter], threads [filter], agent [N] <task>, subagents, rlm [N] <file_or_text>, task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], anchor [text|list|remove], queue [list|edit|drop|clear], share, export [path], mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
+                self.status = "commands: mode plan|agent|yolo, diff, clear, goal [objective|clear], sessions [filter], threads [filter], agent [N] <task>, subagents, rlm [N] <file_or_text>, relay [focus], task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], anchor [text|list|remove], queue [list|edit|drop|clear], share, export [path], mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
             }
             _ => {
                 self.status = format!("unknown command: {command}");
@@ -7431,6 +7497,132 @@ impl TuiApp {
         } else {
             format!("`content: {target:?}`")
         }
+    }
+
+    fn handle_relay_command(&mut self, command: TuiRelayCommand) {
+        match command {
+            TuiRelayCommand::Create { focus } => {
+                self.request_session_relay(focus);
+            }
+            TuiRelayCommand::Help => {
+                self.set_mcp_detail(TuiMcpDetailKind::Relay, self.render_relay_help_detail());
+                self.status = "relay help shown".to_string();
+            }
+        }
+    }
+
+    fn request_session_relay(&mut self, focus: Option<String>) {
+        let Some(thread_id) = self.selected_thread_id.clone() else {
+            self.status = "no active durable thread for relay".to_string();
+            return;
+        };
+        let content = self.render_relay_user_message(focus.as_deref());
+        self.pending_actions.push(TuiAction::SubmitUserMessage {
+            thread_id: thread_id.clone(),
+            content,
+        });
+        self.status = match focus
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(focus) => format!(
+                "relay request queued for {thread_id}: {}",
+                clip_line(focus, 60)
+            ),
+            None => format!("relay request queued for {thread_id}"),
+        };
+    }
+
+    fn render_relay_help_detail(&self) -> String {
+        let mut detail = String::new();
+        let _ = writeln!(detail, "DeepSeekCode Relay");
+        let _ = writeln!(detail, "==================");
+        let _ = writeln!(detail);
+        match self.active_thread() {
+            Some(thread) => {
+                push_status_row(
+                    &mut detail,
+                    "Thread:",
+                    &format!("{} [{}]", thread.title, thread.id),
+                );
+            }
+            None => {
+                let _ = writeln!(detail, "No active durable thread selected.");
+            }
+        }
+        if let Some(session) = self.selected_session() {
+            push_status_row(&mut detail, "Workspace:", &session.workspace);
+        }
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Usage");
+        let _ = writeln!(detail, "-----");
+        let _ = writeln!(detail, "- /relay [focus]     Write a compact handoff brief");
+        let _ = writeln!(detail, "- /batonpass [focus] Alias for /relay");
+        let _ = writeln!(detail, "- /接力 [focus]       Alias for /relay");
+        let _ = writeln!(detail);
+        let _ = writeln!(
+            detail,
+            "The relay target is `.dscode/handoff.md`, DeepSeekCode's equivalent of DeepSeek-TUI's `.deepseek/handoff.md`."
+        );
+        detail
+    }
+
+    fn render_relay_user_message(&self, focus: Option<&str>) -> String {
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "Create a compact session relay (接力) for a future DeepSeekCode thread."
+        );
+        let _ = writeln!(out);
+        let _ = writeln!(out, "Write or update `.dscode/handoff.md`.");
+        let _ = writeln!(
+            out,
+            "This is DeepSeekCode's equivalent of DeepSeek-TUI's `.deepseek/handoff.md`; title the artifact `# Session relay`."
+        );
+        let _ = writeln!(out);
+        let _ = writeln!(out, "Current session snapshot:");
+        if let Some(session) = self.selected_session() {
+            let _ = writeln!(out, "- Workspace: {}", session.workspace);
+            let _ = writeln!(out, "- Session: {} [{}]", session.title, session.id);
+        }
+        if let Some(thread) = self.active_thread() {
+            let _ = writeln!(out, "- Thread: {} [{}]", thread.title, thread.id);
+            let _ = writeln!(out, "- Thread mode: {}", thread.mode);
+        }
+        let _ = writeln!(out, "- TUI mode: {}", self.mode.title());
+        if let Some(focus) = focus.map(str::trim).filter(|value| !value.is_empty()) {
+            let _ = writeln!(out, "- Requested relay focus: {focus}");
+        }
+        if let Some(goal) = self.goal_objective.as_deref() {
+            let _ = writeln!(out, "- Goal: {goal}");
+        }
+        if let Some(budget) = self.goal_token_budget {
+            let _ = writeln!(out, "- Goal token budget: {budget}");
+        }
+        let tasks = self.active_thread_tasks();
+        if !tasks.is_empty() {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "Active-thread tasks:");
+            for task in tasks.into_iter().take(8) {
+                let _ = writeln!(
+                    out,
+                    "- {} [{}] {}",
+                    task.id,
+                    task.status,
+                    clip_line(&task.summary, 120)
+                );
+            }
+        }
+        let _ = writeln!(
+            out,
+            "\nBefore writing, inspect the current transcript context and any live tool evidence you need. Do not invent test results, file changes, blockers, or decisions."
+        );
+        let _ = writeln!(
+            out,
+            "\nUse this compact structure:\n# Session relay\n\n## Goal\n[the user's objective and explicit constraints]\n\n## Current work\n[what is mid-flight and what changed recently]\n\n## Evidence\n[commands, tests, files, commits, or links actually observed]\n\n## Open blockers\n[unknowns, failures, or risks]\n\n## Next steps\n[the shortest actionable continuation path]"
+        );
+        out
     }
 
     fn request_anchor_command(&mut self, command: TuiAnchorCommand) {
@@ -14936,6 +15128,53 @@ mod tests {
         assert!(detail.contains("/rlm [0-3] <file_or_text>"));
         assert!(detail.contains("/recursive [0-3] <file_or_text>"));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn relay_command_queues_session_handoff_prompt() {
+        let mut app = app_with_runtime_tasks(vec![runtime_task(
+            "task-relay",
+            "running",
+            "finish relay command parity",
+            "epoch+2",
+        )]);
+        app.goal_objective = Some("Close DeepSeek-TUI relay gap".to_string());
+        app.goal_token_budget = Some(2000);
+
+        run_palette_command(&mut app, "relay verify install");
+        let actions = app.drain_actions();
+        assert_eq!(actions.len(), 1);
+        let TuiAction::SubmitUserMessage { thread_id, content } = &actions[0] else {
+            panic!("expected relay submit action");
+        };
+        assert_eq!(thread_id, "thread-one");
+        assert!(content.contains("session relay"));
+        assert!(content.contains("接力"));
+        assert!(content.contains("Write or update `.dscode/handoff.md`"));
+        assert!(content.contains("Requested relay focus: verify install"));
+        assert!(content.contains("Goal: Close DeepSeek-TUI relay gap"));
+        assert!(content.contains("task-relay [running] finish relay command parity"));
+        assert!(content.contains("# Session relay"));
+
+        app.composer_focused = true;
+        app.composer = "/接力 next hand".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        let actions = app.drain_actions();
+        let TuiAction::SubmitUserMessage { content, .. } = &actions[0] else {
+            panic!("expected relay alias submit action");
+        };
+        assert!(content.contains("Requested relay focus: next hand"));
+        assert_eq!(app.composer, "");
+
+        app.composer_focused = true;
+        app.composer = "/batonpass help".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        let (kind, detail) = app.mcp_detail.as_ref().expect("relay help detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Relay);
+        assert!(detail.contains("/relay [focus]"));
+        assert!(detail.contains("/接力 [focus]"));
     }
 
     #[test]

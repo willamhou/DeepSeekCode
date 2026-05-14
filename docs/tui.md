@@ -28,6 +28,8 @@ Current surfaces:
 - persistent RLM process kickoff with `rlm [0-3] <file_or_text>` / `/rlm`,
   plus `recursive` / `/recursive` aliases, routed through the active thread
   as an `rlm_process live=true` agent instruction
+- session relay kickoff with `relay [focus]` / `/relay`, `batonpass`, and
+  `接力`, asking the active agent to write `.dscode/handoff.md`
 - hook inspection with `hooks` / `/hooks`, including `hooks list` and
   `hooks events` over the configured project/user hook roots
 - composer and command palette custom slash commands from project
@@ -334,6 +336,9 @@ Command palette commands currently implemented:
 | `rlm [0-3] <file_or_text>`, `/rlm [0-3] <file_or_text>` | Ask the active agent to open a persistent `rlm_process live=true` session; omitted depth defaults to `1` |
 | `recursive [0-3] <file_or_text>`, `/recursive [0-3] <file_or_text>` | Alias for `rlm` / `/rlm` |
 | `rlm help`, `/rlm help` | Show RLM command behavior and active thread/workspace target |
+| `relay [focus]`, `/relay [focus]` | Ask the active agent to write a compact session relay to `.dscode/handoff.md` |
+| `batonpass [focus]`, `/batonpass [focus]`, `接力 [focus]`, `/接力 [focus]` | Aliases for `relay` / `/relay` |
+| `relay help`, `/batonpass help` | Show relay command behavior and active thread/workspace target |
 | `shell <command>`, `shell run <command>`, `! <command>` | Start an allowlisted local background shell job, or request foreground approval for an unallowlisted command |
 | `shell list`, `jobs list` | List known local background shell jobs |
 | `shell show <id>`, `jobs show <id>` | Show a shell job snapshot with accumulated output |

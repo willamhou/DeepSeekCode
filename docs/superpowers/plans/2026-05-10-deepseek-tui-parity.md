@@ -398,6 +398,9 @@ Landed first slice:
   `/recursive` aliases, routing a persistent `rlm_process live=true` kickoff
   prompt through the active durable thread so local and HTTP runtime sessions
   share the existing message-submit path
+- TUI now supports DeepSeek-TUI-style `/relay [focus]` plus `/batonpass` and
+  `/接力` aliases, routing a session-handoff prompt through the active durable
+  thread and targeting DeepSeekCode's `.dscode/handoff.md` relay artifact
 - local file-backed TUI now supports DeepSeek-TUI-style `/hooks` read-only
   inspection, listing the configured hook enabled state, timeout, project/user
   hook roots, executable scripts by event directory, and supported event names
