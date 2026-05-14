@@ -836,6 +836,9 @@ fn handle_tui_http_action(
         TuiAction::SaveSession { .. } => {
             app.set_status("save commands require local file-backed TUI".to_string());
         }
+        TuiAction::PruneSessions { .. } => {
+            app.set_status("session prune requires local file-backed TUI".to_string());
+        }
         TuiAction::LoadSession { .. } => {
             app.set_status("load commands require local file-backed TUI".to_string());
         }
@@ -2334,6 +2337,9 @@ fn handle_tui_action_with_live(
         } => {
             run_tui_save_session(store, app, &session_id, &thread_id, path.as_deref())?;
         }
+        TuiAction::PruneSessions { days } => {
+            run_tui_prune_sessions(store, app, days)?;
+        }
         TuiAction::LoadSession { workspace, path } => {
             run_tui_load_session(store, app, &workspace, &path)?;
         }
@@ -3567,6 +3573,22 @@ fn run_tui_save_session(
             items.len()
         ),
     );
+    Ok(())
+}
+
+fn run_tui_prune_sessions(store: &RuntimeStore, app: &mut TuiApp, days: u64) -> AppResult<()> {
+    let max_age = Duration::from_secs(days.saturating_mul(24 * 60 * 60));
+    let summary = store.prune_sessions_older_than(max_age)?;
+    refresh_app_from_store(store, app)?;
+    if summary.sessions == 0 {
+        app.set_status(format!("no sessions older than {days}d to prune"));
+    } else {
+        app.set_status(format!(
+            "pruned {} session{} older than {days}d",
+            summary.sessions,
+            if summary.sessions == 1 { "" } else { "s" }
+        ));
+    }
     Ok(())
 }
 
@@ -6569,6 +6591,11 @@ description = "Review pull requests."
             .unwrap()
             .contains("save commands require local file-backed TUI"));
 
+        handle_tui_http_action(&client, &mut app, TuiAction::PruneSessions { days: 30 }).unwrap();
+        assert!(render_once(&app, 120, 36)
+            .unwrap()
+            .contains("session prune requires local file-backed TUI"));
+
         handle_tui_http_action(
             &client,
             &mut app,
@@ -8878,6 +8905,56 @@ shell_allowlist = ["git diff"]
         assert!(render_once(&app, 160, 48)
             .unwrap()
             .contains("Load complete"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handle_tui_action_prunes_old_sessions() {
+        let root = temp_root("prune-sessions");
+        fs::create_dir_all(&root).unwrap();
+        let store = RuntimeStore::new(root.join(".dscode/runtime"));
+        let old_session = store
+            .create_session("Old work".to_string(), root.display().to_string())
+            .unwrap();
+        store
+            .create_thread_for_session(
+                &old_session.id,
+                "Old thread".to_string(),
+                root.display().to_string(),
+                "deepseek-v4-pro".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let fresh_session = store
+            .create_session("Fresh work".to_string(), root.display().to_string())
+            .unwrap();
+        let mut old_session_record = store.load_session(&old_session.id).unwrap();
+        old_session_record.updated_at = "epoch+1".to_string();
+        fs::write(
+            store
+                .root()
+                .join("sessions")
+                .join(format!("{}.json", old_session_record.id)),
+            json_value_to_string(&session_to_json(&old_session_record)),
+        )
+        .unwrap();
+        let mut app = app_from_store(&store).unwrap();
+
+        handle_tui_action(&store, None, &mut app, TuiAction::PruneSessions { days: 1 }).unwrap();
+
+        assert!(render_once(&app, 160, 48)
+            .unwrap()
+            .contains("pruned 1 session older than 1d"));
+        let sessions = store.list_sessions(20).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, fresh_session.id);
+
+        handle_tui_action(&store, None, &mut app, TuiAction::PruneSessions { days: 1 }).unwrap();
+
+        assert!(render_once(&app, 160, 48)
+            .unwrap()
+            .contains("no sessions older than 1d to prune"));
 
         let _ = fs::remove_dir_all(root);
     }

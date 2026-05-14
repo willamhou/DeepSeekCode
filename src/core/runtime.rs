@@ -4,7 +4,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::{app_error, AppResult};
 use crate::util::json::{
@@ -143,6 +143,14 @@ pub struct ThreadForkRecord {
     pub event: RuntimeEvent,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionPruneSummary {
+    pub sessions: usize,
+    pub threads: usize,
+    pub tasks: usize,
+    pub automations: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeStore {
     root: PathBuf,
@@ -170,6 +178,22 @@ fn write_json_file(path: PathBuf, content: String) -> AppResult<()> {
         error
     })?;
     Ok(())
+}
+
+fn remove_file_if_exists(path: PathBuf) -> AppResult<()> {
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn remove_dir_all_if_exists(path: PathBuf) -> AppResult<()> {
+    match fs::remove_dir_all(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 impl RuntimeStore {
@@ -237,6 +261,54 @@ impl RuntimeStore {
         session.updated_at = epoch_label();
         self.write_session(&session)?;
         Ok(session)
+    }
+
+    pub fn prune_sessions_older_than(&self, max_age: Duration) -> AppResult<SessionPruneSummary> {
+        let _write_guard = runtime_write_lock()
+            .lock()
+            .map_err(|_| app_error("runtime prune lock is poisoned"))?;
+        let now = current_epoch_seconds();
+        let cutoff = now.saturating_sub(max_age.as_secs());
+        let sessions = self.list_sessions(usize::MAX)?;
+        let mut summary = SessionPruneSummary::default();
+
+        for session in sessions {
+            validate_record_id(&session.id)?;
+            let Some(updated_at) = epoch_label_seconds(&session.updated_at) else {
+                continue;
+            };
+            if updated_at >= cutoff {
+                continue;
+            }
+            let threads = self.list_session_threads(&session.id, usize::MAX)?;
+            let tasks = self.list_tasks(Some(&session.id), None, usize::MAX)?;
+            let automations = self.list_automations(Some(&session.id), None, usize::MAX)?;
+
+            for thread in &threads {
+                validate_record_id(&thread.id)?;
+                remove_dir_all_if_exists(self.turns_dir(&thread.id))?;
+                remove_dir_all_if_exists(self.items_dir(&thread.id))?;
+                remove_dir_all_if_exists(self.usage_dir(&thread.id))?;
+                remove_file_if_exists(self.events_path(&thread.id))?;
+                remove_file_if_exists(self.thread_path(&thread.id))?;
+            }
+            for task in &tasks {
+                validate_record_id(&task.id)?;
+                remove_file_if_exists(self.task_path(&task.id))?;
+            }
+            for automation in &automations {
+                validate_record_id(&automation.id)?;
+                remove_file_if_exists(self.automation_path(&automation.id))?;
+            }
+            remove_file_if_exists(self.session_path(&session.id))?;
+
+            summary.sessions += 1;
+            summary.threads += threads.len();
+            summary.tasks += tasks.len();
+            summary.automations += automations.len();
+        }
+
+        Ok(summary)
     }
 
     pub fn create_thread(
@@ -3220,11 +3292,18 @@ fn object<const N: usize>(items: [(&str, JsonValue); N]) -> BTreeMap<String, Jso
 }
 
 fn epoch_label() -> String {
-    let secs = SystemTime::now()
+    format!("epoch+{}", current_epoch_seconds())
+}
+
+fn current_epoch_seconds() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    format!("epoch+{secs}")
+        .unwrap_or(0)
+}
+
+fn epoch_label_seconds(label: &str) -> Option<u64> {
+    label.strip_prefix("epoch+")?.parse().ok()
 }
 
 fn new_id(prefix: &str) -> String {
@@ -4198,6 +4277,93 @@ mod tests {
         assert_eq!(session_threads.len(), 1);
         assert_eq!(session_threads[0].id, thread.id);
         assert_eq!(store.list_sessions(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn prunes_old_sessions_and_linked_runtime_records() {
+        let store = RuntimeStore::new(temp_root("prune"));
+        let old_session = store
+            .create_session("Old work".to_string(), ".".to_string())
+            .unwrap();
+        let old_thread = store
+            .create_thread_for_session(
+                &old_session.id,
+                "Old thread".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let old_turn = store
+            .append_turn(&old_thread.id, "user".to_string(), "hello".to_string())
+            .unwrap();
+        store
+            .append_item(
+                &old_thread.id,
+                Some(&old_turn.id),
+                "message".to_string(),
+                Some("user".to_string()),
+                "hello".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        store
+            .append_usage(
+                &old_thread.id,
+                Some(&old_turn.id),
+                "deepseek-coder".to_string(),
+                "test".to_string(),
+                10,
+                5,
+            )
+            .unwrap();
+        store
+            .create_task(
+                Some(&old_session.id),
+                Some(&old_thread.id),
+                None,
+                "agent".to_string(),
+                "pending".to_string(),
+                "old task".to_string(),
+            )
+            .unwrap();
+        store
+            .create_automation(
+                Some(&old_session.id),
+                Some(&old_thread.id),
+                "old automation".to_string(),
+                "active".to_string(),
+                "manual".to_string(),
+                "run".to_string(),
+                None,
+                None,
+            )
+            .unwrap();
+        let fresh_session = store
+            .create_session("Fresh work".to_string(), ".".to_string())
+            .unwrap();
+
+        let mut old_session_record = store.load_session(&old_session.id).unwrap();
+        old_session_record.updated_at = "epoch+1".to_string();
+        store.write_session(&old_session_record).unwrap();
+
+        let summary = store
+            .prune_sessions_older_than(Duration::from_secs(24 * 60 * 60))
+            .unwrap();
+
+        assert_eq!(summary.sessions, 1);
+        assert_eq!(summary.threads, 1);
+        assert_eq!(summary.tasks, 1);
+        assert_eq!(summary.automations, 1);
+        assert!(store.load_session(&old_session.id).is_err());
+        assert!(store.load_thread(&old_thread.id).is_err());
+        assert!(store.list_turns(&old_thread.id).unwrap().is_empty());
+        assert!(store.list_items(&old_thread.id, None).unwrap().is_empty());
+        assert!(store
+            .list_usage(Some(&old_thread.id), 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.list_sessions(10).unwrap()[0].id, fresh_session.id);
     }
 
     #[test]

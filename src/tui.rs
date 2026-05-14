@@ -1194,6 +1194,7 @@ pub enum TuiTranslationCommand {
 pub enum TuiSessionsCommand {
     Show,
     Filter { query: String },
+    Prune { days: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1398,6 +1399,15 @@ fn parse_tui_sessions_command(line: &str) -> Option<Result<TuiSessionsCommand, S
     let args = rest.split_whitespace().collect::<Vec<_>>();
     match args.as_slice() {
         [] | ["show" | "list" | "open"] => Some(Ok(TuiSessionsCommand::Show)),
+        ["prune"] => Some(Err(
+            "usage: sessions prune <days> or /sessions prune <days>".to_string(),
+        )),
+        ["prune", days] => match days.parse::<u64>() {
+            Ok(days) if days > 0 => Some(Ok(TuiSessionsCommand::Prune { days })),
+            _ => Some(Err(format!(
+                "expected a positive integer number of days, got `{days}`"
+            ))),
+        },
         ["filter"] => Some(Ok(TuiSessionsCommand::Filter {
             query: String::new(),
         })),
@@ -1405,7 +1415,7 @@ fn parse_tui_sessions_command(line: &str) -> Option<Result<TuiSessionsCommand, S
             query: query.join(" "),
         })),
         _ => Some(Err(
-            "usage: sessions [filter <query>], resume, /sessions [filter <query>], or /resume"
+            "usage: sessions [show|filter <query>|prune <days>], resume, /sessions [show|filter <query>|prune <days>], or /resume"
                 .to_string(),
         )),
     }
@@ -2477,6 +2487,9 @@ pub enum TuiAction {
         thread_id: String,
         path: Option<String>,
     },
+    PruneSessions {
+        days: u64,
+    },
     LoadSession {
         workspace: String,
         path: String,
@@ -2746,8 +2759,8 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         category: "Interaction",
         name: "sessions",
         aliases: &["session", "resume"],
-        usage: "/sessions [filter <query>]",
-        description: "Open or filter the session picker.",
+        usage: "/sessions [show|filter <query>|prune <days>]",
+        description: "Open/filter the session picker or prune old sessions.",
     },
     TuiHelpCommandInfo {
         category: "Interaction",
@@ -3129,6 +3142,7 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "resume filter ",
     "session filter ",
     "sessions filter ",
+    "sessions prune ",
     "threads",
     "thread next",
     "thread prev",
@@ -3365,6 +3379,7 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/session",
     "/resume",
     "/sessions filter ",
+    "/sessions prune ",
     "/settings",
     "/config",
     "/diff",
@@ -4567,6 +4582,10 @@ impl TuiApp {
             }
             TuiSessionsCommand::Filter { query } => {
                 self.set_session_picker_filter(query);
+            }
+            TuiSessionsCommand::Prune { days } => {
+                self.pending_actions.push(TuiAction::PruneSessions { days });
+                self.status = format!("session prune queued: older than {days}d");
             }
         }
     }
@@ -19803,6 +19822,28 @@ mod tests {
 
         assert!(app.show_session_picker);
         assert_eq!(app.status, "session picker opened");
+        assert!(app.drain_actions().is_empty());
+
+        app.show_session_picker = false;
+        app.composer_focused = false;
+        run_palette_command(&mut app, "/sessions prune 30");
+
+        assert!(!app.show_session_picker);
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::PruneSessions { days: 30 }]
+        );
+        assert_eq!(app.status, "session prune queued: older than 30d");
+
+        app.composer_focused = true;
+        app.composer = "/sessions prune 0".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.status,
+            "expected a positive integer number of days, got `0`"
+        );
         assert!(app.drain_actions().is_empty());
     }
 

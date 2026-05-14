@@ -334,6 +334,10 @@ Landed first slice:
   `session` / `/session`, and `resume` / `/resume` as built-in session-picker
   commands, including `/sessions filter <query>`, so they no longer fall
   through to custom slash command execution
+- TUI composer and command palette now support DeepSeek-TUI's
+  `sessions prune <days>` / `/sessions prune <days>` housekeeping subcommand
+  for local file-backed runtime sessions, deleting old sessions and their
+  linked runtime records while rejecting the command in HTTP runtime mode
 - TUI now enables terminal mouse capture for first-line workbench navigation:
   click Plan/Agent/YOLO tabs to switch mode, click visible session/thread
   picker rows to select them, scroll the wheel through the active
