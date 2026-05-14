@@ -482,6 +482,11 @@ Landed first slice:
   and `name` is a configured skill, the TUI renders that skill detail instead
   of reporting a missing custom slash command; completions include both
   `/skill <name>` and `/<name>`
+- local file-backed TUI now supports DeepSeek-TUI-style local user-skill
+  management with `/skill trust <name>` and `/skill uninstall <name>`, writing
+  `.trusted` markers beside user TOML skills, removing user skill TOML files
+  and trust markers, and returning actionable messages for missing or
+  bundled-only skills
 - local file-backed TUI composer now supports DeepSeek-TUI-style draft stash:
   `Ctrl+S` parks the current composer text in `.dscode/tui/composer-stash.json`,
   and `stash list|pop|clear` plus `/stash list|pop|clear` list, restore, or
@@ -519,10 +524,12 @@ Landed first slice:
   from `model.base_url` and switching local provider presets by updating
   `model.base_url`, `model.api_key_env`, and `model.model`; the interactive
   provider picker and remote-runtime provider mutation remain separate gaps
-- TUI now supports DeepSeek-TUI-style `/skills [prefix]` and `/skill <name>`
-  plus command-palette `skills` / `skill`, listing and inspecting
-  DeepSeekCode's configured repo/user TOML skill registry in the detail panel
-  without adding remote install/sync mutation paths
+- TUI now supports DeepSeek-TUI-style `/skills [prefix]`, `/skill <name>`,
+  `/skill trust <name>`, and `/skill uninstall <name>` plus command-palette
+  `skills` / `skill`, listing and inspecting DeepSeekCode's configured
+  repo/user TOML skill registry, writing local user-skill trust markers, and
+  deleting user skill TOML files while protecting bundled repo skills; remote
+  install/update/sync mutation paths remain a separate downloader gap
 - TUI now supports DeepSeek-TUI-style `/feedback [bug|feature|security]` plus
   command-palette `feedback`, rendering repository feedback targets and
   security-policy links in the detail panel without attempting to launch a GUI

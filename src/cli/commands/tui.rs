@@ -51,6 +51,7 @@ use crate::error::{app_error, AppResult};
 use crate::model::deepseek::DeepSeekClient;
 use crate::model::protocol::ObservationStatus;
 use crate::repl::slash::load_custom_slash_command_from_config;
+use crate::skills::loader::load_skill;
 use crate::skills::paths::resolve_repo_skills_dir;
 use crate::skills::registry::SkillRegistry;
 use crate::skills::schema::SkillSpec;
@@ -1374,7 +1375,9 @@ fn format_skills_summary(config: &AppConfig, command: &TuiSkillsCommand) -> AppR
                 detail.push_str("\n\nOverrides:\n");
                 detail.push_str(&stats.overridden.join(", "));
             }
-            detail.push_str("\n\nUse skill <name> to inspect a skill.");
+            detail.push_str(
+                "\n\nUse skill <name> to inspect a skill, /skill trust <name> to trust a user skill, or /skill uninstall <name> to remove a user skill.",
+            );
             Ok(detail)
         }
         TuiSkillsCommand::Show { name } => {
@@ -1401,7 +1404,92 @@ fn format_skills_summary(config: &AppConfig, command: &TuiSkillsCommand) -> AppR
             };
             Ok(format_skill_detail(skill, &searched))
         }
+        TuiSkillsCommand::Uninstall { name } => uninstall_user_skill(config, name),
+        TuiSkillsCommand::Trust { name } => trust_user_skill(config, name),
     }
+}
+
+fn uninstall_user_skill(config: &AppConfig, name: &str) -> AppResult<String> {
+    let repo_dir = resolve_repo_skills_dir();
+    let user_dir = expand_tilde(&config.workspace.user_skills_dir);
+    if let Some(path) = find_skill_file_in_dir(&user_dir, name)? {
+        std::fs::remove_file(&path)?;
+        let marker = trusted_skill_marker_path(&path);
+        let marker_note = if marker.exists() {
+            std::fs::remove_file(&marker)?;
+            format!("\nRemoved trust marker: {}", marker.display())
+        } else {
+            String::new()
+        };
+        return Ok(format!(
+            "Skill `{name}` uninstalled.\n\nRemoved: {}{marker_note}\n\nRun /skills to refresh the list.",
+            path.display()
+        ));
+    }
+    if find_skill_file_in_dir(&repo_dir, name)?.is_some() {
+        return Ok(format!(
+            "Cannot uninstall bundled skill `{name}` from the TUI.\n\nBundled skills live under {}. To override it, add a user skill with the same name in {}.",
+            repo_dir.display(),
+            user_dir.display()
+        ));
+    }
+    Ok(format!(
+        "Skill `{name}` not found in user skills.\n\nUser skills path: {}\nRun /skills to list configured skills.",
+        user_dir.display()
+    ))
+}
+
+fn trust_user_skill(config: &AppConfig, name: &str) -> AppResult<String> {
+    let repo_dir = resolve_repo_skills_dir();
+    let user_dir = expand_tilde(&config.workspace.user_skills_dir);
+    let Some(skill_path) = find_skill_file_in_dir(&user_dir, name)? else {
+        if find_skill_file_in_dir(&repo_dir, name)?.is_some() {
+            return Ok(format!(
+                "Cannot mark bundled skill `{name}` trusted from the TUI.\n\nCreate a user override in {} if you need a writable trust marker.",
+                user_dir.display()
+            ));
+        }
+        return Ok(format!(
+            "Skill `{name}` not found in user skills.\n\nUser skills path: {}\nRun /skills to list configured skills.",
+            user_dir.display()
+        ));
+    };
+    std::fs::create_dir_all(&user_dir)?;
+    let marker = trusted_skill_marker_path(&skill_path);
+    std::fs::write(
+        &marker,
+        format!(
+            "trusted = true\nskill = \"{}\"\nsource = \"{}\"\n",
+            name.replace('"', "\\\""),
+            skill_path.display()
+        ),
+    )?;
+    Ok(format!(
+        "Skill `{name}` trusted.\n\nSkill file: {}\nTrust marker: {}",
+        skill_path.display(),
+        marker.display()
+    ))
+}
+
+fn find_skill_file_in_dir(dir: &Path, name: &str) -> AppResult<Option<PathBuf>> {
+    if !dir.exists() {
+        return Ok(None);
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+            continue;
+        }
+        let skill = load_skill(&path)?;
+        if skill.name == name {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn trusted_skill_marker_path(skill_path: &Path) -> PathBuf {
+    skill_path.with_extension("trusted")
 }
 
 fn configured_skill_for_direct_slash(
@@ -2201,6 +2289,10 @@ fn handle_tui_action_with_live(
                 }
                 TuiSkillsCommand::List { prefix: None } => "skills listed".to_string(),
                 TuiSkillsCommand::Show { name } => format!("skill shown: {name}"),
+                TuiSkillsCommand::Uninstall { name } => {
+                    format!("skill uninstall processed: {name}")
+                }
+                TuiSkillsCommand::Trust { name } => format!("skill trust processed: {name}"),
             });
         }
         TuiAction::RespondApproval {
@@ -7858,6 +7950,96 @@ shell_allowlist = ["git diff"]
         assert!(detail.contains("Allowed tools"));
         assert!(detail.contains("git_diff"));
         assert!(detail.contains("require_write_confirmation: true"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::Skills {
+                command: TuiSkillsCommand::Trust {
+                    name: "pr-review".to_string(),
+                },
+            },
+        )
+        .unwrap();
+        let marker = user_skills.join("pr-review.trusted");
+        assert!(marker.is_file());
+        let (_, detail) = app.mcp_detail_for_test().expect("skill trust detail");
+        assert!(detail.contains("Skill `pr-review` trusted."));
+        assert!(detail.contains("Trust marker:"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::Skills {
+                command: TuiSkillsCommand::Uninstall {
+                    name: "pr-review".to_string(),
+                },
+            },
+        )
+        .unwrap();
+        assert!(!user_skills.join("pr-review.toml").exists());
+        assert!(!marker.exists());
+        let (_, detail) = app.mcp_detail_for_test().expect("skill uninstall detail");
+        assert!(detail.contains("Skill `pr-review` uninstalled."));
+        assert!(detail.contains("Removed trust marker:"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::Skills {
+                command: TuiSkillsCommand::Uninstall {
+                    name: "pr-review".to_string(),
+                },
+            },
+        )
+        .unwrap();
+        let (_, detail) = app.mcp_detail_for_test().expect("bundled uninstall detail");
+        assert!(detail.contains("Cannot uninstall bundled skill `pr-review`"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::Skills {
+                command: TuiSkillsCommand::Trust {
+                    name: "pr-review".to_string(),
+                },
+            },
+        )
+        .unwrap();
+        let (_, detail) = app.mcp_detail_for_test().expect("bundled trust detail");
+        assert!(detail.contains("Cannot mark bundled skill `pr-review` trusted"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::Skills {
+                command: TuiSkillsCommand::Trust {
+                    name: "missing-skill".to_string(),
+                },
+            },
+        )
+        .unwrap();
+        let (_, detail) = app.mcp_detail_for_test().expect("missing trust detail");
+        assert!(detail.contains("Skill `missing-skill` not found"));
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::Skills {
+                command: TuiSkillsCommand::Uninstall {
+                    name: "missing-skill".to_string(),
+                },
+            },
+        )
+        .unwrap();
+        let (_, detail) = app.mcp_detail_for_test().expect("missing uninstall detail");
+        assert!(detail.contains("Skill `missing-skill` not found in user skills."));
 
         let _ = std::fs::remove_dir_all(root);
     }

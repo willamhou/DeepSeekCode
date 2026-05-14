@@ -118,8 +118,10 @@ Current surfaces:
   `model <name>` / `/model <name>`, and offline `models` / `/models`
 - provider preset inspection and switching with `provider` / `/provider`,
   `provider list`, and `provider <name> [model]`
-- skill registry inspection with `skills [prefix]` / `/skills [prefix]` and
-  `skill <name>` / `/skill <name>` over DeepSeekCode's configured TOML skills
+- skill registry inspection and local user-skill management with
+  `skills [prefix]` / `/skills [prefix]`, `skill <name>` / `/skill <name>`,
+  `/skill trust <name>`, and `/skill uninstall <name>` over DeepSeekCode's
+  configured TOML skills
 - composer and command-palette editing preserve terminal modifier keys, including
   Ctrl-based line, word, and cursor controls
 - task panel with active thread status, runtime item count, item state/type
@@ -477,6 +479,8 @@ Command palette commands currently implemented:
 | `translate`, `/translate`, `translation`, `/translation`, `transale`, `/transale` | Toggle the session-local language-output requirement for future local agent turns |
 | `skills`, `/skills`, `skills <prefix>` | List configured TOML skills from repo and user skill directories |
 | `skill <name>`, `/skill <name>`, `/<skill-name>` | Show one configured TOML skill's description, triggers, tools, references, policy, and system append; direct `/<skill-name>` is tried after custom slash commands |
+| `skill trust <name>`, `/skill trust <name>` | Write a `.trusted` marker beside a configured user skill TOML file |
+| `skill uninstall <name>`, `/skill uninstall <name>` | Remove a configured user skill TOML file and its `.trusted` marker; bundled repo skills are protected |
 | `feedback`, `/feedback` | Show DeepSeekCode feedback targets in the right-side detail panel |
 | `feedback bug|feature|security`, `/feedback bug|feature|security` | Show GitHub issue or security-policy links for the selected feedback type |
 | `links`, `/links`, `dashboard`, `/dashboard`, `api`, `/api` | Show DeepSeekCode repository/docs links and DeepSeek platform/API docs in the right-side detail panel |
