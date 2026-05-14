@@ -587,6 +587,7 @@ pub enum TuiMcpDetailKind {
     Export,
     Save,
     Load,
+    Attach,
     Mode,
     Help,
     Settings,
@@ -635,6 +636,7 @@ impl TuiMcpDetailKind {
             Self::Export => "export",
             Self::Save => "save",
             Self::Load => "load",
+            Self::Attach => "attach",
             Self::Mode => "mode",
             Self::Help => "help",
             Self::Settings => "settings",
@@ -683,6 +685,7 @@ impl TuiMcpDetailKind {
             Self::Export => "Export",
             Self::Save => "Save",
             Self::Load => "Load",
+            Self::Attach => "Attach",
             Self::Mode => "Mode",
             Self::Help => "Help",
             Self::Settings => "Settings",
@@ -731,6 +734,7 @@ impl TuiMcpDetailKind {
             Self::Share => Self::Manager,
             Self::Save => Self::Manager,
             Self::Load => Self::Manager,
+            Self::Attach => Self::Manager,
             Self::Mode => Self::Manager,
             Self::Help => Self::Manager,
             Self::Settings => Self::Manager,
@@ -779,6 +783,7 @@ impl TuiMcpDetailKind {
             Self::Share => Self::Manager,
             Self::Save => Self::Manager,
             Self::Load => Self::Manager,
+            Self::Attach => Self::Manager,
             Self::Mode => Self::Manager,
             Self::Help => Self::Manager,
             Self::Settings => Self::Manager,
@@ -1015,6 +1020,12 @@ pub enum TuiSaveCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiLoadCommand {
     Load { path: String },
+    Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuiAttachCommand {
+    Attach { path: String },
     Help,
 }
 
@@ -1655,6 +1666,34 @@ fn parse_tui_load_command(line: &str) -> Option<Result<TuiLoadCommand, String>> 
             path: value.to_string(),
         })),
     }
+}
+
+fn parse_tui_attach_command(line: &str) -> Option<Result<TuiAttachCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/attach")
+        .or_else(|| strip_tui_command_prefix(trimmed, "attach"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "/image"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "image"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "/media"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "media"))?;
+    let path = rest.trim();
+    match path {
+        "" => Some(Err(
+            "usage: attach <image-or-video-path> or /attach <image-or-video-path>".to_string(),
+        )),
+        "help" | "--help" | "-h" => Some(Ok(TuiAttachCommand::Help)),
+        value => Some(Ok(TuiAttachCommand::Attach {
+            path: unquote_tui_path(value),
+        })),
+    }
+}
+
+fn unquote_tui_path(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string()
 }
 
 fn parse_tui_clear_command(line: &str) -> Option<Result<TuiClearCommand, String>> {
@@ -2553,6 +2592,10 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "save help",
     "load ",
     "load help",
+    "attach ",
+    "attach help",
+    "image ",
+    "media ",
     "hooks",
     "hooks list",
     "hooks events",
@@ -2733,6 +2776,10 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/save help",
     "/load ",
     "/load help",
+    "/attach ",
+    "/attach help",
+    "/image ",
+    "/media ",
     "/hooks",
     "/hooks list",
     "/hooks events",
@@ -5179,6 +5226,17 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_attach_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.handle_attach_command(command);
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = parse_tui_clear_command(&content) {
                     match command {
                         Ok(command) => {
@@ -5832,6 +5890,15 @@ impl TuiApp {
         if let Some(command) = parse_tui_load_command(command) {
             match command {
                 Ok(command) => self.handle_load_command(command),
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_attach_command(command) {
+            match command {
+                Ok(command) => self.handle_attach_command(command),
                 Err(message) => {
                     self.status = message;
                 }
@@ -8152,6 +8219,85 @@ impl TuiApp {
             detail,
             "Import creates fresh runtime ids instead of overwriting existing sessions."
         );
+        if let Some(session) = self.selected_session() {
+            let _ = writeln!(detail);
+            push_status_row(&mut detail, "Selected workspace:", &session.workspace);
+        }
+        detail
+    }
+
+    fn handle_attach_command(&mut self, command: TuiAttachCommand) {
+        match command {
+            TuiAttachCommand::Attach { path } => self.attach_media_to_composer(&path),
+            TuiAttachCommand::Help => {
+                self.set_mcp_detail(TuiMcpDetailKind::Attach, self.render_attach_help_detail());
+                self.status = "attach help shown".to_string();
+            }
+        }
+    }
+
+    fn attach_media_to_composer(&mut self, raw_path: &str) {
+        let workspace = self
+            .selected_session()
+            .map(|session| PathBuf::from(&session.workspace))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let path = resolve_tui_attachment_path(raw_path, &workspace);
+        let canonical_path = match path.canonicalize() {
+            Ok(path) => path,
+            Err(_) => {
+                self.status = format!("attachment not found: {}", path.display());
+                return;
+            }
+        };
+        if !canonical_path.is_file() {
+            self.status = format!("attachment is not a file: {}", canonical_path.display());
+            return;
+        }
+        let Some(kind) = tui_media_kind(&canonical_path) else {
+            self.status =
+                "unsupported attachment type; use image/video paths or @path for text".to_string();
+            return;
+        };
+        let reference = tui_attachment_reference(&canonical_path, &workspace);
+        let block = render_tui_attachment_block(kind, &reference, &canonical_path);
+        self.insert_attachment_block(block);
+        self.status = format!("attached {kind}: {}", canonical_path.display());
+    }
+
+    fn insert_attachment_block(&mut self, block: String) {
+        if self.composer.trim().is_empty() || parse_tui_attach_command(&self.composer).is_some() {
+            self.composer = block;
+        } else {
+            if !self.composer.ends_with('\n') {
+                self.composer.push('\n');
+            }
+            self.composer.push('\n');
+            self.composer.push_str(&block);
+        }
+        self.composer_cursor = self.composer.len();
+        self.composer_focused = true;
+    }
+
+    fn render_attach_help_detail(&self) -> String {
+        let mut detail = String::new();
+        let _ = writeln!(detail, "DeepSeekCode Attach");
+        let _ = writeln!(detail, "===================");
+        let _ = writeln!(detail);
+        let _ = writeln!(
+            detail,
+            "/attach <path> inserts an image or video attachment reference into the composer."
+        );
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Aliases");
+        let _ = writeln!(detail, "-------");
+        let _ = writeln!(detail, "- /image <path>");
+        let _ = writeln!(detail, "- /media <path>");
+        let _ = writeln!(detail);
+        let _ = writeln!(
+            detail,
+            "Supported images: png, jpg, jpeg, gif, webp, bmp, tif, tiff, ppm"
+        );
+        let _ = writeln!(detail, "Supported videos: mp4, mov, m4v, webm, avi, mkv");
         if let Some(session) = self.selected_session() {
             let _ = writeln!(detail);
             push_status_row(&mut detail, "Selected workspace:", &session.workspace);
@@ -10779,6 +10925,85 @@ fn stable_tui_segment(value: &str) -> String {
     } else {
         segment
     }
+}
+
+fn resolve_tui_attachment_path(raw_path: &str, workspace: &Path) -> PathBuf {
+    let path = PathBuf::from(unquote_tui_path(raw_path));
+    let expanded = expand_tilde_path(path);
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        workspace.join(expanded)
+    }
+}
+
+fn expand_tilde_path(path: PathBuf) -> PathBuf {
+    let value = path.to_string_lossy();
+    if value == "~" {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home);
+        }
+    } else if let Some(rest) = value.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    path
+}
+
+fn tui_media_kind(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "ppm" => Some("image"),
+        "mp4" | "mov" | "m4v" | "webm" | "avi" | "mkv" => Some("video"),
+        _ => None,
+    }
+}
+
+fn tui_attachment_media_type(path: &Path, kind: &str) -> String {
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or(kind)
+        .to_ascii_lowercase();
+    match (kind, ext.as_str()) {
+        ("image", "jpg" | "jpeg") => "image/jpeg".to_string(),
+        ("image", "png") => "image/png".to_string(),
+        ("image", "gif") => "image/gif".to_string(),
+        ("image", "webp") => "image/webp".to_string(),
+        ("image", "bmp") => "image/bmp".to_string(),
+        ("image", "tif" | "tiff") => "image/tiff".to_string(),
+        ("image", "ppm") => "image/x-portable-pixmap".to_string(),
+        ("video", "mp4" | "m4v") => "video/mp4".to_string(),
+        ("video", "mov") => "video/quicktime".to_string(),
+        ("video", "webm") => "video/webm".to_string(),
+        ("video", "avi") => "video/x-msvideo".to_string(),
+        ("video", "mkv") => "video/x-matroska".to_string(),
+        _ => format!("{kind}/{ext}"),
+    }
+}
+
+fn tui_attachment_reference(path: &Path, workspace: &Path) -> String {
+    let workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    path.strip_prefix(&workspace)
+        .ok()
+        .and_then(|relative| relative.to_str())
+        .filter(|relative| !relative.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn render_tui_attachment_block(kind: &str, reference: &str, path: &Path) -> String {
+    let media_type = tui_attachment_media_type(path, kind);
+    let mut block = format!("Attached {kind} files:\n- {reference} ({media_type})");
+    if kind == "image" {
+        block.push_str(&format!(
+            "\n\nUse image_analyze with image_path=\"{reference}\" if visual inspection is needed."
+        ));
+    }
+    block
 }
 
 fn tui_queue_preview(value: &str) -> String {
@@ -15235,6 +15460,60 @@ mod tests {
         app.composer_focused = false;
         run_palette_command(&mut app, "load");
         assert_eq!(app.status, "usage: load <path> or /load <path>");
+    }
+
+    #[test]
+    fn attach_command_inserts_media_reference_into_composer() {
+        let root = temp_root("attach-command");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("photo.png"), b"not decoded").unwrap();
+        fs::write(root.join("notes.txt"), b"text").unwrap();
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: root.display().to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        run_palette_command(&mut app, "attach photo.png");
+        assert!(app.composer_focused);
+        assert!(app.composer.contains("Attached image files:"));
+        assert!(app.composer.contains("- photo.png (image/png)"));
+        assert!(app.composer.contains("image_path=\"photo.png\""));
+        assert!(app.status.contains("attached image:"));
+
+        app.composer = "/image photo.png".to_string();
+        app.composer_cursor = app.composer.len();
+        app.composer_focused = true;
+        assert!(app.handle_key(KeyCode::Enter));
+        assert!(app.composer.contains("Attached image files:"));
+        assert!(!app.composer.contains("/image photo.png"));
+
+        app.composer_focused = false;
+        run_palette_command(&mut app, "attach help");
+        let (kind, detail) = app.mcp_detail.as_ref().expect("attach help detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Attach);
+        assert!(detail.contains("/attach <path>"));
+        assert!(detail.contains("/image <path>"));
+
+        run_palette_command(&mut app, "attach notes.txt");
+        assert!(app.status.contains("unsupported attachment type"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -389,6 +389,10 @@ Landed first slice:
   `/load <path>` session snapshots, writing active durable session/thread JSON
   under the selected workspace by default and importing snapshots into fresh
   runtime session/thread ids without overwriting existing history
+- TUI now supports DeepSeek-TUI-style `/attach <path>` plus `/image` and
+  `/media` aliases, validating local image/video files and inserting an
+  editable attachment reference into the composer with workspace-relative
+  `image_analyze` guidance for images
 - local file-backed TUI now supports DeepSeek-TUI-style `/clear` conversation
   reset by creating and switching to a fresh empty active thread in the selected
   durable session without deleting older thread history

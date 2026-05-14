@@ -24,6 +24,9 @@ Current surfaces:
   to `chat_export_<timestamp>.md` in the selected workspace
 - active session JSON snapshots with `save` / `/save [path]` and
   `load` / `/load <path>`, importing snapshots into fresh durable runtime ids
+- local media attachment insertion with `attach` / `/attach`, `image` /
+  `/image`, and `media` / `/media`, adding validated image/video references to
+  the composer draft
 - runtime-backed sub-agent task inspection and queueing with `subagents` /
   `/subagents`, `agents` / `/agents`, and `agent [0-3] <task>` /
   `/agent [0-3] <task>`
@@ -373,6 +376,8 @@ Command palette commands currently implemented:
 | `save help`, `/save help` | Show snapshot save path rules and current session/thread metadata |
 | `load <path>`, `/load <path>` | Import a DeepSeekCode TUI session snapshot into a new durable session/thread with fresh runtime ids |
 | `load help`, `/load help` | Show snapshot import behavior and path rules |
+| `attach <path>`, `/attach <path>`, `image <path>`, `/image <path>`, `media <path>`, `/media <path>` | Validate a local image/video path and insert an editable attachment reference into the composer |
+| `attach help`, `/attach help` | Show attachment aliases, supported media extensions, and selected workspace context |
 | `hooks`, `/hooks`, `hooks list`, `/hooks list` | Show hook enabled state, timeout, project/user roots, event directories, and executable scripts |
 | `hooks events`, `/hooks events`, `hook events`, `/hook events` | Show supported hook event directory names |
 | `network`, `network list`, `/network list` | Show `network.default`, `network.allow`, and `network.deny` in the right-side detail panel |

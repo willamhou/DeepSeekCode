@@ -1258,6 +1258,7 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Export => Err(app_error("export details are not MCP details")),
         TuiMcpDetailKind::Save => Err(app_error("save details are not MCP details")),
         TuiMcpDetailKind::Load => Err(app_error("load details are not MCP details")),
+        TuiMcpDetailKind::Attach => Err(app_error("attach details are not MCP details")),
         TuiMcpDetailKind::Hooks => Err(app_error("hooks details are not MCP details")),
         TuiMcpDetailKind::Goal => Err(app_error("goal details are not MCP details")),
         TuiMcpDetailKind::Mode => Err(app_error("mode details are not MCP details")),
