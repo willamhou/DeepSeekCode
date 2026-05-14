@@ -1208,6 +1208,7 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Home => Err(app_error("home details are not MCP details")),
         TuiMcpDetailKind::Note => Err(app_error("note details are not MCP details")),
         TuiMcpDetailKind::Anchor => Err(app_error("anchor details are not MCP details")),
+        TuiMcpDetailKind::Queue => Err(app_error("queue details are not MCP details")),
         TuiMcpDetailKind::Hooks => Err(app_error("hooks details are not MCP details")),
         TuiMcpDetailKind::Goal => Err(app_error("goal details are not MCP details")),
         TuiMcpDetailKind::Mode => Err(app_error("mode details are not MCP details")),

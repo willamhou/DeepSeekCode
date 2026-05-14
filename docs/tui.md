@@ -15,6 +15,9 @@ Current surfaces:
   `note add|list|show|edit|remove|clear|path`
 - workspace anchors with `anchor` / `/anchor`, including
   `anchor add|list|remove|path` over `.dscode/anchors.md`
+- busy-turn follow-up queue with `queue` / `/queue`, including
+  `queue list|edit|drop|clear`; plain composer input is queued while an
+  assistant message is still running and dispatched when the turn becomes idle
 - hook inspection with `hooks` / `/hooks`, including `hooks list` and
   `hooks events` over the configured project/user hook roots
 - composer and command palette custom slash commands from project
@@ -328,6 +331,9 @@ Command palette commands currently implemented:
 | `note edit <n> <text>`, `note remove <n>`, `note clear`, `note path` | Replace, remove, clear, or locate persistent workspace notes |
 | `anchor <text>`, `/anchor <text>`, `anchor add <text>` | Pin a durable workspace fact in `.dscode/anchors.md` |
 | `anchor list`, `anchor remove <n>`, `anchor path` | List, remove, or locate workspace anchors |
+| `queue`, `/queue`, `queue list`, `/queue list` | List follow-up messages queued while the active assistant turn is busy |
+| `queue edit <n>`, `/queue edit <n>` | Move a queued follow-up into the composer for editing; Enter requeues or sends it |
+| `queue drop <n>`, `queue clear` | Remove one queued follow-up or clear the whole queue |
 | `hooks`, `/hooks`, `hooks list`, `/hooks list` | Show hook enabled state, timeout, project/user roots, event directories, and executable scripts |
 | `hooks events`, `/hooks events`, `hook events`, `/hook events` | Show supported hook event directory names |
 | `network`, `network list`, `/network list` | Show `network.default`, `network.allow`, and `network.deny` in the right-side detail panel |

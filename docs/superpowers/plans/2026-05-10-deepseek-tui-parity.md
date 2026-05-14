@@ -374,6 +374,10 @@ Landed first slice:
 - local file-backed TUI now supports DeepSeek-TUI-style `/anchor` workspace
   anchors over `.dscode/anchors.md`, including add/list/remove/path commands
   from the composer or command palette
+- local file-backed TUI now supports DeepSeek-TUI-style `/queue` follow-up
+  message management, including automatic composer queueing while an assistant
+  item is running, list/edit/drop/clear commands, and idle-transition dispatch
+  for the next queued message
 - local file-backed TUI now supports DeepSeek-TUI-style `/hooks` read-only
   inspection, listing the configured hook enabled state, timeout, project/user
   hook roots, executable scripts by event directory, and supported event names

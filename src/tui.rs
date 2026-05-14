@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -250,6 +250,12 @@ pub enum TuiLiveEvent {
         user_inputs: Vec<TuiUserInputRequest>,
     },
     Status(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiQueuedMessage {
+    pub thread_id: String,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -571,6 +577,7 @@ pub enum TuiMcpDetailKind {
     Hooks,
     Goal,
     Anchor,
+    Queue,
     Mode,
     Help,
     Settings,
@@ -609,6 +616,7 @@ impl TuiMcpDetailKind {
             Self::Hooks => "hooks",
             Self::Goal => "goal",
             Self::Anchor => "anchor",
+            Self::Queue => "queue",
             Self::Mode => "mode",
             Self::Help => "help",
             Self::Settings => "settings",
@@ -647,6 +655,7 @@ impl TuiMcpDetailKind {
             Self::Hooks => "Hooks",
             Self::Goal => "Goal",
             Self::Anchor => "Anchor",
+            Self::Queue => "Queue",
             Self::Mode => "Mode",
             Self::Help => "Help",
             Self::Settings => "Settings",
@@ -685,6 +694,7 @@ impl TuiMcpDetailKind {
             Self::Hooks => Self::Manager,
             Self::Goal => Self::Manager,
             Self::Anchor => Self::Manager,
+            Self::Queue => Self::Manager,
             Self::Mode => Self::Manager,
             Self::Help => Self::Manager,
             Self::Settings => Self::Manager,
@@ -723,6 +733,7 @@ impl TuiMcpDetailKind {
             Self::Hooks => Self::Manager,
             Self::Goal => Self::Manager,
             Self::Anchor => Self::Manager,
+            Self::Queue => Self::Manager,
             Self::Mode => Self::Manager,
             Self::Help => Self::Manager,
             Self::Settings => Self::Manager,
@@ -926,6 +937,15 @@ pub enum TuiAnchorCommand {
     List,
     Remove { index: usize },
     Path,
+    Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiQueueCommand {
+    List,
+    Edit { index: usize },
+    Drop { index: usize },
+    Clear,
     Help,
 }
 
@@ -1447,6 +1467,40 @@ fn parse_tui_anchor_command(line: &str) -> Option<Result<TuiAnchorCommand, Strin
     }
 }
 
+fn parse_tui_queue_command(line: &str) -> Option<Result<TuiQueueCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/queue")
+        .or_else(|| strip_tui_command_prefix(trimmed, "queue"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "/queued"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "queued"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] | ["list" | "ls" | "show"] => Some(Ok(TuiQueueCommand::List)),
+        ["help" | "--help" | "-h"] => Some(Ok(TuiQueueCommand::Help)),
+        ["edit", index] => parse_note_index_arg(index)
+            .map(|index| TuiQueueCommand::Edit { index })
+            .map_or_else(
+                || Some(Err("usage: queue edit <n> or /queue edit <n>".to_string())),
+                |command| Some(Ok(command)),
+            ),
+        ["edit"] => Some(Err("usage: queue edit <n> or /queue edit <n>".to_string())),
+        ["drop" | "remove" | "rm", index] => parse_note_index_arg(index)
+            .map(|index| TuiQueueCommand::Drop { index })
+            .map_or_else(
+                || Some(Err("usage: queue drop <n> or /queue drop <n>".to_string())),
+                |command| Some(Ok(command)),
+            ),
+        ["drop" | "remove" | "rm"] => {
+            Some(Err("usage: queue drop <n> or /queue drop <n>".to_string()))
+        }
+        ["clear"] => Some(Ok(TuiQueueCommand::Clear)),
+        _ => Some(Err(
+            "usage: queue [list|edit <n>|drop <n>|clear] or /queue [list|edit <n>|drop <n>|clear]"
+                .to_string(),
+        )),
+    }
+}
+
 fn parse_note_index_arg(value: &str) -> Option<usize> {
     value.parse::<usize>().ok().filter(|index| *index > 0)
 }
@@ -1743,6 +1797,7 @@ const TUI_REASONING_REPLAY_PREF_KIND: &str = "deepseek.tui.reasoning_replay.v1";
 const MAX_TUI_COMMAND_HISTORY: usize = 100;
 const MAX_TUI_COMPOSER_STASH_ENTRIES: usize = 100;
 const MAX_TUI_RENAME_TITLE_CHARS: usize = 100;
+const TUI_QUEUE_PREVIEW_LIMIT: usize = 120;
 const TUI_PICKER_PAGE_SIZE: usize = 5;
 
 struct TuiHelpCommandInfo {
@@ -1795,6 +1850,13 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         aliases: &[],
         usage: "/anchor [add|list|remove|path]",
         description: "Pin workspace facts in .dscode/anchors.md.",
+    },
+    TuiHelpCommandInfo {
+        category: "Interaction",
+        name: "queue",
+        aliases: &["queued"],
+        usage: "/queue [list|edit <n>|drop <n>|clear]",
+        description: "Manage follow-up messages queued while the active turn is busy.",
     },
     TuiHelpCommandInfo {
         category: "Config",
@@ -2085,6 +2147,12 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "anchor list",
     "anchor remove ",
     "anchor path",
+    "queue",
+    "queue list",
+    "queue edit ",
+    "queue drop ",
+    "queue clear",
+    "queued",
     "hooks",
     "hooks list",
     "hooks events",
@@ -2237,6 +2305,12 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/anchor list",
     "/anchor remove ",
     "/anchor path",
+    "/queue",
+    "/queue list",
+    "/queue edit ",
+    "/queue drop ",
+    "/queue clear",
+    "/queued",
     "/hooks",
     "/hooks list",
     "/hooks events",
@@ -2497,6 +2571,8 @@ pub struct TuiApp {
     composer: String,
     composer_cursor: usize,
     composer_focused: bool,
+    queued_messages: VecDeque<TuiQueuedMessage>,
+    queued_draft: Option<TuiQueuedMessage>,
     composer_stash: Vec<ComposerStashEntry>,
     composer_stash_path: Option<PathBuf>,
     transcript_scroll: usize,
@@ -2665,6 +2741,8 @@ impl TuiApp {
             composer: String::new(),
             composer_cursor: 0,
             composer_focused: false,
+            queued_messages: VecDeque::new(),
+            queued_draft: None,
             composer_stash: Vec::new(),
             composer_stash_path: None,
             transcript_scroll: 0,
@@ -2850,6 +2928,7 @@ impl TuiApp {
     pub fn apply_live_event(&mut self, event: TuiLiveEvent) {
         match event {
             TuiLiveEvent::UpsertItem(item) => {
+                let was_busy = self.active_thread_busy();
                 let should_refresh =
                     self.selected_thread_id.as_deref() == Some(item.thread_id.as_str());
                 if let Some(existing) = self
@@ -2864,6 +2943,7 @@ impl TuiApp {
                 if should_refresh {
                     self.refresh_runtime_view();
                 }
+                self.dispatch_next_queued_message_after_idle(was_busy);
             }
             TuiLiveEvent::ReplaceRuntime {
                 sessions,
@@ -2984,6 +3064,7 @@ impl TuiApp {
         approvals: Vec<TuiApprovalRequest>,
         user_inputs: Vec<TuiUserInputRequest>,
     ) {
+        let was_busy = self.active_thread_busy();
         let previous_session_id = self.selected_session().map(|session| session.id.clone());
         let previous_thread_id = self.selected_thread_id.clone();
         let previous_counts = (
@@ -3084,6 +3165,7 @@ impl TuiApp {
                 )
             };
         }
+        self.dispatch_next_queued_message_after_idle(was_busy);
     }
 
     pub fn demo() -> Self {
@@ -3382,6 +3464,10 @@ impl TuiApp {
                 && item.item_type == "message"
                 && item.role.as_deref() == Some("assistant")
         })
+    }
+
+    fn active_thread_busy(&self) -> bool {
+        self.active_running_assistant_item().is_some()
     }
 
     fn active_approval(&self) -> Option<&TuiApprovalRequest> {
@@ -4476,6 +4562,12 @@ impl TuiApp {
                     self.status = "composer is empty".to_string();
                     return true;
                 }
+                if let Some(draft) = self.queued_draft.take() {
+                    self.composer.clear();
+                    self.composer_cursor = 0;
+                    self.submit_or_queue_user_message(draft.thread_id, content);
+                    return true;
+                }
                 if let Some(note) = composer_memory_note(&content) {
                     self.composer.clear();
                     self.composer_cursor = 0;
@@ -4538,6 +4630,22 @@ impl TuiApp {
                             self.request_anchor_command(command);
                             self.composer.clear();
                             self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
+                if let Some(command) = parse_tui_queue_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            let keep_composer = matches!(command, TuiQueueCommand::Edit { .. });
+                            self.handle_queue_command(command);
+                            if !keep_composer {
+                                self.composer.clear();
+                                self.composer_cursor = 0;
+                            }
                         }
                         Err(message) => {
                             self.status = message;
@@ -4843,9 +4951,7 @@ impl TuiApp {
                 };
                 self.composer.clear();
                 self.composer_cursor = 0;
-                self.pending_actions
-                    .push(TuiAction::SubmitUserMessage { thread_id, content });
-                self.status = "submitting composer message".to_string();
+                self.submit_or_queue_user_message(thread_id, content);
             }
             KeyCode::Backspace => {
                 backspace_at_cursor(&mut self.composer, &mut self.composer_cursor);
@@ -5100,6 +5206,15 @@ impl TuiApp {
         if let Some(command) = parse_tui_anchor_command(command) {
             match command {
                 Ok(command) => self.request_anchor_command(command),
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_queue_command(command) {
+            match command {
+                Ok(command) => self.handle_queue_command(command),
                 Err(message) => {
                     self.status = message;
                 }
@@ -6009,7 +6124,7 @@ impl TuiApp {
             }
             ["cancel"] | ["stop"] => self.request_cancel_run(),
             ["help"] => {
-                self.status = "commands: mode plan|agent|yolo, goal [objective|clear], sessions [filter], threads [filter], task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], anchor [text|list|remove], mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
+                self.status = "commands: mode plan|agent|yolo, goal [objective|clear], sessions [filter], threads [filter], task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], anchor [text|list|remove], queue [list|edit|drop|clear], mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
             }
             _ => {
                 self.status = format!("unknown command: {command}");
@@ -6521,6 +6636,39 @@ impl TuiApp {
             format!("compaction requested for {thread_id} (keep_tail_turns={keep_tail_turns})");
     }
 
+    fn submit_or_queue_user_message(&mut self, thread_id: String, content: String) {
+        if self.active_thread_busy() {
+            self.queued_messages
+                .push_back(TuiQueuedMessage { thread_id, content });
+            self.status = format!(
+                "message queued for next turn ({} queued)",
+                self.queued_messages.len()
+            );
+            return;
+        }
+        self.pending_actions
+            .push(TuiAction::SubmitUserMessage { thread_id, content });
+        self.status = "submitting composer message".to_string();
+    }
+
+    fn dispatch_next_queued_message_after_idle(&mut self, was_busy: bool) {
+        if !was_busy || self.active_thread_busy() || self.queued_draft.is_some() {
+            return;
+        }
+        let Some(message) = self.queued_messages.pop_front() else {
+            return;
+        };
+        let thread_id = message.thread_id.clone();
+        self.pending_actions.push(TuiAction::SubmitUserMessage {
+            thread_id: message.thread_id,
+            content: message.content,
+        });
+        self.status = format!(
+            "submitted queued message to {thread_id} ({} remaining)",
+            self.queued_messages.len()
+        );
+    }
+
     fn request_custom_slash_command(&mut self, command: String, args: Vec<String>) -> bool {
         let Some(thread_id) = self.selected_thread_id.clone() else {
             self.status = "custom slash command has no active durable thread".to_string();
@@ -6633,6 +6781,153 @@ impl TuiApp {
     fn request_hooks_command(&mut self, command: TuiHooksCommand) {
         self.pending_actions.push(TuiAction::Hooks { command });
         self.status = "hooks command queued".to_string();
+    }
+
+    fn handle_queue_command(&mut self, command: TuiQueueCommand) {
+        match command {
+            TuiQueueCommand::List => self.show_queue_detail(),
+            TuiQueueCommand::Help => {
+                self.set_mcp_detail(TuiMcpDetailKind::Queue, self.render_queue_help_detail());
+                self.status = "queue help shown".to_string();
+            }
+            TuiQueueCommand::Edit { index } => self.edit_queued_message(index),
+            TuiQueueCommand::Drop { index } => self.drop_queued_message(index),
+            TuiQueueCommand::Clear => self.clear_queued_messages(),
+        }
+    }
+
+    fn show_queue_detail(&mut self) {
+        self.set_mcp_detail(TuiMcpDetailKind::Queue, self.render_queue_detail());
+        self.status = format!("queue listed: {} message(s)", self.queued_messages.len());
+    }
+
+    fn edit_queued_message(&mut self, index: usize) {
+        if self.queued_draft.is_some() {
+            self.status = "already editing a queued message".to_string();
+            return;
+        }
+        let Some(position) = index.checked_sub(1) else {
+            self.status = "queue index must be >= 1".to_string();
+            return;
+        };
+        let Some(message) = self.queued_messages.remove(position) else {
+            self.status = format!("queued message {index} not found");
+            return;
+        };
+        self.composer = message.content.clone();
+        self.composer_cursor = self.composer.len();
+        self.composer_focused = true;
+        self.queued_draft = Some(message);
+        self.set_mcp_detail(TuiMcpDetailKind::Queue, self.render_queue_detail());
+        self.status = format!("editing queued message {index}");
+    }
+
+    fn drop_queued_message(&mut self, index: usize) {
+        let Some(position) = index.checked_sub(1) else {
+            self.status = "queue index must be >= 1".to_string();
+            return;
+        };
+        if self.queued_messages.remove(position).is_none() {
+            self.status = format!("queued message {index} not found");
+            return;
+        }
+        self.set_mcp_detail(TuiMcpDetailKind::Queue, self.render_queue_detail());
+        self.status = format!("dropped queued message {index}");
+    }
+
+    fn clear_queued_messages(&mut self) {
+        let queued = self.queued_messages.len();
+        let had_draft = self.queued_draft.take().is_some();
+        self.queued_messages.clear();
+        if had_draft {
+            self.composer.clear();
+            self.composer_cursor = 0;
+        }
+        self.set_mcp_detail(TuiMcpDetailKind::Queue, self.render_queue_detail());
+        self.status = if queued == 0 && !had_draft {
+            "queue already empty".to_string()
+        } else {
+            "queue cleared".to_string()
+        };
+    }
+
+    fn render_queue_help_detail(&self) -> String {
+        let mut detail = self.render_queue_detail();
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Usage");
+        let _ = writeln!(detail, "-----");
+        let _ = writeln!(
+            detail,
+            "- /queue                 List queued follow-up messages"
+        );
+        let _ = writeln!(
+            detail,
+            "- /queue edit <n>        Move one queued message into the composer"
+        );
+        let _ = writeln!(detail, "- /queue drop <n>        Remove one queued message");
+        let _ = writeln!(
+            detail,
+            "- /queue clear           Clear queued messages and any edit draft"
+        );
+        let _ = writeln!(detail);
+        let _ = writeln!(
+            detail,
+            "Plain composer input is queued automatically while an assistant message is still running."
+        );
+        detail
+    }
+
+    fn render_queue_detail(&self) -> String {
+        let mut detail = String::new();
+        let _ = writeln!(detail, "DeepSeekCode Queue");
+        let _ = writeln!(detail, "==================");
+        let _ = writeln!(detail);
+        push_status_row(
+            &mut detail,
+            "Active turn:",
+            if self.active_thread_busy() {
+                "busy"
+            } else {
+                "idle"
+            },
+        );
+        push_status_row(
+            &mut detail,
+            "Queued:",
+            &format!("{} message(s)", self.queued_messages.len()),
+        );
+        if let Some(draft) = self.queued_draft.as_ref() {
+            push_status_row(
+                &mut detail,
+                "Editing:",
+                &format!(
+                    "{} -> {}",
+                    draft.thread_id,
+                    tui_queue_preview(&draft.content)
+                ),
+            );
+        }
+        let _ = writeln!(detail);
+        if self.queued_messages.is_empty() {
+            let _ = writeln!(detail, "No queued messages.");
+        } else {
+            let _ = writeln!(detail, "Queued messages:");
+            for (index, message) in self.queued_messages.iter().enumerate() {
+                let _ = writeln!(
+                    detail,
+                    "{}. [{}] {}",
+                    index + 1,
+                    message.thread_id,
+                    tui_queue_preview(&message.content)
+                );
+            }
+        }
+        let _ = writeln!(detail);
+        let _ = writeln!(
+            detail,
+            "Tip: /queue edit <n> to edit, /queue drop <n> to remove."
+        );
+        detail
     }
 
     fn handle_goal_command(&mut self, command: TuiGoalCommand) {
@@ -6817,6 +7112,7 @@ impl TuiApp {
         let _ = writeln!(detail, "- /network [list|allow|deny|remove|default]");
         let _ = writeln!(detail, "- /memory [show|path|clear|edit|help]");
         let _ = writeln!(detail, "- /anchor [add|list|remove|path]");
+        let _ = writeln!(detail, "- /queue [list|edit <n>|drop <n>|clear]");
         let _ = writeln!(detail, "- /hooks [list|events]");
         let _ = writeln!(
             detail,
@@ -6849,6 +7145,11 @@ impl TuiApp {
             &mut detail,
             "Stash:",
             &format!("{} draft(s)", self.composer_stash.len()),
+        );
+        push_status_row(
+            &mut detail,
+            "Queue:",
+            &format!("{} message(s)", self.queued_messages.len()),
         );
         let _ = writeln!(detail);
         let _ = writeln!(
@@ -7290,7 +7591,10 @@ impl TuiApp {
         push_status_row(
             &mut detail,
             "Pending:",
-            &format!("{pending_approvals} approval(s), {pending_user_inputs} input(s)"),
+            &format!(
+                "{pending_approvals} approval(s), {pending_user_inputs} input(s), {} queued message(s)",
+                self.queued_messages.len()
+            ),
         );
         if let Some(summary) = self.active_usage_summary() {
             push_status_row(
@@ -7483,6 +7787,15 @@ impl TuiApp {
                     .iter()
                     .filter(|request| request.is_pending())
                     .count()
+            ),
+        );
+        push_status_row(
+            &mut detail,
+            "Queued messages:",
+            &format!(
+                "{} queued, {} editing",
+                self.queued_messages.len(),
+                if self.queued_draft.is_some() { 1 } else { 0 }
             ),
         );
         let _ = writeln!(detail);
@@ -9116,6 +9429,10 @@ fn clip_line(value: &str, max_chars: usize) -> String {
     clipped
 }
 
+fn tui_queue_preview(value: &str) -> String {
+    clip_line(value, TUI_QUEUE_PREVIEW_LIMIT)
+}
+
 fn format_transcript_item_lines(item: &TuiItem, verbose_transcript: bool) -> Vec<String> {
     let role = item.role.as_deref().unwrap_or(item.item_type.as_str());
     if item.item_type == "reasoning" && !verbose_transcript {
@@ -10163,8 +10480,10 @@ fn run_loop(
         if last_refresh.elapsed() >= refresh_interval {
             refresh(app)?;
             last_refresh = Instant::now();
+            process_pending_actions(app, action, refresh, &mut last_refresh)?;
         }
         live(app)?;
+        process_pending_actions(app, action, refresh, &mut last_refresh)?;
         terminal.draw(|frame| {
             app.last_frame_area = frame.area();
             draw(frame, app)
@@ -10181,16 +10500,27 @@ fn run_loop(
             if !keep_running {
                 break;
             }
-            let actions = app.drain_actions();
-            if !actions.is_empty() {
-                for next_action in actions {
-                    action(app, next_action)?;
-                }
-                refresh(app)?;
-                last_refresh = Instant::now();
-            }
+            process_pending_actions(app, action, refresh, &mut last_refresh)?;
         }
     }
+    Ok(())
+}
+
+fn process_pending_actions(
+    app: &mut TuiApp,
+    action: &mut dyn FnMut(&mut TuiApp, TuiAction) -> AppResult<()>,
+    refresh: &mut dyn FnMut(&mut TuiApp) -> AppResult<()>,
+    last_refresh: &mut Instant,
+) -> AppResult<()> {
+    let actions = app.drain_actions();
+    if actions.is_empty() {
+        return Ok(());
+    }
+    for next_action in actions {
+        action(app, next_action)?;
+    }
+    refresh(app)?;
+    *last_refresh = Instant::now();
     Ok(())
 }
 
@@ -13258,6 +13588,132 @@ mod tests {
             }]
         );
         assert_eq!(app.composer, "");
+    }
+
+    #[test]
+    fn queue_command_lists_edits_drops_and_clears_messages() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: "/workspace/project".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+        app.queued_messages.push_back(TuiQueuedMessage {
+            thread_id: "thread-one".to_string(),
+            content: "First follow-up".to_string(),
+        });
+        app.queued_messages.push_back(TuiQueuedMessage {
+            thread_id: "thread-one".to_string(),
+            content: "Second follow-up".to_string(),
+        });
+
+        run_palette_command(&mut app, "queue list");
+        let (kind, detail) = app.mcp_detail.as_ref().expect("queue detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Queue);
+        assert!(detail.contains("Queued messages:"));
+        assert!(detail.contains("First follow-up"));
+
+        run_palette_command(&mut app, "queue drop 1");
+        assert_eq!(app.queued_messages.len(), 1);
+        assert_eq!(app.status, "dropped queued message 1");
+
+        run_palette_command(&mut app, "queue edit 1");
+        assert_eq!(app.composer, "Second follow-up");
+        assert!(app.composer_focused);
+        assert!(app.queued_draft.is_some());
+        assert!(app.queued_messages.is_empty());
+
+        app.composer = "Edited follow-up".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::SubmitUserMessage {
+                thread_id: "thread-one".to_string(),
+                content: "Edited follow-up".to_string(),
+            }]
+        );
+        assert!(app.queued_draft.is_none());
+
+        app.queued_messages.push_back(TuiQueuedMessage {
+            thread_id: "thread-one".to_string(),
+            content: "Clear me".to_string(),
+        });
+        app.composer_focused = false;
+        run_palette_command(&mut app, "/queue clear");
+        assert!(app.queued_messages.is_empty());
+        assert_eq!(app.status, "queue cleared");
+    }
+
+    #[test]
+    fn composer_queues_follow_up_while_assistant_is_running() {
+        let running_item = TuiItem {
+            id: "assistant-item".to_string(),
+            thread_id: "thread-one".to_string(),
+            turn_id: Some("turn-one".to_string()),
+            index: 1,
+            item_type: "message".to_string(),
+            role: Some("assistant".to_string()),
+            content: "working".to_string(),
+            status: "running".to_string(),
+        };
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: "/workspace/project".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: Some("turn-one".to_string()),
+                event_seq: 1,
+            }],
+            vec![running_item.clone()],
+        );
+
+        app.composer_focused = true;
+        app.composer = "follow up when ready".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert!(app.drain_actions().is_empty());
+        assert_eq!(app.queued_messages.len(), 1);
+        assert!(app.status.contains("message queued for next turn"));
+
+        let mut completed_item = running_item;
+        completed_item.status = "completed".to_string();
+        app.apply_live_event(TuiLiveEvent::UpsertItem(completed_item));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::SubmitUserMessage {
+                thread_id: "thread-one".to_string(),
+                content: "follow up when ready".to_string(),
+            }]
+        );
+        assert!(app.queued_messages.is_empty());
+        assert!(app.status.contains("submitted queued message"));
     }
 
     #[test]
