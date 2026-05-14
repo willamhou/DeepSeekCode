@@ -1253,6 +1253,36 @@ enum TuiTaskCommand {
     Cancel { id: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiConfigEditorMode {
+    Tui,
+    Native,
+    Web,
+}
+
+impl TuiConfigEditorMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tui => "tui",
+            Self::Native => "native",
+            Self::Web => "web",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TuiConfigCommand {
+    Show,
+    Editor(TuiConfigEditorMode),
+    Model(TuiModelCommand),
+    Provider(TuiProviderCommand),
+    Profile(TuiProfileCommand),
+    Mode(TuiModeCommand),
+    Theme(TuiThemeCommand),
+    Verbose(TuiVerboseCommand),
+    Translation(TuiTranslationCommand),
+}
+
 fn parse_tui_stash_command(line: &str) -> Option<Result<TuiComposerStashCommand, String>> {
     let trimmed = line.trim();
     let rest = strip_tui_command_prefix(trimmed, "/stash")
@@ -2383,18 +2413,115 @@ fn parse_tui_home_command(line: &str) -> Option<Result<(), String>> {
     }
 }
 
+fn parse_tui_config_command(line: &str) -> Option<Result<TuiConfigCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/config")
+        .or_else(|| strip_tui_command_prefix(trimmed, "config"))?;
+    Some(parse_tui_config_args(rest))
+}
+
+fn parse_tui_config_args(rest: &str) -> Result<TuiConfigCommand, String> {
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] | ["show" | "settings" | "help" | "--help" | "-h"] => Ok(TuiConfigCommand::Show),
+        ["tui"] => Ok(TuiConfigCommand::Editor(TuiConfigEditorMode::Tui)),
+        ["native"] => Ok(TuiConfigCommand::Editor(TuiConfigEditorMode::Native)),
+        ["web"] => Ok(TuiConfigCommand::Editor(TuiConfigEditorMode::Web)),
+        ["model"] | ["default_model"] => Ok(TuiConfigCommand::Model(TuiModelCommand::Show)),
+        ["model" | "default_model", "list" | "ls"] => {
+            Ok(TuiConfigCommand::Model(TuiModelCommand::List))
+        }
+        ["model" | "default_model", "show" | "status"] => {
+            Ok(TuiConfigCommand::Model(TuiModelCommand::Show))
+        }
+        ["model" | "default_model", model] if !model.starts_with('-') => {
+            Ok(TuiConfigCommand::Model(TuiModelCommand::Set {
+                model: (*model).to_string(),
+            }))
+        }
+        ["provider"] => Ok(TuiConfigCommand::Provider(TuiProviderCommand::Show)),
+        ["provider", "list" | "ls"] => Ok(TuiConfigCommand::Provider(TuiProviderCommand::List)),
+        ["provider", "show" | "status"] => Ok(TuiConfigCommand::Provider(TuiProviderCommand::Show)),
+        ["provider", provider] if !provider.starts_with('-') => {
+            Ok(TuiConfigCommand::Provider(TuiProviderCommand::Set {
+                provider: (*provider).to_string(),
+                model: None,
+            }))
+        }
+        ["provider", provider, model] if !provider.starts_with('-') && !model.starts_with('-') => {
+            Ok(TuiConfigCommand::Provider(TuiProviderCommand::Set {
+                provider: (*provider).to_string(),
+                model: Some((*model).to_string()),
+            }))
+        }
+        ["profile"] => Ok(TuiConfigCommand::Profile(TuiProfileCommand::Show)),
+        ["profile", "list" | "ls"] => Ok(TuiConfigCommand::Profile(TuiProfileCommand::List)),
+        ["profile", "show" | "status"] => Ok(TuiConfigCommand::Profile(TuiProfileCommand::Show)),
+        ["profile", "clear" | "default" | "none" | "off"] => {
+            Ok(TuiConfigCommand::Profile(TuiProfileCommand::Clear))
+        }
+        ["profile", profile] if !profile.starts_with('-') => {
+            Ok(TuiConfigCommand::Profile(TuiProfileCommand::Switch {
+                profile: (*profile).to_string(),
+            }))
+        }
+        ["mode" | "default_mode"] => Ok(TuiConfigCommand::Mode(TuiModeCommand::Show)),
+        ["mode" | "default_mode", value] => match TuiMode::from_command_arg(value) {
+            Some(mode) => Ok(TuiConfigCommand::Mode(TuiModeCommand::Set(mode))),
+            None => Err("usage: /config mode [agent|plan|yolo|1|2|3]".to_string()),
+        },
+        ["theme" | "ui_theme"] => Ok(TuiConfigCommand::Theme(TuiThemeCommand::Show)),
+        ["theme" | "ui_theme", value] => match TuiTheme::from_command_arg(value) {
+            Some(theme) => Ok(TuiConfigCommand::Theme(TuiThemeCommand::Set(theme))),
+            None => Err("usage: /config theme [dark|light|grayscale|system]".to_string()),
+        },
+        ["verbose" | "show_thinking" | "thinking"] => {
+            Ok(TuiConfigCommand::Verbose(TuiVerboseCommand::Show))
+        }
+        ["verbose" | "show_thinking" | "thinking", value] => {
+            parse_config_verbose_value(value).map(TuiConfigCommand::Verbose)
+        }
+        ["translate" | "translation" | "locale" | "language"] => {
+            Ok(TuiConfigCommand::Translation(TuiTranslationCommand::Show))
+        }
+        ["translate" | "translation" | "locale" | "language", value] => {
+            parse_config_translation_value(value).map(TuiConfigCommand::Translation)
+        }
+        _ => Err(
+            "usage: /config [tui|native|web|model|provider|profile|mode|theme|verbose|translate]"
+                .to_string(),
+        ),
+    }
+}
+
+fn parse_config_verbose_value(value: &str) -> Result<TuiVerboseCommand, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "show" | "status" | "help" | "--help" | "-h" => Ok(TuiVerboseCommand::Show),
+        "toggle" => Ok(TuiVerboseCommand::Toggle),
+        "on" | "true" | "1" | "yes" => Ok(TuiVerboseCommand::Set(true)),
+        "off" | "false" | "0" | "no" => Ok(TuiVerboseCommand::Set(false)),
+        _ => Err("usage: /config verbose [on|off|toggle|show]".to_string()),
+    }
+}
+
+fn parse_config_translation_value(value: &str) -> Result<TuiTranslationCommand, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "show" | "status" | "help" | "--help" | "-h" => Ok(TuiTranslationCommand::Show),
+        "toggle" => Ok(TuiTranslationCommand::Toggle),
+        "on" | "true" | "1" | "yes" => Ok(TuiTranslationCommand::Set(true)),
+        "off" | "false" | "0" | "no" => Ok(TuiTranslationCommand::Set(false)),
+        _ => Err("usage: /config translate [on|off|toggle|show]".to_string()),
+    }
+}
+
 fn parse_tui_settings_command(line: &str) -> Option<Result<(), String>> {
     let trimmed = line.trim();
     let rest = strip_tui_command_prefix(trimmed, "/settings")
-        .or_else(|| strip_tui_command_prefix(trimmed, "settings"))
-        .or_else(|| strip_tui_command_prefix(trimmed, "/config"))
-        .or_else(|| strip_tui_command_prefix(trimmed, "config"))?;
+        .or_else(|| strip_tui_command_prefix(trimmed, "settings"))?;
     let args = rest.split_whitespace().collect::<Vec<_>>();
     match args.as_slice() {
         [] | ["show" | "help" | "--help" | "-h"] => Some(Ok(())),
-        _ => Some(Err(
-            "usage: settings, config, /settings, or /config".to_string()
-        )),
+        _ => Some(Err("usage: settings or /settings".to_string())),
     }
 }
 
@@ -2923,7 +3050,7 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         category: "Workbench",
         name: "settings",
         aliases: &["config"],
-        usage: "/settings",
+        usage: "/settings; /config [key [value]]",
         description: "Show TUI and workspace configuration entry points.",
     },
     TuiHelpCommandInfo {
@@ -3420,6 +3547,16 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "?",
     "settings",
     "config",
+    "config tui",
+    "config native",
+    "config web",
+    "config model ",
+    "config provider ",
+    "config profile ",
+    "config mode ",
+    "config theme ",
+    "config verbose ",
+    "config translate ",
 ];
 const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/help",
@@ -3440,6 +3577,16 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/task cancel ",
     "/settings",
     "/config",
+    "/config tui",
+    "/config native",
+    "/config web",
+    "/config model ",
+    "/config provider ",
+    "/config profile ",
+    "/config mode ",
+    "/config theme ",
+    "/config verbose ",
+    "/config translate ",
     "/diff",
     "/diff help",
     "/clear",
@@ -6578,6 +6725,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_config_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.handle_config_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = parse_tui_settings_command(&content) {
                     match command {
                         Ok(()) => {
@@ -7330,6 +7490,17 @@ impl TuiApp {
             match command {
                 Ok(()) => {
                     self.show_home_detail();
+                }
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_config_command(command) {
+            match command {
+                Ok(command) => {
+                    self.handle_config_command(command);
                 }
                 Err(message) => {
                     self.status = message;
@@ -10230,6 +10401,46 @@ impl TuiApp {
         self.status = "home dashboard shown".to_string();
     }
 
+    fn handle_config_command(&mut self, command: TuiConfigCommand) {
+        match command {
+            TuiConfigCommand::Show => self.show_settings_detail(),
+            TuiConfigCommand::Editor(mode) => self.show_config_editor_detail(mode),
+            TuiConfigCommand::Model(command) => self.request_model_command(command),
+            TuiConfigCommand::Provider(command) => self.request_provider_command(command),
+            TuiConfigCommand::Profile(command) => self.request_profile_command(command),
+            TuiConfigCommand::Mode(command) => self.handle_mode_command(command),
+            TuiConfigCommand::Theme(command) => self.handle_theme_command(command),
+            TuiConfigCommand::Verbose(command) => self.handle_verbose_command(command),
+            TuiConfigCommand::Translation(command) => self.handle_translation_command(command),
+        }
+    }
+
+    fn show_config_editor_detail(&mut self, mode: TuiConfigEditorMode) {
+        let detail = self.render_config_editor_detail(mode);
+        self.set_mcp_detail(TuiMcpDetailKind::Settings, detail);
+        self.status = format!("config {} surface shown", mode.label());
+    }
+
+    fn render_config_editor_detail(&self, mode: TuiConfigEditorMode) -> String {
+        let mut detail = self.render_settings_detail();
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Requested Config Surface");
+        let _ = writeln!(detail, "------------------------");
+        push_status_row(&mut detail, "Mode:", mode.label());
+        let _ = writeln!(
+            detail,
+            "DeepSeekCode currently exposes config editing through focused commands:"
+        );
+        let _ = writeln!(detail, "- /config model [list|<name>]");
+        let _ = writeln!(detail, "- /config provider [list|<name> [model]]");
+        let _ = writeln!(detail, "- /config profile [list|clear|<name>]");
+        let _ = writeln!(detail, "- /config mode [agent|plan|yolo]");
+        let _ = writeln!(detail, "- /config theme [dark|light|grayscale|system]");
+        let _ = writeln!(detail, "- /config verbose [on|off|toggle|show]");
+        let _ = writeln!(detail, "- /config translate [on|off|toggle|show]");
+        detail
+    }
+
     fn handle_mode_command(&mut self, command: TuiModeCommand) {
         match command {
             TuiModeCommand::Show => self.show_mode_detail(),
@@ -10301,6 +10512,10 @@ impl TuiApp {
         let _ = writeln!(detail);
         let _ = writeln!(detail, "Config Commands");
         let _ = writeln!(detail, "---------------");
+        let _ = writeln!(
+            detail,
+            "- /config [tui|native|web|model|provider|profile|mode|theme|verbose|translate]"
+        );
         let _ = writeln!(detail, "- /mode [agent|plan|yolo|1|2|3]");
         let _ = writeln!(detail, "- /diff");
         let _ = writeln!(detail, "- /clear");
@@ -15334,6 +15549,79 @@ mod tests {
         let (kind, detail) = app.mcp_detail.as_ref().expect("composer settings detail");
         assert_eq!(*kind, TuiMcpDetailKind::Settings);
         assert!(detail.contains("Settings are edited through focused commands"));
+    }
+
+    #[test]
+    fn config_command_routes_common_setting_keys() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: "/tmp/deepseek-config".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "running".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        app.composer_focused = true;
+        app.composer = "/config model auto".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Model {
+                workspace: "/tmp/deepseek-config".to_string(),
+                command: TuiModelCommand::Set {
+                    model: "auto".to_string(),
+                },
+            }]
+        );
+        assert!(app.composer.is_empty());
+
+        app.composer_focused = false;
+        run_palette_command(&mut app, "/config provider list");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Provider {
+                workspace: "/tmp/deepseek-config".to_string(),
+                command: TuiProviderCommand::List,
+            }]
+        );
+
+        run_palette_command(&mut app, "/config mode plan");
+        assert_eq!(app.mode, TuiMode::Plan);
+        assert_eq!(app.status, "mode set: Plan");
+
+        run_palette_command(&mut app, "/config theme light");
+        assert_eq!(app.theme, TuiTheme::Light);
+        assert_eq!(app.status, "theme switched: Light");
+
+        run_palette_command(&mut app, "/config verbose on");
+        assert!(app.verbose_transcript);
+        assert_eq!(app.status, "verbose transcript on");
+
+        app.translation_enabled = true;
+        run_palette_command(&mut app, "/config translate off");
+        assert!(!app.translation_enabled);
+        assert_eq!(app.status, "translation output off");
+
+        run_palette_command(&mut app, "/config tui");
+        assert_eq!(app.status, "config tui surface shown");
+        let (kind, detail) = app.mcp_detail.as_ref().expect("config detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Settings);
+        assert!(detail.contains("Requested Config Surface"));
+        assert!(detail.contains("/config model [list|<name>]"));
     }
 
     #[test]

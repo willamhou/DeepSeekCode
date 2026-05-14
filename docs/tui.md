@@ -54,7 +54,9 @@ Current surfaces:
   `mode agent|plan|yolo|1|2|3`
 - help index and command topics with `help` / `/help`, `help <command>`, and
   `/?`
-- settings overview with `settings` / `/settings` and `config` / `/config`
+- settings overview with `settings` / `/settings` and DeepSeek-TUI-style
+  `config` / `/config` routing for common model/provider/profile/mode/theme
+  settings
 - local TUI theme switching with `theme` / `/theme` and
   `theme dark|light|grayscale|system`
 - statusline overview with `statusline` / `/statusline`
@@ -325,6 +327,14 @@ Command palette commands currently implemented:
 | `help`, `/help`, `/?` | Show the TUI help index in the right-side detail panel |
 | `help <command>`, `/help <command>` | Show command-specific usage, aliases, and description |
 | `settings`, `/settings`, `config`, `/config` | Show mode, config file locations, and focused configuration command entry points |
+| `config tui`, `config native`, `config web`, `/config tui`, `/config native`, `/config web` | Show the requested config surface and focused DeepSeekCode config commands |
+| `config model [list\|<name>]`, `/config model [list\|<name>]` | Route to selected workspace model config commands |
+| `config provider [list\|<name> [model]]`, `/config provider [list\|<name> [model]]` | Route to provider preset inspection or updates |
+| `config profile [list\|clear\|<name>]`, `/config profile [list\|clear\|<name>]` | Route to active project profile inspection or switching |
+| `config mode [agent\|plan\|yolo]`, `/config mode [agent\|plan\|yolo]` | Show or switch the current TUI mode |
+| `config theme [dark\|light\|grayscale\|system]`, `/config theme [dark\|light\|grayscale\|system]` | Show or switch the current TUI theme |
+| `config verbose [on\|off\|toggle\|show]`, `/config verbose [on\|off\|toggle\|show]` | Show or toggle verbose transcript rendering |
+| `config translate [on\|off\|toggle\|show]`, `/config translate [on\|off\|toggle\|show]` | Show or toggle translated natural-language output |
 | `theme`, `/theme` | Cycle the local TUI theme and show the theme detail panel |
 | `theme show`, `/theme show` | Show current theme and available theme commands |
 | `theme dark|light|grayscale|system`, `/theme dark|light|grayscale|system` | Switch the local TUI theme |

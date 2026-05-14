@@ -539,6 +539,10 @@ Landed first slice:
 - TUI now supports DeepSeek-TUI-style `/settings` plus `/config`, rendering
   current mode, workspace/user config locations, workbench state, and focused
   configuration command entry points in the detail panel
+- TUI `/config` now routes common DeepSeek-TUI-style key commands through
+  existing focused DeepSeekCode config flows: `model`, `provider`, `profile`,
+  `mode`, `theme`, `verbose`, and `translate`; `/config tui|native|web`
+  surfaces the active config surface instead of returning usage errors
 - TUI now supports DeepSeek-TUI-style `/theme [dark|light|grayscale|system]`,
   cycling or switching local TUI theme state and wiring theme accents into tabs,
   sidebar, command bar, and command palette rendering
