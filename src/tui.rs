@@ -3026,14 +3026,32 @@ fn parse_tui_init_command(line: &str) -> Option<Result<(), String>> {
 
 fn parse_tui_custom_slash_command(line: &str) -> Option<(String, Vec<String>)> {
     let mut tokens = line.split_whitespace();
-    let command = tokens.next()?;
-    if command == "/" || !command.starts_with('/') {
-        return None;
-    }
+    let command = valid_slash_command_token(tokens.next()?)?;
     Some((
         command.to_string(),
         tokens.map(|token| token.to_string()).collect(),
     ))
+}
+
+fn valid_slash_command_token(token: &str) -> Option<&str> {
+    if token == "/" || !token.starts_with('/') {
+        return None;
+    }
+    Some(token)
+}
+
+fn slash_command_token(line: &str) -> Option<&str> {
+    valid_slash_command_token(line.trim_start().split_whitespace().next()?)
+}
+
+fn slash_token_looks_path_like(token: &str) -> bool {
+    token
+        .strip_prefix('/')
+        .is_some_and(|rest| rest.contains('/'))
+}
+
+fn slash_completion_token(completion: &str) -> Option<&str> {
+    slash_command_token(completion)
 }
 
 fn palette_backed_composer_command(line: &str) -> Option<String> {
@@ -7608,12 +7626,14 @@ impl TuiApp {
                     self.composer_cursor = 0;
                     return true;
                 }
-                if let Some((command, args)) = parse_tui_custom_slash_command(&content) {
-                    if self.request_custom_slash_command(command, args) {
-                        self.composer.clear();
-                        self.composer_cursor = 0;
+                if self.should_route_custom_slash_command(&content) {
+                    if let Some((command, args)) = parse_tui_custom_slash_command(&content) {
+                        if self.request_custom_slash_command(command, args) {
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        return true;
                     }
-                    return true;
                 }
                 let Some(thread_id) = self.selected_thread_id.clone() else {
                     self.status = "composer has no active durable thread".to_string();
@@ -7810,6 +7830,10 @@ impl TuiApp {
         }
         let matches = composer_slash_completion_matches(self, prefix);
         if matches.is_empty() {
+            if slash_command_token(prefix).is_some_and(slash_token_looks_path_like) {
+                self.status = "absolute path left as composer text".to_string();
+                return;
+            }
             self.status = format!("no slash completion for `{}`", clip_line(prefix.trim(), 60));
             return;
         }
@@ -9773,6 +9797,25 @@ impl TuiApp {
         });
         self.status = format!("custom slash command queued: {command}");
         true
+    }
+
+    fn should_route_custom_slash_command(&self, content: &str) -> bool {
+        let Some(command) = slash_command_token(content) else {
+            return false;
+        };
+        if !slash_token_looks_path_like(command) {
+            return true;
+        }
+        self.custom_slash_command_token_is_registered(command)
+    }
+
+    fn custom_slash_command_token_is_registered(&self, command: &str) -> bool {
+        self.extra_slash_completions
+            .iter()
+            .any(|completion| slash_completion_token(completion.as_str()) == Some(command))
+            || project_custom_slash_commands(self)
+                .into_iter()
+                .any(|completion| slash_completion_token(completion.as_str()) == Some(command))
     }
 
     fn request_session_rename(&mut self, title: String) -> bool {
@@ -15544,6 +15587,9 @@ fn composer_slash_hint_line(app: &TuiApp) -> Option<String> {
     }
     let matches = composer_slash_completion_matches(app, prefix);
     if matches.is_empty() {
+        if slash_command_token(prefix).is_some_and(slash_token_looks_path_like) {
+            return None;
+        }
         return Some(format!(
             "Slash: no matches for {}",
             clip_line(prefix.trim(), 40)
@@ -22469,6 +22515,46 @@ model.model = "deepseek-v4-pro"
     }
 
     #[test]
+    fn composer_submits_absolute_slash_path_as_user_message() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: ".".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+        let input = "/usr/lib/x86_64-linux-gnu/ 是标准路径吗？";
+
+        assert!(app.handle_key(KeyCode::Char('i')));
+        for ch in input.chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(app.composer, "");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::SubmitUserMessage {
+                thread_id: "thread-one".to_string(),
+                content: input.to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn composer_intercepts_memory_prefix_and_slash_commands() {
         let mut app = TuiApp::with_runtime(
             vec![TuiSession {
@@ -23220,6 +23306,66 @@ model.model = "deepseek-v4-pro"
         assert!(app.handle_key(KeyCode::Char('/')));
         assert!(app.handle_key(KeyCode::Tab));
         assert_eq!(app.composer, "/pr/fix");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn composer_slash_hints_ignore_absolute_path_prefixes() {
+        let mut app = TuiApp::new(Vec::new());
+        app.composer_focused = true;
+        app.composer = "/usr/lib".to_string();
+        app.composer_cursor = app.composer.len();
+
+        assert_eq!(composer_slash_hint_line(&app), None);
+
+        app.complete_composer_slash_command();
+        assert_eq!(app.status, "absolute path left as composer text");
+        assert_eq!(app.composer, "/usr/lib");
+    }
+
+    #[test]
+    fn composer_routes_registered_path_like_custom_slash_command() {
+        let root = temp_root("slash-custom-path-like-submit");
+        let command_dir = root.join(".dscode/commands/pr");
+        fs::create_dir_all(&command_dir).unwrap();
+        fs::write(command_dir.join("fix.md"), "Review PR fixes for $ARGUMENTS").unwrap();
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: root.display().to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        assert!(app.handle_key(KeyCode::Char('i')));
+        for ch in "/pr/fix 123".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::RunCustomSlashCommand {
+                thread_id: "thread-one".to_string(),
+                command: "/pr/fix".to_string(),
+                args: vec!["123".to_string()],
+            }]
+        );
+        assert_eq!(app.status, "custom slash command queued: /pr/fix");
 
         let _ = fs::remove_dir_all(root);
     }

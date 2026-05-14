@@ -30,7 +30,10 @@ proxy environment variables survive into `run_shell` and background
 `exec_shell` jobs, with explicit `env.KEY` overrides still taking precedence.
 The packaged systemd/launchd shell-supervisor templates now describe the
 current native-supervisor PTY protocol surface instead of the earlier
-pre-native-PTY limitation.
+pre-native-PTY limitation. TUI composer slash routing now also preserves
+absolute slash-prefixed filesystem paths such as `/usr/lib/...` as ordinary
+user messages while keeping registered path-like custom slash commands such as
+`/pr/fix` executable.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
 - native supervisor-owned PTY attach/stdin/resize/replay/wait/cancel polish and
