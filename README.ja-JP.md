@@ -13,7 +13,7 @@ DeepSeekCode は DeepSeek-first のターミナル向けコーディングエー
 > 磨き込みは継続中です。
 
 <p align="center">
-  <img src="./docs/demo/deepseek-code-tui.svg" alt="DeepSeekCode TUI demo snapshot" width="100%">
+  <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
 </p>
 
 ## 現在できること
@@ -104,19 +104,25 @@ DeepSeekCode は自身の開発に使える段階ですが、Claude Code CLI / C
 - ネイティブ supervisor-owned PTY の attach/stdin/resize/replay/wait/cancel。
 - 実リポジトリを使った live external write-fixture 検証。
 - npm registry 公開と Homebrew tap。どちらも資格情報が未設定です。
-- onboarding、auth、model/provider 設定、demo 表示まわりの製品化。
+- onboarding、auth、model/provider 設定、より充実した demo 表示まわりの製品化。
 
 ## Demo 素材
 
-README の demo 画像は決定的な TUI snapshot から生成されています。
+README の demo 画像は決定的な TUI snapshot から生成した animated SVG です。
 
 ```bash
-target/debug/deepseek tui --demo --once
+svg-term --command "bash -lc 'target/debug/deepseek tui --demo --once | sed -e \"s/^\\\"//\" -e \"s/\\\"$//\" | while IFS= read -r line; do printf \"%s\\n\" \"\$line\"; sleep 0.08; done; sleep 1.5'" \
+  --out docs/demo/deepseek-code-tui-demo.svg \
+  --width 122 \
+  --height 36 \
+  --window \
+  --no-cursor
 ```
 
-公開品質の README にするには、実際のループを短い GIF/MP4 として録画します:
-TUI を開く、コーディングリクエストを送る、編集を適用する、テストを走らせる、
-diff を確認する、という流れです。生成したメディアは `docs/demo/` に置きます。
+`docs/demo/deepseek-code-tui.svg` は静的 snapshot として残しています。公開品質の
+リリースでは、実モデルを使ったループも短い GIF/MP4 として追加します: TUI を開く、
+コーディングリクエストを送る、編集を適用する、テストを走らせる、diff を確認する、
+という流れです。生成したメディアは `docs/demo/` に置きます。
 
 ## 開発チェック
 

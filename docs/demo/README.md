@@ -1,6 +1,19 @@
 # Demo Assets
 
-`deepseek-code-tui.svg` is a deterministic README snapshot generated from:
+`deepseek-code-tui-demo.svg` is the animated README demo generated from the
+deterministic TUI snapshot:
+
+```bash
+svg-term --command "bash -lc 'target/debug/deepseek tui --demo --once | sed -e \"s/^\\\"//\" -e \"s/\\\"$//\" | while IFS= read -r line; do printf \"%s\\n\" \"\$line\"; sleep 0.08; done; sleep 1.5'" \
+  --out docs/demo/deepseek-code-tui-demo.svg \
+  --width 122 \
+  --height 36 \
+  --window \
+  --no-cursor
+```
+
+`deepseek-code-tui.svg` is the static snapshot generated from the same
+deterministic TUI output:
 
 ```bash
 svg-term --command "bash -lc 'target/debug/deepseek tui --demo --once | sed -e \"s/^\\\"//\" -e \"s/\\\"$//\"; sleep 1'" \

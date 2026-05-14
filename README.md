@@ -12,7 +12,7 @@ iterating from the same terminal.
 > registry/tap credentials, and native PTY/product polish remains in progress.
 
 <p align="center">
-  <img src="./docs/demo/deepseek-code-tui.svg" alt="DeepSeekCode TUI demo snapshot" width="100%">
+  <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
 </p>
 
 ## What Works Today
@@ -102,17 +102,24 @@ Claude Code CLI / Codex CLI polish. The largest remaining gaps are:
 - native supervisor-owned PTY attach/stdin/resize/replay/wait/cancel;
 - live external write-fixture validation across real repositories;
 - npm registry publishing and a Homebrew tap, both blocked on credentials;
-- product polish around onboarding, auth, model/provider setup, and demos.
+- product polish around onboarding, auth, model/provider setup, and richer demos.
 
 ## Demo Asset
 
-The README demo image is generated from the deterministic TUI snapshot:
+The README demo image is an animated SVG generated from the deterministic TUI
+snapshot:
 
 ```bash
-target/debug/deepseek tui --demo --once
+svg-term --command "bash -lc 'target/debug/deepseek tui --demo --once | sed -e \"s/^\\\"//\" -e \"s/\\\"$//\" | while IFS= read -r line; do printf \"%s\\n\" \"\$line\"; sleep 0.08; done; sleep 1.5'" \
+  --out docs/demo/deepseek-code-tui-demo.svg \
+  --width 122 \
+  --height 36 \
+  --window \
+  --no-cursor
 ```
 
-For a launch-quality README, record a short GIF/MP4 of the real loop:
+`docs/demo/deepseek-code-tui.svg` remains as a static snapshot. For a
+launch-quality release, add a short GIF/MP4 of the real model-backed loop:
 open TUI, submit a coding request, apply an edit, run tests, inspect the diff.
 Keep generated media under `docs/demo/`.
 
