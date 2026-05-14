@@ -82,7 +82,7 @@ tick.
 
 Render local supervisor files for running the HTTP runtime, the durable task
 and live RLM worker daemon, diagnostics watch, and the shell supervisor
-protocol skeleton as long-lived services:
+protocol bridge as long-lived services:
 
 ```sh
 deepseek agents service --kind systemd --out ./services --workdir "$PWD" --bin "$(command -v deepseek)"

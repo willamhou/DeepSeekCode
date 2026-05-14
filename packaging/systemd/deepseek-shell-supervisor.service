@@ -1,6 +1,6 @@
 [Unit]
-Description=DeepSeekCode shell supervisor protocol skeleton
-# Exposes the workspace-local shell supervisor socket/status; native PTY sessions are not implemented yet.
+Description=DeepSeekCode shell supervisor protocol bridge
+# Exposes workspace-local shell status/show/start; native PTY sessions are not implemented yet.
 After=network.target
 
 [Service]

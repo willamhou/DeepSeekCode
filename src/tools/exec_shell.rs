@@ -23,10 +23,10 @@ const DEFAULT_REPLAY_LIMIT_BYTES: u64 = 20_000;
 const MAX_REPLAY_LIMIT_BYTES: u64 = 100_000;
 const PTY_BACKEND_SCRIPT: &str = "script";
 const PTY_BACKEND_NONE: &str = "none";
-pub const SHELL_SUPERVISOR_SUPPORTED_METHODS: &[&str] = &["health", "status", "show", "shutdown"];
-pub const SHELL_SUPERVISOR_UNSUPPORTED_PTY_METHODS: &[&str] = &[
-    "start", "wait", "replay", "attach", "stdin", "resize", "cancel",
-];
+pub const SHELL_SUPERVISOR_SUPPORTED_METHODS: &[&str] =
+    &["health", "status", "show", "start", "shutdown"];
+pub const SHELL_SUPERVISOR_UNSUPPORTED_PTY_METHODS: &[&str] =
+    &["wait", "replay", "attach", "stdin", "resize", "cancel"];
 
 static JOB_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SHELL_JOBS: OnceLock<Mutex<BackgroundShellManager>> = OnceLock::new();
@@ -732,16 +732,21 @@ impl BackgroundShellManager {
 
     fn render_list(&self, cwd: &str) -> AppResult<String> {
         let durable = list_durable_shell_jobs(cwd)?;
-        if self.jobs.is_empty() && durable.is_empty() {
+        let managed = self
+            .jobs
+            .values()
+            .filter(|job| job.cwd == cwd)
+            .collect::<Vec<_>>();
+        if managed.is_empty() && durable.is_empty() {
             return Ok("No background shell jobs.".to_string());
         }
 
         let mut lines = vec![format!(
             "Background shell jobs: {} active, {} durable",
-            self.jobs.len(),
+            managed.len(),
             durable.len()
         )];
-        for job in self.jobs.values() {
+        for job in managed {
             let stdout_total = durable_log_bytes(&job.record_dir, "stdout.log", 0);
             let stderr_total = durable_log_bytes(&job.record_dir, "stderr.log", 0);
             lines.push(format!(
@@ -761,7 +766,7 @@ impl BackgroundShellManager {
             lines.push(format!("  command: {}", job.command));
         }
         for record in durable {
-            if self.jobs.contains_key(&record.id) {
+            if self.jobs.get(&record.id).is_some_and(|job| job.cwd == cwd) {
                 continue;
             }
             lines.push(format!(
@@ -2964,6 +2969,40 @@ mod tests {
     }
 
     #[test]
+    fn exec_shell_list_filters_managed_jobs_by_cwd() {
+        let root_a = temp_root("list-filter-a");
+        let root_b = temp_root("list-filter-b");
+        fs::create_dir_all(&root_a).unwrap();
+        fs::create_dir_all(&root_b).unwrap();
+        let cwd_a = root_a.display().to_string();
+        let cwd_b = root_b.display().to_string();
+        let task_id = shell_manager()
+            .lock()
+            .unwrap()
+            .spawn(
+                "tail -f /dev/null",
+                &cwd_a,
+                None,
+                ShellTtyOptions::default(),
+            )
+            .unwrap();
+
+        let listed_b = ExecShellListTool
+            .execute(ToolInput::new().with_arg("cwd", cwd_b))
+            .unwrap();
+        shell_manager().lock().unwrap().cancel(&task_id).unwrap();
+
+        assert!(
+            listed_b.summary.contains("No background shell jobs."),
+            "{}",
+            listed_b.summary
+        );
+        assert!(!listed_b.summary.contains(&task_id), "{}", listed_b.summary);
+        let _ = fs::remove_dir_all(root_a);
+        let _ = fs::remove_dir_all(root_b);
+    }
+
+    #[test]
     fn exec_shell_background_writes_durable_record_for_detached_show() {
         let root = temp_root("durable");
         fs::create_dir_all(&root).unwrap();
@@ -3471,17 +3510,17 @@ mod tests {
         );
         assert!(absent
             .summary
-            .contains("methods: health,status,show,shutdown"));
+            .contains("methods: health,status,show,start,shutdown"));
         assert!(absent
             .summary
-            .contains("unsupported_methods: start,wait,replay,attach,stdin,resize,cancel"));
+            .contains("unsupported_methods: wait,replay,attach,stdin,resize,cancel"));
 
         let state_dir = shell_supervisor_state_dir(&cwd);
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(
             state_dir.join("manifest.json"),
             format!(
-                "{{\"kind\":\"deepseek.exec_shell.supervisor.v1\",\"supervisor_pid\":{},\"supervisor_socket\":\"{}\",\"supervisor_epoch\":\"epoch+77\",\"protocol\":\"newline-json-v1\",\"methods\":[\"health\",\"status\",\"show\",\"shutdown\"],\"unsupported_methods\":[\"start\",\"attach\"],\"active_jobs\":2,\"started_at\":\"epoch+70\",\"updated_at\":\"epoch+76\",\"control_token_hash\":\"sha256:do-not-print\"}}",
+                "{{\"kind\":\"deepseek.exec_shell.supervisor.v1\",\"supervisor_pid\":{},\"supervisor_socket\":\"{}\",\"supervisor_epoch\":\"epoch+77\",\"protocol\":\"newline-json-v1\",\"methods\":[\"health\",\"status\",\"show\",\"start\",\"shutdown\"],\"unsupported_methods\":[\"wait\",\"attach\"],\"active_jobs\":2,\"started_at\":\"epoch+70\",\"updated_at\":\"epoch+76\",\"control_token_hash\":\"sha256:do-not-print\"}}",
                 std::process::id(),
                 state_dir.join("supervisor.sock").display()
             ),
@@ -3514,12 +3553,12 @@ mod tests {
         assert!(
             status
                 .summary
-                .contains("methods: health,status,show,shutdown"),
+                .contains("methods: health,status,show,start,shutdown"),
             "{}",
             status.summary
         );
         assert!(
-            status.summary.contains("unsupported_methods: start,attach"),
+            status.summary.contains("unsupported_methods: wait,attach"),
             "{}",
             status.summary
         );
@@ -3554,7 +3593,7 @@ mod tests {
         fs::write(
             state_dir.join("manifest.json"),
             format!(
-                "{{\"kind\":\"deepseek.exec_shell.supervisor.v1\",\"supervisor_pid\":{},\"supervisor_socket\":\"{}\",\"supervisor_epoch\":\"epoch+health\",\"protocol\":\"newline-json-v1\",\"methods\":[\"health\",\"status\",\"show\",\"shutdown\"],\"unsupported_methods\":[\"start\",\"attach\"],\"active_jobs\":0,\"started_at\":\"epoch+70\",\"updated_at\":\"epoch+76\"}}",
+                "{{\"kind\":\"deepseek.exec_shell.supervisor.v1\",\"supervisor_pid\":{},\"supervisor_socket\":\"{}\",\"supervisor_epoch\":\"epoch+health\",\"protocol\":\"newline-json-v1\",\"methods\":[\"health\",\"status\",\"show\",\"start\",\"shutdown\"],\"unsupported_methods\":[\"wait\",\"attach\"],\"active_jobs\":0,\"started_at\":\"epoch+70\",\"updated_at\":\"epoch+76\"}}",
                 std::process::id(),
                 socket.display()
             ),

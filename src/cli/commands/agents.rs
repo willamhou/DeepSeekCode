@@ -33,7 +33,8 @@ use crate::tools::dispatch_subagent::{
 };
 use crate::tools::exec_shell::{
     count_active_durable_shell_jobs, ExecShellListTool, ExecShellSupervisorStatusTool,
-    SHELL_SUPERVISOR_SUPPORTED_METHODS, SHELL_SUPERVISOR_UNSUPPORTED_PTY_METHODS,
+    TaskShellStartTool, SHELL_SUPERVISOR_SUPPORTED_METHODS,
+    SHELL_SUPERVISOR_UNSUPPORTED_PTY_METHODS,
 };
 use crate::tools::rlm::{
     rlm_live_session_ids_by_runtime_thread, RlmLiveCancelTool, RlmLiveDrainTool, RlmLiveEventsTool,
@@ -747,7 +748,7 @@ fn run_shell_supervisor_daemon(cwd: &Path, json: bool) -> AppResult<()> {
         );
     } else {
         println!(
-            "shell supervisor protocol skeleton listening: {}",
+            "shell supervisor protocol bridge listening: {}",
             socket.display()
         );
     }
@@ -774,7 +775,7 @@ fn run_shell_supervisor_daemon(cwd: &Path, json: bool) -> AppResult<()> {
 #[cfg(not(unix))]
 fn run_shell_supervisor_daemon(_cwd: &Path, _json: bool) -> AppResult<()> {
     Err(app_error(
-        "shell supervisor protocol skeleton is currently supported only on Unix",
+        "shell supervisor protocol bridge is currently supported only on Unix",
     ))
 }
 
@@ -790,10 +791,10 @@ fn handle_shell_supervisor_stream(
         let mut reader = BufReader::new(&mut stream);
         reader.read_line(&mut line)?;
     }
-    let (response, shutdown) = match parse_shell_supervisor_method(&line) {
+    let (response, shutdown) = match parse_shell_supervisor_request(&line) {
         Ok(request) => (
-            shell_supervisor_protocol_response(&request, cwd, socket, epoch),
-            request == "shutdown",
+            shell_supervisor_protocol_response_for_request(&request, cwd, socket, epoch),
+            request.method == "shutdown",
         ),
         Err(error) => (
             shell_supervisor_protocol_error_response(cwd, socket, epoch, &error.to_string()),
@@ -806,7 +807,23 @@ fn handle_shell_supervisor_stream(
     Ok(shutdown)
 }
 
-fn parse_shell_supervisor_method(line: &str) -> AppResult<String> {
+#[derive(Debug, Clone)]
+struct ShellSupervisorRequest {
+    method: String,
+    args: BTreeMap<String, JsonValue>,
+}
+
+impl ShellSupervisorRequest {
+    #[cfg(test)]
+    fn method_only(method: &str) -> Self {
+        Self {
+            method: method.to_string(),
+            args: BTreeMap::new(),
+        }
+    }
+}
+
+fn parse_shell_supervisor_request(line: &str) -> AppResult<ShellSupervisorRequest> {
     let value = if line.trim().is_empty() {
         JsonValue::Object(BTreeMap::new())
     } else {
@@ -815,21 +832,45 @@ fn parse_shell_supervisor_method(line: &str) -> AppResult<String> {
     let Some(object) = json_as_object(&value) else {
         return Err(app_error("shell supervisor request must be a JSON object"));
     };
-    Ok(object
-        .get("method")
-        .and_then(json_as_string)
-        .unwrap_or("health")
-        .to_string())
+    Ok(ShellSupervisorRequest {
+        method: object
+            .get("method")
+            .and_then(json_as_string)
+            .unwrap_or("health")
+            .to_string(),
+        args: object.clone(),
+    })
 }
 
+#[cfg(test)]
+fn parse_shell_supervisor_method(line: &str) -> AppResult<String> {
+    Ok(parse_shell_supervisor_request(line)?.method)
+}
+
+#[cfg(test)]
 fn shell_supervisor_protocol_response(
     method: &str,
     cwd: &Path,
     socket: &Path,
     epoch: &str,
 ) -> JsonValue {
+    shell_supervisor_protocol_response_for_request(
+        &ShellSupervisorRequest::method_only(method),
+        cwd,
+        socket,
+        epoch,
+    )
+}
+
+fn shell_supervisor_protocol_response_for_request(
+    request: &ShellSupervisorRequest,
+    cwd: &Path,
+    socket: &Path,
+    epoch: &str,
+) -> JsonValue {
+    let method = request.method.as_str();
     let supported = SHELL_SUPERVISOR_SUPPORTED_METHODS.contains(&method);
-    let (active_jobs, active_jobs_error) = match count_active_durable_shell_jobs(cwd) {
+    let (mut active_jobs, mut active_jobs_error) = match count_active_durable_shell_jobs(cwd) {
         Ok(count) => (count, None),
         Err(error) => (0, Some(error.to_string())),
     };
@@ -881,6 +922,72 @@ fn shell_supervisor_protocol_response(
             JsonValue::Number(active_jobs.to_string()),
         ),
     ]);
+    if !supported {
+        response.insert(
+            "error".to_string(),
+            JsonValue::String(format!(
+                "shell supervisor method `{method}` is not implemented before native PTY support"
+            )),
+        );
+    } else {
+        match method {
+            "show" => {
+                let inventory = ExecShellListTool
+                    .execute(ToolInput::new().with_arg("cwd", cwd.display().to_string()));
+                match inventory {
+                    Ok(output) => {
+                        response.insert(
+                            "job_inventory".to_string(),
+                            JsonValue::String(output.summary),
+                        );
+                    }
+                    Err(error) => {
+                        response.insert(
+                            "job_inventory_error".to_string(),
+                            JsonValue::String(error.to_string()),
+                        );
+                    }
+                }
+            }
+            "start" => match shell_supervisor_start_job(request, cwd) {
+                Ok(start) => {
+                    response.insert("task_id".to_string(), JsonValue::String(start.task_id));
+                    response.insert(
+                        "start_summary".to_string(),
+                        JsonValue::String(start.summary),
+                    );
+                    response.insert("job_tty".to_string(), JsonValue::Bool(start.tty));
+                    response.insert(
+                        "job_pty_backend".to_string(),
+                        JsonValue::String(start.pty_backend),
+                    );
+                    match count_active_durable_shell_jobs(cwd) {
+                        Ok(count) => {
+                            active_jobs = count;
+                            active_jobs_error = None;
+                            response.insert(
+                                "active_jobs".to_string(),
+                                JsonValue::Number(active_jobs.to_string()),
+                            );
+                        }
+                        Err(error) => {
+                            active_jobs = 0;
+                            active_jobs_error = Some(error.to_string());
+                            response.insert(
+                                "active_jobs".to_string(),
+                                JsonValue::Number(active_jobs.to_string()),
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    response.insert("status".to_string(), JsonValue::String("error".to_string()));
+                    response.insert("error".to_string(), JsonValue::String(error.to_string()));
+                }
+            },
+            _ => {}
+        }
+    }
     if let Some(error) = active_jobs_error {
         response.insert("active_jobs_error".to_string(), JsonValue::String(error));
     } else if let Err(error) =
@@ -891,32 +998,178 @@ fn shell_supervisor_protocol_response(
             JsonValue::String(error.to_string()),
         );
     }
-    if !supported {
-        response.insert(
-            "error".to_string(),
-            JsonValue::String(format!(
-                "shell supervisor method `{method}` is not implemented before native PTY support"
-            )),
-        );
-    } else if method == "show" {
-        let inventory =
-            ExecShellListTool.execute(ToolInput::new().with_arg("cwd", cwd.display().to_string()));
-        match inventory {
-            Ok(output) => {
-                response.insert(
-                    "job_inventory".to_string(),
-                    JsonValue::String(output.summary),
-                );
-            }
-            Err(error) => {
-                response.insert(
-                    "job_inventory_error".to_string(),
-                    JsonValue::String(error.to_string()),
-                );
-            }
+    JsonValue::Object(response)
+}
+
+struct ShellSupervisorStart {
+    task_id: String,
+    summary: String,
+    tty: bool,
+    pty_backend: String,
+}
+
+fn shell_supervisor_start_job(
+    request: &ShellSupervisorRequest,
+    supervisor_cwd: &Path,
+) -> AppResult<ShellSupervisorStart> {
+    let command = shell_supervisor_request_string(request, "command")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| app_error("shell supervisor start requires command"))?;
+    let cwd = shell_supervisor_start_cwd(request, supervisor_cwd)?;
+    let mut input = ToolInput::new()
+        .with_arg("command", command.to_string())
+        .with_arg("cwd", cwd.display().to_string());
+    for key in [
+        "stdin",
+        "input",
+        "timeout_ms",
+        "tty",
+        "tty_rows",
+        "tty_cols",
+    ] {
+        if let Some(value) = shell_supervisor_request_scalar(request, key)? {
+            input = input.with_arg(key, value);
         }
     }
-    JsonValue::Object(response)
+    if let Some(env) = shell_supervisor_request_object(request, "env") {
+        for (key, value) in env {
+            let Some(value) = shell_supervisor_json_scalar(value) else {
+                return Err(app_error(format!(
+                    "shell supervisor start env.{key} must be a string, number, or bool"
+                )));
+            };
+            input = input.with_arg(format!("env.{key}"), value);
+        }
+    }
+    let tty = shell_supervisor_request_bool(request, "tty");
+    let output = TaskShellStartTool.execute(input)?;
+    let task_id = shell_supervisor_summary_value(&output.summary, "task_id")
+        .ok_or_else(|| app_error("shell supervisor start did not return a task_id"))?;
+    let pty_backend = shell_supervisor_summary_value(&output.summary, "pty_backend")
+        .unwrap_or_else(|| "none".to_string());
+    Ok(ShellSupervisorStart {
+        task_id,
+        summary: output.summary,
+        tty,
+        pty_backend,
+    })
+}
+
+fn shell_supervisor_start_cwd(
+    request: &ShellSupervisorRequest,
+    supervisor_cwd: &Path,
+) -> AppResult<PathBuf> {
+    let raw = shell_supervisor_request_string(request, "cwd")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(".");
+    let requested = Path::new(raw);
+    let cwd = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        supervisor_cwd.join(requested)
+    };
+    let normalized = cwd
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_child_path(supervisor_cwd, requested));
+    let supervisor_root = supervisor_cwd
+        .canonicalize()
+        .unwrap_or_else(|_| supervisor_cwd.to_path_buf());
+    if !normalized.starts_with(&supervisor_root) {
+        return Err(app_error(format!(
+            "shell supervisor start cwd must stay inside {}",
+            supervisor_root.display()
+        )));
+    }
+    Ok(normalized)
+}
+
+fn normalize_child_path(root: &Path, child: &Path) -> PathBuf {
+    let path = if child.is_absolute() {
+        child.to_path_buf()
+    } else {
+        root.join(child)
+    };
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn shell_supervisor_request_string<'a>(
+    request: &'a ShellSupervisorRequest,
+    key: &str,
+) -> Option<&'a str> {
+    shell_supervisor_request_value(request, key).and_then(json_as_string)
+}
+
+fn shell_supervisor_request_scalar(
+    request: &ShellSupervisorRequest,
+    key: &str,
+) -> AppResult<Option<String>> {
+    let Some(value) = shell_supervisor_request_value(request, key) else {
+        return Ok(None);
+    };
+    shell_supervisor_json_scalar(value)
+        .map(Some)
+        .ok_or_else(|| app_error(format!("shell supervisor start {key} must be scalar")))
+}
+
+fn shell_supervisor_request_bool(request: &ShellSupervisorRequest, key: &str) -> bool {
+    match shell_supervisor_request_value(request, key) {
+        Some(JsonValue::Bool(value)) => *value,
+        Some(JsonValue::String(value)) => {
+            matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "on")
+        }
+        Some(JsonValue::Number(value)) => value == "1",
+        _ => false,
+    }
+}
+
+fn shell_supervisor_request_object<'a>(
+    request: &'a ShellSupervisorRequest,
+    key: &str,
+) -> Option<&'a BTreeMap<String, JsonValue>> {
+    shell_supervisor_request_value(request, key).and_then(json_as_object)
+}
+
+fn shell_supervisor_request_value<'a>(
+    request: &'a ShellSupervisorRequest,
+    key: &str,
+) -> Option<&'a JsonValue> {
+    request.args.get(key).or_else(|| {
+        ["params", "arguments"]
+            .iter()
+            .find_map(|container| request.args.get(*container).and_then(json_as_object))
+            .and_then(|object| object.get(key))
+    })
+}
+
+fn shell_supervisor_json_scalar(value: &JsonValue) -> Option<String> {
+    match value {
+        JsonValue::String(value) => Some(value.to_string()),
+        JsonValue::Number(value) => Some(value.to_string()),
+        JsonValue::Bool(value) => Some(value.to_string()),
+        JsonValue::Null | JsonValue::Array(_) | JsonValue::Object(_) => None,
+    }
+}
+
+fn shell_supervisor_summary_value(summary: &str, key: &str) -> Option<String> {
+    summary.lines().find_map(|line| {
+        line.strip_prefix(&format!("{key}: "))
+            .or_else(|| line.strip_prefix(&format!("{key}=")))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
 }
 
 fn shell_supervisor_protocol_error_response(
@@ -1267,8 +1520,8 @@ WantedBy=default.target\n",
 fn systemd_shell_supervisor_service(config: &ServiceTemplateConfig) -> String {
     format!(
         "[Unit]\n\
-Description=DeepSeekCode shell supervisor protocol skeleton\n\
-# Exposes the workspace-local shell supervisor socket/status; native PTY sessions are not implemented yet.\n\
+Description=DeepSeekCode shell supervisor protocol bridge\n\
+# Exposes workspace-local shell status/show/start; native PTY sessions are not implemented yet.\n\
 After=network.target\n\
 \n\
 [Service]\n\
@@ -1363,7 +1616,7 @@ fn launchd_shell_supervisor_service(config: &ServiceTemplateConfig) -> String {
         "/tmp/deepseek-shell-supervisor.out.log",
         "/tmp/deepseek-shell-supervisor.err.log",
         Some(
-            "Exposes the workspace-local shell supervisor socket/status; native PTY sessions are not implemented yet.",
+            "Exposes workspace-local shell status/show/start; native PTY sessions are not implemented yet.",
         ),
     )
 }
@@ -2704,7 +2957,7 @@ mod tests {
     #[test]
     fn shell_supervisor_protocol_reports_unsupported_before_native_pty() {
         let response = shell_supervisor_protocol_response(
-            "start",
+            "wait",
             Path::new("/work/repo"),
             Path::new("/work/repo/.dscode/shell-supervisor/supervisor.sock"),
             "epoch+1",
@@ -2730,6 +2983,78 @@ mod tests {
         assert!(json_as_string(object.get("error").unwrap())
             .unwrap()
             .contains("not implemented before native PTY support"));
+    }
+
+    #[test]
+    fn shell_supervisor_protocol_start_creates_durable_job() {
+        let root = temp_root("shell-supervisor-start");
+        let state_dir = root.join(".dscode/shell-supervisor");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let request = parse_shell_supervisor_request(
+            r#"{"method":"start","arguments":{"command":"tail -f /dev/null","tty":false}}"#,
+        )
+        .unwrap();
+
+        let response = shell_supervisor_protocol_response_for_request(
+            &request,
+            &root,
+            &state_dir.join("supervisor.sock"),
+            "epoch+start",
+        );
+        let object = json_as_object(&response).unwrap();
+        let task_id = json_as_string(object.get("task_id").unwrap()).unwrap();
+        let manifest = std::fs::read_to_string(
+            root.join(".dscode/shell-jobs")
+                .join(task_id)
+                .join("manifest.json"),
+        )
+        .unwrap();
+        let supervisor_manifest = std::fs::read_to_string(state_dir.join("manifest.json")).unwrap();
+
+        assert_eq!(json_as_string(object.get("status").unwrap()), Some("ok"));
+        assert_eq!(json_as_string(object.get("method").unwrap()), Some("start"));
+        assert_eq!(
+            json_as_string(object.get("job_pty_backend").unwrap()),
+            Some("none")
+        );
+        assert!(matches!(
+            object.get("job_tty"),
+            Some(JsonValue::Bool(false))
+        ));
+        assert!(matches!(
+            object.get("native_pty"),
+            Some(JsonValue::Bool(false))
+        ));
+        assert!(matches!(
+            object.get("active_jobs"),
+            Some(JsonValue::Number(value)) if value == "1"
+        ));
+        assert!(
+            manifest.contains(r#""command":"tail -f /dev/null""#),
+            "{manifest}"
+        );
+        assert!(
+            supervisor_manifest
+                .contains(r#""methods":["health","status","show","start","shutdown"]"#),
+            "{supervisor_manifest}"
+        );
+        assert!(
+            supervisor_manifest.contains(
+                r#""unsupported_methods":["wait","replay","attach","stdin","resize","cancel"]"#
+            ),
+            "{supervisor_manifest}"
+        );
+        assert!(
+            supervisor_manifest.contains(r#""active_jobs":1"#),
+            "{supervisor_manifest}"
+        );
+
+        let _ = crate::tools::exec_shell::ExecShellCancelTool.execute(
+            ToolInput::new()
+                .with_arg("cwd", root.display().to_string())
+                .with_arg("task_id", task_id.to_string()),
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2887,7 +3212,7 @@ mod tests {
         std::fs::create_dir_all(&job_dir).unwrap();
         std::fs::write(
             state_dir.join("manifest.json"),
-            r#"{"kind":"deepseek.exec_shell.supervisor.v1","supervisor_pid":0,"supervisor_socket":"old.sock","supervisor_epoch":"epoch+old","protocol":"newline-json-v1","methods":["health","status","show","shutdown"],"unsupported_methods":["start"],"active_jobs":0,"started_at":"epoch+old","updated_at":"epoch+old","control_token_hash":"sha256:do-not-print"}"#,
+            r#"{"kind":"deepseek.exec_shell.supervisor.v1","supervisor_pid":0,"supervisor_socket":"old.sock","supervisor_epoch":"epoch+old","protocol":"newline-json-v1","methods":["health","status","show","start","shutdown"],"unsupported_methods":["wait"],"active_jobs":0,"started_at":"epoch+old","updated_at":"epoch+old","control_token_hash":"sha256:do-not-print"}"#,
         )
         .unwrap();
         let manifest = JsonValue::Object(BTreeMap::from([
@@ -2958,9 +3283,9 @@ mod tests {
         let manifest = std::fs::read_to_string(state_dir.join("manifest.json")).unwrap();
         assert!(manifest.contains(r#""kind":"deepseek.exec_shell.supervisor.v1""#));
         assert!(manifest.contains(r#""protocol":"newline-json-v1""#));
-        assert!(manifest.contains(r#""methods":["health","status","show","shutdown"]"#));
+        assert!(manifest.contains(r#""methods":["health","status","show","start","shutdown"]"#));
         assert!(manifest.contains(
-            r#""unsupported_methods":["start","wait","replay","attach","stdin","resize","cancel"]"#
+            r#""unsupported_methods":["wait","replay","attach","stdin","resize","cancel"]"#
         ));
         assert!(manifest.contains(r#""control_token_hash":null"#));
         assert!(!manifest.contains("control_token\":\""));

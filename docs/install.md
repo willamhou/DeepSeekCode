@@ -402,7 +402,7 @@ curl http://127.0.0.1:8765/runtime
 ```
 
 `serve --http` 当前公开 health、runtime metadata、file-backed sessions、threads、turn records、task metadata records、automation metadata records、JSON/SSE event replay、token/cache/cost usage records、usage summary / 1M-context policy 和 non-destructive thread compaction endpoint；
-并支持 active automation 手动 trigger 成 pending task、pending task 被外部 runner claim 成 running；本地后台执行可用 `deepseek agents daemon` 轮询同一 runtime store，并对超过 800k latest-context tokens 的 thread 做 non-destructive compaction。systemd/launchd runtime、agents daemon、diagnostics watch 和 shell-supervisor protocol skeleton 文件可由 `deepseek agents service` 渲染。schema 草案见
+并支持 active automation 手动 trigger 成 pending task、pending task 被外部 runner claim 成 running；本地后台执行可用 `deepseek agents daemon` 轮询同一 runtime store，并对超过 800k latest-context tokens 的 thread 做 non-destructive compaction。systemd/launchd runtime、agents daemon、diagnostics watch 和 shell-supervisor protocol bridge 文件可由 `deepseek agents service` 渲染。schema 草案见
 [`docs/runtime.md`](./runtime.md)。
 
 ## 基本用法
