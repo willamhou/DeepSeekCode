@@ -1225,6 +1225,15 @@ fn fetch_url(
     fetch_https_with_curl(url, max_bytes, timeout_ms)
 }
 
+pub(crate) fn fetch_url_text(
+    url: &str,
+    max_bytes: usize,
+    timeout_ms: u64,
+    network_approved: bool,
+) -> AppResult<String> {
+    Ok(fetch_url(url, max_bytes, timeout_ms, network_approved)?.body)
+}
+
 fn parse_http_url(url: &str) -> AppResult<ParsedUrl> {
     let trimmed = url.trim();
     let (scheme, rest) = trimmed

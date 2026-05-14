@@ -9,6 +9,7 @@ pub struct AppConfig {
     pub diagnostics: DiagnosticsConfig,
     pub memory: MemoryConfig,
     pub network: NetworkConfig,
+    pub skills: SkillsConfig,
 }
 
 impl Default for AppConfig {
@@ -23,9 +24,13 @@ impl Default for AppConfig {
             diagnostics: DiagnosticsConfig::default(),
             memory: MemoryConfig::default(),
             network: NetworkConfig::default(),
+            skills: SkillsConfig::default(),
         }
     }
 }
+
+pub const DEFAULT_SKILL_REGISTRY_URL: &str =
+    "https://raw.githubusercontent.com/Hmbown/deepseek-skills/main/index.json";
 
 #[derive(Debug, Clone)]
 pub struct VisionConfig {
@@ -165,6 +170,19 @@ impl Default for NetworkConfig {
             deny: Vec::new(),
             audit: true,
             audit_path: "~/.config/dscode/network-audit.log".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillsConfig {
+    pub registry_url: String,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            registry_url: DEFAULT_SKILL_REGISTRY_URL.to_string(),
         }
     }
 }

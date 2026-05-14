@@ -530,6 +530,11 @@ Landed first slice:
   repo/user TOML skill registry, writing local user-skill trust markers, and
   deleting user skill TOML files while protecting bundled repo skills; remote
   install/update/sync mutation paths remain a separate downloader gap
+- TUI now supports DeepSeek-TUI-style `/skills --remote` / `/skills remote`
+  browsing of the configured community skill registry URL, rendering remote
+  skill names, descriptions, and sources through the right-side detail panel
+  while keeping installer/update/sync mutations scoped to a later downloader
+  slice
 - TUI now supports DeepSeek-TUI-style `/feedback [bug|feature|security]` plus
   command-palette `feedback`, rendering repository feedback targets and
   security-policy links in the detail panel without attempting to launch a GUI

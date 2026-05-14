@@ -1227,6 +1227,7 @@ pub enum TuiTrustCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiSkillsCommand {
     List { prefix: Option<String> },
+    Remote,
     Show { name: String },
     Uninstall { name: String },
     Trust { name: String },
@@ -1740,8 +1741,9 @@ fn parse_tui_skills_command(line: &str) -> Option<Result<TuiSkillsCommand, Strin
     let args = rest.split_whitespace().collect::<Vec<_>>();
     match args.as_slice() {
         [] => Some(Ok(TuiSkillsCommand::List { prefix: None })),
-        ["remote" | "--remote" | "sync" | "--sync"] => Some(Err(
-            "remote skill registry sync is not supported in the TUI; manage configured TOML skills on disk"
+        ["remote" | "--remote"] => Some(Ok(TuiSkillsCommand::Remote)),
+        ["sync" | "--sync"] => Some(Err(
+            "remote skill registry sync is not supported in this TUI slice; use /skills --remote to browse the registry"
                 .to_string(),
         )),
         [prefix] if !prefix.starts_with('-') => Some(Ok(TuiSkillsCommand::List {
@@ -3220,8 +3222,8 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         category: "Skills",
         name: "skills",
         aliases: &[],
-        usage: "/skills [prefix]",
-        description: "List configured TOML skills.",
+        usage: "/skills [prefix|--remote]",
+        description: "List configured TOML skills or browse the remote registry.",
     },
     TuiHelpCommandInfo {
         category: "Skills",
@@ -3476,6 +3478,7 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "provider openrouter",
     "provider ollama",
     "skills",
+    "skills --remote",
     "skill ",
     "skill uninstall ",
     "skill trust ",
@@ -3749,6 +3752,7 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/trust off",
     "/logout",
     "/skills",
+    "/skills --remote",
     "/skill ",
     "/skill uninstall ",
     "/skill trust ",
@@ -19057,6 +19061,14 @@ mod tests {
             }]
         );
 
+        run_palette_command(&mut app, "skills --remote");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Skills {
+                command: TuiSkillsCommand::Remote,
+            }]
+        );
+
         run_palette_command(&mut app, "skill pr-review");
         assert_eq!(
             app.drain_actions(),
@@ -19502,6 +19514,18 @@ mod tests {
                 command: TuiSkillsCommand::List {
                     prefix: Some("pr".to_string()),
                 },
+            }]
+        );
+
+        for ch in "/skills --remote".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Skills {
+                command: TuiSkillsCommand::Remote,
             }]
         );
 

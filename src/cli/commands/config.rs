@@ -620,6 +620,7 @@ fn print_config(config: &AppConfig) {
     );
     println!("network.audit = {}", config.network.audit);
     println!("network.audit_path = {}", config.network.audit_path);
+    println!("skills.registry_url = {}", config.skills.registry_url);
 }
 
 pub(crate) fn init_config_at(root: &std::path::Path, force: bool) -> AppResult<std::path::PathBuf> {
@@ -1264,6 +1265,9 @@ network.allow = {network_allow}
 network.deny = {network_deny}
 network.audit = {network_audit}
 network.audit_path = "{network_audit_path}"
+
+# Community skill registry browsing for `deepseek tui` `/skills --remote`.
+skills.registry_url = "{skills_registry_url}"
 "#,
         base_url = config.model.base_url,
         model = config.model.model,
@@ -1298,6 +1302,7 @@ network.audit_path = "{network_audit_path}"
         network_deny = render_string_list(&config.network.deny),
         network_audit = config.network.audit,
         network_audit_path = config.network.audit_path,
+        skills_registry_url = config.skills.registry_url,
     )
 }
 

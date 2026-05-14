@@ -64,6 +64,7 @@ use crate::tools::exec_shell::{
 use crate::tools::recall_archive::RecallArchiveTool;
 use crate::tools::review::ReviewTool;
 use crate::tools::types::{Tool, ToolInput};
+use crate::tools::web::fetch_url_text;
 use crate::tui::{
     discover_custom_slash_commands_dir, render_once, run_interactive,
     run_interactive_with_refresh_actions_and_live, TuiAction, TuiAnchorCommand, TuiApp,
@@ -1328,7 +1329,14 @@ fn mcp_detail_summary(
     }
 }
 
+const REMOTE_SKILL_REGISTRY_MAX_BYTES: usize = 1_000_000;
+const REMOTE_SKILL_REGISTRY_TIMEOUT_MS: u64 = 15_000;
+
 fn format_skills_summary(config: &AppConfig, command: &TuiSkillsCommand) -> AppResult<String> {
+    if matches!(command, TuiSkillsCommand::Remote) {
+        return Ok(format_remote_skills_summary(config));
+    }
+
     let repo_dir = resolve_repo_skills_dir();
     let user_dir = expand_tilde(&config.workspace.user_skills_dir);
     let search_dirs = [repo_dir.as_path(), user_dir.as_path()];
@@ -1406,7 +1414,142 @@ fn format_skills_summary(config: &AppConfig, command: &TuiSkillsCommand) -> AppR
         }
         TuiSkillsCommand::Uninstall { name } => uninstall_user_skill(config, name),
         TuiSkillsCommand::Trust { name } => trust_user_skill(config, name),
+        TuiSkillsCommand::Remote => unreachable!("remote registry handled before local load"),
     }
+}
+
+fn format_remote_skills_summary(config: &AppConfig) -> String {
+    let registry_url = config.skills.registry_url.trim();
+    let registry_url = if registry_url.is_empty() {
+        crate::config::types::DEFAULT_SKILL_REGISTRY_URL
+    } else {
+        registry_url
+    };
+    let body = match fetch_url_text(
+        registry_url,
+        REMOTE_SKILL_REGISTRY_MAX_BYTES,
+        REMOTE_SKILL_REGISTRY_TIMEOUT_MS,
+        false,
+    ) {
+        Ok(body) => body,
+        Err(error) => {
+            return format!(
+                "Remote skill registry unavailable.\n\nRegistry: {registry_url}\nError: {error}\n\nConfigure `skills.registry_url` or allow the registry host with `network allow <host>` before retrying."
+            );
+        }
+    };
+
+    match parse_remote_skill_entries(&body) {
+        Ok(entries) => render_remote_skill_entries(registry_url, &entries),
+        Err(error) => format!(
+            "Remote skill registry could not be parsed.\n\nRegistry: {registry_url}\nError: {error}\n\nExpected JSON with a top-level `skills` object."
+        ),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteSkillEntry {
+    name: String,
+    description: String,
+    source: String,
+}
+
+fn parse_remote_skill_entries(body: &str) -> AppResult<Vec<RemoteSkillEntry>> {
+    let root = parse_root_object(body)?;
+    let Some(skills) = root.get("skills") else {
+        return Err(app_error("remote skill registry missing `skills`"));
+    };
+    let mut entries = Vec::new();
+    match skills {
+        JsonValue::Object(map) => {
+            for (name, value) in map {
+                let object = json_as_object(value).ok_or_else(|| {
+                    app_error(format!("remote skill `{name}` entry must be an object"))
+                })?;
+                let source = object
+                    .get("source")
+                    .and_then(json_as_string)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if source.is_empty() {
+                    return Err(app_error(format!(
+                        "remote skill `{name}` missing required `source`"
+                    )));
+                }
+                let description = object
+                    .get("description")
+                    .and_then(json_as_string)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                entries.push(RemoteSkillEntry {
+                    name: name.to_string(),
+                    description,
+                    source,
+                });
+            }
+        }
+        JsonValue::Array(items) => {
+            for item in items {
+                let object = json_as_object(item)
+                    .ok_or_else(|| app_error("remote skill array entries must be objects"))?;
+                let name = object
+                    .get("name")
+                    .and_then(json_as_string)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let source = object
+                    .get("source")
+                    .and_then(json_as_string)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if name.is_empty() || source.is_empty() {
+                    return Err(app_error(
+                        "remote skill array entries require `name` and `source`",
+                    ));
+                }
+                let description = object
+                    .get("description")
+                    .and_then(json_as_string)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                entries.push(RemoteSkillEntry {
+                    name,
+                    description,
+                    source,
+                });
+            }
+        }
+        _ => return Err(app_error("remote `skills` must be an object or array")),
+    }
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(entries)
+}
+
+fn render_remote_skill_entries(registry_url: &str, entries: &[RemoteSkillEntry]) -> String {
+    let mut detail = format!("Available remote skills ({})\n\n", entries.len());
+    if entries.is_empty() {
+        detail.push_str("Remote registry is empty.\n");
+    } else {
+        for entry in entries {
+            detail.push_str(&format!(
+                "- {}: {}\n  source: {}\n",
+                entry.name,
+                empty_as_placeholder(&entry.description),
+                entry.source
+            ));
+        }
+    }
+    detail.push_str("\nRegistry: ");
+    detail.push_str(registry_url);
+    detail.push_str(
+        "\n\nInstall/update download support is not available in this TUI slice yet; use the source URL to create a local TOML skill manually.",
+    );
+    detail
 }
 
 fn uninstall_user_skill(config: &AppConfig, name: &str) -> AppResult<String> {
@@ -2288,6 +2431,7 @@ fn handle_tui_action_with_live(
                     format!("skills listed with prefix: {prefix}")
                 }
                 TuiSkillsCommand::List { prefix: None } => "skills listed".to_string(),
+                TuiSkillsCommand::Remote => "remote skills listed".to_string(),
                 TuiSkillsCommand::Show { name } => format!("skill shown: {name}"),
                 TuiSkillsCommand::Uninstall { name } => {
                     format!("skill uninstall processed: {name}")
@@ -6228,6 +6372,30 @@ description = "Review pull requests."
         (client, handle)
     }
 
+    fn serve_once_text(body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        format!("http://{addr}/index.json")
+    }
+
+    fn restore_env_var(key: &str, value: Option<String>) {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
     #[test]
     fn runtime_http_watcher_formats_rlm_live_event_status() {
         let event = RuntimeEvent {
@@ -8041,6 +8209,119 @@ shell_allowlist = ["git diff"]
         let (_, detail) = app.mcp_detail_for_test().expect("missing uninstall detail");
         assert!(detail.contains("Skill `missing-skill` not found in user skills."));
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn parse_remote_skill_registry_sorts_entries() {
+        let entries = parse_remote_skill_entries(
+            r#"{"skills":{"zeta":{"description":"Z skill","source":"github:owner/zeta"},"alpha":{"description":"A skill","source":"https://example.com/a.tar.gz"}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            entries,
+            vec![
+                RemoteSkillEntry {
+                    name: "alpha".to_string(),
+                    description: "A skill".to_string(),
+                    source: "https://example.com/a.tar.gz".to_string(),
+                },
+                RemoteSkillEntry {
+                    name: "zeta".to_string(),
+                    description: "Z skill".to_string(),
+                    source: "github:owner/zeta".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn handle_tui_action_lists_remote_skill_registry() {
+        let _guard = env_lock();
+        let previous_allow_local = std::env::var("DSCODE_ALLOW_LOCAL_FETCH").ok();
+        let previous_network_default = std::env::var("DSCODE_NETWORK_DEFAULT").ok();
+        std::env::set_var("DSCODE_ALLOW_LOCAL_FETCH", "1");
+        std::env::set_var("DSCODE_NETWORK_DEFAULT", "allow");
+
+        let registry_url = serve_once_text(
+            r#"{"skills":{"beta":{"description":"Beta skill","source":"github:team/beta"},"alpha":{"description":"Alpha skill","source":"https://example.com/alpha.tar.gz"}}}"#
+                .to_string(),
+        );
+        let root = temp_root("remote-skills-action");
+        let store = RuntimeStore::new(root.join("runtime"));
+        let mut config = temp_config(&root);
+        config.skills.registry_url = registry_url.clone();
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::Skills {
+                command: TuiSkillsCommand::Remote,
+            },
+        )
+        .unwrap();
+
+        let (_, detail) = app
+            .mcp_detail_for_test()
+            .expect("remote skill registry detail");
+        assert!(detail.contains("Available remote skills (2)"));
+        assert!(detail.contains("- alpha: Alpha skill"));
+        assert!(detail.contains("source: https://example.com/alpha.tar.gz"));
+        assert!(detail.contains("- beta: Beta skill"));
+        assert!(detail.contains("source: github:team/beta"));
+        assert!(detail.contains(&format!("Registry: {registry_url}")));
+        assert!(detail.contains("Install/update download support is not available"));
+
+        restore_env_var("DSCODE_ALLOW_LOCAL_FETCH", previous_allow_local);
+        restore_env_var("DSCODE_NETWORK_DEFAULT", previous_network_default);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn format_remote_skill_registry_reports_network_denial() {
+        let _guard = env_lock();
+        let previous_allow_local = std::env::var("DSCODE_ALLOW_LOCAL_FETCH").ok();
+        let previous_network_default = std::env::var("DSCODE_NETWORK_DEFAULT").ok();
+        std::env::set_var("DSCODE_ALLOW_LOCAL_FETCH", "1");
+        std::env::set_var("DSCODE_NETWORK_DEFAULT", "deny");
+
+        let root = temp_root("remote-skills-deny");
+        let mut config = temp_config(&root);
+        config.skills.registry_url = "http://127.0.0.1:9/index.json".to_string();
+
+        let detail = format_remote_skills_summary(&config);
+        assert!(detail.contains("Remote skill registry unavailable."));
+        assert!(detail.contains("network policy denied host"));
+        assert!(detail.contains("network allow <host>"));
+
+        restore_env_var("DSCODE_ALLOW_LOCAL_FETCH", previous_allow_local);
+        restore_env_var("DSCODE_NETWORK_DEFAULT", previous_network_default);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn format_remote_skill_registry_reports_parse_failure() {
+        let _guard = env_lock();
+        let previous_allow_local = std::env::var("DSCODE_ALLOW_LOCAL_FETCH").ok();
+        let previous_network_default = std::env::var("DSCODE_NETWORK_DEFAULT").ok();
+        std::env::set_var("DSCODE_ALLOW_LOCAL_FETCH", "1");
+        std::env::set_var("DSCODE_NETWORK_DEFAULT", "allow");
+
+        let registry_url = serve_once_text(r#"{"unexpected":true}"#.to_string());
+        let root = temp_root("remote-skills-parse");
+        let mut config = temp_config(&root);
+        config.skills.registry_url = registry_url;
+
+        let detail = format_remote_skills_summary(&config);
+        assert!(detail.contains("Remote skill registry could not be parsed."));
+        assert!(detail.contains("remote skill registry missing `skills`"));
+        assert!(detail.contains("Expected JSON with a top-level `skills` object."));
+
+        restore_env_var("DSCODE_ALLOW_LOCAL_FETCH", previous_allow_local);
+        restore_env_var("DSCODE_NETWORK_DEFAULT", previous_network_default);
         let _ = std::fs::remove_dir_all(root);
     }
 
