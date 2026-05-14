@@ -1561,7 +1561,7 @@ fn render_remote_skill_entries(registry_url: &str, entries: &[RemoteSkillEntry])
     detail.push_str("\nRegistry: ");
     detail.push_str(registry_url);
     detail.push_str(
-        "\n\nUse /skill install <name|url> for direct TOML, SKILL.md, GitHub, or tar.gz skill sources, or /skills sync to cache supported registry entries. Zip archives remain pending.",
+        "\n\nUse /skill install <name|url> for direct TOML, SKILL.md, GitHub, tar.gz, or zip skill sources, or /skills sync to cache supported registry entries.",
     );
     detail
 }
@@ -1853,7 +1853,7 @@ fn update_user_skill(config: &AppConfig, name: &str) -> AppResult<String> {
     let marker = installed_from_marker_path(&skill_path);
     if !marker.exists() {
         return Ok(format!(
-            "Skill `{name}` was not installed by /skill install.\n\nMissing marker: {}\nReinstall from a supported TOML, SKILL.md, tarball, GitHub, or registry source to enable /skill update.",
+            "Skill `{name}` was not installed by /skill install.\n\nMissing marker: {}\nReinstall from a supported TOML, SKILL.md, tarball, zip, GitHub, or registry source to enable /skill update.",
             marker.display()
         ));
     }
@@ -1992,9 +1992,6 @@ fn resolve_remote_skill_entry_source(source: &str) -> Result<SkillInstallSource,
     if source.is_empty() {
         return Err("source is empty".to_string());
     }
-    if is_zip_skill_source(source) {
-        return Err(unsupported_zip_skill_message(source));
-    }
     if let Some(repo) = parse_github_source(source)? {
         return Ok(SkillInstallSource {
             candidate_urls: github_archive_candidate_urls(&repo),
@@ -2071,12 +2068,6 @@ fn is_zip_skill_source(source: &str) -> bool {
     lower_without_suffix.ends_with(".zip")
 }
 
-fn unsupported_zip_skill_message(source: &str) -> String {
-    format!(
-        "Skill zip archives are not supported yet.\n\nSource: {source}\n\nSupported now: direct TOML URLs, direct SKILL.md URLs, GitHub repository specs, and .tar.gz/.tgz skill archives."
-    )
-}
-
 fn fetch_first_skill_source(candidate_urls: &[String]) -> AppResult<DownloadedSkillSource> {
     let mut errors = Vec::new();
     for url in candidate_urls {
@@ -2125,7 +2116,8 @@ fn fetch_first_skill_source(candidate_urls: &[String]) -> AppResult<DownloadedSk
 
 fn skill_source_bytes_to_toml(url: &str, bytes: &[u8]) -> AppResult<String> {
     if is_zip_skill_source(url) || bytes.starts_with(b"PK\x03\x04") {
-        return Err(app_error(unsupported_zip_skill_message(url)));
+        let skill_md = read_skill_md_from_zip(bytes)?;
+        return skill_md_to_toml(&skill_md);
     }
     if is_tar_gz_skill_source(url, bytes) {
         let skill_md = read_skill_md_from_tar_gz(bytes)?;
@@ -2210,6 +2202,76 @@ fn read_skill_md_from_tar_gz(bytes: &[u8]) -> AppResult<String> {
     };
     String::from_utf8(body)
         .map_err(|_| app_error(format!("SKILL.md in archive is not valid UTF-8: {path}")))
+}
+
+fn read_skill_md_from_zip(bytes: &[u8]) -> AppResult<String> {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor)
+        .map_err(|error| app_error(format!("failed to read skill zip archive: {error}")))?;
+    let mut best = None::<(u8, String, Vec<u8>)>;
+    let mut total_size = 0usize;
+
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| {
+            app_error(format!("failed to read skill zip archive entry: {error}"))
+        })?;
+        let path = zip_entry_path(entry.name())?;
+        if entry.size() > REMOTE_SKILL_DOWNLOAD_MAX_BYTES as u64 {
+            return Err(app_error(format!(
+                "skill zip archive uncompressed size exceeds {} bytes",
+                REMOTE_SKILL_DOWNLOAD_MAX_BYTES
+            )));
+        }
+        total_size = total_size.saturating_add(entry.size() as usize);
+        if total_size > REMOTE_SKILL_DOWNLOAD_MAX_BYTES {
+            return Err(app_error(format!(
+                "skill zip archive uncompressed size exceeds {} bytes",
+                REMOTE_SKILL_DOWNLOAD_MAX_BYTES
+            )));
+        }
+        if !entry.is_file() {
+            continue;
+        }
+        let Some(rank) = skill_md_archive_candidate_rank(&path) else {
+            continue;
+        };
+        if best
+            .as_ref()
+            .is_some_and(|(current_rank, _, _)| *current_rank <= rank)
+        {
+            continue;
+        }
+        let mut body = Vec::new();
+        entry
+            .read_to_end(&mut body)
+            .map_err(|error| app_error(format!("failed to read SKILL.md from zip: {error}")))?;
+        best = Some((rank, path.display().to_string(), body));
+    }
+
+    let Some((_, path, body)) = best else {
+        return Err(app_error("missing SKILL.md in skill zip archive"));
+    };
+    String::from_utf8(body).map_err(|_| {
+        app_error(format!(
+            "SKILL.md in zip archive is not valid UTF-8: {path}"
+        ))
+    })
+}
+
+fn zip_entry_path(name: &str) -> AppResult<PathBuf> {
+    if name.contains('\0') {
+        return Err(app_error(
+            "skill zip archive entry path contains a null byte",
+        ));
+    }
+    let normalized = name.replace('\\', "/");
+    let path = PathBuf::from(&normalized);
+    if !is_safe_archive_path(&path) {
+        return Err(app_error(format!(
+            "skill zip archive entry escapes destination: {normalized}"
+        )));
+    }
+    Ok(path)
 }
 
 fn skill_md_archive_candidate_rank(path: &Path) -> Option<u8> {
@@ -7367,6 +7429,17 @@ description: {description}
         encoder.finish().unwrap()
     }
 
+    fn test_skill_zip(path: &str, skill_md: &str) -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .unix_permissions(0o644);
+        writer.start_file(path, options).unwrap();
+        writer.write_all(skill_md.as_bytes()).unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
     #[test]
     fn runtime_http_watcher_formats_rlm_live_event_status() {
         let event = RuntimeEvent {
@@ -9280,8 +9353,7 @@ shell_allowlist = ["git diff"]
         assert!(detail.contains("source: github:team/beta"));
         assert!(detail.contains(&format!("Registry: {registry_url}")));
         assert!(detail.contains("Use /skill install <name|url>"));
-        assert!(detail.contains("GitHub, or tar.gz skill sources"));
-        assert!(detail.contains("Zip archives remain pending"));
+        assert!(detail.contains("GitHub, tar.gz, or zip skill sources"));
 
         restore_env_var("DSCODE_ALLOW_LOCAL_FETCH", previous_allow_local);
         restore_env_var("DSCODE_NETWORK_DEFAULT", previous_network_default);
@@ -9298,7 +9370,7 @@ shell_allowlist = ["git diff"]
 
         let skill_url = serve_once_text(test_skill_toml("cache-triage", "Cache triage"));
         let registry_url = serve_once_text(format!(
-            r#"{{"skills":{{"cache-triage":{{"description":"Cache triage","source":"{skill_url}"}},"zip":{{"description":"Zip skill","source":"https://example.com/repo.zip"}}}}}}"#
+            r#"{{"skills":{{"cache-triage":{{"description":"Cache triage","source":"{skill_url}"}},"unsupported":{{"description":"Unsupported skill","source":"ftp://example.com/repo.toml"}}}}}}"#
         ));
         let root = temp_root("skill-sync-cache");
         let store = RuntimeStore::new(root.join("runtime"));
@@ -9323,7 +9395,7 @@ shell_allowlist = ["git diff"]
         let (_, detail) = app.mcp_detail_for_test().expect("skill sync detail");
         assert!(detail.contains("Remote skill registry sync complete."));
         assert!(detail.contains("cache-triage downloaded"));
-        assert!(detail.contains("zip skipped"));
+        assert!(detail.contains("unsupported skipped"));
         assert!(detail
             .contains("2 skill(s) processed: 1 downloaded, 0 up-to-date, 1 skipped, 0 failed."));
 
@@ -9377,6 +9449,59 @@ shell_allowlist = ["git diff"]
         assert!(cached_body.contains("Use archived workflow instructions."));
         let (_, detail) = app.mcp_detail_for_test().expect("archive sync detail");
         assert!(detail.contains("archive-triage downloaded"));
+        assert!(detail
+            .contains("1 skill(s) processed: 1 downloaded, 0 up-to-date, 0 skipped, 0 failed."));
+
+        restore_env_var("DSCODE_ALLOW_LOCAL_FETCH", previous_allow_local);
+        restore_env_var("DSCODE_NETWORK_DEFAULT", previous_network_default);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handle_tui_action_syncs_remote_zip_skill_cache() {
+        let _guard = env_lock();
+        let previous_allow_local = std::env::var("DSCODE_ALLOW_LOCAL_FETCH").ok();
+        let previous_network_default = std::env::var("DSCODE_NETWORK_DEFAULT").ok();
+        std::env::set_var("DSCODE_ALLOW_LOCAL_FETCH", "1");
+        std::env::set_var("DSCODE_NETWORK_DEFAULT", "allow");
+
+        let skill_md = test_skill_md(
+            "zip-triage",
+            "Zip triage",
+            "Use zipped workflow instructions.",
+        );
+        let archive_url = serve_once_bytes(
+            test_skill_zip("repo-main/skills/zip-triage/SKILL.md", &skill_md),
+            "application/zip",
+        );
+        let registry_url = serve_once_text(format!(
+            r#"{{"skills":{{"zip-triage":{{"description":"Zip triage","source":"{archive_url}"}}}}}}"#
+        ));
+        let root = temp_root("skill-sync-zip");
+        let store = RuntimeStore::new(root.join("runtime"));
+        let cache_dir = root.join("skill-cache");
+        let mut config = temp_config(&root);
+        config.skills.registry_url = registry_url;
+        config.skills.cache_dir = cache_dir.display().to_string();
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::Skills {
+                command: TuiSkillsCommand::Sync,
+            },
+        )
+        .unwrap();
+
+        let cached = cache_dir.join("zip-triage.toml");
+        assert!(cached.is_file());
+        let cached_body = fs::read_to_string(cached).unwrap();
+        assert!(cached_body.contains("Imported from a SKILL.md bundle."));
+        assert!(cached_body.contains("Use zipped workflow instructions."));
+        let (_, detail) = app.mcp_detail_for_test().expect("zip sync detail");
+        assert!(detail.contains("zip-triage downloaded"));
         assert!(detail
             .contains("1 skill(s) processed: 1 downloaded, 0 up-to-date, 0 skipped, 0 failed."));
 
@@ -9760,11 +9885,24 @@ shell_allowlist = ["git diff"]
     }
 
     #[test]
-    fn handle_tui_action_rejects_unsupported_zip_skill_source() {
+    fn handle_tui_action_installs_direct_zip_skill() {
+        let _guard = env_lock();
+        let previous_allow_local = std::env::var("DSCODE_ALLOW_LOCAL_FETCH").ok();
+        let previous_network_default = std::env::var("DSCODE_NETWORK_DEFAULT").ok();
+        std::env::set_var("DSCODE_ALLOW_LOCAL_FETCH", "1");
+        std::env::set_var("DSCODE_NETWORK_DEFAULT", "allow");
+
+        let skill_md = test_skill_md("zip-triage", "Zip triage", "Use zip install instructions.");
+        let archive_url = serve_once_bytes(
+            test_skill_zip("repo-main/skills/zip-triage/SKILL.md", &skill_md),
+            "application/zip",
+        );
         let root = temp_root("skill-install-zip");
         let store = RuntimeStore::new(root.join("runtime"));
+        let user_skills = root.join("user-skills");
+        let mut config = temp_config(&root);
+        config.workspace.user_skills_dir = user_skills.display().to_string();
         let mut app = TuiApp::new(Vec::new());
-        let config = temp_config(&root);
 
         handle_tui_action(
             &store,
@@ -9772,17 +9910,79 @@ shell_allowlist = ["git diff"]
             &mut app,
             TuiAction::Skills {
                 command: TuiSkillsCommand::Install {
-                    source: "https://example.com/repo.zip".to_string(),
+                    source: archive_url.clone(),
                 },
             },
         )
         .unwrap();
 
-        let (_, detail) = app.mcp_detail_for_test().expect("unsupported zip detail");
-        assert!(detail.contains("Skill zip archives are not supported yet"));
-        assert!(detail.contains("direct SKILL.md URLs"));
+        let skill_path = user_skills.join("zip-triage.toml");
+        assert!(skill_path.is_file());
+        assert!(user_skills.join("zip-triage.installed-from").is_file());
+        let body = fs::read_to_string(skill_path).unwrap();
+        assert!(body.contains("Use zip install instructions."));
+        let (_, detail) = app.mcp_detail_for_test().expect("zip install detail");
+        assert!(detail.contains("Skill `zip-triage` installed."));
+        assert!(detail.contains(&format!("URL: {archive_url}")));
 
+        restore_env_var("DSCODE_ALLOW_LOCAL_FETCH", previous_allow_local);
+        restore_env_var("DSCODE_NETWORK_DEFAULT", previous_network_default);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn skill_zip_archive_rejects_unsafe_path() {
+        let skill_md = test_skill_md("zip-triage", "Zip triage", "Unsafe.");
+        for path in ["../SKILL.md", "/SKILL.md"] {
+            let error = skill_source_bytes_to_toml(
+                "https://example.com/repo.zip",
+                &test_skill_zip(path, &skill_md),
+            )
+            .unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("skill zip archive entry escapes destination"),
+                "{path} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn skill_zip_archive_reports_missing_skill_md() {
+        let error = skill_source_bytes_to_toml(
+            "https://example.com/repo.zip",
+            &test_skill_zip("repo-main/README.md", "no skill here"),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("missing SKILL.md in skill zip archive"));
+    }
+
+    #[test]
+    fn skill_zip_archive_prefers_root_skill_md() {
+        let first = test_skill_md("nested-zip", "Nested zip", "Nested body.");
+        let second = test_skill_md("root-zip", "Root zip", "Root body.");
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .unix_permissions(0o644);
+        writer
+            .start_file("repo-main/skills/nested-zip/SKILL.md", options)
+            .unwrap();
+        writer.write_all(first.as_bytes()).unwrap();
+        writer.start_file("repo-main/SKILL.md", options).unwrap();
+        writer.write_all(second.as_bytes()).unwrap();
+        let archive = writer.finish().unwrap().into_inner();
+
+        let toml = skill_source_bytes_to_toml("https://example.com/repo.zip", &archive).unwrap();
+        assert!(toml.contains("name = \"root-zip\""));
+        assert!(toml.contains("Root body."));
+        assert!(!toml.contains("Nested body."));
     }
 
     #[test]

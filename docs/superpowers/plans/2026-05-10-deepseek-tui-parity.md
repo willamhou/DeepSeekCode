@@ -532,21 +532,22 @@ Landed first slice:
 - TUI now supports DeepSeek-TUI-style `/skills --remote` / `/skills remote`
   browsing of the configured community skill registry URL, rendering remote
   skill names, descriptions, and sources through the right-side detail panel
-  while keeping zip archives scoped to a later installer slice
+  while directing users to the install/sync commands for supported remote
+  sources
 - TUI now supports DeepSeek-TUI-style `/skill new` by routing the alias to a
   bundled `skill-creator` TOML skill that guides creation of focused
   DeepSeekCode local skills
 - TUI now supports a DeepSeekCode-native `/skill install <registry-name|url>`
   and `/skill update <name>` slice for direct TOML, SKILL.md, GitHub, and
-  tar.gz skill sources, resolving registry entries through
+  tar.gz/zip skill sources, resolving registry entries through
   `skills.registry_url`, converting imported SKILL.md bundles into TOML user
   skills under `workspace.user_skills_dir`, and tracking source/checksum
-  metadata in `.installed-from`; zip archives remain unsupported
+  metadata in `.installed-from`
 - TUI now supports DeepSeek-TUI-style `/skills sync` and `/skills --sync` for
   the configured community registry, caching supported TOML, SKILL.md, GitHub,
-  and tar.gz skill entries under `skills.cache_dir`, reporting
-  downloaded/up-to-date/skipped/failed counts, and skipping unsupported zip
-  archive entries with an actionable reason
+  tar.gz, and zip skill entries under `skills.cache_dir`, reporting
+  downloaded/up-to-date/skipped/failed counts, and skipping unsupported source
+  entries with an actionable reason
 - TUI now supports DeepSeek-TUI-style `/feedback [bug|feature|security]` plus
   command-palette `feedback`, rendering repository feedback targets and
   security-policy links in the detail panel without attempting to launch a GUI

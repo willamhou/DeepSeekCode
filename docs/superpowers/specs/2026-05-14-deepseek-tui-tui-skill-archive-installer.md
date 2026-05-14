@@ -24,7 +24,8 @@ and converting the Markdown body into `system_append`.
   `workspace.user_skills_dir`.
 - Preserve `.installed-from` source/checksum metadata so `/skill update <name>`
   can refresh archive and `SKILL.md` imports.
-- Keep zip and non-HTTP archive formats explicitly unsupported.
+- Keep non-HTTP archive formats explicitly unsupported. Zip support is covered
+  by the follow-up ZIP archive installer slice.
 
 ## Acceptance
 
@@ -39,7 +40,7 @@ and converting the Markdown body into `system_append`.
   and reports no change when the converted TOML checksum is unchanged.
 - `/skills sync` caches supported archive and `SKILL.md` registry entries as
   TOML files.
-- Malformed archives, missing `SKILL.md`, unsafe paths, missing frontmatter, and
-  zip sources produce actionable detail-panel messages.
+- Malformed archives, missing `SKILL.md`, unsafe paths, and missing
+  frontmatter produce actionable detail-panel messages.
 - Existing TOML install/update and local skill commands remain unchanged.
 - Full `tui` tests continue passing.

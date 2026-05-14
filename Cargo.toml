@@ -25,3 +25,4 @@ crossterm = "0.28.1"
 flate2 = "1.0"
 ratatui = "0.29.0"
 tar = "0.4"
+zip = { version = "2.4.2", default-features = false, features = ["deflate-flate2", "flate2"] }
