@@ -391,6 +391,9 @@ Landed first slice:
 - local file-backed TUI now supports DeepSeek-TUI-style `/diff`, rendering
   changed tracked files and `git diff --stat` for the selected session
   workspace in the detail panel
+- local file-backed TUI now supports DeepSeek-TUI-style `/subagents` and
+  `/agents` active-thread sub-agent task inspection plus `/agent [0-3] <task>`
+  queueing into pending `subagent` runtime tasks for daemon/external runners
 - local file-backed TUI now supports DeepSeek-TUI-style `/hooks` read-only
   inspection, listing the configured hook enabled state, timeout, project/user
   hook roots, executable scripts by event directory, and supported event names

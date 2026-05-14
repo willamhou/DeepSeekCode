@@ -576,6 +576,7 @@ pub enum TuiMcpDetailKind {
     Links,
     Home,
     Note,
+    Subagents,
     Hooks,
     Goal,
     Anchor,
@@ -619,6 +620,7 @@ impl TuiMcpDetailKind {
             Self::Links => "links",
             Self::Home => "home",
             Self::Note => "note",
+            Self::Subagents => "subagents",
             Self::Hooks => "hooks",
             Self::Goal => "goal",
             Self::Anchor => "anchor",
@@ -662,6 +664,7 @@ impl TuiMcpDetailKind {
             Self::Links => "Links",
             Self::Home => "Home",
             Self::Note => "Note",
+            Self::Subagents => "Subagents",
             Self::Hooks => "Hooks",
             Self::Goal => "Goal",
             Self::Anchor => "Anchor",
@@ -705,6 +708,7 @@ impl TuiMcpDetailKind {
             Self::Links => Self::Manager,
             Self::Home => Self::Manager,
             Self::Note => Self::Manager,
+            Self::Subagents => Self::Manager,
             Self::Hooks => Self::Manager,
             Self::Goal => Self::Manager,
             Self::Anchor => Self::Manager,
@@ -748,6 +752,7 @@ impl TuiMcpDetailKind {
             Self::Links => Self::Manager,
             Self::Home => Self::Manager,
             Self::Note => Self::Manager,
+            Self::Subagents => Self::Manager,
             Self::Hooks => Self::Manager,
             Self::Goal => Self::Manager,
             Self::Anchor => Self::Manager,
@@ -990,6 +995,13 @@ pub enum TuiClearCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TuiDiffCommand {
     Show,
+    Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuiSubagentsCommand {
+    List,
+    Spawn { max_depth: usize, task: String },
     Help,
 }
 
@@ -1597,6 +1609,64 @@ fn parse_tui_diff_command(line: &str) -> Option<Result<TuiDiffCommand, String>> 
     }
 }
 
+fn parse_tui_subagents_command(line: &str) -> Option<Result<TuiSubagentsCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/subagents")
+        .or_else(|| strip_tui_command_prefix(trimmed, "subagents"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "/agents"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "agents"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] | ["list" | "ls" | "show"] => Some(Ok(TuiSubagentsCommand::List)),
+        ["help" | "--help" | "-h"] => Some(Ok(TuiSubagentsCommand::Help)),
+        _ => Some(Err(
+            "usage: subagents, agents, /subagents, or /agents".to_string()
+        )),
+    }
+}
+
+fn parse_tui_agent_command(line: &str) -> Option<Result<TuiSubagentsCommand, String>> {
+    let trimmed = line.trim();
+    let (rest, slash_command) = if let Some(rest) = strip_tui_command_prefix(trimmed, "/agent") {
+        (rest, true)
+    } else if let Some(rest) = strip_tui_command_prefix(trimmed, "agent") {
+        (rest, false)
+    } else {
+        return None;
+    };
+    let arg = rest.trim();
+    if arg.is_empty() {
+        if !slash_command {
+            return None;
+        }
+        return Some(Err(
+            "usage: agent [0-3] <task> or /agent [0-3] <task>".to_string()
+        ));
+    }
+    if matches!(arg, "help" | "--help" | "-h") {
+        return Some(Ok(TuiSubagentsCommand::Help));
+    }
+    let mut parts = arg.split_whitespace();
+    let first = parts.next().unwrap_or_default();
+    let (max_depth, task) = match first.parse::<usize>() {
+        Ok(depth) if depth <= 3 => (depth, parts.collect::<Vec<_>>().join(" ")),
+        Ok(_) => {
+            return Some(Err("agent depth must be between 0 and 3".to_string()));
+        }
+        Err(_) => (1, arg.to_string()),
+    };
+    let task = task.trim();
+    if task.is_empty() {
+        return Some(Err(
+            "usage: agent [0-3] <task> or /agent [0-3] <task>".to_string()
+        ));
+    }
+    Some(Ok(TuiSubagentsCommand::Spawn {
+        max_depth,
+        task: task.to_string(),
+    }))
+}
+
 fn parse_note_index_arg(value: &str) -> Option<usize> {
     value.parse::<usize>().ok().filter(|index| *index > 0)
 }
@@ -1753,6 +1823,11 @@ pub enum TuiAction {
     },
     ShowDiff {
         workspace: String,
+    },
+    CreateSubagentTask {
+        thread_id: String,
+        task: String,
+        max_depth: usize,
     },
     Hooks {
         command: TuiHooksCommand,
@@ -1946,6 +2021,20 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         aliases: &[],
         usage: "/feedback [bug|feature|security]",
         description: "Show bug, feature, and security feedback targets.",
+    },
+    TuiHelpCommandInfo {
+        category: "Interaction",
+        name: "subagents",
+        aliases: &["agents"],
+        usage: "/subagents",
+        description: "List runtime-backed sub-agent tasks in the active thread.",
+    },
+    TuiHelpCommandInfo {
+        category: "Interaction",
+        name: "agent",
+        aliases: &[],
+        usage: "/agent [0-3] <task>",
+        description: "Queue a persistent sub-agent task for the active thread.",
     },
     TuiHelpCommandInfo {
         category: "Interaction",
@@ -2276,6 +2365,9 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "memory clear",
     "memory edit",
     "memory help",
+    "subagents",
+    "agents",
+    "agent ",
     "note ",
     "note add ",
     "note list",
@@ -2443,6 +2535,9 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/memory clear",
     "/memory edit",
     "/memory help",
+    "/subagents",
+    "/agents",
+    "/agent ",
     "/note ",
     "/note add ",
     "/note list",
@@ -4791,6 +4886,21 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_subagents_command(&content)
+                    .or_else(|| parse_tui_agent_command(&content))
+                {
+                    match command {
+                        Ok(command) => {
+                            self.handle_subagents_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = parse_tui_anchor_command(&content) {
                     match command {
                         Ok(command) => {
@@ -5416,6 +5526,17 @@ impl TuiApp {
         if let Some(command) = parse_tui_note_command(command) {
             match command {
                 Ok(command) => self.request_note_command(command),
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) =
+            parse_tui_subagents_command(command).or_else(|| parse_tui_agent_command(command))
+        {
+            match command {
+                Ok(command) => self.handle_subagents_command(command),
                 Err(message) => {
                     self.status = message;
                 }
@@ -6379,7 +6500,7 @@ impl TuiApp {
             }
             ["cancel"] | ["stop"] => self.request_cancel_run(),
             ["help"] => {
-                self.status = "commands: mode plan|agent|yolo, diff, clear, goal [objective|clear], sessions [filter], threads [filter], task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], anchor [text|list|remove], queue [list|edit|drop|clear], share, export [path], mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
+                self.status = "commands: mode plan|agent|yolo, diff, clear, goal [objective|clear], sessions [filter], threads [filter], agent [N] <task>, subagents, task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], anchor [text|list|remove], queue [list|edit|drop|clear], share, export [path], mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
             }
             _ => {
                 self.status = format!("unknown command: {command}");
@@ -7021,6 +7142,117 @@ impl TuiApp {
     fn request_note_command(&mut self, command: TuiNoteCommand) {
         self.pending_actions.push(TuiAction::Note { command });
         self.status = "note command queued".to_string();
+    }
+
+    fn handle_subagents_command(&mut self, command: TuiSubagentsCommand) {
+        match command {
+            TuiSubagentsCommand::List => {
+                self.set_mcp_detail(TuiMcpDetailKind::Subagents, self.render_subagents_detail());
+                self.status = "subagents listed".to_string();
+            }
+            TuiSubagentsCommand::Spawn { max_depth, task } => {
+                self.request_subagent_task(max_depth, task);
+            }
+            TuiSubagentsCommand::Help => {
+                self.set_mcp_detail(
+                    TuiMcpDetailKind::Subagents,
+                    self.render_subagents_help_detail(),
+                );
+                self.status = "subagents help shown".to_string();
+            }
+        }
+    }
+
+    fn request_subagent_task(&mut self, max_depth: usize, task: String) {
+        let task = task.trim().to_string();
+        if task.is_empty() {
+            self.status = "subagent task is empty".to_string();
+            return;
+        }
+        let Some(thread_id) = self.selected_thread_id.clone() else {
+            self.status = "no active durable thread for subagent".to_string();
+            return;
+        };
+        self.pending_actions.push(TuiAction::CreateSubagentTask {
+            thread_id: thread_id.clone(),
+            task: task.clone(),
+            max_depth,
+        });
+        self.status = format!(
+            "subagent queued for {thread_id} (depth={max_depth}): {}",
+            clip_line(&task, 60)
+        );
+    }
+
+    fn render_subagents_help_detail(&self) -> String {
+        let mut detail = self.render_subagents_detail();
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Usage");
+        let _ = writeln!(detail, "-----");
+        let _ = writeln!(
+            detail,
+            "- /subagents            List active-thread sub-agent tasks"
+        );
+        let _ = writeln!(
+            detail,
+            "- /agent [0-3] <task>   Queue a persistent sub-agent task"
+        );
+        detail
+    }
+
+    fn render_subagents_detail(&self) -> String {
+        let mut detail = String::new();
+        let _ = writeln!(detail, "DeepSeekCode Subagents");
+        let _ = writeln!(detail, "======================");
+        let _ = writeln!(detail);
+        match self.active_thread() {
+            Some(thread) => {
+                push_status_row(
+                    &mut detail,
+                    "Thread:",
+                    &format!("{} [{}]", thread.title, thread.id),
+                );
+            }
+            None => {
+                let _ = writeln!(detail, "No active durable thread selected.");
+                return detail;
+            }
+        }
+
+        let subagents = self
+            .active_thread_tasks()
+            .into_iter()
+            .filter(|task| task.kind == "subagent" || task.kind == "subagent_input")
+            .collect::<Vec<_>>();
+        push_status_row(
+            &mut detail,
+            "Sub-agent tasks:",
+            &subagents.len().to_string(),
+        );
+        let _ = writeln!(detail);
+        if subagents.is_empty() {
+            let _ = writeln!(detail, "No runtime-backed sub-agent tasks in this thread.");
+            let _ = writeln!(detail, "Use /agent <task> to queue one.");
+            return detail;
+        }
+
+        for task in subagents {
+            let _ = writeln!(
+                detail,
+                "- {} [{}] {}",
+                task.id,
+                task.status,
+                clip_line(&task.summary, 100)
+            );
+            let _ = writeln!(
+                detail,
+                "  kind={} updated={} parent={}",
+                task.kind,
+                task.updated_at,
+                task.parent_task_id.as_deref().unwrap_or("-")
+            );
+        }
+        detail
     }
 
     fn request_anchor_command(&mut self, command: TuiAnchorCommand) {
@@ -14382,6 +14614,63 @@ mod tests {
         assert_eq!(*kind, TuiMcpDetailKind::Diff);
         assert!(detail.contains("/diff shows changed tracked files"));
         assert_eq!(app.composer, "");
+    }
+
+    #[test]
+    fn subagents_command_lists_and_queues_runtime_subagent_tasks() {
+        let mut subagent = runtime_task(
+            "task-subagent",
+            "pending",
+            "max_depth=2: inspect parity gap",
+            "epoch+2",
+        );
+        subagent.kind = "subagent".to_string();
+        let agent = runtime_task("task-agent", "running", "normal agent task", "epoch+1");
+        let mut app = app_with_runtime_tasks(vec![subagent, agent]);
+
+        run_palette_command(&mut app, "subagents");
+        let (kind, detail) = app.mcp_detail.as_ref().expect("subagents detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Subagents);
+        assert!(detail.contains("Sub-agent tasks:"));
+        assert!(detail.contains("task-subagent"));
+        assert!(detail.contains("max_depth=2: inspect parity gap"));
+        assert!(!detail.contains("normal agent task"));
+
+        run_palette_command(&mut app, "agent 2 inspect parity gap");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::CreateSubagentTask {
+                thread_id: "thread-one".to_string(),
+                task: "inspect parity gap".to_string(),
+                max_depth: 2,
+            }]
+        );
+
+        run_palette_command(&mut app, "agent 4 invalid depth");
+        assert!(app.drain_actions().is_empty());
+        assert_eq!(app.status, "agent depth must be between 0 and 3");
+
+        app.composer_focused = true;
+        app.composer = "/agent inspect repo".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::CreateSubagentTask {
+                thread_id: "thread-one".to_string(),
+                task: "inspect repo".to_string(),
+                max_depth: 1,
+            }]
+        );
+        assert_eq!(app.composer, "");
+
+        app.composer_focused = true;
+        app.composer = "/agents help".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        let (kind, detail) = app.mcp_detail.as_ref().expect("subagents help detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Subagents);
+        assert!(detail.contains("/agent [0-3] <task>"));
     }
 
     #[test]

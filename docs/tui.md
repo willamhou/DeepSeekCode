@@ -22,6 +22,9 @@ Current surfaces:
   transcript to standalone HTML and attempting a public GitHub Gist via `gh`
 - active thread Markdown export with `export` / `/export [path]`, defaulting
   to `chat_export_<timestamp>.md` in the selected workspace
+- runtime-backed sub-agent task inspection and queueing with `subagents` /
+  `/subagents`, `agents` / `/agents`, and `agent [0-3] <task>` /
+  `/agent [0-3] <task>`
 - hook inspection with `hooks` / `/hooks`, including `hooks list` and
   `hooks events` over the configured project/user hook roots
 - composer and command palette custom slash commands from project
@@ -322,6 +325,9 @@ Command palette commands currently implemented:
 | `task resume`, `task resume <id>` | Resume a paused active-thread runtime task |
 | `task cancel`, `task cancel <id>` | Cancel a pending, paused, or running active-thread runtime task |
 | `task bulk pause`, `task bulk resume`, `task bulk cancel` | Apply the default task action to compatible selected task-panel rows |
+| `subagents`, `/subagents`, `agents`, `/agents` | List runtime-backed `subagent` and `subagent_input` tasks for the active thread |
+| `agent [0-3] <task>`, `/agent [0-3] <task>` | Queue a pending active-thread `subagent` runtime task; omitted depth defaults to `1` |
+| `subagents help`, `/agents help`, `agent help`, `/agent help` | Show sub-agent command behavior and the current thread target |
 | `shell <command>`, `shell run <command>`, `! <command>` | Start an allowlisted local background shell job, or request foreground approval for an unallowlisted command |
 | `shell list`, `jobs list` | List known local background shell jobs |
 | `shell show <id>`, `jobs show <id>` | Show a shell job snapshot with accumulated output |

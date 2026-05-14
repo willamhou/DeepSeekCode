@@ -42,7 +42,7 @@ use crate::core::rollback::{RestorePlan, RollbackStore, SnapshotRecord};
 use crate::core::runtime::{
     json_object, parse_automation_record, parse_item_record, parse_runtime_event,
     parse_session_record, parse_task_record, parse_thread_record, parse_usage_record, ItemRecord,
-    RuntimeEvent, RuntimeStore, SessionRecord, ThreadRecord,
+    RuntimeEvent, RuntimeStore, SessionRecord, TaskRecord, ThreadRecord,
 };
 use crate::error::{app_error, AppResult};
 use crate::repl::slash::load_custom_slash_command_from_config;
@@ -723,6 +723,26 @@ fn handle_tui_http_action(
             )?;
             app.set_status(format!("created remote pending task for {thread_id}"));
         }
+        TuiAction::CreateSubagentTask {
+            thread_id,
+            task,
+            max_depth,
+        } => {
+            client.post_json(
+                &format!("/v1/threads/{thread_id}/tasks"),
+                json_object([
+                    ("kind", JsonValue::String("subagent".to_string())),
+                    ("status", JsonValue::String("pending".to_string())),
+                    (
+                        "summary",
+                        JsonValue::String(tui_subagent_task_summary(max_depth, &task)),
+                    ),
+                ]),
+            )?;
+            app.set_status(format!(
+                "created remote subagent task for {thread_id} (depth={max_depth})"
+            ));
+        }
         TuiAction::PauseTask { task_id } => {
             client.post_json(
                 &format!("/v1/tasks/{task_id}/pause"),
@@ -1222,6 +1242,7 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Links => Err(app_error("link details are not MCP details")),
         TuiMcpDetailKind::Home => Err(app_error("home details are not MCP details")),
         TuiMcpDetailKind::Note => Err(app_error("note details are not MCP details")),
+        TuiMcpDetailKind::Subagents => Err(app_error("subagent details are not MCP details")),
         TuiMcpDetailKind::Anchor => Err(app_error("anchor details are not MCP details")),
         TuiMcpDetailKind::Queue => Err(app_error("queue details are not MCP details")),
         TuiMcpDetailKind::Share => Err(app_error("share details are not MCP details")),
@@ -1760,6 +1781,17 @@ fn handle_tui_action_with_live(
                 summary,
             )?;
             app.set_status(format!("created pending task {}", task.id));
+        }
+        TuiAction::CreateSubagentTask {
+            thread_id,
+            task,
+            max_depth,
+        } => {
+            let task = run_tui_create_subagent_task(store, &thread_id, max_depth, &task)?;
+            app.set_status(format!(
+                "created pending subagent task {} (depth={max_depth})",
+                task.id
+            ));
         }
         TuiAction::PauseTask { task_id } => match store.pause_task(&task_id, None) {
             Ok(task) => {
@@ -3030,6 +3062,27 @@ fn run_tui_clear_conversation(
         thread.id
     ));
     Ok(())
+}
+
+fn run_tui_create_subagent_task(
+    store: &RuntimeStore,
+    thread_id: &str,
+    max_depth: usize,
+    task: &str,
+) -> AppResult<TaskRecord> {
+    let thread = store.load_thread(thread_id)?;
+    store.create_task(
+        thread.session_id.as_deref(),
+        Some(thread_id),
+        None,
+        "subagent".to_string(),
+        "pending".to_string(),
+        tui_subagent_task_summary(max_depth, task),
+    )
+}
+
+fn tui_subagent_task_summary(max_depth: usize, task: &str) -> String {
+    format!("max_depth={max_depth}: {}", task.trim())
 }
 
 fn run_tui_diff_command(app: &mut TuiApp, workspace: &Path) {
@@ -5343,6 +5396,52 @@ description = "Review pull requests."
     }
 
     #[test]
+    fn handle_tui_http_action_creates_remote_subagent_task() {
+        let store = temp_store("http-subagent-action");
+        let session = store
+            .create_session("Remote action".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Remote subagent thread".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let (client, handle) = runtime_http_client(&store, 1);
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession::from(session.clone())],
+            vec![TuiThread::from(thread.clone())],
+            Vec::new(),
+        );
+
+        handle_tui_http_action(
+            &client,
+            &mut app,
+            TuiAction::CreateSubagentTask {
+                thread_id: thread.id.clone(),
+                task: "inspect remote parity".to_string(),
+                max_depth: 3,
+            },
+        )
+        .unwrap();
+        handle.join().unwrap();
+
+        let tasks = store
+            .list_tasks(Some(&session.id), Some(&thread.id), 10)
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].kind, "subagent");
+        assert_eq!(tasks[0].status, "pending");
+        assert_eq!(tasks[0].summary, "max_depth=3: inspect remote parity");
+        assert!(render_once(&app, 160, 48)
+            .unwrap()
+            .contains("created remote subagent task"));
+    }
+
+    #[test]
     fn handle_tui_http_action_rejects_shell_commands_as_local_only() {
         let client = RuntimeHttpClient::from_url("http://127.0.0.1:9").unwrap();
         let mut app = TuiApp::new(Vec::new());
@@ -6461,6 +6560,51 @@ shell_allowlist = ["git diff"]
             .any(|event| event.kind == "task_recorded"));
         let output = render_once(&app, 160, 48).unwrap();
         assert!(output.contains("created pending task"));
+    }
+
+    #[test]
+    fn handle_tui_action_creates_pending_subagent_runtime_task() {
+        let store = temp_store("create-subagent-task-action");
+        let session = store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Runtime subagents".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let mut app = app_from_store(&store).unwrap();
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::CreateSubagentTask {
+                thread_id: thread.id.clone(),
+                task: "inspect parity gap".to_string(),
+                max_depth: 2,
+            },
+        )
+        .unwrap();
+
+        let tasks = store
+            .list_tasks(Some(&session.id), Some(&thread.id), 10)
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].kind, "subagent");
+        assert_eq!(tasks[0].status, "pending");
+        assert_eq!(tasks[0].summary, "max_depth=2: inspect parity gap");
+        assert!(store
+            .read_events(&thread.id, 0)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "task_recorded"));
+        let output = render_once(&app, 160, 48).unwrap();
+        assert!(output.contains("created pending subagent task"));
     }
 
     #[test]
