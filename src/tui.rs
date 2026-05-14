@@ -1229,6 +1229,8 @@ pub enum TuiSkillsCommand {
     List { prefix: Option<String> },
     Remote,
     Show { name: String },
+    Install { source: String },
+    Update { name: String },
     Uninstall { name: String },
     Trust { name: String },
 }
@@ -1760,16 +1762,20 @@ fn parse_tui_skill_command(line: &str) -> Option<Result<TuiSkillsCommand, String
     let args = rest.split_whitespace().collect::<Vec<_>>();
     match args.as_slice() {
         [] => Some(Err(
-            "usage: skill <name|new|uninstall <name>|trust <name>> or /skill <name|new|uninstall <name>|trust <name>>"
+            "usage: skill <name|new|install <source>|update <name>|uninstall <name>|trust <name>> or /skill <name|new|install <source>|update <name>|uninstall <name>|trust <name>>"
                 .to_string(),
         )),
         ["new"] => Some(Ok(TuiSkillsCommand::Show {
             name: "skill-creator".to_string(),
         })),
-        ["install" | "update", ..] => Some(Err(
-            "skill install/update requires the remote registry installer, which is not available in this TUI slice"
-                .to_string(),
-        )),
+        ["install"] => Some(Err("usage: /skill install <registry-name|url>".to_string())),
+        ["install", source @ ..] => Some(Ok(TuiSkillsCommand::Install {
+            source: source.join(" "),
+        })),
+        ["update"] => Some(Err("usage: /skill update <name>".to_string())),
+        ["update", name] if !name.starts_with('-') => Some(Ok(TuiSkillsCommand::Update {
+            name: (*name).to_string(),
+        })),
         ["uninstall"] => Some(Err("usage: /skill uninstall <name>".to_string())),
         ["uninstall", name] if !name.starts_with('-') => Some(Ok(TuiSkillsCommand::Uninstall {
             name: (*name).to_string(),
@@ -1782,7 +1788,7 @@ fn parse_tui_skill_command(line: &str) -> Option<Result<TuiSkillsCommand, String
             name: (*name).to_string(),
         })),
         _ => Some(Err(
-            "usage: skill <name|new|uninstall <name>|trust <name>> or /skill <name|new|uninstall <name>|trust <name>>"
+            "usage: skill <name|new|install <source>|update <name>|uninstall <name>|trust <name>> or /skill <name|new|install <source>|update <name>|uninstall <name>|trust <name>>"
                 .to_string(),
         )),
     }
@@ -3232,8 +3238,8 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         category: "Skills",
         name: "skill",
         aliases: &[],
-        usage: "/skill <name|new|uninstall <name>|trust <name>>",
-        description: "Show, create, or manage one configured skill.",
+        usage: "/skill <name|new|install <source>|update <name>|uninstall <name>|trust <name>>",
+        description: "Show, create, install, update, or manage one configured skill.",
     },
     TuiHelpCommandInfo {
         category: "Interaction",
@@ -3484,6 +3490,8 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "skills --remote",
     "skill ",
     "skill new",
+    "skill install ",
+    "skill update ",
     "skill uninstall ",
     "skill trust ",
     "feedback",
@@ -3759,6 +3767,8 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/skills --remote",
     "/skill ",
     "/skill new",
+    "/skill install ",
+    "/skill update ",
     "/skill uninstall ",
     "/skill trust ",
     "/feedback",
@@ -19094,6 +19104,26 @@ mod tests {
             }]
         );
 
+        run_palette_command(&mut app, "skill install https://example.com/triage.toml");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Skills {
+                command: TuiSkillsCommand::Install {
+                    source: "https://example.com/triage.toml".to_string(),
+                },
+            }]
+        );
+
+        run_palette_command(&mut app, "skill update pr-review");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Skills {
+                command: TuiSkillsCommand::Update {
+                    name: "pr-review".to_string(),
+                },
+            }]
+        );
+
         run_palette_command(&mut app, "skill uninstall pr-review");
         assert_eq!(
             app.drain_actions(),
@@ -19568,6 +19598,34 @@ mod tests {
             vec![TuiAction::Skills {
                 command: TuiSkillsCommand::Show {
                     name: "skill-creator".to_string(),
+                },
+            }]
+        );
+
+        for ch in "/skill install https://example.com/triage.toml".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Skills {
+                command: TuiSkillsCommand::Install {
+                    source: "https://example.com/triage.toml".to_string(),
+                },
+            }]
+        );
+
+        for ch in "/skill update pr-review".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Skills {
+                command: TuiSkillsCommand::Update {
+                    name: "pr-review".to_string(),
                 },
             }]
         );

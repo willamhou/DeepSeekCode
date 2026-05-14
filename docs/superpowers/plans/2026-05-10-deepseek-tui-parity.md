@@ -538,6 +538,12 @@ Landed first slice:
 - TUI now supports DeepSeek-TUI-style `/skill new` by routing the alias to a
   bundled `skill-creator` TOML skill that guides creation of focused
   DeepSeekCode local skills
+- TUI now supports a DeepSeekCode-native `/skill install <registry-name|url>`
+  and `/skill update <name>` slice for direct TOML skill sources, resolving
+  registry entries through `skills.registry_url`, writing installed user skills
+  under `workspace.user_skills_dir`, and tracking source/checksum metadata in
+  `.installed-from`; GitHub/tarball/SKILL.md archive installs remain the next
+  installer gap
 - TUI now supports DeepSeek-TUI-style `/feedback [bug|feature|security]` plus
   command-palette `feedback`, rendering repository feedback targets and
   security-policy links in the detail panel without attempting to launch a GUI
