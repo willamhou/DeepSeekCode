@@ -23,7 +23,9 @@ strict dogfood report evidence gates for live external fixture/readiness proof,
 and a repo-native model-backed README demo capture workflow. A latest upstream
 refresh also showed DeepSeek-TUI's new terminal stability fixes; DeepSeekCode
 now has a TUI emergency terminal restore guard plus Unix SIGINT/SIGTERM/SIGHUP
-cleanup for raw-mode/alternate-screen recovery.
+cleanup for raw-mode/alternate-screen recovery, and TUI clipping now respects
+terminal display width so CJK / URL / no-whitespace previews stay within panel
+budgets.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
 - native supervisor-owned PTY attach/stdin/resize/replay/wait/cancel polish and

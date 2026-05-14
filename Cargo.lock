@@ -147,6 +147,7 @@ dependencies = [
  "ratatui",
  "signal-hook",
  "tar",
+ "unicode-width 0.2.0",
  "zip",
 ]
 

@@ -22,6 +22,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap},
     Frame, Terminal,
 };
+use unicode_width::UnicodeWidthChar;
 
 use crate::config::load::{config_assignments, parse_dotenv_assignment};
 use crate::config::types::AppConfig;
@@ -14678,13 +14679,37 @@ impl TuiApp {
     }
 }
 
-fn clip_line(value: &str, max_chars: usize) -> String {
+fn clip_line(value: &str, max_width: usize) -> String {
     let line = value.lines().next().unwrap_or("").trim();
-    let mut clipped = line.chars().take(max_chars).collect::<String>();
-    if line.chars().count() > max_chars {
-        clipped.push_str("...");
+    if display_width(line) <= max_width {
+        return line.to_string();
     }
+
+    let ellipsis = clipped_ellipsis(max_width);
+    let content_width = max_width.saturating_sub(ellipsis.len());
+    let mut clipped = String::new();
+    let mut width = 0_usize;
+    for ch in line.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > content_width {
+            break;
+        }
+        clipped.push(ch);
+        width += ch_width;
+    }
+    clipped.push_str(&ellipsis);
     clipped
+}
+
+fn display_width(value: &str) -> usize {
+    value
+        .chars()
+        .map(|ch| ch.width().unwrap_or(0))
+        .sum::<usize>()
+}
+
+fn clipped_ellipsis(max_width: usize) -> String {
+    ".".repeat(max_width.min(3))
 }
 
 fn stable_tui_segment(value: &str) -> String {
@@ -17495,6 +17520,25 @@ mod tests {
         assert_eq!(terminating_signal_exit_code(2), 130);
         assert_eq!(terminating_signal_exit_code(15), 143);
         assert_eq!(terminating_signal_exit_code(1), 129);
+    }
+
+    #[test]
+    fn clip_line_uses_terminal_display_width_for_cjk() {
+        let clipped = clip_line("这是一个没有空格的中文长段落", 12);
+        assert!(display_width(&clipped) <= 12);
+        assert!(clipped.ends_with("..."));
+    }
+
+    #[test]
+    fn clip_line_keeps_long_ascii_token_within_width() {
+        let clipped = clip_line(&"x".repeat(80), 20);
+        assert_eq!(display_width(&clipped), 20);
+        assert!(clipped.ends_with("..."));
+    }
+
+    #[test]
+    fn clip_line_keeps_unclipped_text_unchanged() {
+        assert_eq!(clip_line("plain text", 20), "plain text");
     }
 
     fn left_click(column: u16, row: u16) -> MouseEvent {
