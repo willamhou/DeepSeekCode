@@ -40,7 +40,10 @@ begin, update them through pending approval and terminal statuses, and stream
 `tool_result` upserts without duplicating those results again at turn
 completion. Agent-visible `web_search` now defaults to Bing HTML search while
 keeping DuckDuckGo available through an explicit provider override and preserving
-the deterministic URL-template test hook.
+the deterministic URL-template test hook. Durable runtime approval requests now
+also include stable input-sensitive fingerprints, adapting DeepSeek-TUI's
+generic-tool denial fingerprint fix to DeepSeekCode's request-id-based approval
+event model.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
 - native supervisor-owned PTY attach/stdin/resize/replay/wait/cancel polish and

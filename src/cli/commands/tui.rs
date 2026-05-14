@@ -8625,6 +8625,7 @@ description: {description}
         assert!(output.contains("Approval Modal"));
         assert!(output.contains("run_shell"));
         assert!(output.contains("cargo test"));
+        assert!(output.contains("perm:shell:run_shell:"));
     }
 
     #[test]

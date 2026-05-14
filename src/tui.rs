@@ -335,6 +335,7 @@ pub struct TuiApprovalRequest {
     pub tool: String,
     pub kind: String,
     pub target: String,
+    pub fingerprint: String,
     pub status: String,
 }
 
@@ -344,6 +345,12 @@ impl TuiApprovalRequest {
             return None;
         }
         let payload = json_as_object(&event.payload)?;
+        let fingerprint = payload_string(payload, "fingerprint", "");
+        let fingerprint = if fingerprint.is_empty() {
+            format!("legacy:{}", event.id)
+        } else {
+            fingerprint
+        };
         Some(Self {
             id: event.id.clone(),
             thread_id: event.thread_id.clone(),
@@ -351,6 +358,7 @@ impl TuiApprovalRequest {
             tool: payload_string(payload, "tool", "unknown"),
             kind: payload_string(payload, "kind", "permission"),
             target: payload_string(payload, "target", ""),
+            fingerprint,
             status: payload_string(payload, "status", "pending"),
         })
     }
@@ -17233,7 +17241,7 @@ fn draw_auth_modal(frame: &mut Frame, app: &TuiApp) {
 }
 
 fn draw_approval_modal(frame: &mut Frame, app: &TuiApp) {
-    let area = bottom_center_rect(frame.area(), 68, 11);
+    let area = bottom_center_rect(frame.area(), 72, 12);
     frame.render_widget(Clear, area);
     let lines = if let Some(command) = app.pending_shell_approval.as_deref() {
         vec![
@@ -17242,6 +17250,7 @@ fn draw_approval_modal(frame: &mut Frame, app: &TuiApp) {
             Line::from("Kind: shell"),
             Line::from(format!("Target: {}", clip_line(command, 58))),
             Line::from("Source: TUI command palette"),
+            Line::from("Key: local-shell"),
             Line::from(""),
             Line::from("[y] run once    [n] deny    [Esc] close"),
         ]
@@ -17251,6 +17260,10 @@ fn draw_approval_modal(frame: &mut Frame, app: &TuiApp) {
             Line::from(format!("Tool: {}", clip_line(&approval.tool, 48))),
             Line::from(format!("Kind: {}", clip_line(&approval.kind, 48))),
             Line::from(format!("Target: {}", clip_line(&approval.target, 58))),
+            Line::from(format!(
+                "Key: {}",
+                clip_line(approval.fingerprint.as_str(), 58)
+            )),
             Line::from(format!("Thread: {}", approval.thread_id)),
             Line::from(""),
             Line::from("[y] approve    [n] deny    [c] cancel run"),
@@ -22915,6 +22928,7 @@ model.model = "deepseek-v4-pro"
                 tool: "shell".to_string(),
                 kind: "shell".to_string(),
                 target: "cargo test".to_string(),
+                fingerprint: "perm:shell:shell:fixture".to_string(),
                 status: "pending".to_string(),
             }],
             vec![TuiUserInputRequest {
@@ -24841,6 +24855,7 @@ model.model = "deepseek-v4-pro"
             tool: "run_shell".to_string(),
             kind: "shell".to_string(),
             target: "cargo test".to_string(),
+            fingerprint: "perm:shell:run_shell:fixture".to_string(),
             status: "pending".to_string(),
         };
         let mut app = TuiApp::with_runtime(sessions.clone(), threads.clone(), Vec::new());

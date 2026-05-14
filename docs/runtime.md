@@ -787,12 +787,17 @@ fields as `exec --json` permission notifications and is consumed by
   "tool": "run_shell",
   "kind": "shell",
   "target": "cargo test",
+  "fingerprint": "perm:shell:run_shell:...",
   "status": "pending",
   "input": {
     "command": "cargo test"
   }
 }
 ```
+
+`fingerprint` is generated from the tool, permission kind, target, and sorted
+input fields. It keeps exact repeat approvals/denials auditable without letting
+one denied same-name tool call stand in for a distinct future call.
 
 `permission_response` records the durable approval decision for a request:
 

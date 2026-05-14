@@ -1321,6 +1321,7 @@ impl RuntimeStore {
                 return Err(app_error(format!("runtime turn not found: {turn_id}")));
             }
         }
+        let fingerprint = permission_request_fingerprint(&tool, &kind, &target, &input);
         let event = self.append_event(
             thread_id,
             turn_id,
@@ -1330,6 +1331,7 @@ impl RuntimeStore {
                 ("tool", JsonValue::String(tool)),
                 ("kind", JsonValue::String(kind)),
                 ("target", JsonValue::String(target)),
+                ("fingerprint", JsonValue::String(fingerprint)),
                 ("status", JsonValue::String("pending".to_string())),
                 (
                     "input",
@@ -3283,6 +3285,42 @@ fn validate_automation_status(status: &str) -> AppResult<()> {
     }
 }
 
+fn permission_request_fingerprint(
+    tool: &str,
+    kind: &str,
+    target: &str,
+    input: &BTreeMap<String, String>,
+) -> String {
+    let mut canonical = String::new();
+    push_fingerprint_part(&mut canonical, "tool", tool);
+    push_fingerprint_part(&mut canonical, "kind", kind);
+    push_fingerprint_part(&mut canonical, "target", target);
+    for (key, value) in input {
+        push_fingerprint_part(&mut canonical, key, value);
+    }
+    format!("perm:{kind}:{tool}:{:016x}", fnv1a64(canonical.as_bytes()))
+}
+
+fn push_fingerprint_part(out: &mut String, key: &str, value: &str) {
+    out.push_str(&key.len().to_string());
+    out.push(':');
+    out.push_str(key);
+    out.push('=');
+    out.push_str(&value.len().to_string());
+    out.push(':');
+    out.push_str(value);
+    out.push('\n');
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 fn object<const N: usize>(items: [(&str, JsonValue); N]) -> BTreeMap<String, JsonValue> {
     let mut map = BTreeMap::new();
     for (key, value) in items {
@@ -3987,6 +4025,11 @@ mod tests {
             payload.get("target").and_then(json_as_string),
             Some("cargo test")
         );
+        let fingerprint = payload
+            .get("fingerprint")
+            .and_then(json_as_string)
+            .expect("permission request fingerprint");
+        assert!(fingerprint.starts_with("perm:shell:run_shell:"));
         assert_eq!(
             store.load_thread(&thread.id).unwrap().event_seq,
             request.seq
@@ -3999,6 +4042,68 @@ mod tests {
                 .as_deref(),
             Some(thread.id.as_str())
         );
+    }
+
+    #[test]
+    fn permission_request_fingerprint_tracks_exact_input() {
+        let store = RuntimeStore::new(temp_root("permission-fingerprint"));
+        let thread = store
+            .create_thread(
+                "Investigate".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let mut input_a = BTreeMap::new();
+        input_a.insert("path".to_string(), "a.txt".to_string());
+        let mut input_b = BTreeMap::new();
+        input_b.insert("path".to_string(), "b.txt".to_string());
+
+        let first = store
+            .append_permission_request(
+                &thread.id,
+                None,
+                "edit_file".to_string(),
+                "write".to_string(),
+                "a.txt".to_string(),
+                input_a.clone(),
+            )
+            .unwrap();
+        let repeat = store
+            .append_permission_request(
+                &thread.id,
+                None,
+                "edit_file".to_string(),
+                "write".to_string(),
+                "a.txt".to_string(),
+                input_a,
+            )
+            .unwrap();
+        let distinct = store
+            .append_permission_request(
+                &thread.id,
+                None,
+                "edit_file".to_string(),
+                "write".to_string(),
+                "b.txt".to_string(),
+                input_b,
+            )
+            .unwrap();
+
+        let fingerprint = |event: &RuntimeEvent| -> String {
+            let JsonValue::Object(payload) = &event.payload else {
+                panic!("permission request payload should be an object");
+            };
+            payload
+                .get("fingerprint")
+                .and_then(json_as_string)
+                .expect("permission request fingerprint")
+                .to_string()
+        };
+
+        assert_eq!(fingerprint(&first), fingerprint(&repeat));
+        assert_ne!(fingerprint(&first), fingerprint(&distinct));
     }
 
     #[test]
