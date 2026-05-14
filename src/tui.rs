@@ -1245,6 +1245,14 @@ enum TuiCacheCommand {
     Warmup,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TuiTaskCommand {
+    List,
+    Add { prompt: String },
+    Show { id: String },
+    Cancel { id: String },
+}
+
 fn parse_tui_stash_command(line: &str) -> Option<Result<TuiComposerStashCommand, String>> {
     let trimmed = line.trim();
     let rest = strip_tui_command_prefix(trimmed, "/stash")
@@ -1417,6 +1425,31 @@ fn parse_tui_sessions_command(line: &str) -> Option<Result<TuiSessionsCommand, S
         _ => Some(Err(
             "usage: sessions [show|filter <query>|prune <days>], resume, /sessions [show|filter <query>|prune <days>], or /resume"
                 .to_string(),
+        )),
+    }
+}
+
+fn parse_tui_task_command(line: &str) -> Option<Result<TuiTaskCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/task")
+        .or_else(|| strip_tui_command_prefix(trimmed, "/tasks"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] | ["list"] | ["ls"] => Some(Ok(TuiTaskCommand::List)),
+        ["add"] | ["create"] => Some(Err("usage: /task add <prompt>".to_string())),
+        ["add", prompt @ ..] | ["create", prompt @ ..] => Some(Ok(TuiTaskCommand::Add {
+            prompt: prompt.join(" "),
+        })),
+        ["show"] | ["read"] => Some(Err("usage: /task show <id>".to_string())),
+        ["show", id] | ["read", id] => Some(Ok(TuiTaskCommand::Show {
+            id: (*id).to_string(),
+        })),
+        ["cancel"] | ["stop"] => Some(Err("usage: /task cancel <id>".to_string())),
+        ["cancel", id] | ["stop", id] => Some(Ok(TuiTaskCommand::Cancel {
+            id: (*id).to_string(),
+        })),
+        _ => Some(Err(
+            "usage: /task [add <prompt>|list|show <id>|cancel <id>]".to_string(),
         )),
     }
 }
@@ -3086,7 +3119,7 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         category: "Runtime Work",
         name: "task",
         aliases: &["tasks"],
-        usage: "task <summary>|pause|resume|cancel|select",
+        usage: "task <summary>|pause|resume|cancel|select; /task [add|list|show|cancel]",
         description: "Create and manage active-thread runtime tasks.",
     },
     TuiHelpCommandInfo {
@@ -3399,6 +3432,12 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/resume",
     "/sessions filter ",
     "/sessions prune ",
+    "/tasks",
+    "/task",
+    "/task list",
+    "/task add ",
+    "/task show ",
+    "/task cancel ",
     "/settings",
     "/config",
     "/diff",
@@ -4759,6 +4798,95 @@ impl TuiApp {
         self.active_thread_tasks()
             .into_iter()
             .find(|task| task.id == task_id)
+    }
+
+    fn handle_task_command(&mut self, command: TuiTaskCommand) {
+        match command {
+            TuiTaskCommand::List => self.show_task_list_detail(),
+            TuiTaskCommand::Add { prompt } => self.request_create_task(prompt),
+            TuiTaskCommand::Show { id } => self.show_task_detail(&id),
+            TuiTaskCommand::Cancel { id } => self.request_task_cancel(&id),
+        }
+    }
+
+    fn show_task_list_detail(&mut self) {
+        let count = self.active_thread_tasks().len();
+        let detail = self.render_task_list_detail();
+        self.set_mcp_detail(TuiMcpDetailKind::Status, detail);
+        self.status = if count == 0 {
+            "no runtime tasks in active thread".to_string()
+        } else {
+            format!("active thread tasks={count}")
+        };
+    }
+
+    fn show_task_detail(&mut self, task_id: &str) {
+        let selected = self
+            .active_task_by_id(task_id)
+            .map(|task| (task.id.clone(), render_task_record_detail(task)));
+        let Some((task_id, detail)) = selected else {
+            self.status = format!("task not found in active thread: {task_id}");
+            return;
+        };
+        self.selected_task_id = Some(task_id.clone());
+        self.refresh_runtime_view();
+        self.set_mcp_detail(TuiMcpDetailKind::Status, detail);
+        self.status = format!("task detail: {task_id}");
+    }
+
+    fn render_task_list_detail(&self) -> String {
+        let mut detail = String::new();
+        let _ = writeln!(detail, "Active Thread Tasks");
+        let _ = writeln!(detail, "===================");
+        let _ = writeln!(detail);
+        match self.active_thread() {
+            Some(thread) => {
+                push_status_row(&mut detail, "Thread:", &thread.title);
+                push_status_row(&mut detail, "Thread id:", &thread.id);
+            }
+            None => {
+                let _ = writeln!(detail, "No active durable thread.");
+                return detail;
+            }
+        }
+
+        let tasks = self.active_thread_tasks();
+        push_status_row(&mut detail, "Tasks:", &tasks.len().to_string());
+        if !tasks.is_empty() {
+            let task_states = task_status_counts_line(&tasks)
+                .strip_prefix("Task states: ")
+                .unwrap_or("")
+                .to_string();
+            push_status_row(&mut detail, "Task states:", &task_states);
+            let _ = writeln!(detail);
+            let _ = writeln!(detail, "Recent tasks");
+            let _ = writeln!(detail, "------------");
+            for task in tasks {
+                let selected = if self.selected_task_id.as_deref() == Some(task.id.as_str()) {
+                    ">"
+                } else {
+                    "-"
+                };
+                let _ = writeln!(
+                    detail,
+                    "{selected} {} [{}] {}",
+                    task.id,
+                    task.status,
+                    clip_line(&task.summary, 88)
+                );
+                let _ = writeln!(
+                    detail,
+                    "  kind={} updated={} parent={}",
+                    task.kind,
+                    task.updated_at,
+                    task.parent_task_id.as_deref().unwrap_or("none")
+                );
+            }
+        } else {
+            let _ = writeln!(detail);
+            let _ = writeln!(detail, "No runtime tasks in the active thread.");
+        }
+        detail
     }
 
     fn selected_task(&self) -> Option<&TuiTaskRecord> {
@@ -6503,6 +6631,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_task_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.handle_task_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(message) = parse_tui_legacy_migration_command(&content) {
                     self.status = message.to_string();
                     return true;
@@ -7233,6 +7374,17 @@ impl TuiApp {
             match command {
                 Ok(command) => {
                     self.handle_sessions_command(command);
+                }
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_task_command(command) {
+            match command {
+                Ok(command) => {
+                    self.handle_task_command(command);
                 }
                 Err(message) => {
                     self.status = message;
@@ -13169,6 +13321,37 @@ fn task_status_counts_line(tasks: &[&TuiTaskRecord]) -> String {
     format!("Task states: {}", parts.join(" "))
 }
 
+fn render_task_record_detail(task: &TuiTaskRecord) -> String {
+    let mut detail = String::new();
+    let _ = writeln!(detail, "Runtime Task");
+    let _ = writeln!(detail, "============");
+    let _ = writeln!(detail);
+    push_status_row(&mut detail, "Task id:", &task.id);
+    push_status_row(&mut detail, "Status:", &task.status);
+    push_status_row(&mut detail, "Kind:", &task.kind);
+    push_status_row(&mut detail, "Updated:", &task.updated_at);
+    push_status_row(
+        &mut detail,
+        "Session id:",
+        task.session_id.as_deref().unwrap_or("none"),
+    );
+    push_status_row(
+        &mut detail,
+        "Thread id:",
+        task.thread_id.as_deref().unwrap_or("none"),
+    );
+    push_status_row(
+        &mut detail,
+        "Parent task:",
+        task.parent_task_id.as_deref().unwrap_or("none"),
+    );
+    let _ = writeln!(detail);
+    let _ = writeln!(detail, "Summary");
+    let _ = writeln!(detail, "-------");
+    let _ = writeln!(detail, "{}", task.summary);
+    detail
+}
+
 fn short_task_id(id: &str) -> String {
     clip_line(id, 22)
 }
@@ -15864,6 +16047,60 @@ mod tests {
             }]
         );
         assert!(app.status.contains("task queued for creation"));
+    }
+
+    #[test]
+    fn task_slash_commands_route_before_custom_slash_fallback() {
+        let mut app = app_with_runtime_tasks(vec![runtime_task(
+            "task-one",
+            "pending",
+            "inspect failing integration test",
+            "epoch+1",
+        )]);
+
+        app.composer_focused = true;
+        for ch in "/task add inspect logs".chars() {
+            assert!(app.handle_key(KeyCode::Char(ch)));
+        }
+        assert!(app.handle_key(KeyCode::Enter));
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::CreateTask {
+                thread_id: "thread-one".to_string(),
+                summary: "inspect logs".to_string(),
+            }]
+        );
+        assert!(app.composer.is_empty());
+        assert!(app.status.contains("task queued for creation"));
+
+        app.composer_focused = false;
+        run_palette_command(&mut app, "/task list");
+        assert!(app.drain_actions().is_empty());
+        assert_eq!(
+            app.mcp_detail.as_ref().map(|(kind, _)| *kind),
+            Some(TuiMcpDetailKind::Status)
+        );
+        let detail = app.mcp_detail.as_ref().unwrap().1.as_str();
+        assert!(detail.contains("Active Thread Tasks"));
+        assert!(detail.contains("task-one"));
+        assert!(detail.contains("pending=1"));
+
+        run_palette_command(&mut app, "/task show task-one");
+        assert!(app.drain_actions().is_empty());
+        let detail = app.mcp_detail.as_ref().unwrap().1.as_str();
+        assert!(detail.contains("Runtime Task"));
+        assert!(detail.contains("Task id:"));
+        assert!(detail.contains("task-one"));
+        assert!(detail.contains("inspect failing integration test"));
+
+        run_palette_command(&mut app, "/task cancel task-one");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::CancelTask {
+                task_id: "task-one".to_string(),
+            }]
+        );
+        assert!(app.status.contains("task cancel requested"));
     }
 
     #[test]

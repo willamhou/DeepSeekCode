@@ -342,6 +342,10 @@ Landed first slice:
   migration commands `/set` and `/deepseek` before custom slash fallback,
   surfacing the same replacement guidance while keeping them out of help and
   completion
+- TUI composer and command palette now route DeepSeek-TUI-style `/task` and
+  `/tasks` slash commands before custom slash fallback, supporting
+  `/task add <prompt>`, `/task list`, `/task show <id>`, and
+  `/task cancel <id>` through the existing active-thread runtime task flows
 - TUI now enables terminal mouse capture for first-line workbench navigation:
   click Plan/Agent/YOLO tabs to switch mode, click visible session/thread
   picker rows to select them, scroll the wheel through the active

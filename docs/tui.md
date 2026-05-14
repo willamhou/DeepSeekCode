@@ -181,8 +181,10 @@ Current surfaces:
   local TUI-started agent runs replay into the next request. The local
   file-backed TUI stores the replay limit and pinned turn ids in
   `.dscode/tui/reasoning-replay.json`.
-- `task <summary>` / `task create <summary>` creates a pending active-thread
-  `agent` task for the durable task daemon or external runners
+- `task <summary>` / `task create <summary>` and `/task add <prompt>` create a
+  pending active-thread `agent` task for the durable task daemon or external
+  runners; `/task list` and `/task show <id>` inspect active-thread tasks in the
+  detail panel
 - `task next`, `task prev`, and `task select <id>` move the selected task in
   the active thread's task panel; left-clicking a visible task row also selects
   it
@@ -369,14 +371,16 @@ Command palette commands currently implemented:
 | `stash`, `stash list`, `/stash list` | List parked composer drafts in the right-side detail panel |
 | `stash pop`, `/stash pop` | Restore the most recently stashed composer draft |
 | `stash clear`, `/stash clear` | Clear all parked composer drafts |
-| `tasks`, `task` | Show active-thread task count in the status bar |
+| `tasks`, `task`, `/tasks`, `/task list` | Show active-thread tasks |
 | `task <summary>`, `task create <summary>` | Create a pending active-thread runtime task |
+| `/task add <prompt>` | Create a pending active-thread runtime task |
+| `/task show <id>` | Show active-thread runtime task details |
 | `task next`, `task prev` | Move the selected active-thread runtime task |
 | `task select <id>` | Select an active-thread runtime task by id |
 | `task select all`, `task select clear` | Select visible task-panel rows for bulk actions, or clear selected tasks |
 | `task pause`, `task pause <id>` | Pause a pending active-thread runtime task |
 | `task resume`, `task resume <id>` | Resume a paused active-thread runtime task |
-| `task cancel`, `task cancel <id>` | Cancel a pending, paused, or running active-thread runtime task |
+| `task cancel`, `task cancel <id>`, `/task cancel <id>` | Cancel a pending, paused, or running active-thread runtime task |
 | `task bulk pause`, `task bulk resume`, `task bulk cancel` | Apply the default task action to compatible selected task-panel rows |
 | `subagents`, `/subagents`, `agents`, `/agents` | List runtime-backed `subagent` and `subagent_input` tasks for the active thread |
 | `agent [0-3] <task>`, `/agent [0-3] <task>` | Queue a pending active-thread `subagent` runtime task; omitted depth defaults to `1` |
