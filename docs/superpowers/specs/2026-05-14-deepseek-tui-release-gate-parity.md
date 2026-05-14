@@ -43,6 +43,8 @@ gate already used elsewhere is serial test execution.
   release binary/package/npm platform smoke. Linux remains the full behavioral
   gate with `cargo test -- --test-threads=1`; macOS and Windows now verify
   compile/package viability without depending on Unix-specific test fixtures.
+- Updated the macOS x64 runner from the old Intel label to `macos-15-intel`
+  after the tag workflow queued indefinitely on `macos-13`.
 - Updated `docs/release.md` to use the same serial test command in the local
   release gate.
 

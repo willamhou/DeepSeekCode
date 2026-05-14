@@ -27,7 +27,7 @@ jobs:
             binary: ./target/release/deepseek
             npm_platform: linux-x64
           - name: macos-x64
-            os: macos-13
+            os: macos-15-intel
             artifact: deepseek-macos-x64
             binary: ./target/release/deepseek
             npm_platform: macos-x64
