@@ -456,6 +456,204 @@ impl RuntimeStore {
         })
     }
 
+    pub fn fork_thread_at_turn_count(
+        &self,
+        source_thread_id: &str,
+        keep_turn_count: usize,
+        title: Option<String>,
+    ) -> AppResult<ThreadForkRecord> {
+        validate_record_id(source_thread_id)?;
+        self.ensure_dirs()?;
+        let source = self.load_thread(source_thread_id)?;
+        let source_turns = self.list_turns(source_thread_id)?;
+        if keep_turn_count > source_turns.len() {
+            return Err(app_error(format!(
+                "runtime fork keep_turn_count {keep_turn_count} exceeds source turn count {}",
+                source_turns.len()
+            )));
+        }
+        let source_items = self.list_items(source_thread_id, None)?;
+        let kept_turns = &source_turns[..keep_turn_count];
+        let dropped_turn_ids = source_turns[keep_turn_count..]
+            .iter()
+            .map(|turn| turn.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let first_dropped_item_index = source_items
+            .iter()
+            .filter(|item| {
+                item.turn_id
+                    .as_deref()
+                    .is_some_and(|turn_id| dropped_turn_ids.contains(turn_id))
+            })
+            .map(|item| item.index)
+            .min();
+        let kept_turn_ids = kept_turns
+            .iter()
+            .map(|turn| turn.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let last_kept_item_index = source_items
+            .iter()
+            .filter(|item| {
+                item.turn_id
+                    .as_deref()
+                    .is_some_and(|turn_id| kept_turn_ids.contains(turn_id))
+            })
+            .map(|item| item.index)
+            .max();
+        let now = epoch_label();
+        let title = title
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("Fork: {}", source.title));
+        let mut thread = ThreadRecord {
+            id: new_id("thread"),
+            session_id: source.session_id.clone(),
+            created_at: now.clone(),
+            updated_at: now,
+            title,
+            workspace: source.workspace.clone(),
+            model: source.model.clone(),
+            mode: source.mode.clone(),
+            status: "active".to_string(),
+            latest_turn_id: None,
+            event_seq: 0,
+        };
+        self.write_thread(&thread)?;
+        let created = self.append_event(
+            &thread.id,
+            None,
+            "thread_created",
+            JsonValue::Object(object([
+                ("title", JsonValue::String(thread.title.clone())),
+                ("mode", JsonValue::String(thread.mode.clone())),
+                (
+                    "session_id",
+                    thread
+                        .session_id
+                        .clone()
+                        .map(JsonValue::String)
+                        .unwrap_or(JsonValue::Null),
+                ),
+                (
+                    "source_thread_id",
+                    JsonValue::String(source_thread_id.to_string()),
+                ),
+            ])),
+        )?;
+        thread.event_seq = created.seq;
+        thread.updated_at = created.created_at;
+        self.write_thread(&thread)?;
+
+        let mut turn_id_map = BTreeMap::new();
+        for source_turn in kept_turns {
+            let turn = TurnRecord {
+                id: new_id("turn"),
+                thread_id: thread.id.clone(),
+                index: source_turn.index,
+                role: source_turn.role.clone(),
+                content: source_turn.content.clone(),
+                status: source_turn.status.clone(),
+                created_at: source_turn.created_at.clone(),
+            };
+            turn_id_map.insert(source_turn.id.clone(), turn.id.clone());
+            self.write_turn(&turn)?;
+        }
+
+        let mut copied_item_count = 0;
+        for source_item in &source_items {
+            let turn_id = match source_item.turn_id.as_ref() {
+                Some(source_turn_id) => match turn_id_map.get(source_turn_id) {
+                    Some(mapped) => Some(mapped.clone()),
+                    None => continue,
+                },
+                None => {
+                    if keep_turn_count < source_turns.len()
+                        && match first_dropped_item_index {
+                            Some(index) => source_item.index >= index,
+                            None => last_kept_item_index
+                                .map(|index| source_item.index > index)
+                                .unwrap_or(true),
+                        }
+                    {
+                        continue;
+                    }
+                    None
+                }
+            };
+            let item = ItemRecord {
+                id: new_id("item"),
+                thread_id: thread.id.clone(),
+                turn_id,
+                index: source_item.index,
+                item_type: source_item.item_type.clone(),
+                role: source_item.role.clone(),
+                content: source_item.content.clone(),
+                status: source_item.status.clone(),
+                created_at: source_item.created_at.clone(),
+            };
+            self.write_item(&item)?;
+            copied_item_count += 1;
+        }
+
+        thread.latest_turn_id = kept_turns
+            .last()
+            .and_then(|turn| turn_id_map.get(&turn.id).cloned());
+        let event = self.append_event(
+            &thread.id,
+            thread.latest_turn_id.as_deref(),
+            "thread_forked",
+            JsonValue::Object(object([
+                (
+                    "source_thread_id",
+                    JsonValue::String(source_thread_id.to_string()),
+                ),
+                (
+                    "source_session_id",
+                    source
+                        .session_id
+                        .clone()
+                        .map(JsonValue::String)
+                        .unwrap_or(JsonValue::Null),
+                ),
+                (
+                    "copied_turn_count",
+                    JsonValue::Number(kept_turns.len().to_string()),
+                ),
+                (
+                    "copied_item_count",
+                    JsonValue::Number(copied_item_count.to_string()),
+                ),
+                (
+                    "dropped_turn_count",
+                    JsonValue::Number(
+                        source_turns
+                            .len()
+                            .saturating_sub(keep_turn_count)
+                            .to_string(),
+                    ),
+                ),
+            ])),
+        )?;
+        thread.event_seq = event.seq;
+        thread.updated_at = event.created_at.clone();
+        self.write_thread(&thread)?;
+        if let Some(session_id) = thread.session_id.as_deref() {
+            if let Ok(mut session) = self.load_session(session_id) {
+                session.active_thread_id = Some(thread.id.clone());
+                session.thread_count += 1;
+                session.updated_at = thread.updated_at.clone();
+                self.write_session(&session)?;
+            }
+        }
+        Ok(ThreadForkRecord {
+            source_thread_id: source_thread_id.to_string(),
+            thread,
+            copied_turn_count: kept_turns.len(),
+            copied_item_count,
+            event,
+        })
+    }
+
     pub fn list_threads(&self, limit: usize) -> AppResult<Vec<ThreadRecord>> {
         let dir = self.threads_dir();
         if !dir.exists() {
@@ -3314,6 +3512,98 @@ mod tests {
             Some(fork.thread.id.as_str())
         );
         assert_eq!(store.load_session(&session.id).unwrap().thread_count, 2);
+    }
+
+    #[test]
+    fn fork_thread_at_turn_count_drops_later_turns_and_items() {
+        let store = RuntimeStore::new(temp_root("fork-thread-at-turn-count"));
+        let session = store
+            .create_session("Session".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Investigate".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let first = store
+            .append_turn(&thread.id, "user".to_string(), "first".to_string())
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                Some(&first.id),
+                "message".to_string(),
+                Some("user".to_string()),
+                "first".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                None,
+                "message".to_string(),
+                Some("system".to_string()),
+                "pre-exchange marker".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        let second = store
+            .append_turn(&thread.id, "user".to_string(), "second".to_string())
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                Some(&second.id),
+                "message".to_string(),
+                Some("user".to_string()),
+                "second".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                None,
+                "message".to_string(),
+                Some("system".to_string()),
+                "post-exchange marker".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+
+        let fork = store
+            .fork_thread_at_turn_count(&thread.id, 1, Some("Undo branch".to_string()))
+            .unwrap();
+
+        assert_eq!(fork.copied_turn_count, 1);
+        assert_eq!(fork.copied_item_count, 2);
+        assert_eq!(fork.thread.title, "Undo branch");
+        let fork_turns = store.list_turns(&fork.thread.id).unwrap();
+        assert_eq!(fork_turns.len(), 1);
+        assert_eq!(fork_turns[0].content, "first");
+        let fork_items = store.list_items(&fork.thread.id, None).unwrap();
+        assert_eq!(fork_items.len(), 2);
+        assert!(fork_items.iter().any(|item| item.content == "first"));
+        assert!(fork_items
+            .iter()
+            .any(|item| item.content == "pre-exchange marker"));
+        assert!(!fork_items.iter().any(|item| item.content == "second"));
+        assert!(!fork_items
+            .iter()
+            .any(|item| item.content == "post-exchange marker"));
+        assert_eq!(
+            store
+                .load_session(&session.id)
+                .unwrap()
+                .active_thread_id
+                .as_deref(),
+            Some(fork.thread.id.as_str())
+        );
     }
 
     #[test]

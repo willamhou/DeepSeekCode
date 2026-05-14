@@ -69,7 +69,11 @@ Current surfaces:
 - local runtime system prompt preview with `system` / `/system`, including the
   selected workspace instructions, user memory, and latest selected user message
 - latest-message editing with `edit` / `/edit`, loading the selected thread's
-  latest user message back into the composer
+  latest user message back into the composer and resubmitting through a
+  rollback fork
+- conversation undo/retry with `undo` / `/undo` and `retry` / `/retry`, forking
+  the selected durable thread before the latest user request while preserving
+  the original thread
 - workspace diff inspection with `diff` / `/diff`, showing changed tracked
   files and `git diff --stat` for the selected session workspace
 - slash quit aliases with `exit` / `/exit`, `quit` / `/quit`, and `q` / `/q`
@@ -332,6 +336,10 @@ Command palette commands currently implemented:
 | `diff help`, `/diff help` | Show diff command behavior and the selected workspace |
 | `clear`, `/clear` | Start a fresh active thread in the selected durable session without deleting older history |
 | `clear help`, `/clear help` | Show clear/reset behavior and the current session/thread target |
+| `undo`, `/undo` | Fork the selected durable thread before the latest user request and switch to that branch |
+| `undo help`, `/undo help` | Show non-destructive undo behavior |
+| `retry`, `/retry` | Fork before the latest user request, switch to that branch, and resubmit the request |
+| `retry help`, `/retry help` | Show retry behavior |
 | `stash`, `stash list`, `/stash list` | List parked composer drafts in the right-side detail panel |
 | `stash pop`, `/stash pop` | Restore the most recently stashed composer draft |
 | `stash clear`, `/stash clear` | Clear all parked composer drafts |
@@ -405,6 +413,8 @@ Command palette commands currently implemented:
 | `change`, `/change`, `changes`, `/changes`, `changelog`, `/changelog` | Show the latest bundled DeepSeekCode changelog entry in the right-side detail panel |
 | `system`, `/system` | Show the selected workspace local runtime system prompt preview in the right-side detail panel |
 | `edit`, `/edit` | Load the selected thread's latest user message back into the composer for revision |
+| `undo`, `/undo` | Fork before the latest user request and make the fork active |
+| `retry`, `/retry` | Fork before the latest user request and resubmit it |
 | `model`, `/model` | Show selected workspace model config in the right-side detail panel |
 | `model <name>`, `/model <name>` | Update selected workspace `model.model`; aliases include `auto`, `flash`, `pro`, `chat`, `coder`, and `reasoner` |
 | `models`, `/models`, `model list` | Show the offline DeepSeekCode model catalog and current project model |

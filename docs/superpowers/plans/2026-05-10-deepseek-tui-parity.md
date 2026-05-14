@@ -404,8 +404,12 @@ Landed first slice:
   user memory, selected latest user message, skill/planning metadata, and prompt
   text in the detail panel
 - TUI now supports DeepSeek-TUI-style `/edit`, loading the selected thread's
-  latest user message back into the composer for revision without starting a
-  model turn or mutating durable runtime history
+  latest user message back into the composer; submitting the edited replacement
+  now creates a non-destructive rollback fork before sending the revised prompt
+- local file-backed TUI now supports DeepSeek-TUI-style `/undo` and `/retry`:
+  both fork the selected durable thread before the latest user request, `/undo`
+  switches to that branch, and `/retry` resubmits the latest request there while
+  preserving the original thread
 - local file-backed TUI now supports DeepSeek-TUI-style `/clear` conversation
   reset by creating and switching to a fresh empty active thread in the selected
   durable session without deleting older thread history

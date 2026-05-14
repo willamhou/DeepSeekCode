@@ -43,7 +43,7 @@ use crate::core::runtime::{
     item_to_json, json_object, parse_automation_record, parse_item_record, parse_runtime_event,
     parse_session_record, parse_task_record, parse_thread_record, parse_turn_record,
     parse_usage_record, session_to_json, thread_to_json, turn_to_json, ItemRecord, RuntimeEvent,
-    RuntimeStore, SessionRecord, TaskRecord, ThreadRecord, TurnRecord,
+    RuntimeStore, SessionRecord, TaskRecord, ThreadForkRecord, ThreadRecord, TurnRecord,
 };
 use crate::error::{app_error, AppResult};
 use crate::repl::slash::load_custom_slash_command_from_config;
@@ -792,6 +792,11 @@ fn handle_tui_http_action(
         TuiAction::AppendMemory { .. } | TuiAction::Memory { .. } => {
             app.set_status("memory commands require local file-backed TUI".to_string());
         }
+        TuiAction::UndoConversation { .. }
+        | TuiAction::RetryUserMessage { .. }
+        | TuiAction::SubmitEditedUserMessage { .. } => {
+            app.set_status("undo/retry commands require local file-backed TUI".to_string());
+        }
         TuiAction::Note { .. } => {
             app.set_status("note commands require local file-backed TUI".to_string());
         }
@@ -1246,6 +1251,8 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Change => Err(app_error("change details are not MCP details")),
         TuiMcpDetailKind::System => Err(app_error("system details are not MCP details")),
         TuiMcpDetailKind::Edit => Err(app_error("edit details are not MCP details")),
+        TuiMcpDetailKind::Undo => Err(app_error("undo details are not MCP details")),
+        TuiMcpDetailKind::Retry => Err(app_error("retry details are not MCP details")),
         TuiMcpDetailKind::Status => Err(app_error("status details are not MCP details")),
         TuiMcpDetailKind::Tokens => Err(app_error("token details are not MCP details")),
         TuiMcpDetailKind::Cost => Err(app_error("cost details are not MCP details")),
@@ -1660,29 +1667,66 @@ fn handle_tui_action_with_live(
 ) -> AppResult<()> {
     match action {
         TuiAction::SubmitUserMessage { thread_id, content } => {
-            let turn = store.append_turn(&thread_id, "user".to_string(), content.clone())?;
-            store.append_item(
-                &thread_id,
-                Some(&turn.id),
-                "message".to_string(),
-                Some("user".to_string()),
-                content.clone(),
-                "completed".to_string(),
-            )?;
-            if let Some(config) = config {
-                let run_config = load_or_default().unwrap_or_else(|_| config.clone());
-                start_tui_agent_run(
-                    store.clone(),
-                    run_config,
-                    thread_id.clone(),
-                    content,
-                    app.reasoning_replay_limit(),
-                    app.reasoning_replay_pinned_turn_ids(),
-                    live_tx,
-                );
-                app.set_status(format!("started agent run for {thread_id}"));
-            } else {
-                app.set_status(format!("submitted user message to {thread_id}"));
+            run_tui_submit_user_message(store, config, app, thread_id, content, live_tx)?;
+        }
+        TuiAction::UndoConversation { thread_id } => {
+            match run_tui_undo_conversation(store, app, &thread_id, "Undo") {
+                Ok(fork) => {
+                    app.set_status(format!(
+                        "undid latest exchange: active thread {}",
+                        fork.thread.id
+                    ));
+                }
+                Err(error) => {
+                    app.set_status(format!("undo failed: {error}"));
+                }
+            }
+        }
+        TuiAction::RetryUserMessage { thread_id } => {
+            match latest_user_turn_content(store, &thread_id).and_then(|last_user| {
+                run_tui_undo_conversation(store, app, &thread_id, "Retry")
+                    .map(|fork| (fork, last_user))
+            }) {
+                Ok((fork, last_user)) => {
+                    run_tui_submit_user_message(
+                        store,
+                        config,
+                        app,
+                        fork.thread.id.clone(),
+                        last_user.clone(),
+                        live_tx,
+                    )?;
+                    app.set_status(format!(
+                        "retrying on {}: {}",
+                        fork.thread.id,
+                        runtime_summary(&last_user)
+                    ));
+                }
+                Err(error) => {
+                    app.set_status(format!("retry failed: {error}"));
+                }
+            }
+        }
+        TuiAction::SubmitEditedUserMessage { thread_id, content } => {
+            match run_tui_undo_conversation(store, app, &thread_id, "Edit") {
+                Ok(fork) => {
+                    run_tui_submit_user_message(
+                        store,
+                        config,
+                        app,
+                        fork.thread.id.clone(),
+                        content.clone(),
+                        live_tx,
+                    )?;
+                    app.set_status(format!(
+                        "submitted edited message on {}: {}",
+                        fork.thread.id,
+                        runtime_summary(&content)
+                    ));
+                }
+                Err(error) => {
+                    app.set_status(format!("edit submit failed: {error}"));
+                }
             }
         }
         TuiAction::RunCustomSlashCommand {
@@ -2451,6 +2495,86 @@ fn handle_tui_action_with_live(
         },
     }
     Ok(())
+}
+
+fn run_tui_submit_user_message(
+    store: &RuntimeStore,
+    config: Option<&AppConfig>,
+    app: &mut TuiApp,
+    thread_id: String,
+    content: String,
+    live_tx: Option<Sender<TuiLiveEvent>>,
+) -> AppResult<()> {
+    let turn = store.append_turn(&thread_id, "user".to_string(), content.clone())?;
+    store.append_item(
+        &thread_id,
+        Some(&turn.id),
+        "message".to_string(),
+        Some("user".to_string()),
+        content.clone(),
+        "completed".to_string(),
+    )?;
+    if let Some(config) = config {
+        let run_config = load_or_default().unwrap_or_else(|_| config.clone());
+        start_tui_agent_run(
+            store.clone(),
+            run_config,
+            thread_id.clone(),
+            content,
+            app.reasoning_replay_limit(),
+            app.reasoning_replay_pinned_turn_ids(),
+            live_tx,
+        );
+        app.set_status(format!("started agent run for {thread_id}"));
+    } else {
+        app.set_status(format!("submitted user message to {thread_id}"));
+    }
+    Ok(())
+}
+
+fn latest_user_turn_index_and_content(
+    store: &RuntimeStore,
+    thread_id: &str,
+) -> AppResult<(usize, String)> {
+    let turns = store.list_turns(thread_id)?;
+    turns
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, turn)| turn.role == "user")
+        .map(|(index, turn)| (index, turn.content.clone()))
+        .ok_or_else(|| app_error("no previous user message to undo"))
+}
+
+fn latest_user_turn_content(store: &RuntimeStore, thread_id: &str) -> AppResult<String> {
+    latest_user_turn_index_and_content(store, thread_id).map(|(_, content)| content)
+}
+
+fn run_tui_undo_conversation(
+    store: &RuntimeStore,
+    app: &mut TuiApp,
+    thread_id: &str,
+    title_prefix: &str,
+) -> AppResult<ThreadForkRecord> {
+    let (keep_turn_count, content) = latest_user_turn_index_and_content(store, thread_id)?;
+    let source = store.load_thread(thread_id)?;
+    let fork = store.fork_thread_at_turn_count(
+        thread_id,
+        keep_turn_count,
+        Some(format!(
+            "{}: {}",
+            title_prefix,
+            runtime_summary(if content.trim().is_empty() {
+                &source.title
+            } else {
+                &content
+            })
+        )),
+    )?;
+    refresh_app_from_store(store, app)?;
+    app.clear_transient_conversation_state();
+    app.select_thread_by_id(&fork.thread.id);
+    Ok(fork)
 }
 
 fn run_tui_memory_append(app: &mut TuiApp, config: Option<&AppConfig>, note: &str) {
@@ -8165,6 +8289,254 @@ shell_allowlist = ["git diff"]
         assert!(output.contains("New conversation"));
         assert!(!output.contains("old transcript"));
         assert!(output.contains("cleared conversation; new active thread"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handle_tui_action_undo_forks_before_latest_user_turn() {
+        let root = temp_root("undo-action");
+        fs::create_dir_all(&root).unwrap();
+        let store = RuntimeStore::new(root.join(".dscode/runtime"));
+        let session = store
+            .create_session("Daily work".to_string(), root.display().to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Active conversation".to_string(),
+                root.display().to_string(),
+                "deepseek-v4-pro".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let first_user = store
+            .append_turn(&thread.id, "user".to_string(), "first request".to_string())
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                Some(&first_user.id),
+                "message".to_string(),
+                Some("user".to_string()),
+                "first request".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        let first_assistant = store
+            .append_turn(
+                &thread.id,
+                "assistant".to_string(),
+                "first answer".to_string(),
+            )
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                Some(&first_assistant.id),
+                "message".to_string(),
+                Some("assistant".to_string()),
+                "first answer".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        let second_user = store
+            .append_turn(&thread.id, "user".to_string(), "second request".to_string())
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                Some(&second_user.id),
+                "message".to_string(),
+                Some("user".to_string()),
+                "second request".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        let second_assistant = store
+            .append_turn(
+                &thread.id,
+                "assistant".to_string(),
+                "second answer".to_string(),
+            )
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                Some(&second_assistant.id),
+                "message".to_string(),
+                Some("assistant".to_string()),
+                "second answer".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        let mut app = app_from_store(&store).unwrap();
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::UndoConversation {
+                thread_id: thread.id.clone(),
+            },
+        )
+        .unwrap();
+
+        let active_thread_id = store
+            .load_session(&session.id)
+            .unwrap()
+            .active_thread_id
+            .expect("active thread");
+        assert_ne!(active_thread_id, thread.id);
+        let active_turns = store.list_turns(&active_thread_id).unwrap();
+        assert_eq!(active_turns.len(), 2);
+        assert_eq!(active_turns[0].content, "first request");
+        assert_eq!(active_turns[1].content, "first answer");
+        let active_items = store.list_items(&active_thread_id, None).unwrap();
+        assert!(active_items
+            .iter()
+            .any(|item| item.content == "first answer"));
+        assert!(!active_items
+            .iter()
+            .any(|item| item.content == "second request"));
+        assert_eq!(store.list_turns(&thread.id).unwrap().len(), 4);
+        assert!(render_once(&app, 160, 48)
+            .unwrap()
+            .contains("undid latest exchange"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handle_tui_action_retry_and_edit_resubmit_on_rollback_fork() {
+        let root = temp_root("retry-edit-action");
+        fs::create_dir_all(&root).unwrap();
+        let store = RuntimeStore::new(root.join(".dscode/runtime"));
+        let session = store
+            .create_session("Daily work".to_string(), root.display().to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Active conversation".to_string(),
+                root.display().to_string(),
+                "deepseek-v4-pro".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let first_user = store
+            .append_turn(&thread.id, "user".to_string(), "first request".to_string())
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                Some(&first_user.id),
+                "message".to_string(),
+                Some("user".to_string()),
+                "first request".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        let first_assistant = store
+            .append_turn(
+                &thread.id,
+                "assistant".to_string(),
+                "first answer".to_string(),
+            )
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                Some(&first_assistant.id),
+                "message".to_string(),
+                Some("assistant".to_string()),
+                "first answer".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        let second_user = store
+            .append_turn(&thread.id, "user".to_string(), "second request".to_string())
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                Some(&second_user.id),
+                "message".to_string(),
+                Some("user".to_string()),
+                "second request".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        let second_assistant = store
+            .append_turn(
+                &thread.id,
+                "assistant".to_string(),
+                "second answer".to_string(),
+            )
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                Some(&second_assistant.id),
+                "message".to_string(),
+                Some("assistant".to_string()),
+                "second answer".to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        let mut app = app_from_store(&store).unwrap();
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::RetryUserMessage {
+                thread_id: thread.id.clone(),
+            },
+        )
+        .unwrap();
+
+        let retry_thread_id = store
+            .load_session(&session.id)
+            .unwrap()
+            .active_thread_id
+            .expect("retry active thread");
+        let retry_turns = store.list_turns(&retry_thread_id).unwrap();
+        assert_eq!(retry_turns.len(), 3);
+        assert_eq!(retry_turns[2].role, "user");
+        assert_eq!(retry_turns[2].content, "second request");
+        let retry_items = store.list_items(&retry_thread_id, None).unwrap();
+        assert!(retry_items
+            .iter()
+            .any(|item| item.content == "second request"));
+        assert!(!retry_items
+            .iter()
+            .any(|item| item.content == "second answer"));
+        assert!(render_once(&app, 160, 48).unwrap().contains("retrying on"));
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::SubmitEditedUserMessage {
+                thread_id: thread.id.clone(),
+                content: "revised second request".to_string(),
+            },
+        )
+        .unwrap();
+
+        let edit_thread_id = store
+            .load_session(&session.id)
+            .unwrap()
+            .active_thread_id
+            .expect("edit active thread");
+        assert_ne!(edit_thread_id, retry_thread_id);
+        let edit_turns = store.list_turns(&edit_thread_id).unwrap();
+        assert_eq!(edit_turns.len(), 3);
+        assert_eq!(edit_turns[2].content, "revised second request");
+        assert!(render_once(&app, 160, 48)
+            .unwrap()
+            .contains("submitted edited message"));
 
         let _ = fs::remove_dir_all(root);
     }

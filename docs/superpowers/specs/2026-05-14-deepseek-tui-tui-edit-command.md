@@ -14,8 +14,8 @@ this composer workflow.
 - Find the latest selected-thread user message from durable TUI items.
 - Load that message into the composer, focus the composer, and place the cursor
   at the end.
-- Keep the operation local to the TUI: no model turn, no durable runtime
-  mutation, and no rollback action.
+- Keep the initial load local to the TUI: no model turn is started until the
+  user submits the edited replacement.
 - Reject unsupported arguments with a concise usage error.
 
 ## Design
@@ -24,8 +24,9 @@ this composer workflow.
 same latest selected user message lookup used by `/system` task previews. When
 invoked from the composer, `/edit` replaces the slash command with the loaded
 message instead of clearing the composer. This matches the immediate
-DeepSeek-TUI editing affordance while leaving durable conversation rewriting for
-a separate `/undo` or `/retry` slice.
+DeepSeek-TUI editing affordance. The follow-up `/undo` and `/retry` slice wires
+edited resubmission through a non-destructive rollback fork before sending the
+replacement.
 
 ## Acceptance
 

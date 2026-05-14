@@ -567,6 +567,8 @@ pub enum TuiMcpDetailKind {
     Change,
     System,
     Edit,
+    Undo,
+    Retry,
     Status,
     Tokens,
     Cost,
@@ -620,6 +622,8 @@ impl TuiMcpDetailKind {
             Self::Change => "change",
             Self::System => "system",
             Self::Edit => "edit",
+            Self::Undo => "undo",
+            Self::Retry => "retry",
             Self::Status => "status",
             Self::Tokens => "tokens",
             Self::Cost => "cost",
@@ -673,6 +677,8 @@ impl TuiMcpDetailKind {
             Self::Change => "Changelog",
             Self::System => "System Prompt",
             Self::Edit => "Edit",
+            Self::Undo => "Undo",
+            Self::Retry => "Retry",
             Self::Status => "Status",
             Self::Tokens => "Tokens",
             Self::Cost => "Cost",
@@ -726,6 +732,8 @@ impl TuiMcpDetailKind {
             Self::Change => Self::Manager,
             Self::System => Self::Manager,
             Self::Edit => Self::Manager,
+            Self::Undo => Self::Manager,
+            Self::Retry => Self::Manager,
             Self::Status => Self::Manager,
             Self::Tokens => Self::Manager,
             Self::Cost => Self::Manager,
@@ -779,6 +787,8 @@ impl TuiMcpDetailKind {
             Self::Change => Self::Manager,
             Self::System => Self::Manager,
             Self::Edit => Self::Manager,
+            Self::Undo => Self::Manager,
+            Self::Retry => Self::Manager,
             Self::Status => Self::Manager,
             Self::Tokens => Self::Manager,
             Self::Cost => Self::Manager,
@@ -1071,6 +1081,18 @@ pub enum TuiSystemCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TuiEditCommand {
     LoadLast,
+    Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiUndoCommand {
+    Undo,
+    Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiRetryCommand {
+    Retry,
     Help,
 }
 
@@ -1844,6 +1866,34 @@ fn parse_tui_edit_command(line: &str) -> Option<Result<TuiEditCommand, String>> 
     }
 }
 
+fn parse_tui_undo_command(line: &str) -> Option<Result<TuiUndoCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/undo")
+        .or_else(|| strip_tui_command_prefix(trimmed, "undo"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] => Some(Ok(TuiUndoCommand::Undo)),
+        ["help" | "--help" | "-h"] => Some(Ok(TuiUndoCommand::Help)),
+        _ => Some(Err(
+            "usage: undo or /undo; use undo help for details".to_string()
+        )),
+    }
+}
+
+fn parse_tui_retry_command(line: &str) -> Option<Result<TuiRetryCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/retry")
+        .or_else(|| strip_tui_command_prefix(trimmed, "retry"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] => Some(Ok(TuiRetryCommand::Retry)),
+        ["help" | "--help" | "-h"] => Some(Ok(TuiRetryCommand::Help)),
+        _ => Some(Err(
+            "usage: retry or /retry; use retry help for details".to_string()
+        )),
+    }
+}
+
 fn parse_tui_clear_command(line: &str) -> Option<Result<TuiClearCommand, String>> {
     let trimmed = line.trim();
     let rest = strip_tui_command_prefix(trimmed, "/clear")
@@ -2089,6 +2139,16 @@ fn parse_tui_custom_slash_command(line: &str) -> Option<(String, Vec<String>)> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiAction {
     SubmitUserMessage {
+        thread_id: String,
+        content: String,
+    },
+    UndoConversation {
+        thread_id: String,
+    },
+    RetryUserMessage {
+        thread_id: String,
+    },
+    SubmitEditedUserMessage {
         thread_id: String,
         content: String,
     },
@@ -2446,6 +2506,20 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         aliases: &[],
         usage: "/clear",
         description: "Start a fresh active-thread conversation without deleting history.",
+    },
+    TuiHelpCommandInfo {
+        category: "Workbench",
+        name: "undo",
+        aliases: &[],
+        usage: "/undo",
+        description: "Fork the active thread before the latest user request.",
+    },
+    TuiHelpCommandInfo {
+        category: "Workbench",
+        name: "retry",
+        aliases: &[],
+        usage: "/retry",
+        description: "Fork before the latest user request and resubmit it.",
     },
     TuiHelpCommandInfo {
         category: "Workbench",
@@ -3018,6 +3092,10 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/system help",
     "/edit",
     "/edit help",
+    "/undo",
+    "/undo help",
+    "/retry",
+    "/retry help",
     "/mode",
     "/mode agent",
     "/mode plan",
@@ -3249,6 +3327,7 @@ pub struct TuiApp {
     composer: String,
     composer_cursor: usize,
     composer_focused: bool,
+    edit_pending_thread_id: Option<String>,
     queued_messages: VecDeque<TuiQueuedMessage>,
     queued_draft: Option<TuiQueuedMessage>,
     composer_stash: Vec<ComposerStashEntry>,
@@ -3419,6 +3498,7 @@ impl TuiApp {
             composer: String::new(),
             composer_cursor: 0,
             composer_focused: false,
+            edit_pending_thread_id: None,
             queued_messages: VecDeque::new(),
             queued_draft: None,
             composer_stash: Vec::new(),
@@ -4549,6 +4629,7 @@ impl TuiApp {
     fn select_session(&mut self, index: usize) {
         self.selected_session = index.min(self.sessions.len().saturating_sub(1));
         self.selected_thread_id = self.default_thread_id_for_selected_session();
+        self.edit_pending_thread_id = None;
         self.transcript_scroll = 0;
         self.refresh_runtime_view();
     }
@@ -4565,6 +4646,7 @@ impl TuiApp {
         };
         if let Some((thread_id, title)) = selected {
             self.selected_thread_id = Some(thread_id.clone());
+            self.edit_pending_thread_id = None;
             self.transcript_scroll = 0;
             self.refresh_runtime_view();
             self.status = format!("selected thread: {} {}", thread_id, clip_line(&title, 60));
@@ -4593,6 +4675,7 @@ impl TuiApp {
             }
         }
         self.selected_thread_id = Some(thread.id.clone());
+        self.edit_pending_thread_id = None;
         self.transcript_scroll = 0;
         self.refresh_runtime_view();
         self.status = format!(
@@ -4608,6 +4691,7 @@ impl TuiApp {
         self.queued_draft = None;
         self.composer.clear();
         self.composer_cursor = 0;
+        self.edit_pending_thread_id = None;
         self.transcript_scroll = 0;
         self.mcp_detail = None;
         self.mcp_detail_scroll = 0;
@@ -5487,6 +5571,32 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_undo_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.handle_undo_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
+                if let Some(command) = parse_tui_retry_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.handle_retry_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = parse_tui_clear_command(&content) {
                     match command {
                         Ok(command) => {
@@ -6191,6 +6301,24 @@ impl TuiApp {
                 Ok(command) => {
                     self.handle_edit_command(command);
                 }
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_undo_command(command) {
+            match command {
+                Ok(command) => self.handle_undo_command(command),
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_retry_command(command) {
+            match command {
+                Ok(command) => self.handle_retry_command(command),
                 Err(message) => {
                     self.status = message;
                 }
@@ -7640,6 +7768,21 @@ impl TuiApp {
     }
 
     fn submit_or_queue_user_message(&mut self, thread_id: String, content: String) {
+        if self.edit_pending_thread_id.as_deref() == Some(thread_id.as_str()) {
+            if self.active_thread_busy() {
+                self.composer = content;
+                self.composer_cursor = self.composer.len();
+                self.composer_focused = true;
+                self.status =
+                    "cannot submit edited message while active thread is busy".to_string();
+                return;
+            }
+            self.pending_actions
+                .push(TuiAction::SubmitEditedUserMessage { thread_id, content });
+            self.edit_pending_thread_id = None;
+            self.status = "submitting edited message".to_string();
+            return;
+        }
         if self.active_thread_busy() {
             self.queued_messages
                 .push_back(TuiQueuedMessage { thread_id, content });
@@ -8767,9 +8910,11 @@ impl TuiApp {
             self.status = "no previous message to edit".to_string();
             return false;
         };
+        let thread_id = self.selected_thread_id.clone();
         self.composer = content;
         self.composer_cursor = self.composer.len();
         self.composer_focused = true;
+        self.edit_pending_thread_id = thread_id;
         self.status = "last user message loaded into composer".to_string();
         true
     }
@@ -8788,6 +8933,84 @@ impl TuiApp {
         let _ = writeln!(detail, "--------");
         let _ = writeln!(detail, "- /edit");
         let _ = writeln!(detail, "- /edit help");
+        detail
+    }
+
+    fn handle_undo_command(&mut self, command: TuiUndoCommand) {
+        match command {
+            TuiUndoCommand::Undo => self.request_undo_conversation(),
+            TuiUndoCommand::Help => {
+                self.set_mcp_detail(TuiMcpDetailKind::Undo, self.render_undo_help_detail());
+                self.status = "undo help shown".to_string();
+            }
+        }
+    }
+
+    fn request_undo_conversation(&mut self) {
+        let Some(thread_id) = self.selected_thread_id.clone() else {
+            self.status = "no active durable thread to undo".to_string();
+            return;
+        };
+        self.pending_actions
+            .push(TuiAction::UndoConversation { thread_id });
+        self.edit_pending_thread_id = None;
+        self.status = "undo queued for active thread".to_string();
+    }
+
+    fn render_undo_help_detail(&self) -> String {
+        let mut detail = String::new();
+        let _ = writeln!(detail, "DeepSeekCode Undo");
+        let _ = writeln!(detail, "=================");
+        let _ = writeln!(detail);
+        let _ = writeln!(
+            detail,
+            "/undo forks the selected durable thread before the latest user request."
+        );
+        let _ = writeln!(detail, "The original thread remains available in history.");
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Commands");
+        let _ = writeln!(detail, "--------");
+        let _ = writeln!(detail, "- /undo");
+        let _ = writeln!(detail, "- /undo help");
+        detail
+    }
+
+    fn handle_retry_command(&mut self, command: TuiRetryCommand) {
+        match command {
+            TuiRetryCommand::Retry => self.request_retry_user_message(),
+            TuiRetryCommand::Help => {
+                self.set_mcp_detail(TuiMcpDetailKind::Retry, self.render_retry_help_detail());
+                self.status = "retry help shown".to_string();
+            }
+        }
+    }
+
+    fn request_retry_user_message(&mut self) {
+        let Some(thread_id) = self.selected_thread_id.clone() else {
+            self.status = "no active durable thread to retry".to_string();
+            return;
+        };
+        self.pending_actions
+            .push(TuiAction::RetryUserMessage { thread_id });
+        self.edit_pending_thread_id = None;
+        self.status = "retry queued for active thread".to_string();
+    }
+
+    fn render_retry_help_detail(&self) -> String {
+        let mut detail = String::new();
+        let _ = writeln!(detail, "DeepSeekCode Retry");
+        let _ = writeln!(detail, "==================");
+        let _ = writeln!(detail);
+        let _ = writeln!(
+            detail,
+            "/retry forks the selected durable thread before the latest user request, then resubmits that request."
+        );
+        let _ = writeln!(detail, "The original thread remains available in history.");
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Commands");
+        let _ = writeln!(detail, "--------");
+        let _ = writeln!(detail, "- /retry");
+        let _ = writeln!(detail, "- /retry help");
         detail
     }
 
@@ -9079,6 +9302,8 @@ impl TuiApp {
         let _ = writeln!(detail, "- /change");
         let _ = writeln!(detail, "- /system");
         let _ = writeln!(detail, "- /edit");
+        let _ = writeln!(detail, "- /undo");
+        let _ = writeln!(detail, "- /retry");
         let _ = writeln!(detail, "- /goal [objective [budget: N]|clear]");
         let _ = writeln!(detail, "- /model [name|list]");
         let _ = writeln!(detail, "- /provider [name [model]|list]");
@@ -16189,6 +16414,119 @@ mod tests {
         let mut empty = TuiApp::new(Vec::new());
         run_palette_command(&mut empty, "edit");
         assert_eq!(empty.status, "no previous message to edit");
+    }
+
+    #[test]
+    fn edit_submit_queues_rollback_replacement_action() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-1".to_string(),
+                title: "Session".to_string(),
+                workspace: "/tmp/deepseek-edit-submit".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-1".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-1".to_string(),
+                session_id: Some("session-1".to_string()),
+                title: "Thread".to_string(),
+                mode: "agent".to_string(),
+                status: "idle".to_string(),
+                latest_turn_id: Some("turn-2".to_string()),
+                event_seq: 0,
+            }],
+            vec![TuiItem {
+                id: "item-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                index: 1,
+                item_type: "message".to_string(),
+                role: Some("user".to_string()),
+                content: "latest request".to_string(),
+                status: "completed".to_string(),
+            }],
+        );
+
+        app.composer_focused = true;
+        app.composer = "/edit".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        app.composer = "revised request".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::SubmitEditedUserMessage {
+                thread_id: "thread-1".to_string(),
+                content: "revised request".to_string(),
+            }]
+        );
+        assert_eq!(app.status, "submitting edited message");
+    }
+
+    #[test]
+    fn undo_and_retry_commands_queue_active_thread_actions() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-1".to_string(),
+                title: "Session".to_string(),
+                workspace: "/tmp/deepseek-undo".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-1".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-1".to_string(),
+                session_id: Some("session-1".to_string()),
+                title: "Thread".to_string(),
+                mode: "agent".to_string(),
+                status: "idle".to_string(),
+                latest_turn_id: Some("turn-2".to_string()),
+                event_seq: 0,
+            }],
+            Vec::new(),
+        );
+
+        run_palette_command(&mut app, "undo");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::UndoConversation {
+                thread_id: "thread-1".to_string(),
+            }]
+        );
+        assert_eq!(app.status, "undo queued for active thread");
+
+        app.composer_focused = true;
+        app.composer = "/retry".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::RetryUserMessage {
+                thread_id: "thread-1".to_string(),
+            }]
+        );
+        assert_eq!(app.composer, "");
+        assert_eq!(app.status, "retry queued for active thread");
+
+        app.composer_focused = false;
+        run_palette_command(&mut app, "undo help");
+        let (kind, detail) = app.mcp_detail.as_ref().expect("undo help detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Undo);
+        assert!(detail.contains("/undo forks the selected durable thread"));
+
+        run_palette_command(&mut app, "retry help");
+        let (kind, detail) = app.mcp_detail.as_ref().expect("retry help detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Retry);
+        assert!(detail.contains("/retry forks the selected durable thread"));
+
+        run_palette_command(&mut app, "retry extra");
+        assert_eq!(
+            app.status,
+            "usage: retry or /retry; use retry help for details"
+        );
     }
 
     #[test]
