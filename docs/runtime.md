@@ -166,10 +166,11 @@ deepseek agents service --kind launchd --out ./services --workdir "$PWD" --bin "
 The rendered set runs `deepseek serve --http`,
 `deepseek agents daemon --json`, `deepseek diagnostics --watch --changed`, and
 `deepseek agents shell-supervisor --json` against the selected workspace. The
-shell supervisor service publishes workspace-local status/show/start over the
-protocol socket and starts durable safe shell jobs; native PTY sessions are
-still not implemented. The service set is still local template output, not a
-hosted multi-user runtime.
+shell supervisor service publishes workspace-local
+status/show/start/wait/replay/attach/stdin/resize/cancel over the protocol
+socket and controls durable safe shell jobs; native PTY sessions are still not
+implemented. The service set is still local template output, not a hosted
+multi-user runtime.
 
 ### Health Schema
 

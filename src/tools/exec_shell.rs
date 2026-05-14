@@ -23,10 +23,11 @@ const DEFAULT_REPLAY_LIMIT_BYTES: u64 = 20_000;
 const MAX_REPLAY_LIMIT_BYTES: u64 = 100_000;
 const PTY_BACKEND_SCRIPT: &str = "script";
 const PTY_BACKEND_NONE: &str = "none";
-pub const SHELL_SUPERVISOR_SUPPORTED_METHODS: &[&str] =
-    &["health", "status", "show", "start", "shutdown"];
-pub const SHELL_SUPERVISOR_UNSUPPORTED_PTY_METHODS: &[&str] =
-    &["wait", "replay", "attach", "stdin", "resize", "cancel"];
+pub const SHELL_SUPERVISOR_SUPPORTED_METHODS: &[&str] = &[
+    "health", "status", "show", "start", "wait", "replay", "attach", "stdin", "resize", "cancel",
+    "shutdown",
+];
+pub const SHELL_SUPERVISOR_UNSUPPORTED_PTY_METHODS: &[&str] = &[];
 
 static JOB_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SHELL_JOBS: OnceLock<Mutex<BackgroundShellManager>> = OnceLock::new();
@@ -3508,19 +3509,17 @@ mod tests {
             "{}",
             absent.summary
         );
-        assert!(absent
-            .summary
-            .contains("methods: health,status,show,start,shutdown"));
-        assert!(absent
-            .summary
-            .contains("unsupported_methods: wait,replay,attach,stdin,resize,cancel"));
+        assert!(absent.summary.contains(
+            "methods: health,status,show,start,wait,replay,attach,stdin,resize,cancel,shutdown"
+        ));
+        assert!(absent.summary.contains("unsupported_methods: "));
 
         let state_dir = shell_supervisor_state_dir(&cwd);
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(
             state_dir.join("manifest.json"),
             format!(
-                "{{\"kind\":\"deepseek.exec_shell.supervisor.v1\",\"supervisor_pid\":{},\"supervisor_socket\":\"{}\",\"supervisor_epoch\":\"epoch+77\",\"protocol\":\"newline-json-v1\",\"methods\":[\"health\",\"status\",\"show\",\"start\",\"shutdown\"],\"unsupported_methods\":[\"wait\",\"attach\"],\"active_jobs\":2,\"started_at\":\"epoch+70\",\"updated_at\":\"epoch+76\",\"control_token_hash\":\"sha256:do-not-print\"}}",
+                "{{\"kind\":\"deepseek.exec_shell.supervisor.v1\",\"supervisor_pid\":{},\"supervisor_socket\":\"{}\",\"supervisor_epoch\":\"epoch+77\",\"protocol\":\"newline-json-v1\",\"methods\":[\"health\",\"status\",\"show\",\"start\",\"wait\",\"replay\",\"attach\",\"stdin\",\"resize\",\"cancel\",\"shutdown\"],\"unsupported_methods\":[],\"active_jobs\":2,\"started_at\":\"epoch+70\",\"updated_at\":\"epoch+76\",\"control_token_hash\":\"sha256:do-not-print\"}}",
                 std::process::id(),
                 state_dir.join("supervisor.sock").display()
             ),
@@ -3551,14 +3550,14 @@ mod tests {
             status.summary
         );
         assert!(
-            status
-                .summary
-                .contains("methods: health,status,show,start,shutdown"),
+            status.summary.contains(
+                "methods: health,status,show,start,wait,replay,attach,stdin,resize,cancel,shutdown"
+            ),
             "{}",
             status.summary
         );
         assert!(
-            status.summary.contains("unsupported_methods: wait,attach"),
+            status.summary.contains("unsupported_methods: "),
             "{}",
             status.summary
         );
@@ -3593,7 +3592,7 @@ mod tests {
         fs::write(
             state_dir.join("manifest.json"),
             format!(
-                "{{\"kind\":\"deepseek.exec_shell.supervisor.v1\",\"supervisor_pid\":{},\"supervisor_socket\":\"{}\",\"supervisor_epoch\":\"epoch+health\",\"protocol\":\"newline-json-v1\",\"methods\":[\"health\",\"status\",\"show\",\"start\",\"shutdown\"],\"unsupported_methods\":[\"wait\",\"attach\"],\"active_jobs\":0,\"started_at\":\"epoch+70\",\"updated_at\":\"epoch+76\"}}",
+                "{{\"kind\":\"deepseek.exec_shell.supervisor.v1\",\"supervisor_pid\":{},\"supervisor_socket\":\"{}\",\"supervisor_epoch\":\"epoch+health\",\"protocol\":\"newline-json-v1\",\"methods\":[\"health\",\"status\",\"show\",\"start\",\"wait\",\"replay\",\"attach\",\"stdin\",\"resize\",\"cancel\",\"shutdown\"],\"unsupported_methods\":[],\"active_jobs\":0,\"started_at\":\"epoch+70\",\"updated_at\":\"epoch+76\"}}",
                 std::process::id(),
                 socket.display()
             ),

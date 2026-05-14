@@ -246,11 +246,12 @@ Landed first slice:
   without leaking `control_token_hash`; `deepseek agents shell-supervisor
   --json` now starts a Unix newline-JSON protocol daemon bridge that writes
   the workspace supervisor manifest, binds `supervisor.sock`, answers
-  health/status/show/start/shutdown, includes durable `.dscode/shell-jobs`
-  inventory in `show` responses, can `start` safe workspace-contained
-  `task_shell_start` background jobs owned by the supervisor process, and
-  returns structured unsupported responses for native PTY methods until
-  supervisor-owned PTYs land; `deepseek agents service`
+  health/status/show/start/wait/replay/attach/stdin/resize/cancel/shutdown,
+  includes durable `.dscode/shell-jobs` inventory in `show` responses, can
+  `start` safe workspace-contained `task_shell_start` background jobs owned by
+  the supervisor process, and bridges wait/replay/attach/stdin/resize/cancel
+  control requests through the durable shell job tools while native
+  supervisor-owned PTYs remain a later slice; `deepseek agents service`
   and packaged systemd/launchd templates include that shell-supervisor service;
   `exec_shell_supervisor_status` now probes socket health before reporting a
   daemon as ready, reads healthy daemon `status` active-job counts backed by
