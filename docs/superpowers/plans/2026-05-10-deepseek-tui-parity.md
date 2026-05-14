@@ -1115,6 +1115,10 @@ Landed first slice:
 - `deepseek pr live-status <pr> --json` emits
   `deepseek.pr_live_status.v1`, making live PR fixture readiness scriptable
   without posting GitHub comments
+- Release Matrix now runs `cargo test -- --test-threads=1`, matching the stable
+  local release gate for tests that share process-global current-directory and
+  background-shell state; `docs/release.md` and generated release notes name the
+  same serial test gate
 
 Remaining:
 

@@ -1,0 +1,53 @@
+# DeepSeek-TUI parity: release gate evidence
+
+Status: implemented
+Date: 2026-05-14
+
+## Gap
+
+DeepSeek-TUI has public release evidence for installable versions. On
+2026-05-14, `Hmbown/DeepSeek-TUI` reported latest release `v0.8.36`, public
+topics `cli`, `deepseek`, `llm`, `rust`, `terminal`, and `tui`, and a public
+Cargo/npm install story. DeepSeekCode is now public with matching core topics,
+but `willamhou/DeepSeekCode` still had no tagged GitHub Release, GHCR image,
+npm package, or Homebrew tap evidence.
+
+Before creating a public tag, the local release gate exposed a blocker:
+`cargo test` with default parallelism failed due existing process-global test
+state such as current directory guards and background shell jobs. The stable
+gate already used elsewhere is serial test execution.
+
+## Implementation
+
+- Updated `.github/workflows/release.yml` to run
+  `cargo test -- --test-threads=1` in the release build matrix.
+- Updated the generated release notes text in the workflow so published release
+  notes name the actual serial test gate.
+- Updated `docs/release.md` to use the same serial test command in the local
+  release gate.
+
+## Verification
+
+- `cargo test` with default parallelism reproduced the release blocker:
+  `1400 passed; 6 failed`.
+- `cargo test -- --test-threads=1`
+- `cargo metadata --no-deps --format-version 1`
+- `cargo package --allow-dirty`
+- `node npm/scripts/check-version-sync.js`
+- `(cd npm && npm test)`
+- `(cd npm && npm pack --dry-run)`
+- `for package_dir in npm/platforms/*; do (cd "$package_dir" && npm_config_cache=/tmp/deepseek-npm-cache npm pack --dry-run); done`
+- `cargo fmt --check`
+- `git diff --check`
+- Local Homebrew formula syntax smoke was not run because `ruby` is not
+  installed in this workspace image; the GitHub-hosted release runner still
+  performs `ruby -c packaging/homebrew/deepseek.rb`.
+
+## Remaining Gap
+
+This stabilizes the release gate, but it is not itself public release evidence.
+The next packaging step is to tag `v0.1.0`, let the release workflow publish
+GitHub Release assets and the GHCR image, then re-run
+`deepseek update publish-status --json` against downloaded artifacts. npm and
+Homebrew still require registry/tap credentials before they can match
+DeepSeek-TUI's public install channels.

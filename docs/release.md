@@ -29,7 +29,7 @@ Run the full local release gate before tagging or publishing:
 
 ```bash
 cargo fmt --check
-cargo test
+cargo test -- --test-threads=1
 cargo package --allow-dirty
 deepseek benchmark
 ```
