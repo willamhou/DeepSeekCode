@@ -165,8 +165,10 @@ Attach is an API-level terminal stream, not a full UI widget:
      supervised native PTY job through one socket connection, drops that
      connection, then replays/resizes/attaches/cancels through fresh socket
      connections
-   - status: daemon/socket owner-exit smoke landed; restarted controller CLI
-     wrappers remain open
+   - detached tool-level stdin/resize/cancel now forward through
+     `supervisor_socket` for running native-supervisor manifests
+   - status: daemon/socket owner-exit smoke and detached tool forwarding landed;
+     dedicated human-facing CLI wrappers remain open
 6. Service packaging:
    - systemd/launchd templates can supervise the shell supervisor alongside
      runtime and diagnostics services
@@ -194,6 +196,6 @@ the first Linux `native-supervisor` PTY backend have landed. Normal
 `exec_shell tty=true` still uses `script`; shell-supervisor `tty=true` starts
 own a native PTY master, write `terminal-events.jsonl`, and support live
 `TIOCSWINSZ` resize through the in-process supervisor. Remaining hard slices
-are restarted controller CLI wrappers, streaming MCP/ACP attach frames,
-stronger child-observed resize verification, service-manager lifecycle
-coverage, and Windows ConPTY.
+are dedicated human-facing shell wrappers, streaming MCP/ACP attach frames,
+stronger child-observed resize verification, service-manager lifecycle coverage,
+and Windows ConPTY.

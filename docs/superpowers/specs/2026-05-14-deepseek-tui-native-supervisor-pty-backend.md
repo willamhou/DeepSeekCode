@@ -32,6 +32,10 @@ instead of the short-lived command caller.
   --json` daemon, starts a native PTY job over one socket connection, drops that
   connection, then uses fresh socket connections to replay, resize, attach, and
   cancel the same job.
+- Detached `exec_shell_interact`, `exec_shell_resize`, and `exec_shell_cancel`
+  now detect running `native-supervisor` manifests and forward control through
+  `supervisor_socket`, returning `meta.supervisor_forwarded=true` instead of
+  pretending to resize via metadata-only fallback.
 
 ## Verification
 
@@ -53,6 +57,6 @@ This is not the final PTY parity endpoint. Still open:
   supervisors and restarted controller CLIs;
 - streaming attach frames over MCP/ACP/HTTP instead of single-response replay;
 - child-observed resize verification such as `stty size` from inside the PTY;
-- user-facing CLI wrappers for detached native PTY control through the
-  supervisor socket, beyond the low-level protocol integration test;
+- dedicated human-facing shell subcommands for detached native PTY control,
+  beyond tool-level forwarding and low-level protocol integration;
 - Windows ConPTY.

@@ -274,9 +274,10 @@ Landed first slice:
   control requests through the durable shell job tools; the
   `shell_supervisor_owner_exit` integration test launches the real daemon,
   starts a native PTY job through one socket connection, drops that connection,
-  then replays/resizes/attaches/cancels through fresh connections; `deepseek
-  agents service` and packaged systemd/launchd templates include that
-  shell-supervisor service;
+  then replays through a fresh connection and verifies detached
+  `exec_shell_interact` / `exec_shell_resize` / `exec_shell_cancel` forward
+  through `supervisor_socket`; `deepseek agents service` and packaged
+  systemd/launchd templates include that shell-supervisor service;
   `exec_shell_supervisor_status` now probes socket health before reporting a
   daemon as ready, reads healthy daemon `status` active-job counts backed by
   durable shell manifests, refreshes the workspace supervisor manifest during

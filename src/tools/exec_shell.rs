@@ -2012,6 +2012,31 @@ fn interact_detached_shell_job(
             record.status
         )));
     }
+    if record_is_native_supervisor(&record) {
+        let mut args = BTreeMap::from([
+            (
+                "task_id".to_string(),
+                JsonValue::String(task_id.to_string()),
+            ),
+            ("cwd".to_string(), JsonValue::String(cwd.to_string())),
+            ("input".to_string(), JsonValue::String(data.to_string())),
+            ("close_stdin".to_string(), JsonValue::Bool(close_stdin)),
+            (
+                "timeout_ms".to_string(),
+                JsonValue::Number(timeout_ms.to_string()),
+            ),
+        ]);
+        if data.is_empty() {
+            args.remove("input");
+        }
+        return forward_native_supervisor_shell_control(
+            cwd,
+            &record,
+            "stdin",
+            args,
+            "stdin_summary",
+        );
+    }
     let Some(stdin_path) = record.stdin_path.clone() else {
         return Err(detached_or_unknown_shell_task_error(cwd, task_id, "stdin"));
     };
@@ -2062,6 +2087,29 @@ fn resize_detached_shell_job(cwd: &str, task_id: &str, size: ShellTtySize) -> Ap
             "detached background shell task {task_id} was not started with tty=true"
         )));
     }
+    if record.status == "running" && record_is_native_supervisor(&record) {
+        return forward_native_supervisor_shell_control(
+            cwd,
+            &record,
+            "resize",
+            BTreeMap::from([
+                (
+                    "task_id".to_string(),
+                    JsonValue::String(task_id.to_string()),
+                ),
+                ("cwd".to_string(), JsonValue::String(cwd.to_string())),
+                (
+                    "tty_rows".to_string(),
+                    JsonValue::Number(size.rows.to_string()),
+                ),
+                (
+                    "tty_cols".to_string(),
+                    JsonValue::Number(size.cols.to_string()),
+                ),
+            ]),
+            "resize_summary",
+        );
+    }
     let mut live_control = "metadata_only";
     if record.status == "running" {
         live_control = if let Some(stdin_path) = record.stdin_path.as_deref() {
@@ -2100,6 +2148,21 @@ fn cancel_detached_shell_job(cwd: &str, task_id: &str) -> AppResult<String> {
             record.status
         ));
     }
+    if record_is_native_supervisor(&record) {
+        return forward_native_supervisor_shell_control(
+            cwd,
+            &record,
+            "cancel",
+            BTreeMap::from([
+                (
+                    "task_id".to_string(),
+                    JsonValue::String(task_id.to_string()),
+                ),
+                ("cwd".to_string(), JsonValue::String(cwd.to_string())),
+            ]),
+            "cancel_summary",
+        );
+    }
     if record.pid == 0 {
         return Err(app_error(format!(
             "detached background shell task {task_id} has no recorded pid for cancellation"
@@ -2120,6 +2183,74 @@ fn cancel_detached_shell_job(cwd: &str, task_id: &str) -> AppResult<String> {
         "Canceled detached background shell job: {task_id}\nmanaged: false\npid: {}\nstatus: killed",
         record.pid
     ))
+}
+
+fn record_is_native_supervisor(record: &DurableShellJobRecord) -> bool {
+    record.pty_backend.as_deref() == Some(PTY_BACKEND_NATIVE_SUPERVISOR)
+}
+
+fn forward_native_supervisor_shell_control(
+    cwd: &str,
+    record: &DurableShellJobRecord,
+    method: &str,
+    args: BTreeMap<String, JsonValue>,
+    summary_key: &str,
+) -> AppResult<String> {
+    let socket = supervisor_socket_path_for_record(cwd, record)?;
+    let root =
+        shell_supervisor_protocol_request_with_args(&socket, method, args).map_err(|error| {
+            app_error(format!(
+                "native-supervisor {method} requires active supervisor socket {}: {error}",
+                socket.display()
+            ))
+        })?;
+    if root.get("status").and_then(json_as_string) != Some("ok") {
+        let error = root
+            .get("error")
+            .and_then(json_as_string)
+            .unwrap_or("unknown supervisor error");
+        return Err(app_error(format!(
+            "native-supervisor {method} failed via {}: {error}",
+            socket.display()
+        )));
+    }
+    let summary = root
+        .get(summary_key)
+        .and_then(json_as_string)
+        .ok_or_else(|| {
+            app_error(format!(
+                "native-supervisor {method} response from {} did not include `{summary_key}`",
+                socket.display()
+            ))
+        })?;
+    Ok(format!(
+        "meta.supervisor_forwarded=true\nmeta.supervisor_socket={}\n{}",
+        socket.display(),
+        summary
+    ))
+}
+
+fn supervisor_socket_path_for_record(
+    cwd: &str,
+    record: &DurableShellJobRecord,
+) -> AppResult<PathBuf> {
+    let Some(raw) = record
+        .supervisor_socket
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(app_error(format!(
+            "native-supervisor shell task {} has no supervisor_socket",
+            record.id
+        )));
+    };
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(Path::new(cwd).join(path))
+    }
 }
 
 fn persist_job_snapshot(job: &BackgroundShellJob) -> AppResult<()> {
@@ -2686,6 +2817,33 @@ fn shell_supervisor_protocol_request_unix(
     socket_path: &Path,
     method: &str,
 ) -> AppResult<BTreeMap<String, JsonValue>> {
+    shell_supervisor_protocol_request_with_args_unix(socket_path, method, BTreeMap::new())
+}
+
+fn shell_supervisor_protocol_request_with_args(
+    socket_path: &Path,
+    method: &str,
+    args: BTreeMap<String, JsonValue>,
+) -> AppResult<BTreeMap<String, JsonValue>> {
+    #[cfg(unix)]
+    {
+        shell_supervisor_protocol_request_with_args_unix(socket_path, method, args)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (socket_path, method, args);
+        Err(app_error(
+            "shell supervisor protocol requests are currently supported only on Unix",
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn shell_supervisor_protocol_request_with_args_unix(
+    socket_path: &Path,
+    method: &str,
+    args: BTreeMap<String, JsonValue>,
+) -> AppResult<BTreeMap<String, JsonValue>> {
     use std::io::{BufRead, BufReader, ErrorKind};
     use std::os::unix::net::UnixStream;
 
@@ -2697,8 +2855,13 @@ fn shell_supervisor_protocol_request_unix(
     stream
         .set_write_timeout(Some(Duration::from_millis(250)))
         .map_err(|error| app_error(format!("{method} write timeout setup failed: {error}")))?;
+    let mut request =
+        BTreeMap::from([("method".to_string(), JsonValue::String(method.to_string()))]);
+    if !args.is_empty() {
+        request.insert("arguments".to_string(), JsonValue::Object(args));
+    }
     stream
-        .write_all(format!("{{\"method\":\"{method}\"}}\n").as_bytes())
+        .write_all(format!("{}\n", json_value_to_string(&JsonValue::Object(request))).as_bytes())
         .map_err(|error| app_error(format!("{method} request write failed: {error}")))?;
 
     let mut response = String::new();

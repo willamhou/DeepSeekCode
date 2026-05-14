@@ -8,6 +8,11 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use deepseek_code::tools::exec_shell::{
+    ExecShellCancelTool, ExecShellInteractTool, ExecShellResizeTool,
+};
+use deepseek_code::tools::types::{Tool, ToolInput};
+
 #[test]
 fn shell_supervisor_native_pty_survives_start_connection_exit() {
     let root = temp_root("shell-supervisor-owner-exit");
@@ -18,7 +23,7 @@ fn shell_supervisor_native_pty_survives_start_connection_exit() {
 
     let start = request(
         &socket,
-        r#"{"method":"start","arguments":{"command":"echo owner-exit-ready; tail -f /dev/null","tty":true,"tty_rows":24,"tty_cols":80}}"#,
+        r#"{"method":"start","arguments":{"command":"echo owner-exit-ready; cat","tty":true,"tty_rows":24,"tty_cols":80}}"#,
     );
     assert_contains(&start, r#""status":"ok""#);
     assert_contains(&start, r#""job_pty_backend":"native-supervisor""#);
@@ -38,14 +43,42 @@ fn shell_supervisor_native_pty_survives_start_connection_exit() {
     assert_contains(&replay, "stream: terminal");
     assert_contains(&replay, "owner-exit-ready");
 
-    let resize = request(
-        &socket,
-        &format!(
-            r#"{{"method":"resize","arguments":{{"task_id":"{task_id}","tty_rows":33,"tty_cols":101}}}}"#
-        ),
-    );
-    assert_contains(&resize, r#""status":"ok""#);
-    assert_contains(&resize, "meta.live_resize=native_tiocswinsz");
+    let stdin = ExecShellInteractTool {
+        tool_name: "exec_shell_interact",
+    }
+    .execute(
+        ToolInput::new()
+            .with_arg("cwd", root.display().to_string())
+            .with_arg("task_id", task_id.clone())
+            .with_arg("input", "from-fresh-client\n")
+            .with_arg("timeout_ms", "100"),
+    )
+    .unwrap();
+    assert_contains(&stdin.summary, "meta.supervisor_forwarded=true");
+
+    let replay = poll_until(Duration::from_secs(3), || {
+        let response = request(
+            &socket,
+            &format!(
+                r#"{{"method":"replay","arguments":{{"task_id":"{task_id}","stream":"terminal","cursor":0,"limit_bytes":4000}}}}"#
+            ),
+        );
+        response.contains("from-fresh-client").then_some(response)
+    })
+    .unwrap_or_else(|| panic!("terminal replay never observed forwarded stdin for task {task_id}"));
+    assert_contains(&replay, "from-fresh-client");
+
+    let resize = ExecShellResizeTool
+        .execute(
+            ToolInput::new()
+                .with_arg("cwd", root.display().to_string())
+                .with_arg("task_id", task_id.clone())
+                .with_arg("tty_rows", "33")
+                .with_arg("tty_cols", "101"),
+        )
+        .unwrap();
+    assert_contains(&resize.summary, "meta.supervisor_forwarded=true");
+    assert_contains(&resize.summary, "meta.live_resize=native_tiocswinsz");
 
     let attach = request(
         &socket,
@@ -56,12 +89,15 @@ fn shell_supervisor_native_pty_survives_start_connection_exit() {
     assert_contains(&attach, "mode: terminal_event_attach");
     assert_contains(&attach, "rows=33 cols=101");
 
-    let cancel = request(
-        &socket,
-        &format!(r#"{{"method":"cancel","arguments":{{"task_id":"{task_id}"}}}}"#),
-    );
-    assert_contains(&cancel, r#""status":"ok""#);
-    assert_contains(&cancel, "Canceled background shell job");
+    let cancel = ExecShellCancelTool
+        .execute(
+            ToolInput::new()
+                .with_arg("cwd", root.display().to_string())
+                .with_arg("task_id", task_id),
+        )
+        .unwrap();
+    assert_contains(&cancel.summary, "meta.supervisor_forwarded=true");
+    assert_contains(&cancel.summary, "Canceled background shell job");
 
     let shutdown = request(&socket, r#"{"method":"shutdown"}"#);
     assert_contains(&shutdown, r#""status":"ok""#);
