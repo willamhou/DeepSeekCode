@@ -207,8 +207,9 @@ Current surfaces:
 - active-thread automation records are loaded from `.dscode/runtime/automations`;
   `automation trigger [id] [prompt override]` creates a pending automation task
   through the runtime store
-- `compact` / `compact <tail>` appends a durable active-thread compaction
-  summary and `thread_compacted` audit event through the runtime store
+- `compact` / `/compact` / `compact <tail>` / `/compact <tail>` appends a
+  durable active-thread compaction summary and `thread_compacted` audit event
+  through the runtime store
 - `c` / `cancel` records a durable `cancel_requested` event for the active
   running assistant turn; TUI-started agent runs stop at cancellation
   checkpoints and mark the assistant item/task `cancelled`
@@ -507,7 +508,7 @@ Command palette commands currently implemented:
 | `automations`, `automation` | Show active-thread automation count in the status bar |
 | `automation trigger`, `automation run` | Trigger the first active automation in the current thread |
 | `automation trigger <id> [prompt]` | Trigger one current-thread automation with an optional prompt override |
-| `compact`, `compact <tail>` | Compact the active durable thread, keeping the latest N turns |
+| `compact`, `/compact`, `compact <tail>`, `/compact <tail>` | Compact the active durable thread, keeping the latest N turns |
 | `thread compact`, `thread compact <tail>` | Alias for active thread compaction |
 | `reasoning`, `reasoning list` | Show active-thread reasoning items in the right-side detail panel |
 | `reasoning latest`, `reasoning show <latest\|index\|item-id\|turn-id>` | Show full reasoning item content |

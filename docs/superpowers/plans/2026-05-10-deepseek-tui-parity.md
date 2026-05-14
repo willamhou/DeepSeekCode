@@ -630,7 +630,9 @@ Landed first slice:
 - runtime usage records persist prompt cache hit/miss tokens and recognized DeepSeek V4 USD micro-cost estimates
 - usage summary aggregates cache hit rate, estimated input/output/total cost, unpriced record count, and 1M-context strategy
 - TUI usage panel renders cache and cost split bars so DeepSeek prefix-cache and cost behavior is visible during durable sessions
-- TUI command palette can trigger non-destructive active-thread compaction with `compact [tail]`, reusing the runtime `thread_compacted` audit event path
+- TUI command palette and composer slash commands can trigger non-destructive
+  active-thread compaction with `compact [tail]` / `/compact [tail]`, reusing
+  the runtime `thread_compacted` audit event path
 - `model.reasoning_effort = "off|high|max|auto"` and `DEEPSEEK_REASONING_EFFORT` now map to official DeepSeek V4 thinking/reasoning parameters for OpenAI-compatible and Anthropic-compatible requests; streaming parsers surface reasoning deltas separately from final answer text
 - runtime-backed TUI and daemon agent runs preload compact persisted reasoning
   items from the active durable thread into the next model request, extending

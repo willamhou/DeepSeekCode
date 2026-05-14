@@ -1792,6 +1792,22 @@ fn parse_tui_context_command(line: &str) -> Option<Result<(), String>> {
     }
 }
 
+fn parse_tui_compact_command(line: &str) -> Option<Result<Option<String>, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/compact")
+        .or_else(|| strip_tui_command_prefix(trimmed, "compact"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "/thread compact"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "thread compact"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] => Some(Ok(None)),
+        [keep_tail] => Some(Ok(Some((*keep_tail).to_string()))),
+        _ => Some(Err(
+            "usage: compact [tail], thread compact [tail], or /compact [tail]".to_string(),
+        )),
+    }
+}
+
 fn parse_tui_exit_command(line: &str) -> Option<Result<(), String>> {
     let trimmed = line.trim();
     let rest = strip_tui_command_prefix(trimmed, "/exit")
@@ -3621,7 +3637,7 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         category: "Runtime Work",
         name: "compact",
         aliases: &[],
-        usage: "compact [tail]",
+        usage: "/compact [tail]",
         description: "Compact the active durable thread.",
     },
 ];
@@ -7019,6 +7035,25 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_compact_command(&content) {
+                    match command {
+                        Ok(Some(keep_tail)) => {
+                            if self.request_compact_thread_from_arg(&keep_tail) {
+                                self.composer.clear();
+                                self.composer_cursor = 0;
+                            }
+                        }
+                        Ok(None) => {
+                            self.request_compact_thread(DEFAULT_TUI_COMPACTION_KEEP_TAIL_TURNS);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = parse_tui_tokens_command(&content) {
                     match command {
                         Ok(()) => {
@@ -7813,6 +7848,18 @@ impl TuiApp {
                 Ok(()) => {
                     self.show_context_detail();
                 }
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_compact_command(command) {
+            match command {
+                Ok(Some(keep_tail)) => {
+                    self.request_compact_thread_from_arg(&keep_tail);
+                }
+                Ok(None) => self.request_compact_thread(DEFAULT_TUI_COMPACTION_KEEP_TAIL_TURNS),
                 Err(message) => {
                     self.status = message;
                 }
@@ -9334,18 +9381,21 @@ impl TuiApp {
             .unwrap_or(0)
     }
 
-    fn request_compact_thread_from_arg(&mut self, keep_tail: &str) {
+    fn request_compact_thread_from_arg(&mut self, keep_tail: &str) -> bool {
         match keep_tail.parse::<usize>() {
             Ok(value) if value <= MAX_TUI_COMPACTION_KEEP_TAIL_TURNS => {
                 self.request_compact_thread(value);
+                true
             }
             Ok(_) => {
                 self.status = format!(
                     "compact keep_tail_turns must be <= {MAX_TUI_COMPACTION_KEEP_TAIL_TURNS}"
                 );
+                false
             }
             Err(_) => {
                 self.status = format!("invalid compact keep_tail_turns: {keep_tail}");
+                false
             }
         }
     }
@@ -22335,6 +22385,21 @@ mod tests {
                 keep_tail_turns: 2,
             }]
         );
+        assert!(app.status.contains("compaction requested"));
+
+        app.composer_focused = true;
+        app.composer = "/compact".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::CompactThread {
+                thread_id: "thread-one".to_string(),
+                keep_tail_turns: DEFAULT_TUI_COMPACTION_KEEP_TAIL_TURNS,
+            }]
+        );
+        assert_eq!(app.composer, "");
         assert!(app.status.contains("compaction requested"));
     }
 
