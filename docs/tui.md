@@ -41,7 +41,8 @@ Current surfaces:
   `.dscode/commands/*.md` or the configured user commands dir
 - composer slash-command hints and `Tab` completion for built-in local
   slash commands, project `.dscode/commands/**/*.md` entries, configured user
-  command entries, and configured skill names while typing `/...`
+  command entries, configured skill names, and DeepSeek-TUI command families
+  such as `/compact`, `/mcp`, `/jobs`, and `/restore` while typing `/...`
 - remote skill registry sync with `/skills sync`, caching supported TOML,
   SKILL.md, GitHub, tar.gz, and zip entries under the configured
   `skills.cache_dir`

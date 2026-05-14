@@ -4021,12 +4021,61 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/hooks list",
     "/hooks events",
     "/hook events",
+    "/compact",
+    "/compact ",
     "/goal ",
     "/goal clear",
+    "/jobs",
+    "/jobs list",
+    "/jobs show ",
+    "/jobs attach ",
+    "/jobs supervisor",
+    "/jobs stdin ",
+    "/jobs close-stdin ",
+    "/jobs wait ",
+    "/jobs poll ",
+    "/jobs resize ",
+    "/jobs cancel ",
     "/stash",
     "/stash list",
     "/stash pop",
     "/stash clear",
+    "/mcp",
+    "/mcp manager",
+    "/mcp manager tab overview",
+    "/mcp manager tab tools",
+    "/mcp manager tab prompts",
+    "/mcp manager tab resources",
+    "/mcp manager tab resource-templates",
+    "/mcp manager tab health",
+    "/mcp manager filter ",
+    "/mcp manager tools",
+    "/mcp manager prompts",
+    "/mcp manager resources",
+    "/mcp manager resource-templates",
+    "/mcp list",
+    "/mcp status",
+    "/mcp reload",
+    "/mcp tools",
+    "/mcp prompts",
+    "/mcp resources",
+    "/mcp resource-templates",
+    "/mcp close",
+    "/mcp init",
+    "/mcp init --force",
+    "/mcp add stdio ",
+    "/mcp add http ",
+    "/mcp add sse ",
+    "/mcp enable ",
+    "/mcp disable ",
+    "/mcp remove ",
+    "/mcp user add stdio ",
+    "/mcp user add http ",
+    "/mcp user add sse ",
+    "/mcp user enable ",
+    "/mcp user disable ",
+    "/mcp user remove ",
+    "/mcp validate",
     "/network",
     "/network allow ",
     "/network deny ",
@@ -4072,6 +4121,17 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/recall ",
     "/review ",
     "/review help",
+    "/restore snapshot",
+    "/restore list",
+    "/restore show ",
+    "/restore hunks ",
+    "/restore diff ",
+    "/restore hunk ",
+    "/restore hunk-apply ",
+    "/restore hunk-check ",
+    "/restore apply-hunk ",
+    "/restore check-hunk ",
+    "/restore revert-turn ",
     "/mode",
     "/mode agent",
     "/mode plan",
@@ -21556,6 +21616,29 @@ mod tests {
         assert!(app.handle_key(KeyCode::Char('n')));
         assert!(app.handle_key(KeyCode::Tab));
         assert_eq!(app.composer, "/provider nvidia-nim");
+    }
+
+    #[test]
+    fn composer_slash_hints_include_deepseek_tui_palette_backed_commands() {
+        let app = TuiApp::new(Vec::new());
+
+        let compact = composer_slash_completion_matches(&app, "/comp");
+        assert!(compact.contains(&"/compact".to_string()));
+
+        let mcp = composer_slash_completion_matches(&app, "/mcp");
+        assert!(mcp.contains(&"/mcp".to_string()));
+        assert!(mcp.contains(&"/mcp reload".to_string()));
+        assert!(mcp.contains(&"/mcp manager".to_string()));
+
+        let jobs = composer_slash_completion_matches(&app, "/jobs");
+        assert!(jobs.contains(&"/jobs list".to_string()));
+        assert!(jobs.contains(&"/jobs attach ".to_string()));
+        assert!(jobs.contains(&"/jobs supervisor".to_string()));
+
+        let restore = composer_slash_completion_matches(&app, "/restore");
+        assert!(restore.contains(&"/restore list".to_string()));
+        assert!(restore.contains(&"/restore hunk ".to_string()));
+        assert!(restore.contains(&"/restore revert-turn ".to_string()));
     }
 
     #[test]
