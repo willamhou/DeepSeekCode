@@ -1836,6 +1836,8 @@ fn render_shell_supervisor_status(cwd: &str) -> AppResult<String> {
         .unwrap_or(default_socket);
     let socket_kind = shell_supervisor_socket_kind(&socket_path);
     let protocol_health = shell_supervisor_protocol_health(&socket_path, socket_kind == "socket");
+    let (protocol_show, protocol_job_inventory) =
+        shell_supervisor_protocol_show(&socket_path, socket_kind == "socket", &protocol_health);
     let supervisor_alive = manifest
         .as_ref()
         .and_then(|manifest| manifest.supervisor_pid)
@@ -1847,7 +1849,7 @@ fn render_shell_supervisor_status(cwd: &str) -> AppResult<String> {
         &protocol_health,
     );
     Ok(format!(
-        "kind: deepseek.exec_shell.supervisor_status.v1\nstatus: {status}\nplatform: {}\ncwd: {}\nstate_dir: {}\nmanifest: {}\nmanifest_exists: {}\nmanifest_kind: {}\nsocket: {}\nsocket_kind: {socket_kind}\nprotocol_health: {protocol_health}\nsupervisor_pid: {}\nsupervisor_alive: {}\nsupervisor_epoch: {}\nprotocol: {}\nmethods: {}\nunsupported_methods: {}\nactive_jobs: {}\nstarted_at: {}\nupdated_at: {}\nnote: this is the shell supervisor protocol/status skeleton; native PTY ownership, live attach, and TIOCSWINSZ resize are not implemented until a real supervisor process writes this state.\n",
+        "kind: deepseek.exec_shell.supervisor_status.v1\nstatus: {status}\nplatform: {}\ncwd: {}\nstate_dir: {}\nmanifest: {}\nmanifest_exists: {}\nmanifest_kind: {}\nsocket: {}\nsocket_kind: {socket_kind}\nprotocol_health: {protocol_health}\nprotocol_show: {protocol_show}\nsupervisor_pid: {}\nsupervisor_alive: {}\nsupervisor_epoch: {}\nprotocol: {}\nmethods: {}\nunsupported_methods: {}\nactive_jobs: {}\nstarted_at: {}\nupdated_at: {}\nprotocol_job_inventory:\n{}\nnote: this is the shell supervisor protocol/status skeleton; native PTY ownership, live attach, and TIOCSWINSZ resize are not implemented until a real supervisor process writes this state.\n",
         shell_supervisor_platform_label(),
         cwd,
         state_dir.display(),
@@ -1889,7 +1891,8 @@ fn render_shell_supervisor_status(cwd: &str) -> AppResult<String> {
             manifest
                 .as_ref()
                 .and_then(|manifest| manifest.updated_at.as_deref())
-        )
+        ),
+        protocol_job_inventory.unwrap_or_else(|| "not_checked".to_string())
     )
     .trim_end()
     .to_string())
@@ -1936,39 +1939,7 @@ fn shell_supervisor_protocol_health(socket_path: &Path, socket_ready: bool) -> S
 
 #[cfg(unix)]
 fn shell_supervisor_protocol_health_unix(socket_path: &Path) -> AppResult<String> {
-    use std::io::{BufRead, BufReader, ErrorKind};
-    use std::os::unix::net::UnixStream;
-
-    let mut stream = UnixStream::connect(socket_path)
-        .map_err(|error| app_error(format!("health connect failed: {error}")))?;
-    stream
-        .set_read_timeout(Some(Duration::from_millis(250)))
-        .map_err(|error| app_error(format!("health read timeout setup failed: {error}")))?;
-    stream
-        .set_write_timeout(Some(Duration::from_millis(250)))
-        .map_err(|error| app_error(format!("health write timeout setup failed: {error}")))?;
-    stream
-        .write_all(b"{\"method\":\"health\"}\n")
-        .map_err(|error| app_error(format!("health request write failed: {error}")))?;
-
-    let mut response = String::new();
-    let mut reader = BufReader::new(stream);
-    match reader.read_line(&mut response) {
-        Ok(0) => return Err(app_error("health response was empty")),
-        Ok(_) => {}
-        Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
-            return Err(app_error("health response timed out"));
-        }
-        Err(error) => return Err(app_error(format!("health response read failed: {error}"))),
-    }
-
-    let root = parse_root_object(response.trim()).map_err(|error| {
-        app_error(format!(
-            "health response was not valid JSON: {}; response={}",
-            error,
-            shell_compact_error_label(response.trim())
-        ))
-    })?;
+    let root = shell_supervisor_protocol_request_unix(socket_path, "health")?;
     if root.get("method").and_then(json_as_string) == Some("health")
         && root.get("status").and_then(json_as_string) == Some("ok")
     {
@@ -1976,9 +1947,104 @@ fn shell_supervisor_protocol_health_unix(socket_path: &Path) -> AppResult<String
     } else {
         Ok(format!(
             "unexpected_response: {}",
-            shell_compact_error_label(response.trim())
+            shell_compact_error_label(&json_value_to_string(&JsonValue::Object(root)))
         ))
     }
+}
+
+fn shell_supervisor_protocol_show(
+    socket_path: &Path,
+    socket_ready: bool,
+    protocol_health: &str,
+) -> (String, Option<String>) {
+    if !socket_ready {
+        return ("not_checked".to_string(), None);
+    }
+    if protocol_health != "ok" {
+        return ("not_checked".to_string(), None);
+    }
+    #[cfg(unix)]
+    {
+        match shell_supervisor_protocol_show_unix(socket_path) {
+            Ok((label, inventory)) => (label, inventory),
+            Err(error) => (
+                format!("error: {}", shell_compact_error_label(&error.to_string())),
+                None,
+            ),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = socket_path;
+        ("unsupported".to_string(), None)
+    }
+}
+
+#[cfg(unix)]
+fn shell_supervisor_protocol_show_unix(socket_path: &Path) -> AppResult<(String, Option<String>)> {
+    let root = shell_supervisor_protocol_request_unix(socket_path, "show")?;
+    if root.get("method").and_then(json_as_string) == Some("show")
+        && root.get("status").and_then(json_as_string) == Some("ok")
+    {
+        let inventory = root
+            .get("job_inventory")
+            .and_then(json_as_string)
+            .map(str::to_string);
+        if let Some(error) = root.get("job_inventory_error").and_then(json_as_string) {
+            return Ok((
+                format!("inventory_error: {}", shell_compact_error_label(error)),
+                inventory,
+            ));
+        }
+        return Ok(("ok".to_string(), inventory));
+    }
+    Ok((
+        format!(
+            "unexpected_response: {}",
+            shell_compact_error_label(&json_value_to_string(&JsonValue::Object(root)))
+        ),
+        None,
+    ))
+}
+
+#[cfg(unix)]
+fn shell_supervisor_protocol_request_unix(
+    socket_path: &Path,
+    method: &str,
+) -> AppResult<BTreeMap<String, JsonValue>> {
+    use std::io::{BufRead, BufReader, ErrorKind};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket_path)
+        .map_err(|error| app_error(format!("{method} connect failed: {error}")))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .map_err(|error| app_error(format!("{method} read timeout setup failed: {error}")))?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(250)))
+        .map_err(|error| app_error(format!("{method} write timeout setup failed: {error}")))?;
+    stream
+        .write_all(format!("{{\"method\":\"{method}\"}}\n").as_bytes())
+        .map_err(|error| app_error(format!("{method} request write failed: {error}")))?;
+
+    let mut response = String::new();
+    let mut reader = BufReader::new(stream);
+    match reader.read_line(&mut response) {
+        Ok(0) => return Err(app_error(format!("{method} response was empty"))),
+        Ok(_) => {}
+        Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+            return Err(app_error(format!("{method} response timed out")));
+        }
+        Err(error) => return Err(app_error(format!("{method} response read failed: {error}"))),
+    }
+
+    parse_root_object(response.trim()).map_err(|error| {
+        app_error(format!(
+            "{method} response was not valid JSON: {}; response={}",
+            error,
+            shell_compact_error_label(response.trim())
+        ))
+    })
 }
 
 fn shell_compact_error_label(value: &str) -> String {
@@ -3407,7 +3473,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn exec_shell_supervisor_status_probes_protocol_health() {
+    fn exec_shell_supervisor_status_probes_protocol_health_and_show() {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
 
@@ -3433,19 +3499,26 @@ mod tests {
         .unwrap();
 
         let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = String::new();
-            {
-                let mut reader = BufReader::new(&mut stream);
-                reader.read_line(&mut request).unwrap();
+            for (expected_method, response) in [
+                (
+                    "health",
+                    br#"{"kind":"deepseek.exec_shell.supervisor.response.v1","method":"health","status":"ok"}"#.as_slice(),
+                ),
+                (
+                    "show",
+                    br#"{"kind":"deepseek.exec_shell.supervisor.response.v1","method":"show","status":"ok","job_inventory":"No background shell jobs."}"#.as_slice(),
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                {
+                    let mut reader = BufReader::new(&mut stream);
+                    reader.read_line(&mut request).unwrap();
+                }
+                assert!(request.contains(&format!(r#""method":"{expected_method}""#)));
+                stream.write_all(response).unwrap();
+                stream.write_all(b"\n").unwrap();
             }
-            assert!(request.contains(r#""method":"health""#));
-            stream
-                .write_all(
-                    br#"{"kind":"deepseek.exec_shell.supervisor.response.v1","method":"health","status":"ok"}"#,
-                )
-                .unwrap();
-            stream.write_all(b"\n").unwrap();
         });
 
         let status = ExecShellSupervisorStatusTool
@@ -3460,6 +3533,21 @@ mod tests {
         );
         assert!(
             status.summary.contains("protocol_health: ok"),
+            "{}",
+            status.summary
+        );
+        assert!(
+            status.summary.contains("protocol_show: ok"),
+            "{}",
+            status.summary
+        );
+        assert!(
+            status.summary.contains("protocol_job_inventory:"),
+            "{}",
+            status.summary
+        );
+        assert!(
+            status.summary.contains("No background shell jobs."),
             "{}",
             status.summary
         );
