@@ -476,7 +476,7 @@ Command palette commands currently implemented:
 | `logout`, `/logout` | Remove selected workspace `model.api_key_env` / `vision.api_key_env` values from the current TUI process and matching `.env` assignments |
 | `translate`, `/translate`, `translation`, `/translation`, `transale`, `/transale` | Toggle the session-local language-output requirement for future local agent turns |
 | `skills`, `/skills`, `skills <prefix>` | List configured TOML skills from repo and user skill directories |
-| `skill <name>`, `/skill <name>` | Show one configured TOML skill's description, triggers, tools, references, policy, and system append |
+| `skill <name>`, `/skill <name>`, `/<skill-name>` | Show one configured TOML skill's description, triggers, tools, references, policy, and system append; direct `/<skill-name>` is tried after custom slash commands |
 | `feedback`, `/feedback` | Show DeepSeekCode feedback targets in the right-side detail panel |
 | `feedback bug|feature|security`, `/feedback bug|feature|security` | Show GitHub issue or security-policy links for the selected feedback type |
 | `links`, `/links`, `dashboard`, `/dashboard`, `api`, `/api` | Show DeepSeekCode repository/docs links and DeepSeek platform/API docs in the right-side detail panel |

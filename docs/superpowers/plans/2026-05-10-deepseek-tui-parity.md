@@ -477,6 +477,11 @@ Landed first slice:
   commands, project `.dscode/commands/**/*.md` custom commands, configured
   user custom commands, and configured `/skill <name>` entries before
   submission
+- local file-backed TUI custom slash fallback now matches DeepSeek-TUI's direct
+  skill namespace: when `/name` is not a native or project/user custom command
+  and `name` is a configured skill, the TUI renders that skill detail instead
+  of reporting a missing custom slash command; completions include both
+  `/skill <name>` and `/<name>`
 - local file-backed TUI composer now supports DeepSeek-TUI-style draft stash:
   `Ctrl+S` parks the current composer text in `.dscode/tui/composer-stash.json`,
   and `stash list|pop|clear` plus `/stash list|pop|clear` list, restore, or

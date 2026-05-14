@@ -1219,7 +1219,7 @@ fn configure_tui_slash_completions(app: &mut TuiApp, config: &AppConfig) {
         completions.extend(
             registry
                 .iter()
-                .map(|skill| format!("/skill {}", skill.name)),
+                .flat_map(|skill| [format!("/skill {}", skill.name), format!("/{}", skill.name)]),
         );
     }
     app.set_extra_slash_completions(completions);
@@ -1402,6 +1402,27 @@ fn format_skills_summary(config: &AppConfig, command: &TuiSkillsCommand) -> AppR
             Ok(format_skill_detail(skill, &searched))
         }
     }
+}
+
+fn configured_skill_for_direct_slash(
+    config: &AppConfig,
+    command: &str,
+    args: &[String],
+) -> AppResult<Option<String>> {
+    if !args.is_empty() {
+        return Ok(None);
+    }
+    let Some(name) = command.strip_prefix('/') else {
+        return Ok(None);
+    };
+    if name.is_empty() || name.contains('/') || name.contains(char::is_whitespace) {
+        return Ok(None);
+    }
+
+    let repo_dir = resolve_repo_skills_dir();
+    let user_dir = expand_tilde(&config.workspace.user_skills_dir);
+    let (registry, _stats) = SkillRegistry::load_dirs(&[repo_dir.as_path(), user_dir.as_path()])?;
+    Ok(registry.find(name).map(|skill| skill.name.clone()))
 }
 
 fn format_skill_detail(skill: &SkillSpec, searched: &str) -> String {
@@ -1884,6 +1905,13 @@ fn handle_tui_action_with_live(
             let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
             let Some(content) = load_custom_slash_command_from_config(config, &command, &arg_refs)?
             else {
+                if let Some(name) = configured_skill_for_direct_slash(config, &command, &args)? {
+                    let skill_command = TuiSkillsCommand::Show { name: name.clone() };
+                    let detail = format_skills_summary(config, &skill_command)?;
+                    app.set_mcp_detail(TuiMcpDetailKind::Skills, detail);
+                    app.set_status(format!("skill shown: {name}"));
+                    return Ok(());
+                }
                 app.set_status(format!("custom slash command not found: {command}"));
                 return Ok(());
             };
@@ -6070,6 +6098,7 @@ description = "Review pull requests."
         let completions = app.extra_slash_completions_for_test();
         assert!(completions.iter().any(|value| value == "/global/fix"));
         assert!(completions.iter().any(|value| value == "/skill pr-review"));
+        assert!(completions.iter().any(|value| value == "/pr-review"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -7153,6 +7182,61 @@ description = "Review pull requests."
             .unwrap()
             .contains("custom slash command not found: /missing"));
         assert!(store.list_turns(&thread.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn handle_tui_action_falls_back_to_direct_skill_slash_command() {
+        let root = temp_root("custom-slash-skill-fallback");
+        let store = RuntimeStore::new(root.join("runtime"));
+        let user_skills = root.join("user-skills");
+        fs::create_dir_all(&user_skills).unwrap();
+        fs::write(
+            user_skills.join("pr-review.toml"),
+            r#"
+name = "pr-review"
+description = "Review pull requests."
+allowed_tools = ["read_file"]
+"#,
+        )
+        .unwrap();
+        let mut config = temp_config(&root);
+        config.workspace.user_skills_dir = user_skills.display().to_string();
+        let session = store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Runtime skill slash".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let mut app = app_from_store(&store).unwrap();
+
+        handle_tui_action(
+            &store,
+            Some(&config),
+            &mut app,
+            TuiAction::RunCustomSlashCommand {
+                thread_id: thread.id.clone(),
+                command: "/pr-review".to_string(),
+                args: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        assert!(render_once(&app, 120, 36)
+            .unwrap()
+            .contains("skill shown: pr-review"));
+        let (kind, detail) = app.mcp_detail_for_test().expect("skill detail");
+        assert_eq!(kind, TuiMcpDetailKind::Skills);
+        assert!(detail.contains("# Skill: pr-review"));
+        assert!(detail.contains("Review pull requests."));
+        assert!(store.list_turns(&thread.id).unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
