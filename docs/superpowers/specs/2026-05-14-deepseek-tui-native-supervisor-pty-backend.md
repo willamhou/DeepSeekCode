@@ -36,6 +36,9 @@ instead of the short-lived command caller.
   now detect running `native-supervisor` manifests and forward control through
   `supervisor_socket`, returning `meta.supervisor_forwarded=true` instead of
   pretending to resize via metadata-only fallback.
+- The owner-exit integration test now resizes a live native PTY, sends stdin
+  from a fresh tool client, and asserts the child process observes `33 101` via
+  `stty size`.
 
 ## Verification
 
@@ -48,6 +51,7 @@ instead of the short-lived command caller.
 - `cargo test --test shell_supervisor_owner_exit`
 - `cargo fmt --check`
 - `cargo check`
+- `git diff --check`
 
 ## Residual
 
@@ -56,7 +60,6 @@ This is not the final PTY parity endpoint. Still open:
 - broader service-manager lifecycle coverage for packaged systemd/launchd
   supervisors and restarted controller CLIs;
 - streaming attach frames over MCP/ACP/HTTP instead of single-response replay;
-- child-observed resize verification such as `stty size` from inside the PTY;
 - dedicated human-facing shell subcommands for detached native PTY control,
   beyond tool-level forwarding and low-level protocol integration;
 - Windows ConPTY.

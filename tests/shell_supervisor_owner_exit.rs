@@ -23,7 +23,7 @@ fn shell_supervisor_native_pty_survives_start_connection_exit() {
 
     let start = request(
         &socket,
-        r#"{"method":"start","arguments":{"command":"echo owner-exit-ready; cat","tty":true,"tty_rows":24,"tty_cols":80}}"#,
+        r#"{"method":"start","arguments":{"command":"echo owner-exit-ready; while read line; do stty size; echo \"$line\"; done","tty":true,"tty_rows":24,"tty_cols":80}}"#,
     );
     assert_contains(&start, r#""status":"ok""#);
     assert_contains(&start, r#""job_pty_backend":"native-supervisor""#);
@@ -43,6 +43,18 @@ fn shell_supervisor_native_pty_survives_start_connection_exit() {
     assert_contains(&replay, "stream: terminal");
     assert_contains(&replay, "owner-exit-ready");
 
+    let resize = ExecShellResizeTool
+        .execute(
+            ToolInput::new()
+                .with_arg("cwd", root.display().to_string())
+                .with_arg("task_id", task_id.clone())
+                .with_arg("tty_rows", "33")
+                .with_arg("tty_cols", "101"),
+        )
+        .unwrap();
+    assert_contains(&resize.summary, "meta.supervisor_forwarded=true");
+    assert_contains(&resize.summary, "meta.live_resize=native_tiocswinsz");
+
     let stdin = ExecShellInteractTool {
         tool_name: "exec_shell_interact",
     }
@@ -50,7 +62,7 @@ fn shell_supervisor_native_pty_survives_start_connection_exit() {
         ToolInput::new()
             .with_arg("cwd", root.display().to_string())
             .with_arg("task_id", task_id.clone())
-            .with_arg("input", "from-fresh-client\n")
+            .with_arg("input", "probe-size\n")
             .with_arg("timeout_ms", "100"),
     )
     .unwrap();
@@ -63,22 +75,13 @@ fn shell_supervisor_native_pty_survives_start_connection_exit() {
                 r#"{{"method":"replay","arguments":{{"task_id":"{task_id}","stream":"terminal","cursor":0,"limit_bytes":4000}}}}"#
             ),
         );
-        response.contains("from-fresh-client").then_some(response)
+        (response.contains("33 101") && response.contains("probe-size")).then_some(response)
     })
-    .unwrap_or_else(|| panic!("terminal replay never observed forwarded stdin for task {task_id}"));
-    assert_contains(&replay, "from-fresh-client");
-
-    let resize = ExecShellResizeTool
-        .execute(
-            ToolInput::new()
-                .with_arg("cwd", root.display().to_string())
-                .with_arg("task_id", task_id.clone())
-                .with_arg("tty_rows", "33")
-                .with_arg("tty_cols", "101"),
-        )
-        .unwrap();
-    assert_contains(&resize.summary, "meta.supervisor_forwarded=true");
-    assert_contains(&resize.summary, "meta.live_resize=native_tiocswinsz");
+    .unwrap_or_else(|| {
+        panic!("terminal replay never observed child PTY resize output for task {task_id}")
+    });
+    assert_contains(&replay, "33 101");
+    assert_contains(&replay, "probe-size");
 
     let attach = request(
         &socket,

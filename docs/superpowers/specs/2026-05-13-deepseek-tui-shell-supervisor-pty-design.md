@@ -158,8 +158,8 @@ Attach is an API-level terminal stream, not a full UI widget:
    - `TIOCSWINSZ`
    - `SIGWINCH`
    - persisted `resize` terminal event
-   - tests verify the native supervisor resize path and event log; an
-     end-to-end `stty size` assertion inside the child PTY remains open
+   - tests verify the native supervisor resize path, event log, and an
+     end-to-end `stty size` assertion inside the child PTY after resize
 5. Owner-exit integration:
    - integration test that starts the real shell-supervisor daemon, starts a
      supervised native PTY job through one socket connection, drops that
@@ -167,8 +167,9 @@ Attach is an API-level terminal stream, not a full UI widget:
      connections
    - detached tool-level stdin/resize/cancel now forward through
      `supervisor_socket` for running native-supervisor manifests
-   - status: daemon/socket owner-exit smoke and detached tool forwarding landed;
-     dedicated human-facing CLI wrappers remain open
+   - status: daemon/socket owner-exit smoke, detached tool forwarding, and
+     child-observed resize verification landed; dedicated human-facing CLI
+     wrappers remain open
 6. Service packaging:
    - systemd/launchd templates can supervise the shell supervisor alongside
      runtime and diagnostics services
@@ -197,5 +198,4 @@ the first Linux `native-supervisor` PTY backend have landed. Normal
 own a native PTY master, write `terminal-events.jsonl`, and support live
 `TIOCSWINSZ` resize through the in-process supervisor. Remaining hard slices
 are dedicated human-facing shell wrappers, streaming MCP/ACP attach frames,
-stronger child-observed resize verification, service-manager lifecycle coverage,
-and Windows ConPTY.
+service-manager lifecycle coverage, and Windows ConPTY.

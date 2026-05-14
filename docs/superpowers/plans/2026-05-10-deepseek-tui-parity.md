@@ -276,8 +276,10 @@ Landed first slice:
   starts a native PTY job through one socket connection, drops that connection,
   then replays through a fresh connection and verifies detached
   `exec_shell_interact` / `exec_shell_resize` / `exec_shell_cancel` forward
-  through `supervisor_socket`; `deepseek agents service` and packaged
-  systemd/launchd templates include that shell-supervisor service;
+  through `supervisor_socket`, including a child-side `stty size` assertion
+  that observes resized `33 101` geometry inside the PTY; `deepseek agents
+  service` and packaged systemd/launchd templates include that
+  shell-supervisor service;
   `exec_shell_supervisor_status` now probes socket health before reporting a
   daemon as ready, reads healthy daemon `status` active-job counts backed by
   durable shell manifests, refreshes the workspace supervisor manifest during
