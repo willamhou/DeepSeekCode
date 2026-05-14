@@ -383,6 +383,9 @@ Landed first slice:
   DeepSeek-TUI-style `/compact`, `/mcp`, `/jobs`, and `/restore` command
   families that the composer can execute, closing the discoverability half of
   those slash-command slices
+- TUI unit coverage now includes a source-level DeepSeek-TUI slash registry
+  audit that checks every refreshed upstream first-class command name is present
+  in composer slash hints, reducing future execution/completion drift
 - local file-backed TUI command palette now routes unallowlisted foreground
   shell commands through an explicit modal approval; approved commands run once
   through a trusted TUI-only background shell path without adding an allowlist

@@ -21642,6 +21642,90 @@ mod tests {
     }
 
     #[test]
+    fn composer_slash_hints_cover_deepseek_tui_command_registry_names() {
+        let app = TuiApp::new(Vec::new());
+        let upstream_commands = [
+            "anchor",
+            "help",
+            "clear",
+            "exit",
+            "model",
+            "models",
+            "provider",
+            "queue",
+            "stash",
+            "hooks",
+            "subagents",
+            "agent",
+            "links",
+            "feedback",
+            "home",
+            "note",
+            "memory",
+            "attach",
+            "task",
+            "jobs",
+            "mcp",
+            "network",
+            "rename",
+            "save",
+            "sessions",
+            "load",
+            "compact",
+            "relay",
+            "context",
+            "cycles",
+            "cycle",
+            "recall",
+            "export",
+            "config",
+            "mode",
+            "theme",
+            "verbose",
+            "trust",
+            "logout",
+            "tokens",
+            "translate",
+            "system",
+            "edit",
+            "diff",
+            "change",
+            "undo",
+            "retry",
+            "init",
+            "lsp",
+            "share",
+            "goal",
+            "settings",
+            "status",
+            "statusline",
+            "skills",
+            "skill",
+            "review",
+            "restore",
+            "rlm",
+            "cost",
+            "profile",
+            "cache",
+        ];
+
+        let missing = upstream_commands
+            .into_iter()
+            .filter(|command| {
+                let prefix = format!("/{command}");
+                !composer_slash_completion_matches(&app, &prefix)
+                    .into_iter()
+                    .any(|entry| entry == prefix || entry.starts_with(&format!("{prefix} ")))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing.is_empty(),
+            "missing DeepSeek-TUI slash completions: {missing:?}"
+        );
+    }
+
+    #[test]
     fn composer_slash_hints_include_project_custom_commands() {
         let root = temp_root("slash-custom-hints");
         let command_dir = root.join(".dscode/commands/pr");
