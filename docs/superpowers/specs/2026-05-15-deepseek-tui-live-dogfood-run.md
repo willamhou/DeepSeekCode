@@ -17,6 +17,9 @@ Claude/Codex/DeepSeek-TUI gap.
 - Added `deepseek dogfood live-run`.
 - The command reuses the live-plan target model and selects the next recommended
   benchmark cases across `write_validate`, `recovery`, and `pr_workflow`.
+- Unfiltered batches are category-balanced: selection walks the active
+  categories round-robin, then fills the next round when a category has more
+  recommended cases.
 - It is safe by default:
   - dry-run unless `--execute` is present;
   - default batch limit is 3;
@@ -31,7 +34,8 @@ Claude/Codex/DeepSeek-TUI gap.
 ## Verification
 
 - Parser coverage for `dogfood live-run`.
-- Unit coverage for category filtering and total run limiting.
+- Unit coverage for category filtering, balanced selection, and total run
+  limiting.
 - Command smoke:
   - `deepseek dogfood live-run --limit 3`
   - `deepseek dogfood live-run --limit 2 --category recovery`

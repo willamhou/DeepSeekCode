@@ -1570,20 +1570,34 @@ fn build_live_plan(
 
 fn select_live_run_cases(plan: &LivePlan, categories: &[String], limit: usize) -> Vec<LiveRunCase> {
     let category_filter = categories.iter().cloned().collect::<HashSet<_>>();
+    let category_plans = plan
+        .category_plans
+        .iter()
+        .filter(|category| {
+            category_filter.is_empty() || category_filter.contains(&category.category)
+        })
+        .collect::<Vec<_>>();
     let mut selected = Vec::new();
-    for category in &plan.category_plans {
-        if !category_filter.is_empty() && !category_filter.contains(&category.category) {
-            continue;
-        }
-        for case in &category.recommended_cases {
+    let mut case_index = 0;
+    while selected.len() < limit {
+        let mut added_this_pass = false;
+        for category in &category_plans {
             if selected.len() >= limit {
-                return selected;
+                break;
             }
+            let Some(case) = category.recommended_cases.get(case_index) else {
+                continue;
+            };
             selected.push(LiveRunCase {
                 category: category.category.clone(),
                 name: case.clone(),
             });
+            added_this_pass = true;
         }
+        if !added_this_pass {
+            break;
+        }
+        case_index += 1;
     }
     selected
 }
@@ -3382,6 +3396,25 @@ mod tests {
                 LiveRunCase {
                     category: "write_validate".to_string(),
                     name: "write-1".to_string(),
+                },
+                LiveRunCase {
+                    category: "recovery".to_string(),
+                    name: "recover-1".to_string(),
+                },
+            ]
+        );
+
+        let balanced_then_refilled = select_live_run_cases(&plan, &[], 3);
+        assert_eq!(
+            balanced_then_refilled,
+            vec![
+                LiveRunCase {
+                    category: "write_validate".to_string(),
+                    name: "write-1".to_string(),
+                },
+                LiveRunCase {
+                    category: "recovery".to_string(),
+                    name: "recover-1".to_string(),
                 },
                 LiveRunCase {
                     category: "write_validate".to_string(),
