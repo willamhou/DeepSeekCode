@@ -121,10 +121,11 @@ deepseek agents service-smoke --workdir /tmp/dsc-smk --bin "$(command -v deepsee
 `service-smoke` starts `serve --http --once` on a loopback ephemeral port,
 probes `/health`, waits for that child to exit, then starts
 `agents shell-supervisor --json`, probes the Unix socket `health` method, runs
-`start` -> `wait` -> `attach` against a small command, requests `shutdown`, and
-waits for the supervisor child to exit. On Linux, that control smoke requests
-`tty=true` and requires the `native-supervisor` PTY backend; on other Unix
-platforms it uses non-TTY shell execution. On non-Unix platforms, the
+`start` -> `wait` -> `attach` -> `replay` against a small command, requests
+`shutdown`, and waits for the supervisor child to exit. On Linux, that control
+smoke requests `tty=true`, requires the `native-supervisor` PTY backend, and
+also verifies PTY `stdin`, `resize`, terminal `replay`, and `cancel`; on other
+Unix platforms it uses non-TTY shell execution. On non-Unix platforms, the
 shell-supervisor portion is reported as a warning because the protocol socket
 is Unix-only. If the target workspace already has a live shell-supervisor
 socket, the smoke check reports a blocker and does not send `shutdown` to the

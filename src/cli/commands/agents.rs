@@ -3267,10 +3267,11 @@ fn shell_supervisor_request_raw(socket: &Path, method: &str, request: &str) -> A
 #[cfg(unix)]
 fn shell_supervisor_control_smoke(socket: &Path, timeout_ms: u64) -> AppResult<String> {
     let tty = cfg!(all(unix, target_os = "linux"));
+    let wait_timeout = timeout_ms.min(5000);
     let start_request = format!(
         "{{\"method\":\"start\",\"arguments\":{{\"command\":\"echo deepseek-shell-supervisor-smoke\",\"tty\":{},\"tty_rows\":24,\"tty_cols\":80,\"timeout_ms\":{}}}}}\n",
         if tty { "true" } else { "false" },
-        timeout_ms.min(5000)
+        wait_timeout
     );
     let start_response = shell_supervisor_request_raw(socket, "start", &start_request)?;
     let task_id = shell_supervisor_response_string(&start_response, "task_id")
@@ -3284,7 +3285,7 @@ fn shell_supervisor_control_smoke(socket: &Path, timeout_ms: u64) -> AppResult<S
     let wait_request = format!(
         "{{\"method\":\"wait\",\"arguments\":{{\"task_id\":\"{}\",\"timeout_ms\":{}}}}}\n",
         json_escape(&task_id),
-        timeout_ms.min(5000)
+        wait_timeout
     );
     shell_supervisor_request_raw(socket, "wait", &wait_request)?;
 
@@ -3298,8 +3299,32 @@ fn shell_supervisor_control_smoke(socket: &Path, timeout_ms: u64) -> AppResult<S
             "shell supervisor attach smoke did not replay command output",
         ));
     }
+
+    let replay_stream = if tty { "terminal" } else { "stdout" };
+    let replay_request = format!(
+        "{{\"method\":\"replay\",\"arguments\":{{\"task_id\":\"{}\",\"stream\":\"{}\",\"cursor\":0,\"limit_bytes\":4096}}}}\n",
+        json_escape(&task_id),
+        replay_stream
+    );
+    let replay_response = shell_supervisor_request_raw(socket, "replay", &replay_request)?;
+    if !replay_response.contains("deepseek-shell-supervisor-smoke") {
+        return Err(app_error(
+            "shell supervisor replay smoke did not return command output",
+        ));
+    }
+
+    let pty_summary = if tty {
+        Some(shell_supervisor_pty_control_smoke(socket, wait_timeout)?)
+    } else {
+        None
+    };
+    if let Some(pty_summary) = pty_summary {
+        return Ok(format!(
+            "shell supervisor start/wait/attach/replay control smoke passed for task {task_id} (tty={tty}); {pty_summary}"
+        ));
+    }
     Ok(format!(
-        "shell supervisor start/wait/attach control smoke passed for task {task_id} (tty={tty})"
+        "shell supervisor start/wait/attach/replay control smoke passed for task {task_id} (tty={tty})"
     ))
 }
 
@@ -3308,6 +3333,137 @@ fn shell_supervisor_response_string(response: &str, key: &str) -> Option<String>
     let value = parse_json_value(response.trim()).ok()?;
     let object = json_as_object(&value)?;
     json_as_string(object.get(key)?).map(str::to_string)
+}
+
+#[cfg(unix)]
+fn shell_supervisor_pty_control_smoke(socket: &Path, timeout_ms: u64) -> AppResult<String> {
+    let command = "cat -";
+    let start_request = format!(
+        "{{\"method\":\"start\",\"arguments\":{{\"command\":\"{}\",\"tty\":true,\"tty_rows\":24,\"tty_cols\":80,\"timeout_ms\":{}}}}}\n",
+        json_escape(command),
+        timeout_ms
+    );
+    let start_response = shell_supervisor_request_raw(socket, "start", &start_request)?;
+    let task_id = shell_supervisor_response_string(&start_response, "task_id")
+        .ok_or_else(|| app_error("shell supervisor PTY smoke response missing task_id"))?;
+    if !start_response.contains(r#""job_pty_backend":"native-supervisor""#) {
+        return Err(app_error(
+            "shell supervisor PTY smoke did not start a native-supervisor PTY job",
+        ));
+    }
+
+    let smoke = (|| {
+        let stdin_request = format!(
+            "{{\"method\":\"stdin\",\"arguments\":{{\"task_id\":\"{}\",\"input\":\"deepseek-pty-control\\n\",\"timeout_ms\":500}}}}\n",
+            json_escape(&task_id)
+        );
+        shell_supervisor_request_raw(socket, "stdin", &stdin_request)?;
+
+        let resize_request = format!(
+            "{{\"method\":\"resize\",\"arguments\":{{\"task_id\":\"{}\",\"tty_rows\":31,\"tty_cols\":99}}}}\n",
+            json_escape(&task_id)
+        );
+        let resize_response = shell_supervisor_request_raw(socket, "resize", &resize_request)?;
+        if !resize_response.contains("meta.live_resize=native_tiocswinsz") {
+            return Err(app_error(
+                "shell supervisor PTY resize smoke did not use native_tiocswinsz",
+            ));
+        }
+
+        let attach_response = shell_supervisor_poll_for_output(
+            socket,
+            "attach",
+            &task_id,
+            "deepseek-pty-control",
+            timeout_ms,
+        )?;
+        if !attach_response.contains("deepseek-pty-control") {
+            return Err(app_error(
+                "shell supervisor PTY attach smoke did not replay stdin output",
+            ));
+        }
+
+        let replay_response = shell_supervisor_poll_for_output(
+            socket,
+            "replay",
+            &task_id,
+            "deepseek-pty-control",
+            timeout_ms,
+        )?;
+        if !replay_response.contains("rows=31 cols=99") {
+            return Err(app_error(
+                "shell supervisor PTY replay smoke did not include resize event",
+            ));
+        }
+
+        Ok(format!(
+            "PTY stdin/resize/replay smoke passed for task {task_id}"
+        ))
+    })();
+
+    let cancel_request = format!(
+        "{{\"method\":\"cancel\",\"arguments\":{{\"task_id\":\"{}\"}}}}\n",
+        json_escape(&task_id)
+    );
+    let cancel = shell_supervisor_request_raw(socket, "cancel", &cancel_request);
+    match (smoke, cancel) {
+        (Ok(summary), Ok(cancel_response)) => {
+            if !cancel_response.contains("Canceled")
+                && !cancel_response.contains("status: killed")
+                && !cancel_response.contains("status: completed")
+            {
+                return Err(app_error(format!(
+                    "shell supervisor PTY cancel smoke returned unexpected response: {}",
+                    cancel_response.trim()
+                )));
+            }
+            Ok(format!("{summary}; PTY cancel smoke passed"))
+        }
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(_), Err(cancel_error)) => Err(app_error(format!(
+            "shell supervisor PTY cancel smoke failed: {cancel_error}"
+        ))),
+        (Err(error), Err(cancel_error)) => Err(app_error(format!(
+            "{error}; cleanup cancel also failed: {cancel_error}"
+        ))),
+    }
+}
+
+#[cfg(unix)]
+fn shell_supervisor_poll_for_output(
+    socket: &Path,
+    method: &str,
+    task_id: &str,
+    needle: &str,
+    timeout_ms: u64,
+) -> AppResult<String> {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(100).min(5000));
+    let mut last_response = String::new();
+    loop {
+        if Instant::now() >= deadline {
+            return Err(app_error(format!(
+                "timed out waiting for shell supervisor {method} output `{needle}`; last response: {}",
+                last_response.trim()
+            )));
+        }
+        let request = match method {
+            "attach" => format!(
+                "{{\"method\":\"attach\",\"arguments\":{{\"task_id\":\"{}\",\"tail\":true,\"limit_bytes\":4096}}}}\n",
+                json_escape(task_id)
+            ),
+            "replay" => format!(
+                "{{\"method\":\"replay\",\"arguments\":{{\"task_id\":\"{}\",\"stream\":\"terminal\",\"cursor\":0,\"limit_bytes\":4096}}}}\n",
+                json_escape(task_id)
+            ),
+            _ => return Err(app_error(format!("unsupported shell supervisor poll method: {method}"))),
+        };
+        let response = shell_supervisor_request_raw(socket, method, &request)?;
+        if response.contains(needle) {
+            return Ok(response);
+        }
+        last_response = response;
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn wait_child_exit(child: &mut Child, timeout: Duration) -> AppResult<std::process::ExitStatus> {
@@ -5608,15 +5764,23 @@ mod tests {
         let socket = root.join("supervisor.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         let tty = cfg!(all(unix, target_os = "linux"));
+        let expected_methods: Vec<&'static str> = if tty {
+            vec![
+                "start", "wait", "attach", "replay", "start", "stdin", "resize", "attach",
+                "replay", "cancel",
+            ]
+        } else {
+            vec!["start", "wait", "attach", "replay"]
+        };
         let handle = std::thread::spawn(move || {
-            for expected in ["start", "wait", "attach"] {
+            for (step, expected) in expected_methods.into_iter().enumerate() {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
                 let mut request = String::new();
                 reader.read_line(&mut request).unwrap();
                 assert!(request.contains(&format!(r#""method":"{expected}""#)));
-                match expected {
-                    "start" => {
+                match (step, expected) {
+                    (0, "start") => {
                         assert!(request.contains(if tty {
                             r#""tty":true"#
                         } else {
@@ -5632,7 +5796,7 @@ mod tests {
                             )
                             .unwrap();
                     }
-                    "wait" => {
+                    (_, "wait") => {
                         assert!(request.contains(r#""task_id":"task-smoke""#));
                         stream
                             .write_all(
@@ -5640,11 +5804,71 @@ mod tests {
                             )
                             .unwrap();
                     }
-                    "attach" => {
+                    (2, "attach") => {
                         assert!(request.contains(r#""task_id":"task-smoke""#));
                         stream
                             .write_all(
                                 br#"{"status":"ok","method":"attach","attach_summary":"deepseek-shell-supervisor-smoke"}"#,
+                            )
+                            .unwrap();
+                    }
+                    (3, "replay") => {
+                        assert!(request.contains(r#""task_id":"task-smoke""#));
+                        stream
+                            .write_all(
+                                br#"{"status":"ok","method":"replay","replay_summary":"deepseek-shell-supervisor-smoke"}"#,
+                            )
+                            .unwrap();
+                    }
+                    (4, "start") => {
+                        assert!(request.contains(r#""tty":true"#));
+                        assert!(request.contains("cat -"));
+                        stream
+                            .write_all(
+                                br#"{"status":"ok","method":"start","task_id":"task-pty","job_pty_backend":"native-supervisor"}"#,
+                            )
+                            .unwrap();
+                    }
+                    (_, "stdin") => {
+                        assert!(request.contains(r#""task_id":"task-pty""#));
+                        assert!(request.contains("deepseek-pty-control"));
+                        stream
+                            .write_all(
+                                br#"{"status":"ok","method":"stdin","stdin_summary":"status: running deepseek-pty-control"}"#,
+                            )
+                            .unwrap();
+                    }
+                    (_, "resize") => {
+                        assert!(request.contains(r#""task_id":"task-pty""#));
+                        assert!(request.contains(r#""tty_rows":31"#));
+                        assert!(request.contains(r#""tty_cols":99"#));
+                        stream
+                            .write_all(
+                                br#"{"status":"ok","method":"resize","resize_summary":"meta.live_resize=native_tiocswinsz"}"#,
+                            )
+                            .unwrap();
+                    }
+                    (7, "attach") => {
+                        assert!(request.contains(r#""task_id":"task-pty""#));
+                        stream
+                            .write_all(
+                                br#"{"status":"ok","method":"attach","attach_summary":"deepseek-pty-control"}"#,
+                            )
+                            .unwrap();
+                    }
+                    (8, "replay") => {
+                        assert!(request.contains(r#""task_id":"task-pty""#));
+                        stream
+                            .write_all(
+                                br#"{"status":"ok","method":"replay","replay_summary":"deepseek-pty-control\n[2 resize] rows=31 cols=99"}"#,
+                            )
+                            .unwrap();
+                    }
+                    (_, "cancel") => {
+                        assert!(request.contains(r#""task_id":"task-pty""#));
+                        stream
+                            .write_all(
+                                br#"{"status":"ok","method":"cancel","cancel_summary":"Canceled background shell job: task-pty\nstatus: killed"}"#,
                             )
                             .unwrap();
                     }
@@ -5659,6 +5883,11 @@ mod tests {
 
         assert!(summary.contains("task-smoke"));
         assert!(summary.contains(&format!("tty={tty}")));
+        assert!(summary.contains("start/wait/attach/replay"));
+        if tty {
+            assert!(summary.contains("PTY stdin/resize/replay"));
+            assert!(summary.contains("PTY cancel"));
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }

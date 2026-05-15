@@ -326,7 +326,7 @@ Release notes should include:
   `target/service-smoke/SERVICES.md`, `deepseek agents service-doctor --json`
   output showing zero blockers for rendered templates, `deepseek agents
   service-smoke --json` output showing runtime startup plus shell-supervisor
-  start/wait/attach control proof, and
+  start/wait/attach/replay proof plus Linux PTY stdin/resize/cancel proof, and
   `deepseek agents rlm-status --json` output showing the live RLM service
   lifecycle surface
 - `npm test` output from `npm/`

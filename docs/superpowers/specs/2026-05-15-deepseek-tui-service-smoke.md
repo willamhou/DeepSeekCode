@@ -19,10 +19,11 @@ release binary's long-lived surfaces without requiring systemd or launchd.
   probe `/health`, and verify the child exits successfully.
 - Start the selected binary as `agents shell-supervisor --json`, probe the
   Unix socket `health` method, run a control smoke through `start` -> `wait` ->
-  `attach`, request `shutdown`, and verify the child exits.
+  `attach` -> `replay`, request `shutdown`, and verify the child exits.
 - On Linux, the shell-supervisor control smoke should request `tty=true` and
   require the `native-supervisor` PTY backend so release evidence proves the
-  platform PTY path, not only non-interactive shell execution.
+  platform PTY path, then verify PTY `stdin`, `resize`, terminal `replay`, and
+  `cancel`, not only non-interactive shell execution.
 - Treat an already-active shell-supervisor socket as a blocker so the smoke
   command never shuts down an existing workspace supervisor.
 - Treat a too-long absolute shell-supervisor socket path as a blocker before
