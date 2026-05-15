@@ -106,9 +106,10 @@ git.
 DeepSeekCode is close enough to use as its own coding CLI, but it is not yet at
 Claude Code CLI / Codex CLI polish. The largest remaining gaps are:
 
-- native supervisor-owned PTY attach/stdin/resize/replay/wait/cancel;
-- deeper live external write-fixture sample evidence across disposable real
-  repositories;
+- broader platform proof for native supervisor-owned PTY control beyond current
+  Unix/Linux smoke coverage;
+- deeper model-backed live dogfood and external write-fixture sample evidence
+  across disposable real repositories;
 - npm registry publishing and a Homebrew tap, both blocked on credentials;
 - a committed reviewed model-backed README media asset beyond deterministic TUI
   snapshots.
@@ -187,11 +188,16 @@ deepseek dogfood report --limit 10
 deepseek dogfood report --limit 20 \
   --require-min-runs 100 \
   --require-success-rate 90 \
+  --require-live-runs 100 \
+  --require-live-success-rate 90 \
   --require-recent-clean 20 \
   --require-external-write-fixtures 3 \
   --require-category write_validate:25:90 \
   --require-category recovery:25:90 \
-  --require-category pr_workflow:25:90
+  --require-category pr_workflow:25:90 \
+  --require-live-category write_validate:25:90 \
+  --require-live-category recovery:25:90 \
+  --require-live-category pr_workflow:25:90
 ```
 
 ## Documentation

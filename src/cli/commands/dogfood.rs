@@ -23,6 +23,9 @@ use crate::util::json::{
 
 const DEFAULT_REPORT_LIMIT: usize = 20;
 const CATEGORY_TREND_WINDOW: usize = 5;
+const MODEL_TRANSPORT_OFFLINE: &str = "offline";
+const MODEL_TRANSPORT_ONLINE: &str = "online";
+const MODEL_TRANSPORT_UNKNOWN: &str = "unknown";
 
 pub fn run(action: DogfoodAction) -> AppResult<()> {
     let config = load_or_default()?;
@@ -60,6 +63,7 @@ fn run_live_task_with_policy(
     let budget = args.budget.unwrap_or(AgentLoopOptions::default().steps);
     let manual_intervention =
         args.manual_intervention || matches!(args.outcome, Some(DogfoodOutcome::Manual));
+    let model_transport = model_transport_for_config(config);
 
     println!("DeepSeekCode dogfood");
     println!("task: {}", args.task);
@@ -107,6 +111,7 @@ fn run_live_task_with_policy(
             timestamp_secs,
             duration_ms,
             config.model.model.clone(),
+            model_transport,
             workdir,
             budget,
             &args,
@@ -117,6 +122,7 @@ fn run_live_task_with_policy(
             timestamp_secs,
             duration_ms,
             config.model.model.clone(),
+            model_transport,
             workdir,
             budget,
             &args,
@@ -206,6 +212,17 @@ fn dogfood_error_is_environment_transport_failure(
     ]
     .iter()
     .any(|marker| message.contains(marker))
+}
+
+fn model_transport_for_config(config: &crate::config::types::AppConfig) -> &'static str {
+    let api_key_env = config.model.api_key_env.trim();
+    if api_key_env.is_empty() || api_key_env.to_ascii_uppercase().contains("OFFLINE") {
+        return MODEL_TRANSPORT_OFFLINE;
+    }
+    match env::var(api_key_env) {
+        Ok(value) if !value.trim().is_empty() => MODEL_TRANSPORT_ONLINE,
+        _ => MODEL_TRANSPORT_OFFLINE,
+    }
 }
 
 fn resolve_run_args(
@@ -438,9 +455,12 @@ fn render_report_command(
 fn report_has_requirements(args: &DogfoodReportArgs) -> bool {
     args.require_min_runs.is_some()
         || args.require_success_rate.is_some()
+        || args.require_live_runs.is_some()
+        || args.require_live_success_rate.is_some()
         || args.require_external_write_fixtures.is_some()
         || args.require_recent_clean.is_some()
         || !args.require_categories.is_empty()
+        || !args.require_live_categories.is_empty()
 }
 
 fn enforce_report_requirements(
@@ -477,6 +497,31 @@ fn report_requirement_failures(records: &[DogfoodRecord], args: &DogfoodReportAr
             "overall success rate",
             success,
             records.len(),
+            min_success_percent,
+        );
+    }
+    let live_records = records
+        .iter()
+        .filter(|record| record_is_model_backed(record))
+        .collect::<Vec<_>>();
+    if let Some(min_runs) = args.require_live_runs {
+        if live_records.len() < min_runs {
+            failures.push(format!(
+                "model-backed runs {} below required minimum {min_runs}",
+                live_records.len()
+            ));
+        }
+    }
+    if let Some(min_success_percent) = args.require_live_success_rate {
+        let live_success = live_records
+            .iter()
+            .filter(|record| matches!(record.outcome, DogfoodOutcome::Success))
+            .count();
+        push_rate_failure(
+            &mut failures,
+            "model-backed success rate",
+            live_success,
+            live_records.len(),
             min_success_percent,
         );
     }
@@ -519,7 +564,18 @@ fn report_requirement_failures(records: &[DogfoodRecord], args: &DogfoodReportAr
     if !args.require_categories.is_empty() {
         let stats = aggregate_category_stats(records);
         for requirement in &args.require_categories {
-            push_category_requirement_failure(&mut failures, &stats, requirement);
+            push_category_requirement_failure(&mut failures, &stats, requirement, "category");
+        }
+    }
+    if !args.require_live_categories.is_empty() {
+        let stats = aggregate_category_stats_for(live_records);
+        for requirement in &args.require_live_categories {
+            push_category_requirement_failure(
+                &mut failures,
+                &stats,
+                requirement,
+                "model-backed category",
+            );
         }
     }
     failures
@@ -529,23 +585,24 @@ fn push_category_requirement_failure(
     failures: &mut Vec<String>,
     stats: &BTreeMap<String, DogfoodCategoryStats>,
     requirement: &DogfoodCategoryRequirement,
+    label: &str,
 ) {
     let Some(category) = stats.get(&requirement.category) else {
         failures.push(format!(
-            "category `{}` has 0 runs, required {}",
+            "{label} `{}` has 0 runs, required {}",
             requirement.category, requirement.min_runs
         ));
         return;
     };
     if category.runs < requirement.min_runs {
         failures.push(format!(
-            "category `{}` runs {} below required minimum {}",
+            "{label} `{}` runs {} below required minimum {}",
             requirement.category, category.runs, requirement.min_runs
         ));
     }
     push_rate_failure(
         failures,
-        &format!("category `{}` success rate", requirement.category),
+        &format!("{label} `{}` success rate", requirement.category),
         category.success,
         category.runs,
         requirement.min_success_percent,
@@ -570,6 +627,10 @@ fn push_rate_failure(
 
 fn record_is_clean(record: &DogfoodRecord) -> bool {
     matches!(record.outcome, DogfoodOutcome::Success) && !record.manual_intervention
+}
+
+fn record_is_model_backed(record: &DogfoodRecord) -> bool {
+    record.model_transport == MODEL_TRANSPORT_ONLINE
 }
 
 fn replay_benchmark_command(
@@ -727,6 +788,7 @@ struct DogfoodRecord {
     skill: Option<String>,
     budget: u64,
     model: String,
+    model_transport: String,
     workdir: String,
     outcome: DogfoodOutcome,
     manual_intervention: bool,
@@ -748,6 +810,7 @@ impl DogfoodRecord {
         timestamp_secs: u64,
         duration_ms: u64,
         model: String,
+        model_transport: &'static str,
         workdir: String,
         budget: usize,
         args: &DogfoodRunArgs,
@@ -823,6 +886,7 @@ impl DogfoodRecord {
             skill: args.skill.clone(),
             budget: budget as u64,
             model,
+            model_transport: model_transport.to_string(),
             workdir,
             outcome,
             manual_intervention,
@@ -846,6 +910,7 @@ impl DogfoodRecord {
         timestamp_secs: u64,
         duration_ms: u64,
         model: String,
+        model_transport: &'static str,
         workdir: String,
         budget: usize,
         args: &DogfoodRunArgs,
@@ -862,6 +927,7 @@ impl DogfoodRecord {
             skill: args.skill.clone(),
             budget: budget as u64,
             model,
+            model_transport: model_transport.to_string(),
             workdir,
             outcome,
             manual_intervention,
@@ -906,6 +972,10 @@ impl DogfoodRecord {
             JsonValue::Number(self.budget.to_string()),
         );
         root.insert("model".to_string(), JsonValue::String(self.model.clone()));
+        root.insert(
+            "model_transport".to_string(),
+            JsonValue::String(self.model_transport.clone()),
+        );
         root.insert(
             "workdir".to_string(),
             JsonValue::String(self.workdir.clone()),
@@ -986,6 +1056,10 @@ impl DogfoodRecord {
         let skill = read_optional_string(&root, "skill").map(str::to_string);
         let budget = read_u64(&root, "budget")?;
         let model = read_string(&root, "model")?.to_string();
+        let model_transport = read_optional_string(&root, "model_transport")
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(MODEL_TRANSPORT_UNKNOWN)
+            .to_string();
         let workdir = read_string(&root, "workdir")?.to_string();
         let outcome = parse_dogfood_outcome(read_string(&root, "outcome")?)
             .ok_or_else(|| app_error("dogfood record has invalid `outcome`"))?;
@@ -1034,6 +1108,7 @@ impl DogfoodRecord {
             skill,
             budget,
             model,
+            model_transport,
             workdir,
             outcome,
             manual_intervention,
@@ -1268,6 +1343,16 @@ fn render_report(ledger_path: &Path, records: &[DogfoodRecord], limit: usize) ->
         .iter()
         .filter(|record| matches!(record.outcome, DogfoodOutcome::Success))
         .count();
+    let model_backed = records
+        .iter()
+        .filter(|record| record_is_model_backed(record))
+        .count();
+    let successful_model_backed = records
+        .iter()
+        .filter(|record| {
+            record_is_model_backed(record) && matches!(record.outcome, DogfoodOutcome::Success)
+        })
+        .count();
     let diagnostic = records
         .iter()
         .filter(|record| record.diagnostic_expected_failure)
@@ -1331,6 +1416,10 @@ fn render_report(ledger_path: &Path, records: &[DogfoodRecord], limit: usize) ->
     out.push_str(&format!(
         "- Average tool calls: {:.2}\n\n",
         overall_avg_tool_calls
+    ));
+    out.push_str(&format!(
+        "- Model-backed runs: {}\n",
+        rate_line(successful_model_backed, model_backed)
     ));
     out.push_str(&format!(
         "- Benchmark seed candidates: {benchmark_seed_candidates}\n"
@@ -1419,14 +1508,15 @@ fn render_report(ledger_path: &Path, records: &[DogfoodRecord], limit: usize) ->
         }
         out.push('\n');
     }
-    out.push_str("| Timestamp | Category | Outcome | Manual | Budget | Tool Calls | Failed Tools | Workdir | Task | Notes |\n");
-    out.push_str("| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- | --- |\n");
+    out.push_str("| Timestamp | Category | Outcome | Transport | Manual | Budget | Tool Calls | Failed Tools | Workdir | Task | Notes |\n");
+    out.push_str("| --- | --- | --- | --- | --- | ---: | ---: | ---: | --- | --- | --- |\n");
     for record in records.iter().rev().take(limit) {
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             record.timestamp_secs,
             escape_table(&benchmark_case_category(record)),
             report_outcome_label(record),
+            escape_table(&record.model_transport),
             if record.manual_intervention {
                 "yes"
             } else {
@@ -1456,6 +1546,13 @@ struct DogfoodCategoryStats {
 }
 
 fn aggregate_category_stats(records: &[DogfoodRecord]) -> BTreeMap<String, DogfoodCategoryStats> {
+    aggregate_category_stats_for(records.iter())
+}
+
+fn aggregate_category_stats_for<'a, I>(records: I) -> BTreeMap<String, DogfoodCategoryStats>
+where
+    I: IntoIterator<Item = &'a DogfoodRecord>,
+{
     let mut category_stats = BTreeMap::<String, DogfoodCategoryStats>::new();
     for record in records {
         let category = benchmark_case_category(record).to_string();
@@ -2175,6 +2272,7 @@ mod tests {
             skill: None,
             budget: 6,
             model: "x".to_string(),
+            model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
             workdir: "/tmp/external-repo-copy".to_string(),
             outcome,
             manual_intervention: false,
@@ -2348,6 +2446,7 @@ mod tests {
             skill: Some("research".to_string()),
             budget: 6,
             model: "deepseek-v4-pro".to_string(),
+            model_transport: MODEL_TRANSPORT_ONLINE.to_string(),
             workdir: "/tmp/demo".to_string(),
             outcome: DogfoodOutcome::Manual,
             manual_intervention: true,
@@ -2370,6 +2469,7 @@ mod tests {
         assert!(decoded.manual_intervention);
         assert_eq!(decoded.tool_trace, "todo_write -> search_text");
         assert_eq!(decoded.error_kind.as_deref(), Some("tool_failure"));
+        assert_eq!(decoded.model_transport, MODEL_TRANSPORT_ONLINE);
         assert!(!decoded.diagnostic_expected_failure);
         assert_eq!(decoded.benchmark_category.as_deref(), Some("recovery"));
         assert_eq!(
@@ -2385,6 +2485,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decoded.benchmark_category.as_deref(), Some("recovery"));
+        assert_eq!(decoded.model_transport, MODEL_TRANSPORT_UNKNOWN);
     }
 
     #[test]
@@ -2398,6 +2499,7 @@ mod tests {
                 skill: None,
                 budget: 4,
                 model: "x".to_string(),
+                model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
                 workdir: ".".to_string(),
                 outcome: DogfoodOutcome::Success,
                 manual_intervention: false,
@@ -2421,6 +2523,7 @@ mod tests {
                 skill: None,
                 budget: 4,
                 model: "x".to_string(),
+                model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
                 workdir: ".".to_string(),
                 outcome: DogfoodOutcome::Stuck,
                 manual_intervention: true,
@@ -2451,7 +2554,7 @@ mod tests {
         assert!(report.contains("Status: insufficient history"));
         assert!(report.contains("| read_only | 1 | 1/1 (100.0%) | 0/1 (0.0%) | 0/1 (0.0%) | 0/1 (0.0%) | 0/1 (0.0%) | 2.00 | 0 |"));
         assert!(report.contains("| recovery | 1 | 0/1 (0.0%) | 0/1 (0.0%) | 0/1 (0.0%) | 1/1 (100.0%) | 1/1 (100.0%) | 3.00 | 1 |"));
-        assert!(report.contains("| Timestamp | Category | Outcome | Manual | Budget | Tool Calls | Failed Tools | Workdir | Task | Notes |"));
+        assert!(report.contains("| Timestamp | Category | Outcome | Transport | Manual | Budget | Tool Calls | Failed Tools | Workdir | Task | Notes |"));
     }
 
     #[test]
@@ -2469,6 +2572,7 @@ mod tests {
                 skill: None,
                 budget: 4,
                 model: "x".to_string(),
+                model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
                 workdir: ".".to_string(),
                 outcome: if success {
                     DogfoodOutcome::Success
@@ -2504,6 +2608,7 @@ mod tests {
             skill: Some("debug".to_string()),
             budget: 4,
             model: "x".to_string(),
+            model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
             workdir: ".".to_string(),
             outcome: DogfoodOutcome::Success,
             manual_intervention: false,
@@ -2526,7 +2631,7 @@ mod tests {
         let report = render_report(Path::new(".dscode/dogfood/ledger.jsonl"), &records, 20);
         assert!(report.contains("Diagnostic expected-failure rate: 1/1 (100.0%)"));
         assert!(report.contains("| recovery | 1 | 1/1 (100.0%) | 1/1 (100.0%) | 0/1 (0.0%) | 0/1 (0.0%) | 0/1 (0.0%) | 2.00 | 0 |"));
-        assert!(report.contains("| 7 | recovery | diagnostic | no | 4 | 2 | 1 | . | investigate why npm test fails in the JavaScript CLI"));
+        assert!(report.contains("| 7 | recovery | diagnostic | unknown | no | 4 | 2 | 1 | . | investigate why npm test fails in the JavaScript CLI"));
     }
 
     #[test]
@@ -2540,6 +2645,7 @@ mod tests {
             skill: None,
             budget: 6,
             model: "x".to_string(),
+            model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
             workdir: "/tmp/external-repo-copy".to_string(),
             outcome: DogfoodOutcome::Success,
             manual_intervention: false,
@@ -2561,22 +2667,49 @@ mod tests {
     }
 
     #[test]
+    fn render_report_counts_model_backed_evidence() {
+        let mut online = test_record(8, "write_validate", DogfoodOutcome::Success);
+        online.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
+        let offline = test_record(9, "write_validate", DogfoodOutcome::Success);
+
+        let report = render_report(
+            Path::new(".dscode/dogfood/ledger.jsonl"),
+            &[online, offline],
+            20,
+        );
+
+        assert!(report.contains("Model-backed runs: 1/1 (100.0%)"));
+        assert!(report.contains("| 8 | write_validate | success | online | no |"));
+        assert!(report.contains("| 9 | write_validate | success | unknown | no |"));
+    }
+
+    #[test]
     fn report_requirements_pass_with_external_and_category_evidence() {
         let mut external = test_record(8, "write_validate", DogfoodOutcome::Success);
         external.notes = Some("external-write-fixture; disposable repo".to_string());
+        external.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
+        let mut recovery = test_record(6, "recovery", DogfoodOutcome::Success);
+        recovery.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
         let records = vec![
-            test_record(6, "recovery", DogfoodOutcome::Success),
+            recovery,
             test_record(7, "write_validate", DogfoodOutcome::Success),
             external,
         ];
         let args = DogfoodReportArgs {
             require_min_runs: Some(3),
             require_success_rate: Some(100.0),
+            require_live_runs: Some(2),
+            require_live_success_rate: Some(100.0),
             require_external_write_fixtures: Some(1),
             require_recent_clean: Some(3),
             require_categories: vec![DogfoodCategoryRequirement {
                 category: "write_validate".to_string(),
                 min_runs: 2,
+                min_success_percent: 100.0,
+            }],
+            require_live_categories: vec![DogfoodCategoryRequirement {
+                category: "recovery".to_string(),
+                min_runs: 1,
                 min_success_percent: 100.0,
             }],
             ..DogfoodReportArgs::default()
@@ -2589,19 +2722,29 @@ mod tests {
     fn report_requirements_fail_on_missing_live_evidence() {
         let mut manual = test_record(8, "write_validate", DogfoodOutcome::Failed);
         manual.manual_intervention = true;
+        let mut online_failure = test_record(9, "recovery", DogfoodOutcome::Failed);
+        online_failure.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
         let records = vec![
             test_record(6, "recovery", DogfoodOutcome::Success),
             test_record(7, "write_validate", DogfoodOutcome::Success),
             manual,
+            online_failure,
         ];
         let args = DogfoodReportArgs {
-            require_min_runs: Some(4),
+            require_min_runs: Some(5),
             require_success_rate: Some(90.0),
+            require_live_runs: Some(2),
+            require_live_success_rate: Some(90.0),
             require_external_write_fixtures: Some(1),
             require_recent_clean: Some(3),
             require_categories: vec![DogfoodCategoryRequirement {
                 category: "write_validate".to_string(),
                 min_runs: 3,
+                min_success_percent: 90.0,
+            }],
+            require_live_categories: vec![DogfoodCategoryRequirement {
+                category: "write_validate".to_string(),
+                min_runs: 1,
                 min_success_percent: 90.0,
             }],
             ..DogfoodReportArgs::default()
@@ -2610,18 +2753,27 @@ mod tests {
         let failures = report_requirement_failures(&records, &args);
         assert!(failures
             .iter()
-            .any(|failure| failure.contains("runs 3 below required minimum 4")));
+            .any(|failure| failure.contains("runs 4 below required minimum 5")));
         assert!(failures
             .iter()
-            .any(|failure| failure.contains("overall success rate 66.7% below required 90.0%")));
+            .any(|failure| failure.contains("overall success rate 50.0% below required 90.0%")));
+        assert!(failures
+            .iter()
+            .any(|failure| failure.contains("model-backed runs 1 below required minimum 2")));
+        assert!(failures.iter().any(|failure| {
+            failure.contains("model-backed success rate 0.0% below required 90.0% (0/1)")
+        }));
         assert!(failures.iter().any(|failure| failure
             .contains("successful external write fixtures 0 below required minimum 1")));
         assert!(failures.iter().any(|failure| failure
-            .contains("recent clean window contains 1 failed, stuck, or manual records")));
+            .contains("recent clean window contains 2 failed, stuck, or manual records")));
         assert!(failures
             .iter()
             .any(|failure| failure
                 .contains("category `write_validate` runs 2 below required minimum 3")));
+        assert!(failures.iter().any(|failure| {
+            failure.contains("model-backed category `write_validate` has 0 runs, required 1")
+        }));
         assert!(failures.iter().any(|failure| failure
             .contains("category `write_validate` success rate 50.0% below required 90.0%")));
     }
@@ -2649,6 +2801,7 @@ mod tests {
             skill: None,
             budget: 4,
             model: "x".to_string(),
+            model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
             workdir: ".".to_string(),
             outcome: DogfoodOutcome::Success,
             manual_intervention: false,
@@ -2677,6 +2830,7 @@ mod tests {
             skill: None,
             budget: 6,
             model: "x".to_string(),
+            model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
             workdir: ".".to_string(),
             outcome: DogfoodOutcome::Success,
             manual_intervention: false,
@@ -2705,6 +2859,7 @@ mod tests {
             skill: Some("debug".to_string()),
             budget: 4,
             model: "x".to_string(),
+            model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
             workdir: ".".to_string(),
             outcome: DogfoodOutcome::Failed,
             manual_intervention: false,
@@ -2812,6 +2967,7 @@ mod tests {
             1,
             10,
             "deepseek-v4-pro".to_string(),
+            MODEL_TRANSPORT_UNKNOWN,
             ".".to_string(),
             4,
             &args,
@@ -2854,6 +3010,7 @@ mod tests {
             1,
             10,
             "deepseek-v4-flash".to_string(),
+            MODEL_TRANSPORT_UNKNOWN,
             ".".to_string(),
             4,
             &args,
@@ -2903,6 +3060,7 @@ mod tests {
             1,
             10,
             "deepseek-v4-pro".to_string(),
+            MODEL_TRANSPORT_UNKNOWN,
             ".".to_string(),
             6,
             &args,
@@ -2982,6 +3140,7 @@ mod tests {
             1,
             10,
             "deepseek-v4-pro".to_string(),
+            MODEL_TRANSPORT_UNKNOWN,
             ".".to_string(),
             8,
             &args,
@@ -3043,6 +3202,7 @@ mod tests {
             1,
             10,
             "deepseek-chat".to_string(),
+            MODEL_TRANSPORT_UNKNOWN,
             ".".to_string(),
             8,
             &args,
@@ -3092,6 +3252,7 @@ mod tests {
             1,
             10,
             "deepseek-v4-pro".to_string(),
+            MODEL_TRANSPORT_UNKNOWN,
             ".".to_string(),
             4,
             &args,
@@ -3341,6 +3502,7 @@ budget = 6
                 skill: None,
                 budget: 6,
                 model: "x".to_string(),
+                model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
                 workdir: "/repo".to_string(),
                 outcome: DogfoodOutcome::Stuck,
                 manual_intervention: false,
@@ -3366,6 +3528,7 @@ budget = 6
                 skill: None,
                 budget: 4,
                 model: "x".to_string(),
+                model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
                 workdir: "/repo".to_string(),
                 outcome: DogfoodOutcome::Success,
                 manual_intervention: false,
@@ -3404,6 +3567,7 @@ budget = 6
                 skill: None,
                 budget: 6,
                 model: "x".to_string(),
+                model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
                 workdir: "/repo".to_string(),
                 outcome: DogfoodOutcome::Stuck,
                 manual_intervention: false,
@@ -3429,6 +3593,7 @@ budget = 6
                 skill: None,
                 budget: 6,
                 model: "x".to_string(),
+                model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
                 workdir: "/repo".to_string(),
                 outcome: DogfoodOutcome::Stuck,
                 manual_intervention: false,
@@ -3487,6 +3652,7 @@ budget = 6
                 skill: None,
                 budget: 6,
                 model: "x".to_string(),
+                model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
                 workdir: "/repo".to_string(),
                 outcome: DogfoodOutcome::Manual,
                 manual_intervention: true,
@@ -3510,6 +3676,7 @@ budget = 6
                 skill: None,
                 budget: 12,
                 model: "x".to_string(),
+                model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
                 workdir: "/repo".to_string(),
                 outcome: DogfoodOutcome::Failed,
                 manual_intervention: false,
@@ -3553,6 +3720,7 @@ budget = 6
             skill: None,
             budget: 6,
             model: "x".to_string(),
+            model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
             workdir: "/repo".to_string(),
             outcome: DogfoodOutcome::Manual,
             manual_intervention: true,
@@ -3591,6 +3759,7 @@ budget = 6
             skill: None,
             budget: 6,
             model: "x".to_string(),
+            model_transport: MODEL_TRANSPORT_UNKNOWN.to_string(),
             workdir: "/repo".to_string(),
             outcome: DogfoodOutcome::Failed,
             manual_intervention: false,

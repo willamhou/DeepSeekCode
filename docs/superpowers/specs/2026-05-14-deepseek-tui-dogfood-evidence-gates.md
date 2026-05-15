@@ -15,14 +15,20 @@ needs to fail closed when live samples are too thin.
 - `deepseek dogfood report` now accepts strict evidence gates:
   - `--require-min-runs <n>`
   - `--require-success-rate <percent>`
+  - `--require-live-runs <n>`
+  - `--require-live-success-rate <percent>`
   - `--require-external-write-fixtures <n>`
   - `--require-recent-clean <n>`
   - `--require-category <category>:<min-runs>:<min-success-percent>`
+  - `--require-live-category <category>:<min-runs>:<min-success-percent>`
 - The command still writes the Markdown report first, then exits with a
   grouped error when any evidence gate fails.
+- New dogfood ledger rows include `model_transport` as `online` only when the
+  configured non-offline API key environment variable is present; legacy rows
+  read as `unknown` and do not count toward live gates.
 - The release docs, install docs, and multilingual README surface the strict
-  readiness command used for the 100-run / overall 90% / 25-per-category / 90%
-  success-rate dogfood target.
+  readiness command used for the 100 model-backed-run / overall 90% /
+  25-per-category / 90% success-rate dogfood target.
 
 ## Verification
 

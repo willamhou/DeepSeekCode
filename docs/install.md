@@ -94,11 +94,16 @@ deepseek dogfood report --limit 10
 deepseek dogfood report --limit 20 \
   --require-min-runs 100 \
   --require-success-rate 90 \
+  --require-live-runs 100 \
+  --require-live-success-rate 90 \
   --require-recent-clean 20 \
   --require-external-write-fixtures 3 \
   --require-category write_validate:25:90 \
   --require-category recovery:25:90 \
-  --require-category pr_workflow:25:90
+  --require-category pr_workflow:25:90 \
+  --require-live-category write_validate:25:90 \
+  --require-live-category recovery:25:90 \
+  --require-live-category pr_workflow:25:90
 ```
 
 ## Release Binary

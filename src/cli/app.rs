@@ -174,9 +174,12 @@ pub struct DogfoodReportArgs {
     pub limit: Option<usize>,
     pub require_min_runs: Option<usize>,
     pub require_success_rate: Option<f64>,
+    pub require_live_runs: Option<usize>,
+    pub require_live_success_rate: Option<f64>,
     pub require_external_write_fixtures: Option<usize>,
     pub require_recent_clean: Option<usize>,
     pub require_categories: Vec<DogfoodCategoryRequirement>,
+    pub require_live_categories: Vec<DogfoodCategoryRequirement>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3694,6 +3697,24 @@ fn parse_dogfood_report_args(args: Vec<String>) -> Result<DogfoodReportArgs, Str
                 index += 2;
                 continue;
             }
+            "--require-live-runs" if index + 1 < args.len() => {
+                report.require_live_runs = Some(parse_required_usize(
+                    "--require-live-runs",
+                    &args[index + 1],
+                    1,
+                    100_000,
+                )?);
+                index += 2;
+                continue;
+            }
+            "--require-live-success-rate" if index + 1 < args.len() => {
+                report.require_live_success_rate = Some(parse_percent_arg(
+                    "--require-live-success-rate",
+                    &args[index + 1],
+                )?);
+                index += 2;
+                continue;
+            }
             "--require-external-write-fixtures" if index + 1 < args.len() => {
                 report.require_external_write_fixtures = Some(parse_required_usize(
                     "--require-external-write-fixtures",
@@ -3721,11 +3742,21 @@ fn parse_dogfood_report_args(args: Vec<String>) -> Result<DogfoodReportArgs, Str
                 index += 2;
                 continue;
             }
+            "--require-live-category" if index + 1 < args.len() => {
+                report
+                    .require_live_categories
+                    .push(parse_dogfood_category_requirement(&args[index + 1])?);
+                index += 2;
+                continue;
+            }
             "--require-min-runs"
             | "--require-success-rate"
+            | "--require-live-runs"
+            | "--require-live-success-rate"
             | "--require-external-write-fixtures"
             | "--require-recent-clean"
-            | "--require-category" => {
+            | "--require-category"
+            | "--require-live-category" => {
                 return Err(format!("{} requires a value", args[index]));
             }
             _ => {}
@@ -4389,12 +4420,18 @@ mod tests {
             "100".to_string(),
             "--require-success-rate".to_string(),
             "90%".to_string(),
+            "--require-live-runs".to_string(),
+            "80".to_string(),
+            "--require-live-success-rate".to_string(),
+            "92".to_string(),
             "--require-external-write-fixtures".to_string(),
             "3".to_string(),
             "--require-recent-clean".to_string(),
             "20".to_string(),
             "--require-category".to_string(),
             "write_validate:25:90".to_string(),
+            "--require-live-category".to_string(),
+            "pr_workflow:25:90".to_string(),
         ])
         .unwrap();
 
@@ -4404,12 +4441,18 @@ mod tests {
                 assert_eq!(args.limit, Some(50));
                 assert_eq!(args.require_min_runs, Some(100));
                 assert_eq!(args.require_success_rate, Some(90.0));
+                assert_eq!(args.require_live_runs, Some(80));
+                assert_eq!(args.require_live_success_rate, Some(92.0));
                 assert_eq!(args.require_external_write_fixtures, Some(3));
                 assert_eq!(args.require_recent_clean, Some(20));
                 assert_eq!(args.require_categories.len(), 1);
                 assert_eq!(args.require_categories[0].category, "write_validate");
                 assert_eq!(args.require_categories[0].min_runs, 25);
                 assert_eq!(args.require_categories[0].min_success_percent, 90.0);
+                assert_eq!(args.require_live_categories.len(), 1);
+                assert_eq!(args.require_live_categories[0].category, "pr_workflow");
+                assert_eq!(args.require_live_categories[0].min_runs, 25);
+                assert_eq!(args.require_live_categories[0].min_success_percent, 90.0);
             }
             DogfoodAction::Run(_) => panic!("expected dogfood report args"),
             DogfoodAction::ExternalFixture(_) => panic!("expected dogfood report args"),
