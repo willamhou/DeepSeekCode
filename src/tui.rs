@@ -16646,9 +16646,7 @@ fn run_loop(
             app.last_frame_area = frame.area();
             draw(frame, app)
         })?;
-        let poll_timeout = refresh_interval
-            .saturating_sub(last_refresh.elapsed())
-            .min(Duration::from_millis(200));
+        let poll_timeout = tui_refresh_poll_timeout(refresh_interval, last_refresh.elapsed());
         if event::poll(poll_timeout)? {
             let keep_running = match event::read()? {
                 Event::Key(key) => app.handle_key_event(key),
@@ -16662,6 +16660,12 @@ fn run_loop(
         }
     }
     Ok(())
+}
+
+fn tui_refresh_poll_timeout(refresh_interval: Duration, elapsed: Duration) -> Duration {
+    refresh_interval
+        .saturating_sub(elapsed)
+        .min(Duration::from_millis(200))
 }
 
 fn process_pending_actions(
@@ -17938,6 +17942,30 @@ mod tests {
             guard.disarm();
         }
         assert!(!TUI_TERMINAL_ACTIVE.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn refresh_poll_timeout_caps_long_waits() {
+        assert_eq!(
+            tui_refresh_poll_timeout(Duration::from_secs(5), Duration::from_millis(100)),
+            Duration::from_millis(200)
+        );
+    }
+
+    #[test]
+    fn refresh_poll_timeout_keeps_short_remaining_waits() {
+        assert_eq!(
+            tui_refresh_poll_timeout(Duration::from_millis(250), Duration::from_millis(100)),
+            Duration::from_millis(150)
+        );
+    }
+
+    #[test]
+    fn refresh_poll_timeout_saturates_after_missed_refresh() {
+        assert_eq!(
+            tui_refresh_poll_timeout(Duration::from_millis(250), Duration::from_secs(2)),
+            Duration::ZERO
+        );
     }
 
     #[cfg(unix)]

@@ -80,6 +80,10 @@ TUI provider picking now also initializes from the selected workspace's current
 provider/model config and preserves an active provider's custom model on
 reselection, adapting DeepSeek-TUI's provider-selected model preservation to
 DeepSeekCode's offline preset picker.
+TUI refresh polling now routes through a small saturating timeout helper with
+regression coverage for capped, exact, and missed-refresh waits, adapting
+DeepSeek-TUI's Windows-sensitive `Instant` underflow test fix to DeepSeekCode's
+`elapsed()`-based run loop.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
 - native supervisor-owned PTY attach/stdin/resize/replay/wait/cancel polish and
