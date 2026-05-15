@@ -185,6 +185,7 @@ deepseek dogfood external-fixture --workdir /tmp/disposable-repo --dry-run \
 deepseek dogfood external-fixture --workdir /tmp/disposable-repo --benchmark-gate \
   'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
 deepseek dogfood report --limit 10
+deepseek dogfood live-plan --limit 10
 deepseek dogfood report --limit 20 \
   --require-min-runs 100 \
   --require-success-rate 90 \

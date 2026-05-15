@@ -8,8 +8,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cli::app::{
     BenchmarkArgs, DogfoodAction, DogfoodCategoryRequirement, DogfoodExportArgs,
-    DogfoodExternalFixtureArgs, DogfoodOutcome, DogfoodPromoteArgs, DogfoodReplayArgs,
-    DogfoodReportArgs, DogfoodRunArgs,
+    DogfoodExternalFixtureArgs, DogfoodLivePlanArgs, DogfoodOutcome, DogfoodPromoteArgs,
+    DogfoodReplayArgs, DogfoodReportArgs, DogfoodRunArgs,
 };
 use crate::cli::commands::benchmark::BenchmarkCaseSummary;
 use crate::config::load::load_or_default;
@@ -23,9 +23,17 @@ use crate::util::json::{
 
 const DEFAULT_REPORT_LIMIT: usize = 20;
 const CATEGORY_TREND_WINDOW: usize = 5;
+const DEFAULT_LIVE_TARGET_RUNS: usize = 100;
+const DEFAULT_LIVE_TARGET_SUCCESS_RATE: f64 = 90.0;
+const DEFAULT_LIVE_PLAN_LIMIT: usize = 25;
 const MODEL_TRANSPORT_OFFLINE: &str = "offline";
 const MODEL_TRANSPORT_ONLINE: &str = "online";
 const MODEL_TRANSPORT_UNKNOWN: &str = "unknown";
+const LIVE_PLAN_TARGET_CATEGORIES: &[(&str, usize, f64)] = &[
+    ("write_validate", 25, 90.0),
+    ("recovery", 25, 90.0),
+    ("pr_workflow", 25, 90.0),
+];
 
 pub fn run(action: DogfoodAction) -> AppResult<()> {
     let config = load_or_default()?;
@@ -33,6 +41,7 @@ pub fn run(action: DogfoodAction) -> AppResult<()> {
         DogfoodAction::Run(args) => run_live_task(&config, args),
         DogfoodAction::ExternalFixture(args) => run_external_fixture_command(&config, args),
         DogfoodAction::ReplayBenchmark(args) => replay_benchmark_command(&config, args),
+        DogfoodAction::LivePlan(args) => live_plan_command(&config, args),
         DogfoodAction::Report(args) => render_report_command(&config, args),
         DogfoodAction::ExportBenchmark(args) => export_benchmark_command(&config, args),
         DogfoodAction::PromoteBenchmark(args) => promote_benchmark_command(&config, args),
@@ -631,6 +640,38 @@ fn record_is_clean(record: &DogfoodRecord) -> bool {
 
 fn record_is_model_backed(record: &DogfoodRecord) -> bool {
     record.model_transport == MODEL_TRANSPORT_ONLINE
+}
+
+fn live_plan_command(
+    config: &crate::config::types::AppConfig,
+    args: DogfoodLivePlanArgs,
+) -> AppResult<()> {
+    let ledger_path = config.workspace.dogfood_ledger_path();
+    let manifest_path = args
+        .manifest
+        .map(PathBuf::from)
+        .unwrap_or_else(|| config.workspace.benchmark_manifest_path());
+    let records = load_records_or_empty(&ledger_path)?;
+    let summaries = crate::cli::commands::benchmark::load_manifest_case_summaries(&manifest_path)?;
+    let targets = live_plan_targets(args.target_categories);
+    let plan = build_live_plan(
+        &ledger_path,
+        &manifest_path,
+        &records,
+        &summaries,
+        model_transport_for_config(config),
+        args.target_live_runs.unwrap_or(DEFAULT_LIVE_TARGET_RUNS),
+        args.target_live_success_rate
+            .unwrap_or(DEFAULT_LIVE_TARGET_SUCCESS_RATE),
+        &targets,
+        args.limit.unwrap_or(DEFAULT_LIVE_PLAN_LIMIT),
+    );
+    if args.json {
+        println!("{}", render_live_plan_json(&plan));
+    } else {
+        println!("{}", render_live_plan_text(&plan));
+    }
+    Ok(())
 }
 
 fn replay_benchmark_command(
@@ -1321,6 +1362,297 @@ fn load_records(path: &Path) -> AppResult<Vec<DogfoodRecord>> {
         )));
     }
     Ok(records)
+}
+
+fn load_records_or_empty(path: &Path) -> AppResult<Vec<DogfoodRecord>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    load_records(path)
+}
+
+#[derive(Debug, Clone)]
+struct LivePlan {
+    ledger_path: PathBuf,
+    manifest_path: PathBuf,
+    model_transport: String,
+    target_live_runs: usize,
+    target_live_success_rate: f64,
+    live_runs: usize,
+    live_success: usize,
+    category_plans: Vec<LiveCategoryPlan>,
+}
+
+#[derive(Debug, Clone)]
+struct LiveCategoryPlan {
+    category: String,
+    target_runs: usize,
+    target_success_rate: f64,
+    live_runs: usize,
+    live_success: usize,
+    needed_runs: usize,
+    replayable_cases: Vec<String>,
+    recommended_cases: Vec<String>,
+}
+
+fn live_plan_targets(
+    configured: Vec<DogfoodCategoryRequirement>,
+) -> Vec<DogfoodCategoryRequirement> {
+    if !configured.is_empty() {
+        return configured;
+    }
+    LIVE_PLAN_TARGET_CATEGORIES
+        .iter()
+        .map(
+            |(category, min_runs, min_success_percent)| DogfoodCategoryRequirement {
+                category: (*category).to_string(),
+                min_runs: *min_runs,
+                min_success_percent: *min_success_percent,
+            },
+        )
+        .collect()
+}
+
+fn build_live_plan(
+    ledger_path: &Path,
+    manifest_path: &Path,
+    records: &[DogfoodRecord],
+    summaries: &[BenchmarkCaseSummary],
+    model_transport: &str,
+    target_live_runs: usize,
+    target_live_success_rate: f64,
+    targets: &[DogfoodCategoryRequirement],
+    limit_per_category: usize,
+) -> LivePlan {
+    let live_records = records
+        .iter()
+        .filter(|record| record_is_model_backed(record))
+        .collect::<Vec<_>>();
+    let live_success = live_records
+        .iter()
+        .filter(|record| matches!(record.outcome, DogfoodOutcome::Success))
+        .count();
+    let live_stats = aggregate_category_stats_for(live_records.iter().copied());
+    let category_plans = targets
+        .iter()
+        .map(|target| {
+            let stats = live_stats
+                .get(&target.category)
+                .cloned()
+                .unwrap_or_default();
+            let replayable_cases = replayable_live_cases_for_category(summaries, &target.category);
+            let needed_runs = target.min_runs.saturating_sub(stats.runs);
+            let recommended_cases = replayable_cases
+                .iter()
+                .take(needed_runs.min(limit_per_category))
+                .cloned()
+                .collect::<Vec<_>>();
+            LiveCategoryPlan {
+                category: target.category.clone(),
+                target_runs: target.min_runs,
+                target_success_rate: target.min_success_percent,
+                live_runs: stats.runs,
+                live_success: stats.success,
+                needed_runs,
+                replayable_cases,
+                recommended_cases,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    LivePlan {
+        ledger_path: ledger_path.to_path_buf(),
+        manifest_path: manifest_path.to_path_buf(),
+        model_transport: model_transport.to_string(),
+        target_live_runs,
+        target_live_success_rate,
+        live_runs: live_records.len(),
+        live_success,
+        category_plans,
+    }
+}
+
+fn replayable_live_cases_for_category(
+    summaries: &[BenchmarkCaseSummary],
+    category: &str,
+) -> Vec<String> {
+    summaries
+        .iter()
+        .filter(|case| case.category == category)
+        .filter(|case| case.workdir.is_some())
+        .filter(|case| case.seed_observations.is_none())
+        .map(|case| case.name.clone())
+        .collect()
+}
+
+fn render_live_plan_text(plan: &LivePlan) -> String {
+    let mut out = String::new();
+    out.push_str("DeepSeekCode dogfood live plan\n");
+    out.push_str(&format!("ledger: {}\n", plan.ledger_path.display()));
+    out.push_str(&format!("manifest: {}\n", plan.manifest_path.display()));
+    out.push_str(&format!(
+        "current_model_transport: {}\n",
+        plan.model_transport
+    ));
+    if plan.model_transport != MODEL_TRANSPORT_ONLINE {
+        out.push_str(
+            "warning: current model config will not count as model-backed live evidence\n",
+        );
+    }
+    out.push_str(&format!(
+        "target_live_runs: {}/{}; success: {} required {:.1}%\n",
+        plan.live_runs,
+        plan.target_live_runs,
+        rate_line(plan.live_success, plan.live_runs),
+        plan.target_live_success_rate
+    ));
+    let overall_needed = plan.target_live_runs.saturating_sub(plan.live_runs);
+    out.push_str(&format!("overall_needed_runs: {overall_needed}\n\n"));
+    out.push_str("Category plan:\n");
+    for category in &plan.category_plans {
+        out.push_str(&format!(
+            "- {}: live {}/{}; success {} required {:.1}%; needed {}; replayable_unique {}; recommended_now {}\n",
+            category.category,
+            category.live_runs,
+            category.target_runs,
+            rate_line(category.live_success, category.live_runs),
+            category.target_success_rate,
+            category.needed_runs,
+            category.replayable_cases.len(),
+            category.recommended_cases.len()
+        ));
+        if category.replayable_cases.is_empty() && category.needed_runs > 0 {
+            out.push_str(
+                "  blocker: no replayable workdir-backed benchmark case for this category\n",
+            );
+        } else if !category.recommended_cases.is_empty() {
+            out.push_str(&format!(
+                "  command: deepseek dogfood replay-benchmark --manifest {} --category {} --limit {}\n",
+                shell_quote(&plan.manifest_path.display().to_string()),
+                shell_quote(&category.category),
+                category.recommended_cases.len()
+            ));
+            out.push_str(&format!(
+                "  cases: {}\n",
+                category.recommended_cases.join(", ")
+            ));
+            if category.needed_runs > category.replayable_cases.len() {
+                out.push_str(&format!(
+                    "  note: {} more run(s) remain after one unique replay pass; add more fixtures or repeat carefully after reviewing outcomes\n",
+                    category.needed_runs - category.replayable_cases.len()
+                ));
+            }
+        }
+    }
+    out
+}
+
+fn render_live_plan_json(plan: &LivePlan) -> String {
+    let categories = plan
+        .category_plans
+        .iter()
+        .map(|category| {
+            let mut root = BTreeMap::new();
+            root.insert(
+                "category".to_string(),
+                JsonValue::String(category.category.clone()),
+            );
+            root.insert(
+                "target_runs".to_string(),
+                JsonValue::Number(category.target_runs.to_string()),
+            );
+            root.insert(
+                "target_success_rate".to_string(),
+                JsonValue::Number(format!("{:.1}", category.target_success_rate)),
+            );
+            root.insert(
+                "live_runs".to_string(),
+                JsonValue::Number(category.live_runs.to_string()),
+            );
+            root.insert(
+                "live_success".to_string(),
+                JsonValue::Number(category.live_success.to_string()),
+            );
+            root.insert(
+                "needed_runs".to_string(),
+                JsonValue::Number(category.needed_runs.to_string()),
+            );
+            root.insert(
+                "replayable_cases".to_string(),
+                JsonValue::Array(
+                    category
+                        .replayable_cases
+                        .iter()
+                        .cloned()
+                        .map(JsonValue::String)
+                        .collect(),
+                ),
+            );
+            root.insert(
+                "recommended_cases".to_string(),
+                JsonValue::Array(
+                    category
+                        .recommended_cases
+                        .iter()
+                        .cloned()
+                        .map(JsonValue::String)
+                        .collect(),
+                ),
+            );
+            JsonValue::Object(root)
+        })
+        .collect::<Vec<_>>();
+
+    let mut root = BTreeMap::new();
+    root.insert(
+        "ledger".to_string(),
+        JsonValue::String(plan.ledger_path.display().to_string()),
+    );
+    root.insert(
+        "manifest".to_string(),
+        JsonValue::String(plan.manifest_path.display().to_string()),
+    );
+    root.insert(
+        "model_transport".to_string(),
+        JsonValue::String(plan.model_transport.clone()),
+    );
+    root.insert(
+        "target_live_runs".to_string(),
+        JsonValue::Number(plan.target_live_runs.to_string()),
+    );
+    root.insert(
+        "target_live_success_rate".to_string(),
+        JsonValue::Number(format!("{:.1}", plan.target_live_success_rate)),
+    );
+    root.insert(
+        "live_runs".to_string(),
+        JsonValue::Number(plan.live_runs.to_string()),
+    );
+    root.insert(
+        "live_success".to_string(),
+        JsonValue::Number(plan.live_success.to_string()),
+    );
+    root.insert(
+        "overall_needed_runs".to_string(),
+        JsonValue::Number(
+            plan.target_live_runs
+                .saturating_sub(plan.live_runs)
+                .to_string(),
+        ),
+    );
+    root.insert("categories".to_string(), JsonValue::Array(categories));
+    json_value_to_string(&JsonValue::Object(root))
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 fn write_report(
@@ -2776,6 +3108,121 @@ mod tests {
         }));
         assert!(failures.iter().any(|failure| failure
             .contains("category `write_validate` success rate 50.0% below required 90.0%")));
+    }
+
+    #[test]
+    fn live_plan_recommends_replayable_category_cases() {
+        let mut online = test_record(10, "write_validate", DogfoodOutcome::Success);
+        online.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
+        let records = vec![online, test_record(11, "recovery", DogfoodOutcome::Success)];
+        let summaries = vec![
+            BenchmarkCaseSummary {
+                name: "fixture-write-validate-rust-mini".to_string(),
+                task: "replace `a - b` with `a + b` in src/lib.rs and validate with cargo test"
+                    .to_string(),
+                category: "write_validate".to_string(),
+                skill: None,
+                workdir: Some("fixtures/rust-write-mini".to_string()),
+                isolate_workdir: true,
+                budget: 6,
+                notes: None,
+                seed_observations: None,
+            },
+            BenchmarkCaseSummary {
+                name: "seeded-write-validate".to_string(),
+                task: "seeded".to_string(),
+                category: "write_validate".to_string(),
+                skill: None,
+                workdir: Some("fixtures/rust-write-mini".to_string()),
+                isolate_workdir: true,
+                budget: 6,
+                notes: None,
+                seed_observations: Some("run_shell:failed:test failed".to_string()),
+            },
+            BenchmarkCaseSummary {
+                name: "fixture-recover-empty-search".to_string(),
+                task: "recover from missing symbol search".to_string(),
+                category: "recovery".to_string(),
+                skill: None,
+                workdir: Some("fixtures/rust-cli-mini".to_string()),
+                isolate_workdir: true,
+                budget: 6,
+                notes: None,
+                seed_observations: None,
+            },
+        ];
+        let targets = vec![
+            DogfoodCategoryRequirement {
+                category: "write_validate".to_string(),
+                min_runs: 2,
+                min_success_percent: 90.0,
+            },
+            DogfoodCategoryRequirement {
+                category: "recovery".to_string(),
+                min_runs: 1,
+                min_success_percent: 90.0,
+            },
+        ];
+
+        let plan = build_live_plan(
+            Path::new(".dscode/dogfood/ledger.jsonl"),
+            Path::new(".dscode/benchmarks.txt"),
+            &records,
+            &summaries,
+            MODEL_TRANSPORT_OFFLINE,
+            4,
+            90.0,
+            &targets,
+            3,
+        );
+        let text = render_live_plan_text(&plan);
+
+        assert_eq!(plan.live_runs, 1);
+        assert_eq!(plan.live_success, 1);
+        assert!(text.contains("warning: current model config will not count"));
+        assert!(text.contains("write_validate: live 1/2"));
+        assert!(text.contains("replayable_unique 1; recommended_now 1"));
+        assert!(text.contains("fixture-write-validate-rust-mini"));
+        assert!(!text.contains("seeded-write-validate,"));
+        assert!(text.contains("recovery: live 0/1"));
+    }
+
+    #[test]
+    fn live_plan_json_includes_targets_and_recommendations() {
+        let summaries = vec![BenchmarkCaseSummary {
+            name: "fixture-pr-retry-validate-rust-mini".to_string(),
+            task: "Address PR feedback and validate with cargo test".to_string(),
+            category: "pr_workflow".to_string(),
+            skill: None,
+            workdir: Some("fixtures/rust-write-mini".to_string()),
+            isolate_workdir: true,
+            budget: 8,
+            notes: None,
+            seed_observations: None,
+        }];
+        let targets = vec![DogfoodCategoryRequirement {
+            category: "pr_workflow".to_string(),
+            min_runs: 1,
+            min_success_percent: 90.0,
+        }];
+
+        let plan = build_live_plan(
+            Path::new(".dscode/dogfood/ledger.jsonl"),
+            Path::new(".dscode/benchmarks.txt"),
+            &[],
+            &summaries,
+            MODEL_TRANSPORT_ONLINE,
+            1,
+            90.0,
+            &targets,
+            2,
+        );
+        let json = render_live_plan_json(&plan);
+
+        assert!(json.contains("\"model_transport\":\"online\""));
+        assert!(json.contains("\"overall_needed_runs\":1"));
+        assert!(json.contains("\"category\":\"pr_workflow\""));
+        assert!(json.contains("\"recommended_cases\":[\"fixture-pr-retry-validate-rust-mini\"]"));
     }
 
     #[test]

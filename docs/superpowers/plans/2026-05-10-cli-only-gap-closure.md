@@ -188,4 +188,6 @@ Continue with the remaining `<10%` blockers:
 1. Run and record 100+ model-backed live CLI dogfood samples, then require
    `--require-live-runs`, `--require-live-success-rate`, and
    `--require-live-category` gates so offline replay rows cannot satisfy the
-   public readiness target.
+   public readiness target. Use `deepseek dogfood live-plan --limit 10` to
+   choose the next category-balanced replay batch before spending online model
+   calls.

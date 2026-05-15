@@ -74,6 +74,7 @@ deepseek dogfood external-fixture --workdir /tmp/disposable-repo --dry-run \
 deepseek dogfood external-fixture --workdir /tmp/disposable-repo --benchmark-gate \
   'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
 deepseek dogfood report --limit 10
+deepseek dogfood live-plan --limit 10
 ```
 
 For a release-readiness evidence gate, make the report fail closed when the

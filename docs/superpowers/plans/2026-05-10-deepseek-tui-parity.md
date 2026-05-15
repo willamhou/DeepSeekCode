@@ -100,6 +100,9 @@ Dogfood readiness evidence is now also transport-aware: new ledger rows record
 and release gates can require model-backed totals, success rate, and
 per-category thresholds so offline fallback replays cannot satisfy the 100+
 live-sample target.
+`deepseek dogfood live-plan` now also turns those live gate gaps into a
+read-only per-category replay plan, including current model transport,
+model-backed progress, replayable benchmark cases, and next batch commands.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
 - native supervisor-owned PTY polish and broader platform proof beyond the
