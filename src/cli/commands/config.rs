@@ -997,6 +997,38 @@ fn provider_model_value(preset: ProviderPreset, raw: &str) -> AppResult<String> 
     Ok(mapped.to_string())
 }
 
+pub(crate) fn provider_model_completion_values_for_base_url(base_url: &str) -> Vec<&'static str> {
+    provider_model_completion_values(infer_provider_preset(base_url).name)
+}
+
+fn provider_model_completion_values(provider: &str) -> Vec<&'static str> {
+    match provider {
+        "deepseek" => vec!["deepseek-v4-pro", "deepseek-v4-flash"],
+        "nvidia-nim" => vec![
+            "deepseek-ai/deepseek-v4-pro",
+            "deepseek-ai/deepseek-v4-flash",
+        ],
+        "openai" => vec!["gpt-4.1"],
+        "atlascloud" => vec!["deepseek-v4-pro", "deepseek-v4-flash"],
+        "openrouter" => vec!["deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash"],
+        "novita" => vec!["deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash"],
+        "fireworks" => vec![
+            "accounts/fireworks/models/deepseek-v4-pro",
+            "accounts/fireworks/models/deepseek-v4-flash",
+        ],
+        "sglang" => vec![
+            "deepseek-ai/DeepSeek-V4-Pro",
+            "deepseek-ai/DeepSeek-V4-Flash",
+        ],
+        "vllm" => vec![
+            "deepseek-ai/DeepSeek-V4-Pro",
+            "deepseek-ai/DeepSeek-V4-Flash",
+        ],
+        "ollama" => vec!["deepseek-coder:1.3b"],
+        _ => vec!["deepseek-v4-pro", "deepseek-v4-flash"],
+    }
+}
+
 fn canonical_official_deepseek_model_id(model: &str) -> Option<&'static str> {
     match model.trim().to_ascii_lowercase().as_str() {
         "deepseek-v4-pro"
@@ -1639,5 +1671,28 @@ mod tests {
         assert!(content.contains(r#"model.model = "deepseek/deepseek-v4-flash""#));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_model_completion_values_use_active_provider_ids() {
+        assert_eq!(
+            provider_model_completion_values_for_base_url("https://api.deepseek.com"),
+            vec!["deepseek-v4-pro", "deepseek-v4-flash"]
+        );
+        assert_eq!(
+            provider_model_completion_values_for_base_url("https://integrate.api.nvidia.com/v1"),
+            vec![
+                "deepseek-ai/deepseek-v4-pro",
+                "deepseek-ai/deepseek-v4-flash"
+            ]
+        );
+        assert_eq!(
+            provider_model_completion_values_for_base_url("https://openrouter.ai/api/v1"),
+            vec!["deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash"]
+        );
+        assert_eq!(
+            provider_model_completion_values_for_base_url("http://localhost:11434/v1"),
+            vec!["deepseek-coder:1.3b"]
+        );
     }
 }

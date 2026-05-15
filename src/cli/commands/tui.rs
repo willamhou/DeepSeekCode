@@ -20,10 +20,11 @@ use crate::cli::app::{McpConfigScope, TuiArgs};
 use crate::cli::commands::config::{
     diagnostics_config_summary_at, logout_credentials_at, model_config_summary_at,
     network_policy_summary_at, persist_auth_secret_at, profile_config_summary_at,
-    provider_config_summary_at, remove_network_rule_at, set_diagnostics_post_edit_at, set_model_at,
-    set_network_default_at, set_network_rule_at, set_provider_at, switch_profile_at,
-    DiagnosticsConfigSummary, LogoutCredentialSummary, ModelConfigSummary, NetworkPolicySummary,
-    NetworkRuleTarget, ProfileConfigSummary, ProviderConfigSummary,
+    provider_config_summary_at, provider_model_completion_values_for_base_url,
+    remove_network_rule_at, set_diagnostics_post_edit_at, set_model_at, set_network_default_at,
+    set_network_rule_at, set_provider_at, switch_profile_at, DiagnosticsConfigSummary,
+    LogoutCredentialSummary, ModelConfigSummary, NetworkPolicySummary, NetworkRuleTarget,
+    ProfileConfigSummary, ProviderConfigSummary,
 };
 use crate::cli::commands::mcp::{
     add_mcp_server_at, init_mcp_config_at, list_remote_prompts_summary,
@@ -1222,6 +1223,11 @@ fn app_from_store(store: &RuntimeStore) -> AppResult<TuiApp> {
 
 fn configure_tui_slash_completions(app: &mut TuiApp, config: &AppConfig) {
     let mut completions = discover_custom_slash_commands_dir(&config.workspace.user_commands_dir());
+    completions.extend(
+        provider_model_completion_values_for_base_url(&config.model.base_url)
+            .into_iter()
+            .flat_map(|model| [format!("/model {model}"), format!("/config model {model}")]),
+    );
     let repo_dir = resolve_repo_skills_dir();
     let user_dir = expand_tilde(&config.workspace.user_skills_dir);
     if let Ok((registry, _stats)) =
@@ -7622,11 +7628,38 @@ description = "Review pull requests."
         configure_tui_slash_completions(&mut app, &config);
 
         let completions = app.extra_slash_completions_for_test();
+        assert!(completions
+            .iter()
+            .any(|value| value == "/model deepseek-v4-pro"));
+        assert!(completions
+            .iter()
+            .any(|value| value == "/config model deepseek-v4-flash"));
         assert!(completions.iter().any(|value| value == "/global/fix"));
         assert!(completions.iter().any(|value| value == "/skill pr-review"));
         assert!(completions.iter().any(|value| value == "/pr-review"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn configure_tui_slash_completions_uses_provider_model_ids() {
+        let root = temp_root("slash-completions-provider-models");
+        let mut config = temp_config(&root);
+        config.model.base_url = "https://integrate.api.nvidia.com/v1".to_string();
+        let mut app = TuiApp::new(Vec::new());
+
+        configure_tui_slash_completions(&mut app, &config);
+
+        let completions = app.extra_slash_completions_for_test();
+        assert!(completions
+            .iter()
+            .any(|value| value == "/model deepseek-ai/deepseek-v4-pro"));
+        assert!(completions
+            .iter()
+            .any(|value| value == "/model deepseek-ai/deepseek-v4-flash"));
+        assert!(!completions
+            .iter()
+            .any(|value| value == "/model deepseek/deepseek-v4-pro"));
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {

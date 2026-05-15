@@ -4383,8 +4383,6 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/model show",
     "/model pick",
     "/model auto",
-    "/model deepseek-v4-flash",
-    "/model deepseek-v4-pro",
     "/models",
     "/provider",
     "/provider show",

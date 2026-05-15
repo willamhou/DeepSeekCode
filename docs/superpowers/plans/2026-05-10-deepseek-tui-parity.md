@@ -61,7 +61,9 @@ The latest upstream refresh also added provider/model compatibility fixes;
 DeepSeekCode now accepts legacy DeepSeek CN provider aliases, normalizes known
 DeepSeek V4 model aliases according to the active provider, and omits
 DeepSeek-only `thinking` fields for strict OpenAI/Fireworks-compatible request
-bodies.
+bodies. Composer `/model <name>` slash completions now also come from the
+selected workspace's active provider, so compatible backends surface their
+native model ids instead of only DeepSeek bare ids.
 TUI transcript, MCP detail, and MCP manager panels now also hard-wrap long CJK
 or no-whitespace runs by terminal display width while preferring whitespace
 breaks for ordinary prose, adapting DeepSeek-TUI's diff/pager CJK wrap fix to
@@ -473,6 +475,9 @@ Landed first slice:
 - TUI provider picker now opens on the selected workspace's inferred current
   provider/model and preserves a custom current model when reselecting the
   active provider instead of resetting to the preset default
+- composer `/model <name>` slash completions now use active-provider model ids,
+  adapting DeepSeek-TUI's provider-aware model completion fix to DeepSeekCode's
+  local config-backed slash hint system
 - task panel now summarizes active-thread runtime item state/type counts and
   the latest item content, making streamed background agent run progress and
   tool activity visible alongside durable task records
