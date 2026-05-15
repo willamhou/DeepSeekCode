@@ -1161,6 +1161,10 @@ Landed first slice:
   now cover stdio / HTTP / SSE `resources/list` and `resources/read`
 - `deepseek mcp resource-templates [server]` now covers stdio / HTTP / SSE
   `resources/templates/list`
+- HTTP MCP client calls now perform a best-effort GET preflight, capture
+  `Mcp-Session-Id` from preflight or POST responses, and replay it across
+  initialize, initialized, paginated list, and call requests for Streamable HTTP
+  server compatibility
 - agent runs expose read-only `mcp_list_prompts`, `mcp_get_prompt`,
   `mcp_list_resources`, `mcp_read_resource`, and `mcp_list_resource_templates`
   bridge tools whenever project/user MCP config exists

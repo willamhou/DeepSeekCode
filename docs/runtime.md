@@ -478,6 +478,9 @@ DeepSeekCode also acts as an MCP client for configured stdio / HTTP / SSE
 servers. In addition to `tools/list`, `tools/call`, `prompts/list`, and
 `prompts/get`, the client now supports `resources/list`, `resources/read`,
 and `resources/templates/list` for parameterized resource URI templates.
+HTTP MCP sessions preserve `Mcp-Session-Id` values returned by either a
+best-effort GET preflight or later POST responses, and replay the value on
+initialize, initialized, pagination, and call/get/read requests.
 
 ```bash
 deepseek mcp resources [server-name]

@@ -276,7 +276,9 @@ Current surfaces:
   `mcp resource-templates [server]` detail views in the scrollable right-side
   panel; `Esc` or `mcp close` returns that panel to the task view. The same
   add/enable/disable/remove commands can target user config with
-  `mcp user ...`; unscoped commands keep using project config.
+  `mcp user ...`; unscoped commands keep using project config. HTTP MCP
+  discovery/call commands preserve `Mcp-Session-Id` values from GET preflight
+  or POST responses when talking to Streamable HTTP servers.
 
 Useful commands:
 
