@@ -4701,6 +4701,9 @@ pub struct TuiApp {
     show_provider_picker: bool,
     provider_picker_provider_index: usize,
     provider_picker_model_index: usize,
+    provider_picker_current_provider: Option<String>,
+    provider_picker_current_model: Option<String>,
+    provider_picker_preserve_current_model: bool,
     provider_picker_focus: TuiProviderPickerFocus,
     show_auth_modal: bool,
     auth_env_name: String,
@@ -4893,6 +4896,9 @@ impl TuiApp {
             show_provider_picker: false,
             provider_picker_provider_index: 0,
             provider_picker_model_index: 0,
+            provider_picker_current_provider: None,
+            provider_picker_current_model: None,
+            provider_picker_preserve_current_model: false,
             provider_picker_focus: TuiProviderPickerFocus::Provider,
             show_auth_modal: false,
             auth_env_name: String::new(),
@@ -9312,11 +9318,13 @@ impl TuiApp {
             KeyCode::Home => match self.provider_picker_focus {
                 TuiProviderPickerFocus::Provider => {
                     self.provider_picker_provider_index = 0;
-                    self.provider_picker_model_index = 0;
-                    self.status = "provider picker selected provider: deepseek".to_string();
+                    self.sync_provider_picker_model_to_current_or_default();
+                    let spec = self.selected_provider_picker_spec();
+                    self.status = format!("provider picker selected provider: {}", spec.name);
                 }
                 TuiProviderPickerFocus::Model => {
                     self.provider_picker_model_index = 0;
+                    self.provider_picker_preserve_current_model = false;
                     let model = self.selected_provider_picker_model();
                     self.status = format!("provider picker selected model: {}", model.model);
                 }
@@ -9325,13 +9333,14 @@ impl TuiApp {
                 TuiProviderPickerFocus::Provider => {
                     self.provider_picker_provider_index =
                         TUI_PROVIDER_PICKER_SPECS.len().saturating_sub(1);
-                    self.provider_picker_model_index = 0;
+                    self.sync_provider_picker_model_to_current_or_default();
                     let spec = self.selected_provider_picker_spec();
                     self.status = format!("provider picker selected provider: {}", spec.name);
                 }
                 TuiProviderPickerFocus::Model => {
                     let spec = self.selected_provider_picker_spec();
                     self.provider_picker_model_index = spec.models.len().saturating_sub(1);
+                    self.provider_picker_preserve_current_model = false;
                     let model = self.selected_provider_picker_model();
                     self.status = format!("provider picker selected model: {}", model.model);
                 }
@@ -10142,10 +10151,15 @@ impl TuiApp {
         self.show_feedback_picker = false;
         self.show_model_picker = false;
         self.show_command_palette = false;
-        self.provider_picker_provider_index = self
-            .provider_picker_provider_index
-            .min(TUI_PROVIDER_PICKER_SPECS.len().saturating_sub(1));
-        self.provider_picker_model_index = 0;
+        let workspace = self.selected_workspace_string();
+        let current = provider_picker_current_config_for_workspace(&workspace);
+        self.provider_picker_current_provider = current.provider;
+        self.provider_picker_current_model = current.model;
+        self.provider_picker_provider_index = current.provider_index.unwrap_or_else(|| {
+            self.provider_picker_provider_index
+                .min(TUI_PROVIDER_PICKER_SPECS.len().saturating_sub(1))
+        });
+        self.sync_provider_picker_model_to_current_or_default();
         self.provider_picker_focus = TuiProviderPickerFocus::Provider;
         self.status = "provider picker opened".to_string();
     }
@@ -10161,6 +10175,34 @@ impl TuiApp {
         &spec.models[self.provider_picker_model_index.min(spec.models.len() - 1)]
     }
 
+    fn selected_provider_picker_model_value(&self) -> String {
+        let spec = self.selected_provider_picker_spec();
+        if self.provider_picker_preserve_current_model
+            && self.provider_picker_current_provider.as_deref() == Some(spec.name)
+        {
+            if let Some(model) = self.provider_picker_current_model.as_deref() {
+                let model = model.trim();
+                if !model.is_empty() {
+                    return model.to_string();
+                }
+            }
+        }
+        self.selected_provider_picker_model().model.to_string()
+    }
+
+    fn sync_provider_picker_model_to_current_or_default(&mut self) {
+        let spec = self.selected_provider_picker_spec();
+        let current_model = self
+            .provider_picker_current_model
+            .as_deref()
+            .filter(|_| self.provider_picker_current_provider.as_deref() == Some(spec.name));
+        let current_model_index = current_model
+            .and_then(|model| provider_picker_model_index_for_current_model(spec, model));
+        self.provider_picker_model_index = current_model_index.unwrap_or(0);
+        self.provider_picker_preserve_current_model = current_model
+            .is_some_and(|model| !model.trim().is_empty() && current_model_index.is_none());
+    }
+
     fn select_relative_provider_picker_provider(&mut self, delta: isize) {
         let len = TUI_PROVIDER_PICKER_SPECS.len();
         if len == 0 {
@@ -10169,7 +10211,7 @@ impl TuiApp {
         }
         self.provider_picker_provider_index =
             relative_picker_index(self.provider_picker_provider_index.min(len - 1), len, delta);
-        self.provider_picker_model_index = 0;
+        self.sync_provider_picker_model_to_current_or_default();
         let spec = self.selected_provider_picker_spec();
         self.status = format!("provider picker selected provider: {}", spec.name);
     }
@@ -10183,6 +10225,7 @@ impl TuiApp {
         }
         self.provider_picker_model_index =
             relative_picker_index(self.provider_picker_model_index.min(len - 1), len, delta);
+        self.provider_picker_preserve_current_model = false;
         let model = self.selected_provider_picker_model();
         self.status = format!("provider picker selected model: {}", model.model);
     }
@@ -10201,7 +10244,7 @@ impl TuiApp {
 
     fn apply_provider_picker_selection(&mut self) {
         let spec = self.selected_provider_picker_spec();
-        let model = self.selected_provider_picker_model();
+        let model = self.selected_provider_picker_model_value();
         let workspace = self
             .selected_session()
             .map(|session| session.workspace.clone())
@@ -10210,13 +10253,13 @@ impl TuiApp {
             workspace: workspace.clone(),
             command: TuiProviderCommand::Set {
                 provider: spec.name.to_string(),
-                model: Some(model.model.to_string()),
+                model: Some(model.clone()),
             },
         });
         self.show_provider_picker = false;
         self.status = format!(
             "provider picker queued: {} {} ({workspace})",
-            spec.name, model.model
+            spec.name, model
         );
     }
 
@@ -15890,6 +15933,120 @@ fn push_status_row(out: &mut String, label: &str, value: &str) {
     let _ = writeln!(out, "  {label:<16} {value}");
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiProviderPickerCurrentConfig {
+    provider_index: Option<usize>,
+    provider: Option<String>,
+    model: Option<String>,
+}
+
+fn provider_picker_current_config_for_workspace(workspace: &str) -> TuiProviderPickerCurrentConfig {
+    let config_path = tui_setup_config_path(Path::new(workspace));
+    let (config, _) = read_tui_setup_config(&config_path);
+    let provider_index = provider_picker_index_for_base_url(&config.model.base_url);
+    let provider = provider_index.map(|index| TUI_PROVIDER_PICKER_SPECS[index].name.to_string());
+    let model = (!config.model.model.trim().is_empty()).then(|| config.model.model);
+    TuiProviderPickerCurrentConfig {
+        provider_index,
+        provider,
+        model,
+    }
+}
+
+fn provider_picker_index_for_base_url(base_url: &str) -> Option<usize> {
+    let lower = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    if let Some(index) = TUI_PROVIDER_PICKER_SPECS
+        .iter()
+        .position(|spec| lower == spec.base_url.trim_end_matches('/').to_ascii_lowercase())
+    {
+        return Some(index);
+    }
+    let provider = if lower.contains("api.deepseek.com") {
+        "deepseek"
+    } else if lower.contains("integrate.api.nvidia.com") {
+        "nvidia-nim"
+    } else if lower.contains("api.openai.com") {
+        "openai"
+    } else if lower.contains("api.atlascloud.ai") {
+        "atlascloud"
+    } else if lower.contains("openrouter.ai") {
+        "openrouter"
+    } else if lower.contains("api.novita.ai") {
+        "novita"
+    } else if lower.contains("api.fireworks.ai") {
+        "fireworks"
+    } else if lower.contains("localhost:30000") || lower.contains("127.0.0.1:30000") {
+        "sglang"
+    } else if lower.contains("localhost:8000") || lower.contains("127.0.0.1:8000") {
+        "vllm"
+    } else if lower.contains("localhost:11434") || lower.contains("127.0.0.1:11434") {
+        "ollama"
+    } else {
+        return None;
+    };
+    TUI_PROVIDER_PICKER_SPECS
+        .iter()
+        .position(|spec| spec.name == provider)
+}
+
+fn provider_picker_model_index_for_current_model(
+    spec: &TuiProviderPickerSpec,
+    current_model: &str,
+) -> Option<usize> {
+    spec.models
+        .iter()
+        .position(|model| provider_picker_model_matches_current(model, current_model))
+}
+
+fn provider_picker_model_matches_current(
+    picker_model: &TuiProviderPickerModel,
+    current_model: &str,
+) -> bool {
+    let picker_value = picker_model.model.trim();
+    let current_value = current_model.trim();
+    if picker_value.eq_ignore_ascii_case(current_value) {
+        return true;
+    }
+    let picker_family = tui_deepseek_model_family(picker_value);
+    let current_family = tui_deepseek_model_family(current_value);
+    picker_family.is_some() && picker_family == current_family
+}
+
+fn tui_deepseek_model_family(model: &str) -> Option<&'static str> {
+    let lower = model.trim().replace('_', "-").to_ascii_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    if matches!(lower.as_str(), "pro" | "deepseek-v4-pro" | "deepseek-v4pro")
+        || lower.ends_with("/deepseek-v4-pro")
+        || lower.ends_with("/deepseek-v4pro")
+    {
+        Some("pro")
+    } else if matches!(
+        lower.as_str(),
+        "flash" | "deepseek-v4-flash" | "deepseek-v4flash"
+    ) || lower.ends_with("/deepseek-v4-flash")
+        || lower.ends_with("/deepseek-v4flash")
+    {
+        Some("flash")
+    } else if matches!(lower.as_str(), "chat" | "deepseek-chat")
+        || lower.ends_with("/deepseek-chat")
+    {
+        Some("chat")
+    } else if matches!(lower.as_str(), "reasoner" | "deepseek-reasoner")
+        || lower.ends_with("/deepseek-reasoner")
+    {
+        Some("reasoner")
+    } else if lower == "coder" || lower.starts_with("deepseek-coder") {
+        Some("coder")
+    } else {
+        None
+    }
+}
+
 fn tui_setup_config_path(workspace: &Path) -> PathBuf {
     let default_config = AppConfig::default();
     let config_dir = PathBuf::from(&default_config.workspace.config_dir);
@@ -17144,13 +17301,21 @@ fn draw_provider_picker(frame: &mut Frame, app: &TuiApp) {
         columns[1],
     );
 
-    let model = app.selected_provider_picker_model();
+    let model = app.selected_provider_picker_model_value();
     let workspace = app
         .selected_session()
         .map(|session| session.workspace.as_str())
         .unwrap_or(".");
+    let selection = if app.provider_picker_preserve_current_model {
+        format!(
+            "Selection: provider {} {} (preserving current custom model)",
+            spec.name, model
+        )
+    } else {
+        format!("Selection: provider {} {}", spec.name, model)
+    };
     let footer = Paragraph::new(vec![
-        Line::from(format!("Selection: provider {} {}", spec.name, model.model)),
+        Line::from(selection),
         Line::from(format!(
             "API key env: {} | Base URL: {}",
             spec.api_key_env, spec.base_url
@@ -22142,7 +22307,7 @@ model.model = "deepseek-v4-pro"
         assert!(output.contains("Provider Picker"));
         assert!(output.contains("Providers [active]"));
         assert!(output.contains("Models"));
-        assert!(output.contains("provider deepseek pro"));
+        assert!(output.contains("provider deepseek"));
 
         assert!(app.handle_key(KeyCode::Down));
         assert!(app.handle_key(KeyCode::Right));
@@ -22180,6 +22345,124 @@ model.model = "deepseek-v4-pro"
                 command: TuiProviderCommand::List,
             }]
         );
+    }
+
+    #[test]
+    fn provider_picker_opens_on_workspace_provider_and_model() {
+        let _env = EnvRestore::unset(&[
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_API_KEY_ENV",
+            "DEEPSEEK_REASONING_EFFORT",
+            "DSCODE_PROFILE",
+            "DEEPSEEK_PROFILE",
+        ]);
+        let root = temp_root("provider-picker-current");
+        let config_dir = root.join(".dscode");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join("config.toml"),
+            r#"model.base_url = "https://integrate.api.nvidia.com/v1"
+model.model = "deepseek-ai/deepseek-v4-flash"
+model.api_key_env = "NVIDIA_API_KEY"
+"#,
+        )
+        .unwrap();
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: root.display().to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        run_palette_command(&mut app, "provider");
+
+        assert!(app.show_provider_picker);
+        assert_eq!(app.selected_provider_picker_spec().name, "nvidia-nim");
+        assert_eq!(app.selected_provider_picker_model().model, "flash");
+        let output = render_once(&app, 120, 36).unwrap();
+        assert!(output.contains("Selection: provider nvidia-nim flash"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_picker_reselecting_active_provider_preserves_custom_model() {
+        let _env = EnvRestore::unset(&[
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_API_KEY_ENV",
+            "DEEPSEEK_REASONING_EFFORT",
+            "DSCODE_PROFILE",
+            "DEEPSEEK_PROFILE",
+        ]);
+        let root = temp_root("provider-picker-custom");
+        let config_dir = root.join(".dscode");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join("config.toml"),
+            r#"model.base_url = "https://api.openai.com/v1"
+model.model = "gpt-5.4"
+model.api_key_env = "OPENAI_API_KEY"
+"#,
+        )
+        .unwrap();
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: root.display().to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        run_palette_command(&mut app, "provider");
+
+        assert_eq!(app.selected_provider_picker_spec().name, "openai");
+        assert!(app.provider_picker_preserve_current_model);
+        let output = render_once(&app, 120, 36).unwrap();
+        assert!(output.contains("Selection: provider openai gpt-5.4"));
+        assert!(output.contains("preserving current custom model"));
+
+        assert!(app.handle_key(KeyCode::Enter));
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Provider {
+                workspace: root.display().to_string(),
+                command: TuiProviderCommand::Set {
+                    provider: "openai".to_string(),
+                    model: Some("gpt-5.4".to_string()),
+                },
+            }]
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -74,6 +74,10 @@ TUI display text now strips unsupported OSC/CSI/DCS terminal control wrappers
 before clipping or display-width wrapping, preserving visible OSC 8 link labels
 without leaking hidden URLs or escape bytes into transcript/detail render
 buffers.
+TUI provider picking now also initializes from the selected workspace's current
+provider/model config and preserves an active provider's custom model on
+reselection, adapting DeepSeek-TUI's provider-selected model preservation to
+DeepSeekCode's offline preset picker.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
 - native supervisor-owned PTY attach/stdin/resize/replay/wait/cancel polish and
@@ -466,6 +470,9 @@ Landed first slice:
 - TUI transcript, MCP detail, and MCP manager panels now sanitize terminal
   control wrappers such as OSC 8 hyperlinks before clipping/wrapping, keeping
   visible labels while avoiding broken escape sequences in plain-text panels
+- TUI provider picker now opens on the selected workspace's inferred current
+  provider/model and preserves a custom current model when reselecting the
+  active provider instead of resetting to the preset default
 - task panel now summarizes active-thread runtime item state/type counts and
   the latest item content, making streamed background agent run progress and
   tool activity visible alongside durable task records

@@ -133,7 +133,10 @@ Current surfaces:
   `/provider`, `provider show`, `provider list`, and
   `provider <name> [model]`; legacy DeepSeek CN aliases such as
   `deepseek-cn`, `deepseek_china`, `deepseekcn`, and `deepseek-china` map to
-  the canonical DeepSeek preset
+  the canonical DeepSeek preset. The picker opens on the selected workspace's
+  current provider/model when it can infer them from `.dscode/config.toml`, and
+  reselecting the active provider preserves a custom current model instead of
+  silently resetting to the preset default.
 - skill registry inspection and local user-skill management with
   `skills [prefix]` / `/skills [prefix]`, `/skills --remote`,
   `/skills sync`,
