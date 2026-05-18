@@ -94,6 +94,32 @@ jobs:
       - name: Verify Debug Binary
         run: ${{ matrix.binary }} version
 
+      - name: TUI Demo Snapshot
+        if: runner.os != 'Windows'
+        env:
+          DEEPSEEK_BINARY: ${{ matrix.binary }}
+        run: |
+          output="$("$DEEPSEEK_BINARY" tui --demo --once)"
+          printf '%s\n' "$output"
+          grep -q "DeepSeekCode" <<< "$output"
+          grep -q "TUI" <<< "$output"
+
+      - name: TUI Demo Snapshot
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          DEEPSEEK_BINARY: ${{ matrix.binary }}
+        run: |
+          $output = & $env:DEEPSEEK_BINARY tui --demo --once
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $text = $output -join "`n"
+          Write-Output $text
+          if ($text -notmatch "DeepSeekCode" -or $text -notmatch "TUI") {
+            throw "TUI demo snapshot did not render expected DeepSeekCode TUI text"
+          }
+
       - name: TUI Entrypoint Smoke
         if: runner.os != 'Windows'
         run: ${{ matrix.binary }} tui --entrypoint-smoke --smoke-bin ${{ matrix.binary }}

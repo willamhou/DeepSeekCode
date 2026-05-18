@@ -20,8 +20,10 @@ release-proof work dependent on local checks until the next tag workflow.
 - macOS x64 and Windows x64 platform checks cover `cargo check --all-targets`,
   debug binary build, and `deepseek version`, giving normal PRs the same basic
   non-Linux compile/runtime proof that previously only existed in release jobs.
-  macOS x64 also runs the direct TUI entrypoint smoke because the PTY smoke
-  backend is Unix-oriented; Windows keeps compile/version coverage.
+  Both platform jobs also run a deterministic `deepseek tui --demo --once`
+  snapshot check. macOS x64 additionally runs the direct TUI entrypoint smoke
+  because the PTY smoke backend is Unix-oriented; Windows keeps snapshot
+  rendering plus compile/version coverage until ConPTY entrypoint smoke exists.
 - The workflow keeps expensive release-only work such as Docker packaging,
   attestation, npm publishing, and tap publishing in the release matrix.
 - CI and release workflows use `actions/checkout@v5` and
@@ -35,6 +37,7 @@ release-proof work dependent on local checks until the next tag workflow.
   - `cargo test --lib -- --test-threads=1`
   - `cargo check --all-targets`
   - `cargo build --bin deepseek`
+  - `target/debug/deepseek tui --demo --once`
   - `target/debug/deepseek tui --entrypoint-smoke --smoke-bin target/debug/deepseek`
   - `node scripts/check-secrets.js`
   - `docs/demo/record-model-backed-demo.sh --dry-run`

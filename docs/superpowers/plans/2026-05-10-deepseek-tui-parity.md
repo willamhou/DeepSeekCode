@@ -159,13 +159,14 @@ Normal `main` pushes and pull requests now also run `.github/workflows/ci.yml`,
 a CI gate covering Linux Rust fmt/lib tests/build, secret scanning, demo
 evidence self-tests, npm metadata/wrapper smoke, Homebrew formula checks, plus
 Linux and macOS x64 direct TUI entrypoint smoke and macOS x64 / Windows x64
-`cargo check --all-targets` / debug binary version proof.
+`cargo check --all-targets` / debug binary version / deterministic TUI snapshot
+proof.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
 - broader terminal/platform proof beyond the TTY-aware default TUI entrypoint,
   repo-native PTY entrypoint smoke, current Unix/Linux native-supervisor smoke
   coverage, CI Linux/macOS direct TUI smoke, and CI macOS/Windows
-  compile/version checks;
+  compile/version/snapshot checks;
 - model-backed live dogfood and external write-fixture sample depth across
   disposable real repositories;
 - release-channel proof for npm and Homebrew once credentials are available;
