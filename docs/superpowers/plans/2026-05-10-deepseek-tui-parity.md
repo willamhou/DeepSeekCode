@@ -155,6 +155,9 @@ checks now run the recorder dry-run, redaction self-test, verifier self-test,
 and model-backed SVG renderer self-test without requiring API credentials.
 Release packaging now also runs `node scripts/check-secrets.js`, a tracked-file
 secret scan that blocks committed `sk-...` style API tokens before publishing.
+Normal `main` pushes and pull requests now also run `.github/workflows/ci.yml`,
+a Linux CI gate covering Rust fmt/lib tests/build, secret scanning, demo
+evidence self-tests, npm metadata/wrapper smoke, and Homebrew formula checks.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
 - broader terminal/platform proof beyond the TTY-aware default TUI entrypoint,

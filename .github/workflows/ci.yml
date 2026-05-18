@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Format Check
+        run: cargo fmt --check
+
+      - name: Library Tests
+        run: cargo test --lib -- --test-threads=1
+
+      - name: Build Debug Binary
+        run: cargo build --bin deepseek
+
+      - name: Secret Scan
+        run: node scripts/check-secrets.js
+
+      - name: Demo Evidence Checks
+        run: |
+          bash -n docs/demo/record-model-backed-demo.sh
+          docs/demo/record-model-backed-demo.sh --dry-run
+          docs/demo/record-model-backed-demo.sh --redaction-self-test
+          docs/demo/verify-model-backed-demo.js --self-test
+          docs/demo/render-model-backed-demo-svg.js --self-test
+
+      - name: npm Metadata Checks
+        run: |
+          node npm/scripts/check-version-sync.js
+          npm --prefix npm test
+
+      - name: npm Wrapper TUI Entrypoint Smoke
+        env:
+          DEEPSEEK_BINARY: target/debug/deepseek
+        run: node npm/scripts/test-tui-entrypoint-wrapper.js
+
+      - name: Homebrew Formula Check
+        run: node packaging/homebrew/verify-formula.js
