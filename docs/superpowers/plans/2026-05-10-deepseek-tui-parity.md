@@ -158,13 +158,14 @@ secret scan that blocks committed `sk-...` style API tokens before publishing.
 Normal `main` pushes and pull requests now also run `.github/workflows/ci.yml`,
 a CI gate covering Linux Rust fmt/lib tests/build, secret scanning, demo
 evidence self-tests, npm metadata/wrapper smoke, Homebrew formula checks, plus
-macOS x64 and Windows x64 `cargo check --all-targets` / debug binary version
-proof.
+Linux and macOS x64 direct TUI entrypoint smoke and macOS x64 / Windows x64
+`cargo check --all-targets` / debug binary version proof.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
 - broader terminal/platform proof beyond the TTY-aware default TUI entrypoint,
   repo-native PTY entrypoint smoke, current Unix/Linux native-supervisor smoke
-  coverage, and CI macOS/Windows compile/version checks;
+  coverage, CI Linux/macOS direct TUI smoke, and CI macOS/Windows
+  compile/version checks;
 - model-backed live dogfood and external write-fixture sample depth across
   disposable real repositories;
 - release-channel proof for npm and Homebrew once credentials are available;
