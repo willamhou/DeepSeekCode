@@ -152,6 +152,7 @@ npm wrapper 元数据检查：
 ```bash
 node npm/scripts/check-version-sync.js
 DEEPSEEK_BINARY=target/debug/deepseek node npm/scripts/test-tui-entrypoint-wrapper.js
+node packaging/homebrew/verify-formula.js
 ```
 
 发布准备状态：

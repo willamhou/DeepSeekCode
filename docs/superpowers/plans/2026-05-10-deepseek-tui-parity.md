@@ -136,6 +136,10 @@ The npm wrapper now also has release smoke coverage for that same entrypoint:
 `npm/scripts/test-tui-entrypoint-wrapper.js` runs the real PTY smoke through
 `npm/bin/deepseek.js` with `DEEPSEEK_BINARY` pointing at the selected binary,
 and the wrapper is committed executable.
+Homebrew template validation is now also runnable without Homebrew/Ruby:
+`packaging/homebrew/verify-formula.js` checks the formula version, release URLs,
+SHA-256 entries, install/test blocks, optional Ruby syntax, and release-mode
+non-placeholder checksums.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
 - broader terminal/platform proof beyond the TTY-aware default TUI entrypoint,

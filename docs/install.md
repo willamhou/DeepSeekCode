@@ -249,6 +249,7 @@ formula，确保 tap 和发布资产完全一致。安装前可用 `gh attestati
 <archive> --repo <owner>/<repo>` 验证 provenance。然后运行：
 
 ```bash
+node packaging/homebrew/verify-formula.js --release
 ruby -c packaging/homebrew/deepseek.rb
 brew install --build-from-source packaging/homebrew/deepseek.rb
 deepseek version

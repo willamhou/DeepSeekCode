@@ -159,6 +159,7 @@ npm wrapper メタデータ:
 ```bash
 node npm/scripts/check-version-sync.js
 DEEPSEEK_BINARY=target/debug/deepseek node npm/scripts/test-tui-entrypoint-wrapper.js
+node packaging/homebrew/verify-formula.js
 ```
 
 リリース準備状態:

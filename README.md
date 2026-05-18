@@ -160,6 +160,7 @@ For npm wrapper metadata:
 ```bash
 node npm/scripts/check-version-sync.js
 DEEPSEEK_BINARY=target/debug/deepseek node npm/scripts/test-tui-entrypoint-wrapper.js
+node packaging/homebrew/verify-formula.js
 ```
 
 For release readiness:

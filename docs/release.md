@@ -294,12 +294,14 @@ DSCODE_RELEASE_BASE_URL=https://<mirror>/<release-assets> \
 For the Homebrew formula:
 
 ```bash
+node packaging/homebrew/verify-formula.js
 ruby -c packaging/homebrew/deepseek.rb
 deepseek update homebrew-formula \
   --version <version> \
   --repo <owner>/<repo> \
   --dist <downloaded-release-artifact-directory> \
   --formula packaging/homebrew/deepseek.rb
+node packaging/homebrew/verify-formula.js --release
 ruby -c packaging/homebrew/deepseek.rb
 ```
 
