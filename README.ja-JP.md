@@ -8,9 +8,10 @@ DeepSeekCode は DeepSeek-first のターミナル向けコーディングエー
 反復する流れを前提に作られています。
 
 > 状態: dogfood とリポジトリ内の開発作業には利用できます。`v0.1.1` では
-> GitHub Release のバイナリと検証済み GHCR イメージを公開済みです。npm と
-> Homebrew の公開には registry/tap の資格情報がまだ必要で、ネイティブ PTY
-> と製品面の磨き込みは継続中です。
+> GitHub Release のバイナリと検証済み GHCR イメージを公開済みです。bare
+> `deepseek` TUI entrypoint は Linux、macOS、Windows CI で smoke 済みです。
+> npm と Homebrew の公開には registry/tap の資格情報がまだ必要で、より厚い
+> model-backed evidence は継続中です。
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
@@ -116,9 +117,8 @@ deepseek tui --runtime-url http://127.0.0.1:13000
 DeepSeekCode は自身の開発に使える段階ですが、Claude Code CLI / Codex CLI
 ほどの製品成熟度にはまだ届いていません。大きな残差は次の通りです。
 
-- TTY-aware default TUI entrypoint、PTY entrypoint smoke、現行 Unix/Linux
-  native-supervisor PTY smoke coverage を超える、さらに広い
-  terminal/platform proof。
+- CI-smoked default TUI entrypoint と現行 shell-supervisor coverage を超える、
+  より深い interactive shell / PTY takeover proof。
 - disposable な実外部リポジトリでの live external write-fixture サンプル厚み。
 - npm registry 公開と Homebrew tap。どちらも資格情報が未設定です。
 - 決定的な TUI snapshot を超えた、レビュー済みでコミットされた model-backed README メディア。

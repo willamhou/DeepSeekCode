@@ -8,8 +8,9 @@ inspect a repository, edit files, run checks, review the result, and keep
 iterating from the same terminal.
 
 > Status: usable for dogfooding and repository work. `v0.1.1` has GitHub
-> Release binaries and a verified GHCR image; npm and Homebrew publishing still
-> need registry/tap credentials, and native PTY/product polish remains in
+> Release binaries and a verified GHCR image; the bare `deepseek` TUI entrypoint
+> is CI-smoked on Linux, macOS, and Windows. npm and Homebrew publishing still
+> need registry/tap credentials, and deeper model-backed evidence remains in
 > progress.
 
 <p align="center">
@@ -115,9 +116,8 @@ git.
 DeepSeekCode is close enough to use as its own coding CLI, but it is not yet at
 Claude Code CLI / Codex CLI polish. The largest remaining gaps are:
 
-- broader terminal/platform proof beyond the TTY-aware default TUI entrypoint,
-  PTY entrypoint smoke, and current Unix/Linux native-supervisor PTY smoke
-  coverage;
+- deeper interactive shell/PTY takeover proof beyond the CI-smoked default TUI
+  entrypoint and current shell-supervisor coverage;
 - deeper model-backed live dogfood and external write-fixture sample evidence
   across disposable real repositories;
 - npm registry publishing and a Homebrew tap, both blocked on credentials;

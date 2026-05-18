@@ -20,11 +20,18 @@ is now a full-screen terminal app.
 ## Implemented Behavior
 
 - `deepseek tui --entrypoint-smoke` starts the current executable as bare
-  `deepseek` under the Unix `script` PTY wrapper.
+  `deepseek` under the Unix `script` PTY wrapper or a Windows ConPTY-backed
+  `cmd.exe` host.
 - `--smoke-bin <path>` smokes a selected binary, which lets release gates target
   `./target/release/deepseek` or an installed binary.
-- The Release Matrix runs that smoke directly against each non-Windows release
-  binary before packaging artifacts.
+- The Release Matrix and normal CI run that smoke directly against release or
+  debug binaries before packaging or accepting `main`.
+- Windows TUI default detection now treats available `CONIN$` / `CONOUT$`
+  console devices as full-screen capable even when inherited stdio handles are
+  not reported as terminals by Rust's `is_terminal`.
+- Windows interactive TUI startup rebinds standard handles to those console
+  devices before enabling raw mode, so bare `deepseek.exe` enters the full-screen
+  workbench inside ConPTY-hosted environments.
 - The smoke sends `q` to the PTY, verifies successful exit, checks alternate
   screen enter/leave sequences, and confirms the TUI rendered `DeepSeekCode`
   plus `TUI`.
@@ -43,3 +50,9 @@ is now a full-screen terminal app.
 ```bash
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
+
+- GitHub Actions evidence:
+  - `26013810423`: Linux, macOS x64, and Windows x64 CI all green after the
+    Windows ConPTY entrypoint fix.
+  - `26013911327`: README demo refresh CI all green with the same entrypoint
+    smoke still enabled.

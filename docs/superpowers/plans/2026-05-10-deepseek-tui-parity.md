@@ -14,7 +14,7 @@ DeepSeek-TUI is a multi-crate Rust workspace with a dedicated `deepseek` dispatc
 
 DeepseekCode is currently a mostly single-crate CLI with a strong deterministic test/benchmark/dogfood surface and about `36.8k` lines under `src/`. Its CLI core is relatively close, but the terminal product surface is still incomplete.
 
-## Current Gap Audit (2026-05-14)
+## Current Gap Audit (2026-05-18)
 
 Recent parity slices landed public repo metadata, multilingual README/demo
 surface, TUI `/setup` onboarding, guided setup controls, CLI stdin auth
@@ -161,15 +161,19 @@ secret scan that blocks committed `sk-...` style API tokens before publishing.
 Normal `main` pushes and pull requests now also run `.github/workflows/ci.yml`,
 a CI gate covering Linux Rust fmt/lib tests/build, secret scanning, demo
 evidence self-tests, npm metadata/wrapper smoke, Homebrew formula checks, plus
-Linux, macOS x64, and Windows x64 direct TUI entrypoint smoke and macOS x64 / Windows x64
-`cargo check --all-targets` / debug binary version / deterministic TUI snapshot
-proof; CI and release Windows jobs now pin `windows-2025-vs2026` instead of the
-moving `windows-latest` alias.
+Linux, macOS x64, and Windows x64 direct TUI entrypoint smoke and macOS x64 /
+Windows x64 `cargo check --all-targets` / debug binary version /
+deterministic TUI snapshot proof; CI and release Windows jobs now pin
+`windows-2025-vs2026` instead of the moving `windows-latest` alias.
+The Windows smoke now uses a ConPTY-backed `cmd.exe` host, detects
+`CONIN$`/`CONOUT$` for the no-args default TUI path, keeps the ConPTY input
+handle open through clean exit, and has green evidence from `main` CI run
+`26013810423`; the README TUI demo was then regenerated and revalidated in
+green CI run `26013911327`.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
-- broader terminal/platform proof beyond the TTY-aware default TUI entrypoint,
-  repo-native PTY entrypoint smoke, current Unix/Linux native-supervisor smoke
-  coverage, CI Linux/macOS/Windows direct TUI smoke, and CI macOS/Windows
+- deeper interactive shell/PTY takeover proof beyond the CI-smoked default TUI
+  entrypoint, current shell-supervisor coverage, and platform
   compile/version/snapshot checks;
 - model-backed live dogfood and external write-fixture sample depth across
   disposable real repositories;
