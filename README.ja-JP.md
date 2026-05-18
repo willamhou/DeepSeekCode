@@ -25,6 +25,8 @@ DeepSeekCode は DeepSeek-first のターミナル向けコーディングエー
   usage、automations を永続化します。
 - ファイルの読み取り/検索、パッチ適用、diff review、todo、rollback snapshot、
   notes、memory、hooks、skills、subagents を扱えます。
+- OpenAI-compatible の単一 tool call と同一ターンの batch tool calls に対応し、
+  各呼び出しは通常の hook、permission、recovery 経路を通ります。
 - 権限ゲート付き shell 実行に加えて、バックグラウンド shell job、wait/poll、
   replay、attach snapshot、stdin、resize metadata、cancel、workspace
   shell-supervisor protocol bridge をサポートします。

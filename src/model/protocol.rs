@@ -119,7 +119,14 @@ pub struct ModelResponse {
 #[derive(Debug, Clone)]
 pub enum ModelAction {
     CallTool { tool_name: String, input: ToolInput },
+    CallTools(Vec<ToolCallRequest>),
     Finish,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolCallRequest {
+    pub tool_name: String,
+    pub input: ToolInput,
 }
 
 #[derive(Debug, Clone, Default)]

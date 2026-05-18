@@ -26,6 +26,8 @@ iterating from the same terminal.
   automations under `.dscode/runtime/`.
 - File read/search, patch application, diff review, todo tracking, rollback
   snapshots, notes, memory, hooks, skills, and subagents.
+- OpenAI-compatible single and same-turn batch tool calls, with every call run
+  through the normal hook, permission, and recovery paths.
 - Permission-gated shell execution plus background shell jobs, wait/poll,
   replay, attach snapshots, stdin, resize metadata, cancellation, and a
   workspace shell-supervisor protocol bridge.

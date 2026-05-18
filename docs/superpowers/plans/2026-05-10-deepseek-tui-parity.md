@@ -110,6 +110,11 @@ model-backed progress, replayable benchmark cases, and next batch commands.
 `deepseek dogfood live-run` adds the guarded execution step for that backlog:
 it defaults to a dry-run selection, caps the next batch, and requires
 `--execute` plus online model transport before spending model calls.
+OpenAI-compatible tool-call streaming now also preserves same-turn batch
+responses by indexed `tool_calls`, matching DeepSeek-TUI's latest fix for
+gateways that ignore `parallel_tool_calls:false`; DeepSeekCode executes the
+batch sequentially through the normal hook, permission, repeat-guard, and
+recovery paths so no call is silently dropped.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
 - full terminal takeover and broader platform proof beyond the current

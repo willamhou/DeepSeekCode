@@ -11,7 +11,9 @@ use crate::error::app_error;
 use crate::error::tool_failure;
 use crate::error::AppResult;
 use crate::model::client::ModelClient;
-use crate::model::protocol::{ImageInput, ModelAction, ModelRequest, ModelResponse, TokenUsage};
+use crate::model::protocol::{
+    ImageInput, ModelAction, ModelRequest, ModelResponse, TokenUsage, ToolCallRequest,
+};
 use crate::tools::types::ToolInput;
 use crate::ui::stream::StreamEvents;
 use crate::util::cancel::CancellationCheck;
@@ -57,8 +59,16 @@ impl ModelClient for DeepSeekClient {
         let response = self.respond_offline(input);
         events.on_text_delta(&response.message);
         events.on_assistant_done(&response.message);
-        if let ModelAction::CallTool { tool_name, input } = &response.action {
-            events.on_tool_call(tool_name, &input.args);
+        match &response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                events.on_tool_call(tool_name, &input.args);
+            }
+            ModelAction::CallTools(calls) => {
+                for call in calls {
+                    events.on_tool_call(&call.tool_name, &call.input.args);
+                }
+            }
+            ModelAction::Finish => {}
         }
         poll_model_cancel(&mut cancel_check)?;
         Ok((response, None))
@@ -3810,6 +3820,81 @@ struct OpenAiToolAssembly {
     arguments: String,
 }
 
+fn openai_tool_assembly_mut(
+    assemblies: &mut Vec<OpenAiToolAssembly>,
+    observed_index: Option<u64>,
+) -> &mut OpenAiToolAssembly {
+    if let Some(index) = observed_index {
+        if let Some(position) = assemblies
+            .iter()
+            .position(|assembly| assembly.index == index)
+        {
+            return &mut assemblies[position];
+        }
+        assemblies.push(OpenAiToolAssembly {
+            index,
+            ..OpenAiToolAssembly::default()
+        });
+        return assemblies
+            .last_mut()
+            .expect("openai tool assembly was just inserted");
+    }
+
+    if assemblies.is_empty() {
+        assemblies.push(OpenAiToolAssembly::default());
+    }
+    assemblies
+        .last_mut()
+        .expect("openai tool assembly exists after fallback insert")
+}
+
+fn openai_tool_assembly_to_request(assembly: OpenAiToolAssembly) -> AppResult<ToolCallRequest> {
+    let tool_name = assembly
+        .name
+        .ok_or_else(|| tool_failure("openai tool call missing function.name"))?;
+    let arguments = if assembly.arguments.trim().is_empty() {
+        BTreeMap::new()
+    } else {
+        parse_tool_arguments(&assembly.arguments)?
+    };
+    Ok(ToolCallRequest {
+        tool_name,
+        input: ToolInput { args: arguments },
+    })
+}
+
+fn model_action_from_tool_calls(
+    calls: Vec<ToolCallRequest>,
+    events: &mut dyn StreamEvents,
+) -> ModelAction {
+    for call in &calls {
+        events.on_tool_call(&call.tool_name, &call.input.args);
+    }
+    model_action_from_tool_calls_no_events(calls)
+}
+
+fn model_action_from_tool_calls_no_events(calls: Vec<ToolCallRequest>) -> ModelAction {
+    let mut calls = calls;
+    match calls.len() {
+        0 => ModelAction::Finish,
+        1 => {
+            let call = calls.pop().expect("single tool call exists");
+            ModelAction::CallTool {
+                tool_name: call.tool_name,
+                input: call.input,
+            }
+        }
+        _ => ModelAction::CallTools(calls),
+    }
+}
+
+fn model_action_contains_tool_call(action: &ModelAction) -> bool {
+    matches!(
+        action,
+        ModelAction::CallTool { .. } | ModelAction::CallTools(_)
+    )
+}
+
 fn read_cancelable_frame<R: BufRead>(
     reader: &mut R,
     cancel_check: &mut Option<&mut dyn CancellationCheck>,
@@ -3996,7 +4081,7 @@ fn parse_openai_stream_inner<R: BufRead>(
     mut cancel_check: Option<&mut dyn CancellationCheck>,
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     let mut usage: Option<TokenUsage> = None;
-    let mut tool_assembly: Option<OpenAiToolAssembly> = None;
+    let mut tool_assemblies: Vec<OpenAiToolAssembly> = Vec::new();
     let mut done_seen = false;
 
     while let Some(frame) = read_cancelable_frame(reader, &mut cancel_check)? {
@@ -4050,23 +4135,9 @@ fn parse_openai_stream_inner<R: BufRead>(
                         let Some(call_obj) = json_as_object(call) else {
                             continue;
                         };
-                        // OpenAI streams tool calls indexed by `index`. The loop executes one
-                        // tool call per turn; if a gateway ignores `parallel_tool_calls:false`,
-                        // keep the first call and let the next turn continue from its result.
                         let observed_index = call_obj.get("index").and_then(json_as_u64);
-                        match (tool_assembly.as_mut(), observed_index) {
-                            (Some(existing), Some(idx)) if existing.index != idx => {
-                                continue;
-                            }
-                            (Some(_), _) => {}
-                            (None, _) => {
-                                tool_assembly = Some(OpenAiToolAssembly {
-                                    index: observed_index.unwrap_or(0),
-                                    ..OpenAiToolAssembly::default()
-                                });
-                            }
-                        }
-                        let assembly = tool_assembly.as_mut().expect("assembly seeded above");
+                        let assembly =
+                            openai_tool_assembly_mut(&mut tool_assemblies, observed_index);
                         if assembly.id.is_none() {
                             if let Some(id) = call_obj.get("id").and_then(json_as_string) {
                                 assembly.id = Some(id.to_string());
@@ -4088,25 +4159,14 @@ fn parse_openai_stream_inner<R: BufRead>(
         }
     }
 
-    let action = if let Some(assembly) = tool_assembly {
-        let name = assembly
-            .name
-            .ok_or_else(|| tool_failure("openai tool call missing function.name"))?;
-        let arguments = if assembly.arguments.trim().is_empty() {
-            std::collections::BTreeMap::new()
-        } else {
-            parse_tool_arguments(&assembly.arguments)?
-        };
-        events.on_tool_call(&name, &arguments);
-        ModelAction::CallTool {
-            tool_name: name,
-            input: ToolInput { args: arguments },
-        }
-    } else {
-        ModelAction::Finish
-    };
+    tool_assemblies.sort_by_key(|assembly| assembly.index);
+    let calls = tool_assemblies
+        .into_iter()
+        .map(openai_tool_assembly_to_request)
+        .collect::<AppResult<Vec<_>>>()?;
+    let action = model_action_from_tool_calls(calls, events);
 
-    let message = if full_text.is_empty() && matches!(action, ModelAction::CallTool { .. }) {
+    let message = if full_text.is_empty() && model_action_contains_tool_call(&action) {
         "DeepSeek selected a tool.".to_string()
     } else if full_text.is_empty() {
         "DeepSeek returned no content.".to_string()
@@ -4342,23 +4402,33 @@ fn parse_openai_chat_completion(body: &str) -> AppResult<ModelResponse> {
         .ok_or_else(|| app_error("chat completion response missing message object"))?;
 
     if let Some(tool_calls) = message.get("tool_calls").and_then(json_as_array) {
-        let first_call = tool_calls
-            .first()
-            .and_then(json_as_object)
-            .ok_or_else(|| app_error("tool_calls array was empty"))?;
-        let function = first_call
-            .get("function")
-            .and_then(json_as_object)
-            .ok_or_else(|| app_error("tool call missing function object"))?;
-        let tool_name = function
-            .get("name")
-            .and_then(json_as_string)
-            .ok_or_else(|| app_error("tool call missing function name"))?;
-        let arguments_raw = function
-            .get("arguments")
-            .and_then(json_as_string)
-            .ok_or_else(|| app_error("tool call missing function arguments"))?;
-        let arguments = parse_tool_arguments(arguments_raw)?;
+        if tool_calls.is_empty() {
+            return Err(app_error("tool_calls array was empty"));
+        }
+        let calls = tool_calls
+            .iter()
+            .map(|call| {
+                let call_obj =
+                    json_as_object(call).ok_or_else(|| app_error("tool call was not an object"))?;
+                let function = call_obj
+                    .get("function")
+                    .and_then(json_as_object)
+                    .ok_or_else(|| app_error("tool call missing function object"))?;
+                let tool_name = function
+                    .get("name")
+                    .and_then(json_as_string)
+                    .ok_or_else(|| app_error("tool call missing function name"))?;
+                let arguments_raw = function
+                    .get("arguments")
+                    .and_then(json_as_string)
+                    .ok_or_else(|| app_error("tool call missing function arguments"))?;
+                let arguments = parse_tool_arguments(arguments_raw)?;
+                Ok(ToolCallRequest {
+                    tool_name: tool_name.to_string(),
+                    input: ToolInput { args: arguments },
+                })
+            })
+            .collect::<AppResult<Vec<_>>>()?;
         let assistant_message = message
             .get("content")
             .and_then(json_as_string)
@@ -4367,10 +4437,7 @@ fn parse_openai_chat_completion(body: &str) -> AppResult<ModelResponse> {
 
         return Ok(ModelResponse {
             message: assistant_message,
-            action: ModelAction::CallTool {
-                tool_name: tool_name.to_string(),
-                input: ToolInput { args: arguments },
-            },
+            action: model_action_from_tool_calls_no_events(calls),
         });
     }
 
@@ -4831,7 +4898,53 @@ mod tests {
                 assert_eq!(input.get("path"), Some("README.md"));
                 assert_eq!(input.get("max_lines"), Some("20"));
             }
-            ModelAction::Finish => panic!("expected tool call"),
+            _ => panic!("expected tool call"),
+        }
+    }
+
+    #[test]
+    fn parses_openai_batch_tool_call_response() {
+        let body = r#"{
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": "{\"path\":\"README.md\"}"
+                                }
+                            },
+                            {
+                                "id": "call_2",
+                                "type": "function",
+                                "function": {
+                                    "name": "git_diff",
+                                    "arguments": "{}"
+                                }
+                            }
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                    "index": 0
+                }
+            ]
+        }"#;
+
+        let response = parse_openai_chat_completion(body).unwrap();
+        match response.action {
+            ModelAction::CallTools(calls) => {
+                assert_eq!(calls.len(), 2);
+                assert_eq!(calls[0].tool_name, "read_file");
+                assert_eq!(calls[0].input.get("path"), Some("README.md"));
+                assert_eq!(calls[1].tool_name, "git_diff");
+                assert!(calls[1].input.args.is_empty());
+            }
+            other => panic!("expected batched tool calls, got {other:?}"),
         }
     }
 
@@ -6039,7 +6152,7 @@ mod tests {
                 assert_eq!(input.get("path"), Some("README.md"));
                 assert_eq!(input.get("max_lines"), Some("20"));
             }
-            ModelAction::Finish => panic!("expected tool call"),
+            _ => panic!("expected tool call"),
         }
         assert_eq!(response.message, "Reading the file.");
     }
@@ -6076,7 +6189,7 @@ mod tests {
                 assert_eq!(tool_name, "read_file");
                 assert_eq!(input.get("max_lines"), Some("20"));
             }
-            ModelAction::Finish => panic!("expected tool call"),
+            _ => panic!("expected tool call"),
         }
     }
 
@@ -6105,7 +6218,7 @@ mod tests {
         let response = parse_anthropic_messages(body).unwrap();
         match response.action {
             ModelAction::CallTool { tool_name, .. } => assert_eq!(tool_name, "git_diff"),
-            ModelAction::Finish => panic!("expected tool call"),
+            _ => panic!("expected tool call"),
         }
         assert!(response.message.contains("I will do this."));
         assert!(response.message.contains("Now using a tool."));
@@ -6145,7 +6258,7 @@ mod tests {
                 assert_eq!(tool_name, "git_log");
                 assert_eq!(input.get("limit"), Some("10"));
             }
-            ModelAction::Finish => panic!("expected git_log"),
+            _ => panic!("expected git_log"),
         }
     }
 
@@ -6166,7 +6279,7 @@ mod tests {
                 assert_eq!(input.get("line_start"), Some("42"));
                 assert_eq!(input.get("line_end"), Some("42"));
             }
-            ModelAction::Finish => panic!("expected git_blame"),
+            _ => panic!("expected git_blame"),
         }
     }
 
@@ -6232,7 +6345,7 @@ mod tests {
                 assert_eq!(input.get("cwd"), Some(dir.to_string_lossy().as_ref()));
                 assert!(input.get("find").is_none());
             }
-            ModelAction::Finish => panic!("expected tool call"),
+            _ => panic!("expected tool call"),
         }
 
         let _ = fs::remove_dir_all(dir);
@@ -6274,7 +6387,7 @@ mod tests {
                 assert_eq!(tool_name, "apply_patch");
                 assert!(input.get("patch").is_some(), "expected patch-mode shortcut");
             }
-            ModelAction::Finish => panic!("expected tool call"),
+            _ => panic!("expected tool call"),
         }
         assert!(
             response.message.contains("skipped inspection"),
@@ -6326,7 +6439,7 @@ mod tests {
                 assert_eq!(input.get("find"), Some("alpha"));
                 assert_eq!(input.get("replace"), Some("ALPHA"));
             }
-            ModelAction::Finish => panic!("expected tool call"),
+            _ => panic!("expected tool call"),
         }
 
         let _ = fs::remove_dir_all(dir);
@@ -6373,7 +6486,7 @@ mod tests {
                 assert_eq!(input.get("find"), Some("gamma"));
                 assert_eq!(input.get("replace"), Some("GAMMA"));
             }
-            ModelAction::Finish => panic!("expected retry tool call"),
+            _ => panic!("expected retry tool call"),
         }
 
         let _ = fs::remove_dir_all(dir);
@@ -6419,6 +6532,12 @@ mod tests {
             ModelAction::CallTool { tool_name, .. } => {
                 assert_ne!(
                     tool_name, "git_diff",
+                    "git_diff should not run after a failed apply_patch"
+                );
+            }
+            ModelAction::CallTools(calls) => {
+                assert!(
+                    calls.iter().all(|call| call.tool_name != "git_diff"),
                     "git_diff should not run after a failed apply_patch"
                 );
             }
@@ -6503,7 +6622,7 @@ mod tests {
                 assert_eq!(input.get("find"), Some("route_bench_subcommand()"));
                 assert_eq!(input.get("replace"), Some("route_benchmark_subcommand()"));
             }
-            ModelAction::Finish => panic!("expected apply_patch after repro + readback"),
+            _ => panic!("expected apply_patch after repro + readback"),
         }
     }
 
@@ -6544,7 +6663,7 @@ mod tests {
                 assert_eq!(tool_name, "run_shell");
                 assert_eq!(input.get("command"), Some("cargo test"));
             }
-            ModelAction::Finish => panic!("expected validation rerun after patch diff"),
+            _ => panic!("expected validation rerun after patch diff"),
         }
     }
 
@@ -6611,7 +6730,7 @@ mod tests {
                 assert_eq!(input.get("repo"), Some("owner/repo"));
                 assert_eq!(input.get("include_diff"), Some("true"));
             }
-            ModelAction::Finish => panic!("expected github_pr_context tool call"),
+            _ => panic!("expected github_pr_context tool call"),
         }
     }
 
@@ -6647,7 +6766,7 @@ mod tests {
                 assert_eq!(input.get("repo"), Some("owner/repo"));
                 assert_eq!(input.get("include_diff"), Some("true"));
             }
-            ModelAction::Finish => panic!("expected github_pr_context tool call"),
+            _ => panic!("expected github_pr_context tool call"),
         }
     }
 
@@ -6693,7 +6812,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n\
                 assert_eq!(input.get("target"), Some("github_pr_context"));
                 assert_eq!(input.get("github_context"), Some(context));
             }
-            ModelAction::Finish => panic!("expected review tool call"),
+            _ => panic!("expected review tool call"),
         }
     }
 
@@ -6738,7 +6857,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(input.get("github_context"), Some(context));
                 assert_eq!(input.get("semantic"), Some("true"));
             }
-            ModelAction::Finish => panic!("expected semantic review tool call"),
+            _ => panic!("expected semantic review tool call"),
         }
     }
 
@@ -6821,7 +6940,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(input.get("number"), Some("42"));
                 assert_eq!(input.get("repo"), Some("owner/repo"));
             }
-            ModelAction::Finish => panic!("expected pr_review_comment_plan tool call"),
+            _ => panic!("expected pr_review_comment_plan tool call"),
         }
     }
 
@@ -6873,7 +6992,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                     Some("{\"tool\":\"review\",\"issue_count\":1}")
                 );
             }
-            ModelAction::Finish => panic!("expected guarded github_comment tool call"),
+            _ => panic!("expected guarded github_comment tool call"),
         }
     }
 
@@ -6926,7 +7045,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                     Some("{\"tool\":\"review\",\"issue_count\":1}")
                 );
             }
-            ModelAction::Finish => panic!("expected guarded github_pr_review_comment tool call"),
+            _ => panic!("expected guarded github_pr_review_comment tool call"),
         }
     }
 
@@ -6974,7 +7093,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                     Some("line is not part of the diff")
                 );
             }
-            ModelAction::Finish => panic!("expected pr_review_comment_plan retry tool call"),
+            _ => panic!("expected pr_review_comment_plan retry tool call"),
         }
     }
 
@@ -7060,7 +7179,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(input.get("number"), Some("42"));
                 assert_eq!(input.get("repo"), Some("owner/repo"));
             }
-            ModelAction::Finish => panic!("expected comment-plan retry after failed post"),
+            _ => panic!("expected comment-plan retry after failed post"),
         }
     }
 
@@ -7145,7 +7264,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                     "items: {items}"
                 );
             }
-            ModelAction::Finish => panic!("expected planning tool call"),
+            _ => panic!("expected planning tool call"),
         }
     }
 
@@ -7190,7 +7309,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                     "items: {items}"
                 );
             }
-            ModelAction::Finish => panic!("expected planning tool call"),
+            _ => panic!("expected planning tool call"),
         }
     }
 
@@ -7221,7 +7340,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
             .0;
         match response.action {
             ModelAction::CallTool { tool_name, .. } => assert_eq!(tool_name, "list_files"),
-            ModelAction::Finish => panic!("expected list_files tool call"),
+            _ => panic!("expected list_files tool call"),
         }
     }
 
@@ -7285,7 +7404,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert!(task.contains("Parent task:"), "task: {task}");
                 assert_eq!(input.get("steps"), Some("2"));
             }
-            ModelAction::Finish => panic!("expected dispatch_subagent tool call"),
+            _ => panic!("expected dispatch_subagent tool call"),
         }
     }
 
@@ -7343,7 +7462,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
             ModelAction::CallTool { tool_name, .. } => {
                 assert_ne!(tool_name, "dispatch_subagent");
             }
-            ModelAction::Finish => panic!("expected the planner to keep working locally"),
+            _ => panic!("expected the planner to keep working locally"),
         }
     }
 
@@ -7431,7 +7550,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "search_text");
                 assert_eq!(input.get("query"), Some("dispatch_subagent"));
             }
-            ModelAction::Finish => panic!("expected search_text tool call"),
+            _ => panic!("expected search_text tool call"),
         }
     }
 
@@ -7468,7 +7587,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "read_file");
                 assert_eq!(input.get("path"), Some("src/tools/dispatch_subagent.rs"));
             }
-            ModelAction::Finish => panic!("expected read_file tool call"),
+            _ => panic!("expected read_file tool call"),
         }
     }
 
@@ -7505,7 +7624,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "read_file");
                 assert_eq!(input.get("path"), Some("src/cli/app.rs"));
             }
-            ModelAction::Finish => panic!("expected read_file tool call"),
+            _ => panic!("expected read_file tool call"),
         }
     }
 
@@ -7545,7 +7664,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "read_file");
                 assert_eq!(input.get("path"), Some("src/main.rs"));
             }
-            ModelAction::Finish => panic!("expected read_file tool call"),
+            _ => panic!("expected read_file tool call"),
         }
     }
 
@@ -7585,7 +7704,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "read_file");
                 assert_eq!(input.get("path"), Some("src/main.rs"));
             }
-            ModelAction::Finish => panic!("expected read_file tool call"),
+            _ => panic!("expected read_file tool call"),
         }
     }
 
@@ -7669,7 +7788,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "read_file");
                 assert_eq!(input.get("path"), Some("src/cli/app.rs"));
             }
-            ModelAction::Finish => panic!("expected read_file tool call"),
+            _ => panic!("expected read_file tool call"),
         }
     }
 
@@ -7742,7 +7861,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "read_file");
                 assert_eq!(input.get("path"), Some("src/cli/app.rs"));
             }
-            ModelAction::Finish => panic!("expected read_file tool call"),
+            _ => panic!("expected read_file tool call"),
         }
     }
 
@@ -7817,7 +7936,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "search_text");
                 assert_eq!(input.get("query"), Some("route_benchmark_subcommand"));
             }
-            ModelAction::Finish => panic!("expected search_text tool call"),
+            _ => panic!("expected search_text tool call"),
         }
     }
 
@@ -7862,7 +7981,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                     assert_eq!(input.get("path"), Some("src/main.rs"));
                 }
             }
-            ModelAction::Finish => panic!("expected follow-up tool call"),
+            _ => panic!("expected follow-up tool call"),
         }
     }
 
@@ -7929,6 +8048,9 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
             ModelAction::CallTool { tool_name, .. } => {
                 assert_ne!(tool_name, "search_text");
             }
+            ModelAction::CallTools(calls) => {
+                assert!(calls.iter().all(|call| call.tool_name != "search_text"));
+            }
         }
     }
 
@@ -7968,7 +8090,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "list_files");
                 assert_eq!(input.get("max_depth"), Some("3"));
             }
-            ModelAction::Finish => panic!("expected list_files recovery tool call"),
+            _ => panic!("expected list_files recovery tool call"),
         }
     }
 
@@ -8008,7 +8130,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "search_text");
                 assert_eq!(input.get("query"), Some("dispatch_subagent"));
             }
-            ModelAction::Finish => panic!("expected search_text recovery tool call"),
+            _ => panic!("expected search_text recovery tool call"),
         }
     }
 
@@ -8047,7 +8169,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
             .0;
         match response.action {
             ModelAction::CallTool { tool_name, .. } => assert_eq!(tool_name, "git_diff"),
-            ModelAction::Finish => panic!("expected git_diff recovery tool call"),
+            _ => panic!("expected git_diff recovery tool call"),
         }
     }
 
@@ -8093,7 +8215,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "read_file");
                 assert_eq!(input.get("path"), Some("src/lib.rs"));
             }
-            ModelAction::Finish => panic!("expected read_file recovery tool call"),
+            _ => panic!("expected read_file recovery tool call"),
         }
     }
 
@@ -8142,7 +8264,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(input.get("find"), Some("a * b"));
                 assert_eq!(input.get("replace"), Some("a + b"));
             }
-            ModelAction::Finish => panic!("expected retry apply_patch after failed validation"),
+            _ => panic!("expected retry apply_patch after failed validation"),
         }
     }
 
@@ -8194,7 +8316,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(input.get("find"), Some("a * b"));
                 assert_eq!(input.get("replace"), Some("a + b"));
             }
-            ModelAction::Finish => {
+            _ => {
                 panic!("expected retry apply_patch after JavaScript test readback")
             }
         }
@@ -8231,7 +8353,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
         let response = client.respond_offline(request);
         match response.action {
             ModelAction::CallTool { tool_name, .. } => assert_eq!(tool_name, "git_diff"),
-            ModelAction::Finish => panic!("expected git_diff after retry apply_patch"),
+            _ => panic!("expected git_diff after retry apply_patch"),
         }
     }
 
@@ -8270,7 +8392,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "run_shell");
                 assert_eq!(input.get("command"), Some("cargo test"));
             }
-            ModelAction::Finish => panic!("expected rerun of cargo test after retry patch"),
+            _ => panic!("expected rerun of cargo test after retry patch"),
         }
     }
 
@@ -8315,7 +8437,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "search_text");
                 assert_eq!(input.get("query"), Some("dispatch_subagent"));
             }
-            ModelAction::Finish => panic!("expected search_text recovery tool call"),
+            _ => panic!("expected search_text recovery tool call"),
         }
     }
 
@@ -8348,7 +8470,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "read_file");
                 assert_eq!(input.get("path"), Some("src/cli/app.rs"));
             }
-            ModelAction::Finish => panic!("expected read_file recovery tool call"),
+            _ => panic!("expected read_file recovery tool call"),
         }
     }
 
@@ -8448,7 +8570,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "run_shell");
                 assert_eq!(input.get("command"), Some("npm test"));
             }
-            ModelAction::Finish => panic!("expected run_shell repro tool call"),
+            _ => panic!("expected run_shell repro tool call"),
         }
     }
 
@@ -8483,7 +8605,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "run_shell");
                 assert_eq!(input.get("command"), Some("npm test"));
             }
-            ModelAction::Finish => panic!("expected run_shell repro tool call"),
+            _ => panic!("expected run_shell repro tool call"),
         }
     }
 
@@ -8606,7 +8728,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 );
                 assert!(items.contains("Implement the requested changes"));
             }
-            ModelAction::Finish => panic!("expected todo_write replan tool call"),
+            _ => panic!("expected todo_write replan tool call"),
         }
     }
 
@@ -8787,7 +8909,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "read_file");
                 assert_eq!(input.get("path"), Some("a.rs"));
             }
-            super::ModelAction::Finish => panic!("expected tool call"),
+            _ => panic!("expected tool call"),
         }
         let calls = events.tool_calls.borrow();
         assert_eq!(calls.len(), 1);
@@ -8868,7 +8990,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "read_file");
                 assert_eq!(input.get("path"), Some("a.rs"));
             }
-            super::ModelAction::Finish => panic!("expected tool call"),
+            _ => panic!("expected tool call"),
         }
         let calls = events.tool_calls.borrow();
         assert_eq!(calls.len(), 1);
@@ -8989,10 +9111,10 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
     }
 
     #[test]
-    fn parse_openai_stream_keeps_first_parallel_tool_call() {
+    fn parse_openai_stream_preserves_parallel_tool_calls() {
         // Some OpenAI-compatible gateways may ignore `parallel_tool_calls:false`.
-        // Execute the first call and ignore later same-turn calls so the loop can
-        // continue serially on the next model turn.
+        // Preserve every indexed call so the agent loop can execute the batch and
+        // return all observations on the next model turn.
         let body = concat!(
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a.rs\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"b\",\"type\":\"function\",\"function\":{\"name\":\"git_diff\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
@@ -9000,15 +9122,22 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
             "data: [DONE]\n\n",
         );
         let mut cur = Cursor::new(body.as_bytes().to_vec());
-        let mut events = NoopStreamEvents;
+        let mut events = CapturingEvents::default();
         let (resp, _usage) = super::parse_openai_stream(&mut cur, &mut events).unwrap();
         match resp.action {
-            super::ModelAction::CallTool { tool_name, input } => {
-                assert_eq!(tool_name, "read_file");
-                assert_eq!(input.get("path"), Some("a.rs"));
+            super::ModelAction::CallTools(calls) => {
+                assert_eq!(calls.len(), 2);
+                assert_eq!(calls[0].tool_name, "read_file");
+                assert_eq!(calls[0].input.get("path"), Some("a.rs"));
+                assert_eq!(calls[1].tool_name, "git_diff");
+                assert!(calls[1].input.args.is_empty());
             }
-            _ => panic!("expected first tool call to be used"),
+            other => panic!("expected batched tool calls, got {other:?}"),
         }
+        let calls = events.tool_calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "read_file");
+        assert_eq!(calls[1].0, "git_diff");
     }
 
     #[test]
@@ -9027,7 +9156,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "read_file");
                 assert_eq!(input.get("path"), Some("a.rs"));
             }
-            super::ModelAction::Finish => panic!("expected tool call"),
+            _ => panic!("expected tool call"),
         }
     }
 
@@ -9073,7 +9202,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "read_file");
                 assert_eq!(input.get("path"), Some("a.rs"));
             }
-            super::ModelAction::Finish => panic!("expected tool call"),
+            _ => panic!("expected tool call"),
         }
     }
 
@@ -9095,7 +9224,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "read_file");
                 assert_eq!(input.get("path"), Some("a.rs"));
             }
-            super::ModelAction::Finish => panic!("expected tool call"),
+            _ => panic!("expected tool call"),
         }
     }
 
@@ -9134,7 +9263,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "git_diff");
                 assert!(input.args.is_empty());
             }
-            super::ModelAction::Finish => panic!("expected tool call"),
+            _ => panic!("expected tool call"),
         }
     }
 
@@ -9155,7 +9284,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 assert_eq!(tool_name, "git_diff");
                 assert!(input.args.is_empty());
             }
-            super::ModelAction::Finish => panic!("expected tool call"),
+            _ => panic!("expected tool call"),
         }
     }
 

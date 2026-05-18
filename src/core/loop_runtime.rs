@@ -15,6 +15,7 @@ use crate::model::client::ModelClient;
 use crate::model::deepseek::DeepSeekClient;
 use crate::model::protocol::{
     ModelAction, ModelRequest, ModelResponse, Observation, ObservationKind, TokenUsage,
+    ToolCallRequest,
 };
 use crate::skills::registry::SkillRegistry;
 use crate::skills::resolver::{resolve_skill, SkillResolution};
@@ -524,86 +525,150 @@ impl AgentLoop {
                 recent_steps_log.push(entry);
             }
 
-            match response.action {
-                ModelAction::CallTool {
+            let tool_calls = match response.action {
+                ModelAction::CallTool { tool_name, input } => {
+                    vec![ToolCallRequest { tool_name, input }]
+                }
+                ModelAction::CallTools(calls) => calls,
+                ModelAction::Finish => {
+                    break;
+                }
+            };
+
+            for ToolCallRequest {
+                tool_name,
+                mut input,
+            } in tool_calls
+            {
+                check_cancelled(cancel_check.as_ref())?;
+                let event_input = input.args.clone();
+                emit_tool_call(run_events.as_ref(), &tool_name, &event_input);
+
+                // Phase 10c-2: compute fingerprint and check window BEFORE executing.
+                let fingerprint = format!(
+                    "{}:{}",
                     tool_name,
-                    mut input,
-                } => {
-                    check_cancelled(cancel_check.as_ref())?;
-                    let event_input = input.args.clone();
-                    emit_tool_call(run_events.as_ref(), &tool_name, &event_input);
-
-                    // Phase 10c-2: compute fingerprint and check window BEFORE executing.
-                    let fingerprint = format!(
-                        "{}:{}",
-                        tool_name,
-                        event_input
-                            .iter()
-                            .map(|(k, v)| format!("{k}={v}"))
-                            .collect::<Vec<_>>()
-                            .join("|")
-                    );
-                    let same_count_in_window = recent_call_fingerprints
+                    event_input
                         .iter()
-                        .rev()
-                        .take(REPEAT_WINDOW)
-                        .filter(|fp| **fp == fingerprint)
-                        .count();
-                    recent_call_fingerprints.push(fingerprint.clone());
-                    // Trim to keep memory bounded over long runs (only the last
-                    // REPEAT_WINDOW are ever read).
-                    if recent_call_fingerprints.len() > REPEAT_WINDOW {
-                        let drop_n = recent_call_fingerprints.len() - REPEAT_WINDOW;
-                        recent_call_fingerprints.drain(0..drop_n);
-                    }
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join("|")
+                );
+                let same_count_in_window = recent_call_fingerprints
+                    .iter()
+                    .rev()
+                    .take(REPEAT_WINDOW)
+                    .filter(|fp| **fp == fingerprint)
+                    .count();
+                recent_call_fingerprints.push(fingerprint.clone());
+                // Trim to keep memory bounded over long runs (only the last
+                // REPEAT_WINDOW are ever read).
+                if recent_call_fingerprints.len() > REPEAT_WINDOW {
+                    let drop_n = recent_call_fingerprints.len() - REPEAT_WINDOW;
+                    recent_call_fingerprints.drain(0..drop_n);
+                }
 
-                    if same_count_in_window >= 2 {
-                        // Third identical call in window → short-circuit as tool_failure.
-                        let stuck_msg = format!(
+                if same_count_in_window >= 2 {
+                    // Third identical call in window → short-circuit as tool_failure.
+                    let stuck_msg = format!(
                             "repeated identical tool call detected: '{}' invoked {} times in last {} steps with same args. Break out of stuck loop — try a different approach (todo_write to plan, gh/curl for research, or a different path/argument).",
                             tool_name,
                             same_count_in_window + 1,
                             REPEAT_WINDOW
                         );
+                    if let Some(renderer) = renderer.as_mut() {
+                        renderer.paint_tool_result(
+                            crate::ui::stream::ToolResultKind::Failed,
+                            &tool_name,
+                            "stuck",
+                            &stuck_msg,
+                        );
+                    }
+                    let event_name = tool_name.clone();
+                    observations.push(Observation::failed(tool_name, stuck_msg.clone()));
+                    push_tool_event(
+                        &mut tool_events,
+                        run_events.as_ref(),
+                        ToolEvent {
+                            tool_name: event_name,
+                            input: event_input,
+                            output: stuck_msg,
+                            status: crate::model::protocol::ObservationStatus::Failed,
+                        },
+                    );
+                    continue;
+                }
+
+                // Phase 10c-2: 2nd identical call — emit a separate stuck-warning
+                // Observation BEFORE running the tool. Avoids burying the warning in the
+                // tail of a long tool output that head_trim / Todos summarize would eat,
+                // and works for both Ok and Err result paths.
+                if same_count_in_window == 1 {
+                    let warning = format!(
+                            "⚠ stuck-warning: '{tool_name}' was called with the same args last step. If output is unchanged, try a DIFFERENT approach (todo_write to plan, gh/curl for research, different path/args, or move to the next step)."
+                        );
+                    observations.push(Observation::ok("stuck-warning", warning));
+                }
+
+                match hooks.pre_tool_use(&context.task, &tool_name, &input) {
+                    Ok(Some(hook_context)) => {
+                        observations.push(Observation::ok(
+                            "hook",
+                            format!("pre_tool_use: {hook_context}"),
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let raw = error.to_string();
                         if let Some(renderer) = renderer.as_mut() {
                             renderer.paint_tool_result(
-                                crate::ui::stream::ToolResultKind::Failed,
+                                crate::ui::stream::ToolResultKind::Denied,
                                 &tool_name,
-                                "stuck",
-                                &stuck_msg,
+                                "hook",
+                                &raw,
                             );
                         }
                         let event_name = tool_name.clone();
-                        observations.push(Observation::failed(tool_name, stuck_msg.clone()));
+                        observations.push(Observation::failed(
+                            tool_name,
+                            format!("pre_tool_use hook blocked tool: {raw}"),
+                        ));
                         push_tool_event(
                             &mut tool_events,
                             run_events.as_ref(),
                             ToolEvent {
                                 tool_name: event_name,
                                 input: event_input,
-                                output: stuck_msg,
+                                output: raw,
                                 status: crate::model::protocol::ObservationStatus::Failed,
                             },
                         );
                         continue;
                     }
+                }
 
-                    // Phase 10c-2: 2nd identical call — emit a separate stuck-warning
-                    // Observation BEFORE running the tool. Avoids burying the warning in the
-                    // tail of a long tool output that head_trim / Todos summarize would eat,
-                    // and works for both Ok and Err result paths.
-                    if same_count_in_window == 1 {
-                        let warning = format!(
-                            "⚠ stuck-warning: '{tool_name}' was called with the same args last step. If output is unchanged, try a DIFFERENT approach (todo_write to plan, gh/curl for research, different path/args, or move to the next step)."
-                        );
-                        observations.push(Observation::ok("stuck-warning", warning));
-                    }
-
-                    match hooks.pre_tool_use(&context.task, &tool_name, &input) {
+                let mut execution_policy = policy.clone();
+                if let Some(permission) =
+                    registry.permission_request_for(&tool_name, &input, &policy)
+                {
+                    emit_permission_request(
+                        run_events.as_ref(),
+                        &tool_name,
+                        &event_input,
+                        &permission.kind,
+                        &permission.target,
+                    );
+                    match hooks.permission_request(
+                        &context.task,
+                        &tool_name,
+                        &input,
+                        &permission.kind,
+                        &permission.target,
+                    ) {
                         Ok(Some(hook_context)) => {
                             observations.push(Observation::ok(
                                 "hook",
-                                format!("pre_tool_use: {hook_context}"),
+                                format!("permission_request: {hook_context}"),
                             ));
                         }
                         Ok(None) => {}
@@ -620,7 +685,7 @@ impl AgentLoop {
                             let event_name = tool_name.clone();
                             observations.push(Observation::failed(
                                 tool_name,
-                                format!("pre_tool_use hook blocked tool: {raw}"),
+                                format!("permission_request hook blocked tool: {raw}"),
                             ));
                             push_tool_event(
                                 &mut tool_events,
@@ -636,46 +701,33 @@ impl AgentLoop {
                         }
                     }
 
-                    let mut execution_policy = policy.clone();
-                    if let Some(permission) =
-                        registry.permission_request_for(&tool_name, &input, &policy)
-                    {
-                        emit_permission_request(
-                            run_events.as_ref(),
-                            &tool_name,
-                            &event_input,
-                            &permission.kind,
-                            &permission.target,
-                        );
-                        match hooks.permission_request(
-                            &context.task,
-                            &tool_name,
-                            &input,
-                            &permission.kind,
-                            &permission.target,
-                        ) {
-                            Ok(Some(hook_context)) => {
-                                observations.push(Observation::ok(
-                                    "hook",
-                                    format!("permission_request: {hook_context}"),
-                                ));
+                    if let Some(resolver) = approval_resolver.as_ref() {
+                        let approval_request = AgentApprovalRequest {
+                            tool_name: tool_name.clone(),
+                            input: event_input.clone(),
+                            kind: permission.kind.clone(),
+                            target: permission.target.clone(),
+                        };
+                        match resolver.borrow_mut().resolve(&approval_request)? {
+                            AgentApprovalDecision::Approved => {
+                                execution_policy =
+                                    policy.with_auto_approved_permission(&permission.kind);
                             }
-                            Ok(None) => {}
-                            Err(error) => {
-                                let raw = error.to_string();
+                            AgentApprovalDecision::Denied => {
+                                let raw = format!(
+                                    "permission denied for {}: {}",
+                                    permission.kind, permission.target
+                                );
                                 if let Some(renderer) = renderer.as_mut() {
                                     renderer.paint_tool_result(
                                         crate::ui::stream::ToolResultKind::Denied,
                                         &tool_name,
-                                        "hook",
+                                        &permission.kind,
                                         &raw,
                                     );
                                 }
                                 let event_name = tool_name.clone();
-                                observations.push(Observation::failed(
-                                    tool_name,
-                                    format!("permission_request hook blocked tool: {raw}"),
-                                ));
+                                observations.push(Observation::failed(tool_name, raw.clone()));
                                 push_tool_event(
                                     &mut tool_events,
                                     run_events.as_ref(),
@@ -689,112 +741,58 @@ impl AgentLoop {
                                 continue;
                             }
                         }
-
-                        if let Some(resolver) = approval_resolver.as_ref() {
-                            let approval_request = AgentApprovalRequest {
-                                tool_name: tool_name.clone(),
-                                input: event_input.clone(),
-                                kind: permission.kind.clone(),
-                                target: permission.target.clone(),
-                            };
-                            match resolver.borrow_mut().resolve(&approval_request)? {
-                                AgentApprovalDecision::Approved => {
-                                    execution_policy =
-                                        policy.with_auto_approved_permission(&permission.kind);
-                                }
-                                AgentApprovalDecision::Denied => {
-                                    let raw = format!(
-                                        "permission denied for {}: {}",
-                                        permission.kind, permission.target
-                                    );
-                                    if let Some(renderer) = renderer.as_mut() {
-                                        renderer.paint_tool_result(
-                                            crate::ui::stream::ToolResultKind::Denied,
-                                            &tool_name,
-                                            &permission.kind,
-                                            &raw,
-                                        );
-                                    }
-                                    let event_name = tool_name.clone();
-                                    observations.push(Observation::failed(tool_name, raw.clone()));
-                                    push_tool_event(
-                                        &mut tool_events,
-                                        run_events.as_ref(),
-                                        ToolEvent {
-                                            tool_name: event_name,
-                                            input: event_input,
-                                            output: raw,
-                                            status:
-                                                crate::model::protocol::ObservationStatus::Failed,
-                                        },
-                                    );
-                                    continue;
-                                }
-                            }
-                        }
                     }
+                }
 
-                    if shell_env_hook_applies_to(&tool_name) {
-                        match hooks.shell_env(&context.task, &tool_name, &input) {
-                            Ok(shell_env) => {
-                                let mut applied_keys = Vec::new();
-                                for (key, value) in shell_env.vars {
-                                    input.args.insert(format!("env.{key}"), value);
-                                    applied_keys.push(key);
-                                }
-                                if !applied_keys.is_empty() {
-                                    observations.push(Observation::ok(
-                                        "hook",
-                                        format!(
-                                            "shell_env applied keys: {}",
-                                            applied_keys.join(", ")
-                                        ),
-                                    ));
-                                }
-                                if !shell_env.notices.is_empty() {
-                                    observations.push(Observation::ok(
-                                        "hook",
-                                        format!("shell_env: {}", shell_env.notices.join("; ")),
-                                    ));
-                                }
+                if shell_env_hook_applies_to(&tool_name) {
+                    match hooks.shell_env(&context.task, &tool_name, &input) {
+                        Ok(shell_env) => {
+                            let mut applied_keys = Vec::new();
+                            for (key, value) in shell_env.vars {
+                                input.args.insert(format!("env.{key}"), value);
+                                applied_keys.push(key);
                             }
-                            Err(error) => {
+                            if !applied_keys.is_empty() {
                                 observations.push(Observation::ok(
                                     "hook",
-                                    format!("shell_env hook skipped: {error}"),
+                                    format!("shell_env applied keys: {}", applied_keys.join(", ")),
+                                ));
+                            }
+                            if !shell_env.notices.is_empty() {
+                                observations.push(Observation::ok(
+                                    "hook",
+                                    format!("shell_env: {}", shell_env.notices.join("; ")),
                                 ));
                             }
                         }
+                        Err(error) => {
+                            observations.push(Observation::ok(
+                                "hook",
+                                format!("shell_env hook skipped: {error}"),
+                            ));
+                        }
                     }
+                }
 
-                    let tool_result = if tool_name == "request_user_input" {
-                        if let Some(resolver) = user_input_resolver.as_ref() {
-                            match execute_tool_with_cancel(
-                                &registry,
-                                &tool_name,
-                                input.clone(),
-                                &execution_policy,
-                                cancel_check.as_ref(),
-                            ) {
-                                Ok(_) => {
-                                    let request = AgentUserInputRequest {
-                                        input: event_input.clone(),
-                                    };
-                                    let response = resolver.borrow_mut().resolve(&request)?;
-                                    Ok(crate::tools::types::ToolOutput {
-                                        summary: render_user_input_answers(&response.answers),
-                                    })
-                                }
-                                Err(error) => Err(error),
+                let tool_result = if tool_name == "request_user_input" {
+                    if let Some(resolver) = user_input_resolver.as_ref() {
+                        match execute_tool_with_cancel(
+                            &registry,
+                            &tool_name,
+                            input.clone(),
+                            &execution_policy,
+                            cancel_check.as_ref(),
+                        ) {
+                            Ok(_) => {
+                                let request = AgentUserInputRequest {
+                                    input: event_input.clone(),
+                                };
+                                let response = resolver.borrow_mut().resolve(&request)?;
+                                Ok(crate::tools::types::ToolOutput {
+                                    summary: render_user_input_answers(&response.answers),
+                                })
                             }
-                        } else {
-                            execute_tool_with_cancel(
-                                &registry,
-                                &tool_name,
-                                input,
-                                &execution_policy,
-                                cancel_check.as_ref(),
-                            )
+                            Err(error) => Err(error),
                         }
                     } else {
                         execute_tool_with_cancel(
@@ -804,130 +802,129 @@ impl AgentLoop {
                             &execution_policy,
                             cancel_check.as_ref(),
                         )
-                    };
-
-                    match tool_result {
-                        Ok(mut output) => {
-                            check_cancelled(cancel_check.as_ref())?;
-                            if tool_name == "dispatch_subagent" {
-                                if let Some(delegated_task) = event_input.get("task") {
-                                    if todos
-                                        .borrow_mut()
-                                        .complete_in_progress_matching_subagent_task(delegated_task)
-                                    {
-                                        output.summary.push_str(
-                                            "\nparent todos auto-advanced after subagent completion",
-                                        );
-                                    }
-                                }
-                            }
-                            output.summary =
-                                crate::tools::tool_output::maybe_spill_successful_tool_output(
-                                    &tool_name,
-                                    &output.summary,
-                                );
-                            let kind = ObservationKind::from_tool_name(&tool_name);
-                            let observation_summary = summarize_for_kind(&output.summary, kind);
-                            // CR-1: user sees full body (output.summary), observation/transcript get trim.
-                            if let Some(renderer) = renderer.as_mut() {
-                                renderer.paint_tool_result(
-                                    crate::ui::stream::ToolResultKind::Ok,
-                                    &tool_name,
-                                    kind.label(),
-                                    &output.summary,
-                                );
-                            }
-                            let event_name = tool_name.clone();
-                            observations
-                                .push(Observation::ok(tool_name, observation_summary.clone()));
-                            if let Some(recovery_hint) = derive_recovery_hint_after_success(
-                                &event_name,
-                                &output.summary,
-                                &available_tools,
-                                primary_file.as_deref(),
-                                &observations,
-                            ) {
-                                observations.push(Observation::ok("recovery_hint", recovery_hint));
-                            }
-                            if let Some(replan_hint) =
-                                derive_replan_hint(&event_name, &output.summary, &observations)
-                            {
-                                observations.push(Observation::ok("replan_hint", replan_hint));
-                            }
-                            push_tool_event(
-                                &mut tool_events,
-                                run_events.as_ref(),
-                                ToolEvent {
-                                    tool_name: event_name,
-                                    input: event_input,
-                                    output: output.summary,
-                                    status: crate::model::protocol::ObservationStatus::Ok,
-                                },
-                            );
-                            push_post_tool_hook_observation(
-                                &hooks,
-                                &context.task,
-                                &tool_events,
-                                &mut observations,
-                            );
-                        }
-                        Err(error) => {
-                            check_cancelled(cancel_check.as_ref())?;
-                            let kind = ObservationKind::from_tool_name(&tool_name);
-                            let raw = error.to_string();
-                            let observation_summary = summarize_for_kind(&raw, kind);
-                            let result_kind = match crate::error::classify(error.as_ref()) {
-                                crate::error::AppErrorKind::PolicyDenied => {
-                                    crate::ui::stream::ToolResultKind::Denied
-                                }
-                                _ => crate::ui::stream::ToolResultKind::Failed,
-                            };
-                            // CR-1: user sees full error text, observation/transcript get trim.
-                            if let Some(renderer) = renderer.as_mut() {
-                                renderer.paint_tool_result(
-                                    result_kind,
-                                    &tool_name,
-                                    kind.label(),
-                                    &raw,
-                                );
-                            }
-                            let event_name = tool_name.clone();
-                            observations
-                                .push(Observation::failed(tool_name, observation_summary.clone()));
-                            if let Some(recovery_hint) = derive_recovery_hint_after_failure(
-                                &event_name,
-                                &available_tools,
-                                primary_file.as_deref(),
-                                &observations,
-                            ) {
-                                observations.push(Observation::ok("recovery_hint", recovery_hint));
-                            }
-                            if let Some(replan_hint) =
-                                derive_replan_hint(&event_name, &observation_summary, &observations)
-                            {
-                                observations.push(Observation::ok("replan_hint", replan_hint));
-                            }
-                            push_tool_event(
-                                &mut tool_events,
-                                run_events.as_ref(),
-                                ToolEvent {
-                                    tool_name: event_name,
-                                    input: event_input,
-                                    output: raw,
-                                    status: crate::model::protocol::ObservationStatus::Failed,
-                                },
-                            );
-                            push_post_tool_hook_observation(
-                                &hooks,
-                                &context.task,
-                                &tool_events,
-                                &mut observations,
-                            );
-                        }
                     }
-                }
-                ModelAction::Finish => {
-                    break;
+                } else {
+                    execute_tool_with_cancel(
+                        &registry,
+                        &tool_name,
+                        input,
+                        &execution_policy,
+                        cancel_check.as_ref(),
+                    )
+                };
+
+                match tool_result {
+                    Ok(mut output) => {
+                        check_cancelled(cancel_check.as_ref())?;
+                        if tool_name == "dispatch_subagent" {
+                            if let Some(delegated_task) = event_input.get("task") {
+                                if todos
+                                    .borrow_mut()
+                                    .complete_in_progress_matching_subagent_task(delegated_task)
+                                {
+                                    output.summary.push_str(
+                                        "\nparent todos auto-advanced after subagent completion",
+                                    );
+                                }
+                            }
+                        }
+                        output.summary =
+                            crate::tools::tool_output::maybe_spill_successful_tool_output(
+                                &tool_name,
+                                &output.summary,
+                            );
+                        let kind = ObservationKind::from_tool_name(&tool_name);
+                        let observation_summary = summarize_for_kind(&output.summary, kind);
+                        // CR-1: user sees full body (output.summary), observation/transcript get trim.
+                        if let Some(renderer) = renderer.as_mut() {
+                            renderer.paint_tool_result(
+                                crate::ui::stream::ToolResultKind::Ok,
+                                &tool_name,
+                                kind.label(),
+                                &output.summary,
+                            );
+                        }
+                        let event_name = tool_name.clone();
+                        observations.push(Observation::ok(tool_name, observation_summary.clone()));
+                        if let Some(recovery_hint) = derive_recovery_hint_after_success(
+                            &event_name,
+                            &output.summary,
+                            &available_tools,
+                            primary_file.as_deref(),
+                            &observations,
+                        ) {
+                            observations.push(Observation::ok("recovery_hint", recovery_hint));
+                        }
+                        if let Some(replan_hint) =
+                            derive_replan_hint(&event_name, &output.summary, &observations)
+                        {
+                            observations.push(Observation::ok("replan_hint", replan_hint));
+                        }
+                        push_tool_event(
+                            &mut tool_events,
+                            run_events.as_ref(),
+                            ToolEvent {
+                                tool_name: event_name,
+                                input: event_input,
+                                output: output.summary,
+                                status: crate::model::protocol::ObservationStatus::Ok,
+                            },
+                        );
+                        push_post_tool_hook_observation(
+                            &hooks,
+                            &context.task,
+                            &tool_events,
+                            &mut observations,
+                        );
+                    }
+                    Err(error) => {
+                        check_cancelled(cancel_check.as_ref())?;
+                        let kind = ObservationKind::from_tool_name(&tool_name);
+                        let raw = error.to_string();
+                        let observation_summary = summarize_for_kind(&raw, kind);
+                        let result_kind = match crate::error::classify(error.as_ref()) {
+                            crate::error::AppErrorKind::PolicyDenied => {
+                                crate::ui::stream::ToolResultKind::Denied
+                            }
+                            _ => crate::ui::stream::ToolResultKind::Failed,
+                        };
+                        // CR-1: user sees full error text, observation/transcript get trim.
+                        if let Some(renderer) = renderer.as_mut() {
+                            renderer.paint_tool_result(result_kind, &tool_name, kind.label(), &raw);
+                        }
+                        let event_name = tool_name.clone();
+                        observations
+                            .push(Observation::failed(tool_name, observation_summary.clone()));
+                        if let Some(recovery_hint) = derive_recovery_hint_after_failure(
+                            &event_name,
+                            &available_tools,
+                            primary_file.as_deref(),
+                            &observations,
+                        ) {
+                            observations.push(Observation::ok("recovery_hint", recovery_hint));
+                        }
+                        if let Some(replan_hint) =
+                            derive_replan_hint(&event_name, &observation_summary, &observations)
+                        {
+                            observations.push(Observation::ok("replan_hint", replan_hint));
+                        }
+                        push_tool_event(
+                            &mut tool_events,
+                            run_events.as_ref(),
+                            ToolEvent {
+                                tool_name: event_name,
+                                input: event_input,
+                                output: raw,
+                                status: crate::model::protocol::ObservationStatus::Failed,
+                            },
+                        );
+                        push_post_tool_hook_observation(
+                            &hooks,
+                            &context.task,
+                            &tool_events,
+                            &mut observations,
+                        );
+                    }
                 }
             }
         }
@@ -2258,7 +2255,9 @@ mod cr1_regression_test {
     use crate::core::context::TaskContext;
     use crate::core::todos::{TodoList, TodoStatus};
     use crate::model::client::ModelClient;
-    use crate::model::protocol::{ModelAction, ModelRequest, ModelResponse, TokenUsage};
+    use crate::model::protocol::{
+        ModelAction, ModelRequest, ModelResponse, TokenUsage, ToolCallRequest,
+    };
     use crate::tools::types::ToolInput;
     use crate::ui::stream::StreamEvents;
 
@@ -3075,6 +3074,65 @@ mod cr1_regression_test {
                 None,
             ))
         }
+    }
+
+    #[test]
+    fn run_with_client_executes_batched_tool_calls_in_one_model_turn() {
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("inspect workspace".to_string(), None);
+        let client = ScriptedActionsClient {
+            captured_observations: RefCell::new(Vec::new()),
+            actions: vec![
+                ModelAction::CallTools(vec![
+                    ToolCallRequest {
+                        tool_name: "list_files".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("root", ".")
+                            .with_arg("depth", "1"),
+                    },
+                    ToolCallRequest {
+                        tool_name: "read_file".to_string(),
+                        input: ToolInput::new().with_arg("path", "Cargo.toml"),
+                    },
+                ]),
+                ModelAction::Finish,
+            ],
+            calls: RefCell::new(0),
+        };
+
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 2,
+                    emit_progress: false,
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(result.tool_events.len(), 2);
+        assert_eq!(result.tool_events[0].tool_name, "list_files");
+        assert_eq!(result.tool_events[1].tool_name, "read_file");
+        assert!(matches!(
+            result.tool_events[0].status,
+            crate::model::protocol::ObservationStatus::Ok
+        ));
+        assert!(matches!(
+            result.tool_events[1].status,
+            crate::model::protocol::ObservationStatus::Ok
+        ));
+
+        let captures = client.captured_observations.borrow();
+        let step2_obs = captures.get(1).expect("expected second model request");
+        assert!(step2_obs
+            .iter()
+            .any(|observation| observation.tool_name == "list_files"));
+        assert!(step2_obs
+            .iter()
+            .any(|observation| observation.tool_name == "read_file"));
     }
 
     #[test]
