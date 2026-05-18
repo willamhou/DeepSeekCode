@@ -40,6 +40,7 @@ Run the full local release gate before tagging or publishing:
 cargo fmt --check
 cargo test -- --test-threads=1
 cargo package --allow-dirty
+node scripts/check-secrets.js
 deepseek benchmark
 docs/demo/record-model-backed-demo.sh --dry-run
 docs/demo/record-model-backed-demo.sh --redaction-self-test

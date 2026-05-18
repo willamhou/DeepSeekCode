@@ -132,6 +132,9 @@ jobs:
       - name: Cargo Metadata
         run: cargo metadata --no-deps --format-version 1
 
+      - name: Secret Scan
+        run: node scripts/check-secrets.js
+
       - name: Cargo Package Verify
         run: cargo package
 

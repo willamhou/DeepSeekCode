@@ -154,6 +154,7 @@ DEEPSEEK_DEMO_KEY_FILE=/tmp/deepseek-demo.key docs/demo/record-model-backed-demo
 cargo fmt --check
 cargo test --lib -- --test-threads=1
 cargo package --allow-dirty
+node scripts/check-secrets.js
 deepseek tui --demo --once
 ```
 

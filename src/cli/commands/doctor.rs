@@ -962,7 +962,7 @@ mod tests {
         );
         assert!(
             !json_value_to_string(&JsonValue::Object(onboarding.clone()))
-                .contains("sk-test-secret-tail-123456")
+                .contains("sk-test-secret-tail-123456") // secret-scan: allow fake doctor fixture
         );
     }
 
@@ -989,7 +989,7 @@ mod tests {
             std::process::id(),
             std::thread::current().name().unwrap_or("unnamed")
         );
-        std::env::set_var(&env_name, "sk-test-secret-tail-123456");
+        std::env::set_var(&env_name, "sk-test-secret-tail-123456"); // secret-scan: allow fake doctor fixture
         let mut config = AppConfig::default();
         config.model.api_key_env = env_name.clone();
 
