@@ -119,15 +119,11 @@ Codex CLI 的产品成熟度。最大差距集中在：
 
 ## Demo 素材
 
-README 里的 demo 图是从确定性 TUI snapshot 生成的 animated SVG：
+README 里的 demo 图是从确定性 TUI snapshot 生成的 animated SVG。用仓库内置
+recorder 重新生成 animated 和 static 两个 SVG 素材：
 
 ```bash
-svg-term --command "bash -lc 'target/debug/deepseek tui --demo --once | sed -e \"s/^\\\"//\" -e \"s/\\\"$//\" | while IFS= read -r line; do printf \"%s\\n\" \"\$line\"; sleep 0.08; done; sleep 1.5'" \
-  --out docs/demo/deepseek-code-tui-demo.svg \
-  --width 122 \
-  --height 36 \
-  --window \
-  --no-cursor
+docs/demo/record-readme-demo.sh
 ```
 
 `docs/demo/deepseek-code-tui.svg` 保留为静态 snapshot。正式发布前建议再录一段

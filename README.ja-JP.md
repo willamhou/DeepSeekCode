@@ -126,14 +126,10 @@ DeepSeekCode は自身の開発に使える段階ですが、Claude Code CLI / C
 ## Demo 素材
 
 README の demo 画像は決定的な TUI snapshot から生成した animated SVG です。
+repo-native recorder で animated / static の両方を再生成します。
 
 ```bash
-svg-term --command "bash -lc 'target/debug/deepseek tui --demo --once | sed -e \"s/^\\\"//\" -e \"s/\\\"$//\" | while IFS= read -r line; do printf \"%s\\n\" \"\$line\"; sleep 0.08; done; sleep 1.5'" \
-  --out docs/demo/deepseek-code-tui-demo.svg \
-  --width 122 \
-  --height 36 \
-  --window \
-  --no-cursor
+docs/demo/record-readme-demo.sh
 ```
 
 `docs/demo/deepseek-code-tui.svg` は静的 snapshot として残しています。公開品質の

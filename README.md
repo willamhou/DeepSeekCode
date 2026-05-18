@@ -127,15 +127,10 @@ Claude Code CLI / Codex CLI polish. The largest remaining gaps are:
 ## Demo Asset
 
 The README demo image is an animated SVG generated from the deterministic TUI
-snapshot:
+snapshot. Regenerate both README SVG assets with the repo-native recorder:
 
 ```bash
-svg-term --command "bash -lc 'target/debug/deepseek tui --demo --once | sed -e \"s/^\\\"//\" -e \"s/\\\"$//\" | while IFS= read -r line; do printf \"%s\\n\" \"\$line\"; sleep 0.08; done; sleep 1.5'" \
-  --out docs/demo/deepseek-code-tui-demo.svg \
-  --width 122 \
-  --height 36 \
-  --window \
-  --no-cursor
+docs/demo/record-readme-demo.sh
 ```
 
 `docs/demo/deepseek-code-tui.svg` remains as a static snapshot. For a
