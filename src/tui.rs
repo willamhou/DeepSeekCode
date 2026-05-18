@@ -16576,6 +16576,7 @@ where
     L: FnMut(&mut TuiApp) -> AppResult<()>,
 {
     install_terminal_signal_cleanup_once();
+    attach_windows_console_standard_handles();
     enable_raw_mode()?;
     let mut terminal_guard = TerminalRestoreGuard::arm();
     let mut stdout = io::stdout();
@@ -16599,6 +16600,45 @@ where
     terminal_guard.disarm();
     result
 }
+
+#[cfg(windows)]
+fn attach_windows_console_standard_handles() {
+    use std::ffi::c_void;
+    use std::fs::OpenOptions;
+    use std::os::windows::io::IntoRawHandle;
+
+    type BOOL = i32;
+    type DWORD = u32;
+    type HANDLE = *mut c_void;
+
+    const STD_INPUT_HANDLE: DWORD = -10_i32 as DWORD;
+    const STD_OUTPUT_HANDLE: DWORD = -11_i32 as DWORD;
+    const STD_ERROR_HANDLE: DWORD = -12_i32 as DWORD;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetStdHandle(nStdHandle: DWORD, hHandle: HANDLE) -> BOOL;
+    }
+
+    let Ok(conin) = OpenOptions::new().read(true).write(true).open("CONIN$") else {
+        return;
+    };
+    let Ok(conout) = OpenOptions::new().read(true).write(true).open("CONOUT$") else {
+        return;
+    };
+    let Ok(conerr) = conout.try_clone() else {
+        return;
+    };
+
+    unsafe {
+        let _ = SetStdHandle(STD_INPUT_HANDLE, conin.into_raw_handle().cast::<c_void>());
+        let _ = SetStdHandle(STD_OUTPUT_HANDLE, conout.into_raw_handle().cast::<c_void>());
+        let _ = SetStdHandle(STD_ERROR_HANDLE, conerr.into_raw_handle().cast::<c_void>());
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_windows_console_standard_handles() {}
 
 struct TerminalRestoreGuard {
     active: bool,

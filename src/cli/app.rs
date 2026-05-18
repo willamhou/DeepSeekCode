@@ -14,10 +14,20 @@ struct TerminalContext {
 
 impl TerminalContext {
     fn current() -> Self {
-        Self {
+        let context = Self {
             stdin_tty: io::stdin().is_terminal(),
             stdout_tty: io::stdout().is_terminal(),
+        };
+        #[cfg(windows)]
+        {
+            if !context.supports_full_screen() && windows_console_devices_available() {
+                return Self {
+                    stdin_tty: true,
+                    stdout_tty: true,
+                };
+            }
         }
+        context
     }
 
     fn non_interactive() -> Self {
@@ -30,6 +40,20 @@ impl TerminalContext {
     fn supports_full_screen(self) -> bool {
         self.stdin_tty && self.stdout_tty
     }
+}
+
+#[cfg(windows)]
+fn windows_console_devices_available() -> bool {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("CONIN$")
+        .is_ok()
+        && std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("CONOUT$")
+            .is_ok()
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
