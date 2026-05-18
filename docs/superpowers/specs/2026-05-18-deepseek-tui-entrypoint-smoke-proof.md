@@ -23,6 +23,8 @@ is now a full-screen terminal app.
   `deepseek` under the Unix `script` PTY wrapper.
 - `--smoke-bin <path>` smokes a selected binary, which lets release gates target
   `./target/release/deepseek` or an installed binary.
+- The Release Matrix runs that smoke directly against each non-Windows release
+  binary before packaging artifacts.
 - The smoke sends `q` to the PTY, verifies successful exit, checks alternate
   screen enter/leave sequences, and confirms the TUI rendered `DeepSeekCode`
   plus `TUI`.
