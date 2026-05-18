@@ -28,6 +28,7 @@ Dry-run the capture plan without requiring an API key:
 
 ```bash
 docs/demo/record-model-backed-demo.sh --dry-run
+docs/demo/record-model-backed-demo.sh --redaction-self-test
 ```
 
 Record a real model-backed transcript:
@@ -45,4 +46,5 @@ linked from the README; do not publish runs created with
 
 `DEEPSEEK_DEMO_KEY_FILE` must point outside this repository so API keys cannot
 be accidentally committed. `--api-key-stdin` is also supported when piping from
-a local secret manager.
+a local secret manager. The transcript stream redacts known API key values
+before writing the log.

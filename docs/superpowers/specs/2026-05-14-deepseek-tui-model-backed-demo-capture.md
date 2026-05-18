@@ -21,6 +21,8 @@ capture workflow, the README could only describe this as future manual work.
 - `DEEPSEEK_DEMO_KEY_FILE` and `--api-key-stdin` let operators provide the key
   without putting it directly in shell history or committed docs; key files must
   live outside the repository.
+- The transcript stream redacts known API key values before teeing to disk, and
+  `--redaction-self-test` verifies that redaction path without running a model.
 - `--dry-run` prints the planned fixture, transcript path, budget, and prompt
   without creating a repo or calling a model.
 - `docs/demo/README.md` and all README locales now point to the recorder.
@@ -29,6 +31,7 @@ capture workflow, the README could only describe this as future manual work.
 
 - `bash -n docs/demo/record-model-backed-demo.sh`
 - `docs/demo/record-model-backed-demo.sh --dry-run`
+- `docs/demo/record-model-backed-demo.sh --redaction-self-test`
 - `cargo fmt --check`
 - `cargo check`
 - `cargo test --lib -- --test-threads=1`

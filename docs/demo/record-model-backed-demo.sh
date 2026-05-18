@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: docs/demo/record-model-backed-demo.sh [--dry-run] [--cleanup] [--api-key-stdin] [--help]
+Usage: docs/demo/record-model-backed-demo.sh [--dry-run] [--cleanup] [--api-key-stdin] [--redaction-self-test] [--help]
 
 Records a model-backed DeepSeekCode coding loop against a disposable Rust repo:
 failing test -> deepseek exec edit -> git diff -> passing cargo test.
@@ -22,13 +22,15 @@ Environment:
   DEEPSEEK_DEMO_PROMPT      Override the coding task prompt.
 
 The generated transcript is suitable as source evidence for README GIF/MP4
-capture. Review it before committing generated media.
+capture. The recorder redacts known API key values from stdout and transcript
+logs. Review generated media before committing it.
 EOF
 }
 
 dry_run=0
 cleanup=0
 api_key_stdin=0
+redaction_self_test=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,6 +44,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --api-key-stdin)
       api_key_stdin=1
+      shift
+      ;;
+    --redaction-self-test)
+      redaction_self_test=1
       shift
       ;;
     --help|-h)
@@ -64,6 +70,71 @@ demo_prompt=${DEEPSEEK_DEMO_PROMPT:-"Fix the failing Rust test by replacing the 
 demo_out=${DEEPSEEK_DEMO_OUT:-"$repo_root/docs/demo/deepseek-code-model-demo-$run_id.log"}
 work_parent=${DEEPSEEK_DEMO_WORKDIR:-"${TMPDIR:-/tmp}"}
 demo_repo="$work_parent/deepseek-code-model-demo-$run_id"
+
+redact_demo_stream() {
+  awk '
+    function redact_all(line, needle, replacement,    out, pos) {
+      if (length(needle) == 0) {
+        return line
+      }
+      out = ""
+      while ((pos = index(line, needle)) > 0) {
+        out = out substr(line, 1, pos - 1) replacement
+        line = substr(line, pos + length(needle))
+      }
+      return out line
+    }
+    BEGIN {
+      names[1] = "DEEPSEEK_API_KEY"
+      names[2] = "OPENAI_API_KEY"
+      names[3] = "ANTHROPIC_API_KEY"
+      names[4] = "DEEPSEEK_DEMO_KEY_FILE"
+      for (i = 1; i <= 4; i++) {
+        value = ENVIRON[names[i]]
+        if (length(value) > 0) {
+          count += 1
+          secrets[count] = value
+          replacements[count] = "<" names[i] ":redacted>"
+        }
+      }
+    }
+    {
+      line = $0
+      for (i = 1; i <= count; i++) {
+        line = redact_all(line, secrets[i], replacements[i])
+      }
+      print line
+    }
+  '
+}
+
+if [[ "$redaction_self_test" -eq 1 ]]; then
+  previous_key_set=0
+  previous_key_value=
+  if [[ -n "${DEEPSEEK_API_KEY+x}" ]]; then
+    previous_key_set=1
+    previous_key_value=$DEEPSEEK_API_KEY
+  fi
+  export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-demo-secret-for-redaction}"
+  test_secret=$DEEPSEEK_API_KEY
+  output=$(printf 'before %s after\n' "$test_secret" | redact_demo_stream)
+  if [[ "$previous_key_set" -eq 1 ]]; then
+    DEEPSEEK_API_KEY=$previous_key_value
+    export DEEPSEEK_API_KEY
+  else
+    unset DEEPSEEK_API_KEY
+  fi
+  if [[ "$output" == *"$test_secret"* ]]; then
+    echo "redaction self-test failed: secret remained in output" >&2
+    exit 1
+  fi
+  if [[ "$output" != *"<DEEPSEEK_API_KEY:redacted>"* ]]; then
+    echo "redaction self-test failed: redaction marker missing" >&2
+    exit 1
+  fi
+  echo "redaction self-test ok"
+  exit 0
+fi
 
 if [[ "$dry_run" -eq 1 ]]; then
   echo "DeepSeekCode model-backed demo dry run"
@@ -178,7 +249,7 @@ run_session() {
 }
 
 set +e
-run_session 2>&1 | tee "$demo_out"
+run_session 2>&1 | redact_demo_stream | tee "$demo_out"
 session_status=${PIPESTATUS[0]}
 set -e
 

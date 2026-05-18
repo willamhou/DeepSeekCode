@@ -142,7 +142,9 @@ SHA-256 entries, install/test blocks, optional Ruby syntax, and release-mode
 non-placeholder checksums.
 The model-backed README demo recorder now also supports `DEEPSEEK_DEMO_KEY_FILE`
 outside the repository and `--api-key-stdin`, so real demo capture can consume
-DeepSeek credentials without committing or echoing the key.
+DeepSeek credentials without committing or echoing the key; its transcript
+stream redacts known API key values and exposes `--redaction-self-test` for
+offline verification.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
 - broader terminal/platform proof beyond the TTY-aware default TUI entrypoint,
