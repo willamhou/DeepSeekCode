@@ -45,6 +45,9 @@ gate already used elsewhere is serial test execution.
   release binary/package/npm platform smoke. Linux remains the full behavioral
   gate with `cargo test -- --test-threads=1`; macOS and Windows now verify
   compile/package viability without depending on Unix-specific test fixtures.
+- Release Matrix build jobs now also verify deterministic TUI snapshot rendering
+  on Linux, macOS, and Windows release binaries before packaging. Non-Windows
+  jobs continue to run the real PTY entrypoint smoke as well.
 - Updated the macOS x64 runner from the old Intel label to `macos-15-intel`
   after the tag workflow queued indefinitely on `macos-13`.
 - Updated `docs/release.md` to use the same serial test command in the local
@@ -68,6 +71,8 @@ gate already used elsewhere is serial test execution.
 - `(cd npm && npm pack --dry-run)`
 - `for package_dir in npm/platforms/*; do (cd "$package_dir" && npm_config_cache=/tmp/deepseek-npm-cache npm pack --dry-run); done`
 - `cargo fmt --check`
+- `target/debug/deepseek tui --demo --once`
+- `target/debug/deepseek tui --entrypoint-smoke --smoke-bin target/debug/deepseek`
 - `git diff --check`
 - `rg -n '^\s*run: .*: ' .github/workflows/release.yml` returned no matches
   after the workflow YAML fix.

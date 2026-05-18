@@ -130,6 +130,8 @@ That default-entrypoint behavior now has a repo-native PTY release smoke:
 through `script`, verifies alternate-screen TUI rendering, sends `q`, and emits
 `deepseek.tui.entrypoint_smoke.v1` JSON evidence; the Release Matrix runs that
 smoke directly against non-Windows release binaries before packaging.
+Release Matrix build jobs now also verify deterministic TUI snapshot rendering
+on Linux, macOS, and Windows release binaries before packaging.
 README demo refresh is now also repo-native: `docs/demo/record-readme-demo.sh`
 regenerates the animated and static SVG assets and fails if the README
 animation loses SVG keyframes.
