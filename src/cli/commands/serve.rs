@@ -8550,11 +8550,12 @@ fn create_event_response(
                 json_string_map_field(payload, "input")?,
             )?
         }
-        "permission_response" => store.append_permission_response(
+        "permission_response" => store.append_permission_response_with_scope(
             thread_id,
             turn_id.as_deref(),
             json_string_field(payload, "request_id", "")?,
             json_string_field(payload, "decision", "")?,
+            json_optional_string_field(payload, "scope")?,
         )?,
         "user_input_request" => {
             let questions = payload

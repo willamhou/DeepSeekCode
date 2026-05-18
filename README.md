@@ -31,6 +31,8 @@ iterating from the same terminal.
 - Permission-gated shell execution plus background shell jobs, wait/poll,
   replay, attach snapshots, stdin, resize metadata, cancellation, and a
   workspace shell-supervisor protocol bridge.
+- Runtime approvals support approve-once and approve-for-session, with grouped
+  safe command variants and exact denial scoping.
 - Local HTTP/SSE runtime, ACP stdio adapter, MCP client/server tooling, and TUI
   MCP management screens.
 - Guided `/setup` onboarding with first-run done/todo/review state,

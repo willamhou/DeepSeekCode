@@ -1322,6 +1322,8 @@ impl RuntimeStore {
             }
         }
         let fingerprint = permission_request_fingerprint(&tool, &kind, &target, &input);
+        let grouping_fingerprint =
+            permission_request_grouping_fingerprint(&tool, &kind, &target, &input);
         let event = self.append_event(
             thread_id,
             turn_id,
@@ -1332,6 +1334,10 @@ impl RuntimeStore {
                 ("kind", JsonValue::String(kind)),
                 ("target", JsonValue::String(target)),
                 ("fingerprint", JsonValue::String(fingerprint)),
+                (
+                    "grouping_fingerprint",
+                    JsonValue::String(grouping_fingerprint),
+                ),
                 ("status", JsonValue::String("pending".to_string())),
                 (
                     "input",
@@ -1364,6 +1370,17 @@ impl RuntimeStore {
         request_id: String,
         decision: String,
     ) -> AppResult<RuntimeEvent> {
+        self.append_permission_response_with_scope(thread_id, turn_id, request_id, decision, None)
+    }
+
+    pub fn append_permission_response_with_scope(
+        &self,
+        thread_id: &str,
+        turn_id: Option<&str>,
+        request_id: String,
+        decision: String,
+        scope: Option<String>,
+    ) -> AppResult<RuntimeEvent> {
         validate_record_id(thread_id)?;
         if let Some(turn_id) = turn_id {
             validate_record_id(turn_id)?;
@@ -1372,6 +1389,12 @@ impl RuntimeStore {
         if !matches!(decision.as_str(), "approved" | "denied") {
             return Err(app_error(format!(
                 "invalid permission response decision `{decision}`"
+            )));
+        }
+        let scope = scope.unwrap_or_else(|| "once".to_string());
+        if !matches!(scope.as_str(), "once" | "session" | "cached") {
+            return Err(app_error(format!(
+                "invalid permission response scope `{scope}`"
             )));
         }
         self.ensure_dirs()?;
@@ -1390,6 +1413,7 @@ impl RuntimeStore {
                 ("type", JsonValue::String("permission_response".to_string())),
                 ("request_id", JsonValue::String(request_id)),
                 ("decision", JsonValue::String(decision)),
+                ("scope", JsonValue::String(scope)),
             ])),
         )?;
         thread.updated_at = event.created_at.clone();
@@ -3301,6 +3325,182 @@ fn permission_request_fingerprint(
     format!("perm:{kind}:{tool}:{:016x}", fnv1a64(canonical.as_bytes()))
 }
 
+fn permission_request_grouping_fingerprint(
+    tool: &str,
+    kind: &str,
+    target: &str,
+    input: &BTreeMap<String, String>,
+) -> String {
+    if kind == "shell" || shell_permission_tool(tool) {
+        let command = input
+            .get("command")
+            .map(String::as_str)
+            .filter(|command| !command.trim().is_empty())
+            .unwrap_or(target);
+        return format!("perm-group:shell:{}", shell_command_group(command));
+    }
+
+    if tool == "apply_patch" {
+        let paths = patch_permission_paths(input);
+        if !paths.is_empty() {
+            return format!("perm-group:patch:{:016x}", hash_string_list(&paths));
+        }
+    }
+
+    if kind == "write" || write_permission_tool(tool) {
+        if let Some(path) = first_path_argument(input).or_else(|| nonempty_str(target)) {
+            return format!("perm-group:write:{tool}:{:016x}", fnv1a64(path.as_bytes()));
+        }
+    }
+
+    if kind == "network" || matches!(tool, "fetch_url" | "web_search" | "web_run") {
+        if let Some(host) = permission_target_host(target).or_else(|| {
+            input
+                .get("url")
+                .and_then(|url| permission_target_host(url.as_str()))
+        }) {
+            return format!("perm-group:network:{host}");
+        }
+    }
+
+    let mut canonical = String::new();
+    push_fingerprint_part(&mut canonical, "tool", tool);
+    push_fingerprint_part(&mut canonical, "kind", kind);
+    for (key, value) in input {
+        push_fingerprint_part(&mut canonical, key, value);
+    }
+    format!(
+        "perm-group:{kind}:{tool}:{:016x}",
+        fnv1a64(canonical.as_bytes())
+    )
+}
+
+fn shell_permission_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "run_shell"
+            | "exec_shell"
+            | "task_shell_start"
+            | "task_shell_wait"
+            | "exec_shell_wait"
+            | "exec_wait"
+            | "exec_shell_interact"
+            | "exec_interact"
+            | "run_tests"
+    )
+}
+
+fn shell_command_group(command: &str) -> String {
+    let tokens = command.split_whitespace().collect::<Vec<_>>();
+    let Some(first) = tokens.first() else {
+        return "<empty>".to_string();
+    };
+    let family_with_subcommand = matches!(
+        *first,
+        "cargo"
+            | "git"
+            | "gh"
+            | "npm"
+            | "pnpm"
+            | "yarn"
+            | "uv"
+            | "go"
+            | "python"
+            | "python3"
+            | "node"
+            | "docker"
+            | "kubectl"
+            | "make"
+    );
+    if family_with_subcommand {
+        if let Some(second) = tokens.get(1).filter(|token| !token.starts_with('-')) {
+            return format!("{first} {second}");
+        }
+    }
+    (*first).to_string()
+}
+
+fn write_permission_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "write_file"
+            | "edit_file"
+            | "fim_edit"
+            | "delete_file"
+            | "copy_file"
+            | "move_file"
+            | "revert_turn"
+    )
+}
+
+fn first_path_argument(input: &BTreeMap<String, String>) -> Option<&str> {
+    [
+        "path",
+        "target",
+        "destination",
+        "dest",
+        "source",
+        "from",
+        "to",
+    ]
+    .into_iter()
+    .find_map(|key| input.get(key).and_then(|value| nonempty_str(value)))
+}
+
+fn patch_permission_paths(input: &BTreeMap<String, String>) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    if let Some(path) = input.get("path").and_then(|value| nonempty_str(value)) {
+        paths.insert(path.to_string());
+    }
+    if let Some(patch) = input.get("patch") {
+        for line in patch.lines() {
+            for prefix in [
+                "*** Update File: ",
+                "*** Add File: ",
+                "*** Delete File: ",
+                "+++ b/",
+                "--- a/",
+            ] {
+                if let Some(path) = line.strip_prefix(prefix).and_then(nonempty_str) {
+                    paths.insert(path.to_string());
+                }
+            }
+        }
+    }
+    paths.into_iter().collect()
+}
+
+fn permission_target_host(value: &str) -> Option<String> {
+    let value = value.trim();
+    let without_scheme = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .unwrap_or(value);
+    let host = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    nonempty_str(host).map(str::to_string)
+}
+
+fn nonempty_str(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn hash_string_list(values: &[String]) -> u64 {
+    let mut canonical = String::new();
+    for value in values {
+        push_fingerprint_part(&mut canonical, "path", value);
+    }
+    fnv1a64(canonical.as_bytes())
+}
+
 fn push_fingerprint_part(out: &mut String, key: &str, value: &str) {
     out.push_str(&key.len().to_string());
     out.push(':');
@@ -4030,6 +4230,11 @@ mod tests {
             .and_then(json_as_string)
             .expect("permission request fingerprint");
         assert!(fingerprint.starts_with("perm:shell:run_shell:"));
+        let grouping_fingerprint = payload
+            .get("grouping_fingerprint")
+            .and_then(json_as_string)
+            .expect("permission request grouping fingerprint");
+        assert_eq!(grouping_fingerprint, "perm-group:shell:cargo test");
         assert_eq!(
             store.load_thread(&thread.id).unwrap().event_seq,
             request.seq
@@ -4104,6 +4309,119 @@ mod tests {
 
         assert_eq!(fingerprint(&first), fingerprint(&repeat));
         assert_ne!(fingerprint(&first), fingerprint(&distinct));
+    }
+
+    #[test]
+    fn permission_request_grouping_fingerprint_collapses_shell_flag_variants() {
+        let store = RuntimeStore::new(temp_root("permission-group-shell"));
+        let thread = store
+            .create_thread(
+                "Investigate".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let mut input_a = BTreeMap::new();
+        input_a.insert("command".to_string(), "cargo build".to_string());
+        let mut input_b = BTreeMap::new();
+        input_b.insert("command".to_string(), "cargo build --release".to_string());
+        let mut input_c = BTreeMap::new();
+        input_c.insert("command".to_string(), "cargo test".to_string());
+
+        let first = store
+            .append_permission_request(
+                &thread.id,
+                None,
+                "run_shell".to_string(),
+                "shell".to_string(),
+                "cargo build".to_string(),
+                input_a,
+            )
+            .unwrap();
+        let flag_variant = store
+            .append_permission_request(
+                &thread.id,
+                None,
+                "run_shell".to_string(),
+                "shell".to_string(),
+                "cargo build --release".to_string(),
+                input_b,
+            )
+            .unwrap();
+        let distinct = store
+            .append_permission_request(
+                &thread.id,
+                None,
+                "run_shell".to_string(),
+                "shell".to_string(),
+                "cargo test".to_string(),
+                input_c,
+            )
+            .unwrap();
+
+        let key = |event: &RuntimeEvent, field: &str| -> String {
+            let JsonValue::Object(payload) = &event.payload else {
+                panic!("permission request payload should be an object");
+            };
+            payload
+                .get(field)
+                .and_then(json_as_string)
+                .expect("permission request key")
+                .to_string()
+        };
+
+        assert_ne!(
+            key(&first, "fingerprint"),
+            key(&flag_variant, "fingerprint")
+        );
+        assert_eq!(
+            key(&first, "grouping_fingerprint"),
+            key(&flag_variant, "grouping_fingerprint")
+        );
+        assert_ne!(
+            key(&first, "grouping_fingerprint"),
+            key(&distinct, "grouping_fingerprint")
+        );
+    }
+
+    #[test]
+    fn permission_response_can_record_session_scope() {
+        let store = RuntimeStore::new(temp_root("permission-response-scope"));
+        let thread = store
+            .create_thread(
+                "Investigate".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let request = store
+            .append_permission_request(
+                &thread.id,
+                None,
+                "run_shell".to_string(),
+                "shell".to_string(),
+                "cargo build".to_string(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let response = store
+            .append_permission_response_with_scope(
+                &thread.id,
+                None,
+                request.id,
+                "approved".to_string(),
+                Some("session".to_string()),
+            )
+            .unwrap();
+        let JsonValue::Object(payload) = &response.payload else {
+            panic!("permission response payload should be an object");
+        };
+        assert_eq!(
+            payload.get("scope").and_then(json_as_string),
+            Some("session")
+        );
     }
 
     #[test]

@@ -373,6 +373,7 @@ pub struct TuiApprovalRequest {
     pub kind: String,
     pub target: String,
     pub fingerprint: String,
+    pub grouping_fingerprint: String,
     pub status: String,
 }
 
@@ -388,6 +389,12 @@ impl TuiApprovalRequest {
         } else {
             fingerprint
         };
+        let grouping_fingerprint = payload_string(payload, "grouping_fingerprint", "");
+        let grouping_fingerprint = if grouping_fingerprint.is_empty() {
+            fingerprint.clone()
+        } else {
+            grouping_fingerprint
+        };
         Some(Self {
             id: event.id.clone(),
             thread_id: event.thread_id.clone(),
@@ -396,6 +403,7 @@ impl TuiApprovalRequest {
             kind: payload_string(payload, "kind", "permission"),
             target: payload_string(payload, "target", ""),
             fingerprint,
+            grouping_fingerprint,
             status: payload_string(payload, "status", "pending"),
         })
     }
@@ -3251,6 +3259,7 @@ pub enum TuiAction {
         turn_id: Option<String>,
         request_id: String,
         decision: String,
+        scope: Option<String>,
     },
     RespondUserInput {
         thread_id: String,
@@ -9467,8 +9476,9 @@ impl TuiApp {
         }
 
         match code {
-            KeyCode::Char('y') | KeyCode::Enter => {
+            KeyCode::Char('y') | KeyCode::Enter | KeyCode::Char('a') => {
                 if let Some(approval) = self.active_approval().cloned() {
+                    let session_scope = matches!(code, KeyCode::Char('a'));
                     self.active_approval_id = None;
                     let request_id = approval.id.clone();
                     if !self
@@ -9483,8 +9493,13 @@ impl TuiApp {
                         turn_id: approval.turn_id.clone(),
                         request_id: request_id.clone(),
                         decision: "approved".to_string(),
+                        scope: session_scope.then(|| "session".to_string()),
                     });
-                    self.status = format!("approval approved: {request_id}");
+                    self.status = if session_scope {
+                        format!("approval approved for session: {request_id}")
+                    } else {
+                        format!("approval approved: {request_id}")
+                    };
                 } else {
                     self.status = "approval modal closed: no pending request".to_string();
                 }
@@ -9506,6 +9521,7 @@ impl TuiApp {
                         turn_id: approval.turn_id.clone(),
                         request_id: request_id.clone(),
                         decision: "denied".to_string(),
+                        scope: None,
                     });
                     self.status = format!("approval denied: {request_id}");
                 } else {
@@ -17674,9 +17690,13 @@ fn draw_approval_modal(frame: &mut Frame, app: &TuiApp) {
                 "Key: {}",
                 clip_line(approval.fingerprint.as_str(), 58)
             )),
+            Line::from(format!(
+                "Group: {}",
+                clip_line(approval.grouping_fingerprint.as_str(), 56)
+            )),
             Line::from(format!("Thread: {}", approval.thread_id)),
             Line::from(""),
-            Line::from("[y] approve    [n] deny    [c] cancel run"),
+            Line::from("[y] once    [a] session    [n] deny    [c] cancel run"),
         ]
     } else {
         vec![
@@ -23561,6 +23581,7 @@ model.api_key_env = "OPENAI_API_KEY"
                 kind: "shell".to_string(),
                 target: "cargo test".to_string(),
                 fingerprint: "perm:shell:shell:fixture".to_string(),
+                grouping_fingerprint: "perm-group:shell:cargo test".to_string(),
                 status: "pending".to_string(),
             }],
             vec![TuiUserInputRequest {
@@ -25598,6 +25619,7 @@ model.api_key_env = "OPENAI_API_KEY"
             kind: "shell".to_string(),
             target: "cargo test".to_string(),
             fingerprint: "perm:shell:run_shell:fixture".to_string(),
+            grouping_fingerprint: "perm-group:shell:cargo test".to_string(),
             status: "pending".to_string(),
         };
         let mut app = TuiApp::with_runtime(sessions.clone(), threads.clone(), Vec::new());
@@ -25629,12 +25651,63 @@ model.api_key_env = "OPENAI_API_KEY"
                 turn_id: None,
                 request_id: "event-one".to_string(),
                 decision: "approved".to_string(),
+                scope: None,
             }]
         );
 
         app.replace_runtime_with_approvals(sessions, threads, Vec::new(), vec![approval]);
         assert!(!app.show_approval_modal);
         assert_eq!(app.active_approval_id, None);
+    }
+
+    #[test]
+    fn approval_modal_can_approve_for_session() {
+        let sessions = vec![TuiSession {
+            id: "session-one".to_string(),
+            title: "One".to_string(),
+            workspace: ".".to_string(),
+            status: "active".to_string(),
+            active_thread_id: Some("thread-one".to_string()),
+            thread_count: 1,
+        }];
+        let threads = vec![TuiThread {
+            id: "thread-one".to_string(),
+            session_id: Some("session-one".to_string()),
+            title: "First thread".to_string(),
+            mode: "agent".to_string(),
+            status: "active".to_string(),
+            latest_turn_id: None,
+            event_seq: 1,
+        }];
+        let approval = TuiApprovalRequest {
+            id: "event-one".to_string(),
+            thread_id: "thread-one".to_string(),
+            turn_id: None,
+            tool: "run_shell".to_string(),
+            kind: "shell".to_string(),
+            target: "cargo build".to_string(),
+            fingerprint: "perm:shell:run_shell:exact".to_string(),
+            grouping_fingerprint: "perm-group:shell:cargo build".to_string(),
+            status: "pending".to_string(),
+        };
+        let mut app = TuiApp::with_runtime(sessions.clone(), threads.clone(), Vec::new());
+        app.replace_runtime_with_approvals(sessions, threads, Vec::new(), vec![approval]);
+
+        let output = render_once(&app, 120, 36).unwrap();
+        assert!(output.contains("[a] session"));
+        assert!(app.handle_key(KeyCode::Char('a')));
+
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::RespondApproval {
+                thread_id: "thread-one".to_string(),
+                turn_id: None,
+                request_id: "event-one".to_string(),
+                decision: "approved".to_string(),
+                scope: Some("session".to_string()),
+            }]
+        );
+        assert!(app.status.contains("approved for session"));
     }
 
     #[test]

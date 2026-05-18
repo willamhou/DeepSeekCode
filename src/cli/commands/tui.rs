@@ -677,6 +677,7 @@ fn handle_tui_http_action(
             turn_id,
             request_id,
             decision,
+            scope,
         } => {
             let mut body = BTreeMap::new();
             body.insert(
@@ -688,6 +689,9 @@ fn handle_tui_http_action(
                 JsonValue::String(request_id.clone()),
             );
             body.insert("decision".to_string(), JsonValue::String(decision.clone()));
+            if let Some(scope) = scope {
+                body.insert("scope".to_string(), JsonValue::String(scope));
+            }
             if let Some(turn_id) = turn_id {
                 body.insert("turn_id".to_string(), JsonValue::String(turn_id));
             }
@@ -3503,12 +3507,14 @@ fn handle_tui_action_with_live(
             turn_id,
             request_id,
             decision,
+            scope,
         } => {
-            store.append_permission_response(
+            store.append_permission_response_with_scope(
                 &thread_id,
                 turn_id.as_deref(),
                 request_id.clone(),
                 decision.clone(),
+                scope,
             )?;
             app.set_status(format!(
                 "recorded approval response: {request_id} {decision}"
@@ -7046,6 +7052,18 @@ impl AgentApprovalResolver for RuntimeApprovalResolver {
             request.target.clone(),
             request.input.clone(),
         )?;
+        if let Some(decision) =
+            cached_runtime_permission_decision(&self.store, &self.thread_id, &approval)?
+        {
+            self.store.append_permission_response_with_scope(
+                &self.thread_id,
+                Some(&self.turn_id),
+                approval.id.clone(),
+                agent_approval_decision_label(decision).to_string(),
+                Some("cached".to_string()),
+            )?;
+            return Ok(decision);
+        }
         loop {
             if runtime_cancel_requested(
                 &self.store,
@@ -7062,6 +7080,94 @@ impl AgentApprovalResolver for RuntimeApprovalResolver {
             }
             thread::sleep(self.poll_interval);
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RuntimePermissionKeys {
+    fingerprint: String,
+    grouping_fingerprint: String,
+}
+
+fn cached_runtime_permission_decision(
+    store: &RuntimeStore,
+    thread_id: &str,
+    approval: &RuntimeEvent,
+) -> AppResult<Option<AgentApprovalDecision>> {
+    let Some(current) = runtime_permission_request_keys(approval) else {
+        return Ok(None);
+    };
+    let mut requests = BTreeMap::<String, RuntimePermissionKeys>::new();
+    for event in store.read_events(thread_id, 0)? {
+        if event.seq >= approval.seq {
+            break;
+        }
+        if let Some(keys) = runtime_permission_request_keys(&event) {
+            requests.insert(event.id.clone(), keys);
+            continue;
+        }
+        let Some((request_id, decision, scope)) = runtime_permission_response(&event) else {
+            continue;
+        };
+        let Some(keys) = requests.get(&request_id) else {
+            continue;
+        };
+        match decision {
+            AgentApprovalDecision::Approved
+                if scope.as_deref() == Some("session")
+                    && keys.grouping_fingerprint == current.grouping_fingerprint =>
+            {
+                return Ok(Some(AgentApprovalDecision::Approved));
+            }
+            AgentApprovalDecision::Denied if keys.fingerprint == current.fingerprint => {
+                return Ok(Some(AgentApprovalDecision::Denied));
+            }
+            _ => {}
+        }
+    }
+    Ok(None)
+}
+
+fn runtime_permission_request_keys(event: &RuntimeEvent) -> Option<RuntimePermissionKeys> {
+    if event.kind != "permission_request" {
+        return None;
+    }
+    let payload = json_as_object(&event.payload)?;
+    let fingerprint = payload.get("fingerprint").and_then(json_as_string)?;
+    let grouping_fingerprint = payload
+        .get("grouping_fingerprint")
+        .and_then(json_as_string)
+        .unwrap_or(fingerprint);
+    Some(RuntimePermissionKeys {
+        fingerprint: fingerprint.to_string(),
+        grouping_fingerprint: grouping_fingerprint.to_string(),
+    })
+}
+
+fn runtime_permission_response(
+    event: &RuntimeEvent,
+) -> Option<(String, AgentApprovalDecision, Option<String>)> {
+    if event.kind != "permission_response" {
+        return None;
+    }
+    let payload = json_as_object(&event.payload)?;
+    let request_id = payload.get("request_id").and_then(json_as_string)?;
+    let decision = match payload.get("decision").and_then(json_as_string)? {
+        "approved" => AgentApprovalDecision::Approved,
+        "denied" => AgentApprovalDecision::Denied,
+        _ => return None,
+    };
+    let scope = payload
+        .get("scope")
+        .and_then(json_as_string)
+        .map(str::to_string);
+    Some((request_id.to_string(), decision, scope))
+}
+
+fn agent_approval_decision_label(decision: AgentApprovalDecision) -> &'static str {
+    match decision {
+        AgentApprovalDecision::Approved => "approved",
+        AgentApprovalDecision::Denied => "denied",
     }
 }
 
@@ -10421,6 +10527,7 @@ shell_allowlist = ["git diff"]
                 turn_id: None,
                 request_id: request.id.clone(),
                 decision: "approved".to_string(),
+                scope: None,
             },
         )
         .unwrap();
@@ -12874,6 +12981,118 @@ shell_allowlist = ["git diff"]
                 .iter()
                 .find_map(|event| approval_response_decision(event, "event-other")),
             None
+        );
+    }
+
+    #[test]
+    fn cached_runtime_permission_decision_reuses_session_grouping() {
+        let store = temp_store("approval-session-group");
+        let session = store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Runtime permissions".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+
+        let first = store
+            .append_permission_request(
+                &thread.id,
+                None,
+                "run_shell".to_string(),
+                "shell".to_string(),
+                "cargo build".to_string(),
+                BTreeMap::from([("command".to_string(), "cargo build".to_string())]),
+            )
+            .unwrap();
+        store
+            .append_permission_response_with_scope(
+                &thread.id,
+                None,
+                first.id,
+                "approved".to_string(),
+                Some("session".to_string()),
+            )
+            .unwrap();
+        let second = store
+            .append_permission_request(
+                &thread.id,
+                None,
+                "run_shell".to_string(),
+                "shell".to_string(),
+                "cargo build --release".to_string(),
+                BTreeMap::from([("command".to_string(), "cargo build --release".to_string())]),
+            )
+            .unwrap();
+
+        assert_eq!(
+            cached_runtime_permission_decision(&store, &thread.id, &second).unwrap(),
+            Some(AgentApprovalDecision::Approved)
+        );
+    }
+
+    #[test]
+    fn cached_runtime_permission_decision_keeps_denials_exact() {
+        let store = temp_store("approval-denial-exact");
+        let session = store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Runtime permissions".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+
+        let first = store
+            .append_permission_request(
+                &thread.id,
+                None,
+                "run_shell".to_string(),
+                "shell".to_string(),
+                "cargo build".to_string(),
+                BTreeMap::from([("command".to_string(), "cargo build".to_string())]),
+            )
+            .unwrap();
+        store
+            .append_permission_response(&thread.id, None, first.id, "denied".to_string())
+            .unwrap();
+        let variant = store
+            .append_permission_request(
+                &thread.id,
+                None,
+                "run_shell".to_string(),
+                "shell".to_string(),
+                "cargo build --release".to_string(),
+                BTreeMap::from([("command".to_string(), "cargo build --release".to_string())]),
+            )
+            .unwrap();
+        assert_eq!(
+            cached_runtime_permission_decision(&store, &thread.id, &variant).unwrap(),
+            None
+        );
+
+        let repeat = store
+            .append_permission_request(
+                &thread.id,
+                None,
+                "run_shell".to_string(),
+                "shell".to_string(),
+                "cargo build".to_string(),
+                BTreeMap::from([("command".to_string(), "cargo build".to_string())]),
+            )
+            .unwrap();
+        assert_eq!(
+            cached_runtime_permission_decision(&store, &thread.id, &repeat).unwrap(),
+            Some(AgentApprovalDecision::Denied)
         );
     }
 

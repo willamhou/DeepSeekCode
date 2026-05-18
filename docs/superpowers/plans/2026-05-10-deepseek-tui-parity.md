@@ -115,6 +115,11 @@ responses by indexed `tool_calls`, matching DeepSeek-TUI's latest fix for
 gateways that ignore `parallel_tool_calls:false`; DeepSeekCode executes the
 batch sequentially through the normal hook, permission, repeat-guard, and
 recovery paths so no call is silently dropped.
+Runtime/TUI approvals now also match DeepSeek-TUI's restored grouping split:
+approve-once remains exact, approve-for-session uses command/path/host grouping,
+and denials only reuse exact fingerprints. The TUI approval modal exposes `a`
+for session approval and cached resolver decisions are persisted as
+`permission_response` events with `scope=cached`.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
 - full terminal takeover and broader platform proof beyond the current

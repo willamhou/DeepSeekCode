@@ -30,6 +30,8 @@ DeepSeekCode は DeepSeek-first のターミナル向けコーディングエー
 - 権限ゲート付き shell 実行に加えて、バックグラウンド shell job、wait/poll、
   replay、attach snapshot、stdin、resize metadata、cancel、workspace
   shell-supervisor protocol bridge をサポートします。
+- Runtime approval は approve-once と approve-for-session に対応し、安全な
+  コマンド変種はグループで再利用し、denial は exact fingerprint で扱います。
 - ローカル HTTP/SSE runtime、ACP stdio adapter、MCP client/server tooling、
   TUI 内の MCP 管理画面を備えています。
 - guided `/setup` onboarding、first-run done/todo/review state、
