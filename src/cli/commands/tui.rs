@@ -12,7 +12,7 @@ use std::sync::{
     Arc,
 };
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use flate2::read::GzDecoder;
 
@@ -266,7 +266,7 @@ fn run_script_smoke(
         let _ = stdin.flush();
     }
 
-    let started = Instant::now();
+    let started = std::time::Instant::now();
     let mut timed_out = false;
     let status = loop {
         if let Some(status) = child
@@ -306,7 +306,7 @@ fn run_script_smoke(
 }
 
 #[cfg(windows)]
-#[allow(non_snake_case)]
+#[allow(non_camel_case_types, non_snake_case)]
 mod windows_conpty {
     use std::ffi::c_void;
     use std::fs::File;
@@ -475,7 +475,8 @@ mod windows_conpty {
             let _ = CloseHandle(input_write);
             let _ = CloseHandle(output_read);
             return Err(app_error(format!(
-                "failed to create Windows ConPTY for TUI smoke: HRESULT 0x{hr:08x}"
+                "failed to create Windows ConPTY for TUI smoke: HRESULT 0x{:08x}",
+                hr as u32
             )));
         }
 
@@ -545,8 +546,9 @@ mod windows_conpty {
 
         DeleteProcThreadAttributeList(attr_list);
 
+        let output_read_raw = output_read as usize;
         let reader = thread::spawn(move || {
-            let mut file = File::from_raw_handle(output_read as RawHandle);
+            let mut file = File::from_raw_handle(output_read_raw as RawHandle);
             let mut output = Vec::new();
             let _ = file.read_to_end(&mut output);
             output
