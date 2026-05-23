@@ -10,8 +10,8 @@ DeepSeekCode は DeepSeek-first のターミナル向けコーディングエー
 > 状態: dogfood とリポジトリ内の開発作業には利用できます。`v0.1.1` では
 > GitHub Release のバイナリと検証済み GHCR イメージを公開済みです。bare
 > `deepseek` TUI entrypoint は Linux、macOS、Windows CI で smoke 済みです。
-> npm と Homebrew の公開には registry/tap の資格情報がまだ必要で、より厚い
-> hosted IDE/GitHub evidence は継続中です。
+> hosted GitHub write workflow evidence は記録済みです。hosted IDE evidence と
+> npm/Homebrew の公開には外部の資格情報や実行環境がまだ必要です。
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
@@ -120,14 +120,18 @@ deepseek tui --runtime-url http://127.0.0.1:13000
 ## 現在の差分
 
 DeepSeekCode は自身の開発に使える段階ですが、Claude Code CLI / Codex CLI
-ほどの製品成熟度にはまだ届いていません。大きな残差は次の通りです。
+ほどの製品成熟度にはまだ届いていません。Linux/macOS のローカル coding-agent
+CLI に絞ると、残差は主に evidence depth と配布面の polish です。
 
-- compile-check 済み backend、現行 Linux PTY fd handoff、bounded interactive
-  attach、CI-smoked default TUI entrypoint を超える Windows shell-supervisor
-  ConPTY/TCP daemon runtime proof。
-- hosted GitHub/VS Code workflow evidence と、よりリッチな multi-file external fixture サンプル。
-- npm registry 公開と Homebrew tap。どちらも資格情報が未設定です。
+- macOS shell/runtime evidence を entrypoint smoke 以上に厚くすること。CI/release
+  matrix は `agents shell-fixture-smoke` と `agents service-smoke` を実行します。
+- よりリッチな multi-file external fixture サンプル。disposable Python invoice
+  fixture の scaffold script を追加しています。
+- Homebrew 公開。tap 資格情報が未設定です。
 - コミット済み model-backed SVG を超える、任意の polish 済み GIF/MP4 キャプチャ。
+
+Windows ConPTY/service proof、hosted IDE evidence、npm publishing はより広い
+product hardening ですが、Linux/macOS ローカル CLI milestone の blocker ではありません。
 
 現在の状態、次の作業、最終目標は
 [docs/current-status.md](./docs/current-status.md) にまとめています。
@@ -188,6 +192,7 @@ deepseek update publish-status --dist dist-assets --npm-dist npm-dist --strict
 deepseek update publish-status --json
 deepseek agents service-doctor --kind all --workdir "$PWD" --bin "$(command -v deepseek)" --json
 deepseek agents service-smoke --workdir "$PWD" --bin "$(command -v deepseek)" --json
+deepseek agents shell-fixture-smoke --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
 
@@ -204,6 +209,7 @@ repository を使います。まず dry-run で preflight し、その後 isolat
 実行して dogfood report に記録します。
 
 ```bash
+scripts/create-multifile-external-fixture.sh /tmp/deepseek-external-fixtures/python-invoice-multifile
 deepseek dogfood external-fixture --workdir /tmp/disposable-repo --dry-run \
   'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
 deepseek dogfood external-fixture --workdir /tmp/disposable-repo --benchmark-gate \

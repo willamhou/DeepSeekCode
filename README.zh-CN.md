@@ -8,8 +8,8 @@ TUI/runtime workbench。它面向真实写代码循环：阅读仓库、修改�
 
 > 当前状态：已经可以用于 dogfood 和仓库内编码任务。`v0.1.1` 已有 GitHub
 > Release 二进制包和实测可用的 GHCR 镜像；裸 `deepseek` TUI 入口已经在
-> Linux、macOS、Windows CI 里做真实 smoke。npm 与 Homebrew 发布还需要
-> registry/tap 凭据，hosted IDE/GitHub 证据仍在推进中。
+> Linux、macOS、Windows CI 里做真实 smoke。hosted GitHub 写入 workflow
+> 证据已经记录；hosted IDE 证据和 npm/Homebrew 发布仍需要外部凭据或机器。
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
@@ -115,14 +115,18 @@ deepseek tui --runtime-url http://127.0.0.1:13000
 ## 当前差距
 
 DeepSeekCode 已经可以直接拿来写自己的代码，但还没有达到 Claude Code CLI /
-Codex CLI 的产品成熟度。最大差距集中在：
+Codex CLI 的产品成熟度。如果只看 Linux/macOS 本地 coding-agent CLI，剩余差距主要是
+证据厚度和分发打磨：
 
-- 新增 compile-checked backend、当前 Linux PTY fd handoff、bounded interactive
-  attach 和 CI 已验证默认 TUI 入口之外，Windows shell-supervisor ConPTY/TCP
-  daemon 运行证明；
-- hosted GitHub/VS Code workflow 证据，以及更丰富的 multi-file external fixture 样本；
-- npm registry 发布和 Homebrew tap，这两项还缺少对应凭据；
+- macOS shell/runtime 证据需要超过入口 smoke；CI/release matrix 现在会跑
+  `agents shell-fixture-smoke` 和 `agents service-smoke`；
+- 更丰富的 multi-file external fixture 样本；仓库已提供 disposable Python invoice
+  fixture 脚手架；
+- Homebrew 发布仍缺 tap 凭据；
 - 已提交 model-backed SVG 之外，可选的更精致 GIF/MP4 录屏素材。
+
+Windows ConPTY/service proof、hosted IDE 证据和 npm 发布属于更大的产品硬化目标，
+不再阻塞 Linux/macOS 本地 CLI milestone。
 
 当前状态、下一步路线和最终目标见 [docs/current-status.md](./docs/current-status.md)。
 
@@ -181,6 +185,7 @@ deepseek update publish-status --dist dist-assets --npm-dist npm-dist --strict
 deepseek update publish-status --json
 deepseek agents service-doctor --kind all --workdir "$PWD" --bin "$(command -v deepseek)" --json
 deepseek agents service-smoke --workdir "$PWD" --bin "$(command -v deepseek)" --json
+deepseek agents shell-fixture-smoke --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
 
@@ -196,6 +201,7 @@ deepseek pr live-status owner/repo#42 --json
 命令会先 dry-run 检查，然后在 isolated copy 中执行，并把结果写入 dogfood report：
 
 ```bash
+scripts/create-multifile-external-fixture.sh /tmp/deepseek-external-fixtures/python-invoice-multifile
 deepseek dogfood external-fixture --workdir /tmp/disposable-repo --dry-run \
   'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
 deepseek dogfood external-fixture --workdir /tmp/disposable-repo --benchmark-gate \

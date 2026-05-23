@@ -15,6 +15,12 @@ let the model inspect and edit code, run validation, review the diff, recover
 from failures, resume context, and use external integrations without hidden
 manual glue.
 
+Scope update from the 2026-05-23 goal review: the immediate milestone is the
+Linux/macOS local code-agent CLI. Windows ConPTY/service proof, hosted IDE
+evidence, and npm publishing remain broader product-hardening work, but they do
+not block the Linux/macOS CLI milestone. The Linux/macOS gate is entrypoint +
+REPL/TUI + local runtime + shell-supervisor + task worktree + dogfood evidence.
+
 ## Current Evidence Snapshot
 
 Local checks run during this execution pass:
@@ -85,8 +91,9 @@ Live execution update from this pass:
 | Area | Current state | Gap to close | Gate |
 |---|---|---|---|
 | Core CLI/TUI coding loop | Usable; full tests and 82-case benchmark baseline are green in existing reports | Mostly evidence depth, not missing local primitives | Full test + default benchmark + recent no-stuck dogfood |
+| Linux/macOS local CLI gate | TUI entrypoint, task worktree, GitHub fixture smoke, online dogfood, and Linux shell/runtime smoke are available | CI/release matrix now needs to publish macOS shell/runtime smoke results | Non-Windows `agents shell-fixture-smoke --json`, `agents service-smoke --json`, and TUI entrypoint smoke |
 | Model-backed dogfood | Release live gate passed; current live plan reports `105` online runs and `99` successes, with categories `write_validate 29/30`, `recovery 23/25`, `pr_workflow 47/50` | Preserve verified evidence and keep the gate fail-closed in release status | `dogfood report --require-live-runs 100 --require-live-success-rate 90 --require-live-category write_validate:25:90 --require-live-category recovery:25:90 --require-live-category pr_workflow:25:90` |
-| External write fixtures | `3` disposable real repo online write-fixture samples verified for Rust, Python, and JavaScript | Optionally expand to 5 samples and add a multi-file/dependency-backed fixture | `dogfood external-fixture ... --evidence-out` plus `dogfood external-evidence --require-successful-external-fixtures 1` |
+| External write fixtures | `3` disposable real repo online write-fixture samples verified for Rust, Python, and JavaScript; multi-file Python invoice fixture scaffold is now repo-native | Run the new multi-file fixture with an online model and verify evidence | `scripts/create-multifile-external-fixture.sh`, then `dogfood external-fixture ... --evidence-out` plus `dogfood external-evidence --require-successful-external-fixtures 1` |
 | README real demo | Committed model-backed SVG exists at `docs/demo/deepseek-code-model-demo.svg`, generated from a verified online transcript | Optional polish: TUI/GIF/MP4 capture for launch pages | `record-model-backed-demo.sh`, verifier, rendered media committed |
 | Windows Shell/PTY proof | Linux PTY fd/proxy path is strong; Windows ConPTY/TCP compile and workflow wiring exist | Need actual Windows runner evidence for ConPTY/TCP shell supervisor and fixture smoke | Windows CI/release job logs and artifact summary |
 | Installed service proof | service-doctor/service-smoke local gates exist | Need clean-machine installed systemd/launchd smoke evidence | `agents service-smoke --installed ... --json` on real install |
@@ -138,10 +145,14 @@ Live execution update from this pass:
    - This is blocked on VS Code CLI availability and hosted GitHub credentials or
      a fixture repository.
 
-5. Close shell/service platform proof.
-   - Preserve Linux PTY/fd/proxy evidence.
-   - Collect Windows ConPTY/TCP shell fixture CI evidence.
-   - Run installed service smoke on clean Linux/macOS machines.
+5. Close Linux/macOS shell/service platform proof.
+   - Done locally: Linux `agents shell-fixture-smoke --json` and
+     `agents service-smoke --json` pass with native PTY/fd/proxy coverage.
+   - Added to CI/release: non-Windows debug/release binaries now run
+     `agents shell-fixture-smoke --json`, `agents service-smoke --json`, and
+     the multi-file external fixture scaffold smoke.
+   - Remaining for this milestone: record the hosted macOS CI/release run links.
+   - Windows ConPTY/TCP remains a later cross-platform proof item.
 
 6. Publish and update final public docs.
    - Configure `NPM_TOKEN` or `NODE_AUTH_TOKEN`.
@@ -161,15 +172,17 @@ Cleared in this pass:
 
 Do not claim the 5% target while any of these remaining conditions are true:
 
-- VS Code and GitHub hosted evidence is only local/headless;
-- npm/Homebrew publish checks remain credential-skipped;
-- Windows shell-supervisor ConPTY/TCP evidence has not completed on a real
-  Windows runner.
+- For the broad product target: VS Code evidence is only local/headless,
+  npm/Homebrew publish checks remain credential-skipped, or Windows
+  shell-supervisor ConPTY/TCP evidence has not completed on a real Windows
+  runner.
+- For the narrower Linux/macOS local CLI milestone: do not claim closure until
+  the non-Windows shell/runtime CI/release gates have passed and at least one
+  online multi-file external fixture evidence artifact is recorded.
 
 ## Next Local Action
 
-The next unblocked local action is to keep the repo green and preserve the
-fail-closed gates while collecting the remaining external evidence: hosted
-GitHub workflow runs, VS Code CLI evidence, Windows ConPTY/TCP CI evidence,
-optional richer external fixtures/demo media, and release-channel publish
-artifacts.
+The next unblocked local action is to run the new multi-file external fixture
+with an online model key, verify the evidence artifact, and then record the
+Linux/macOS CI/release run links once GitHub Actions has executed the new
+non-Windows shell/runtime gates.
