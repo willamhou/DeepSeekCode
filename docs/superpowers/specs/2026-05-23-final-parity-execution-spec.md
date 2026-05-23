@@ -24,28 +24,20 @@ Local checks run during this execution pass:
 - `git diff --check`: passed.
 - `cargo run --quiet -- benchmark --category mcp --out /tmp/deepseek-goal-mcp-benchmark.md`:
   `3/3` passed, filtered history/trend/live gates skipped as expected.
-- `cargo run --quiet -- dogfood live-run --api-key-file <outside-repo-key>
-  --category pr_workflow --limit 5 --execute --evidence-out
-  .dscode/dogfood/live-evidence-pr-workflow-5-rerun.json`: online, `5/5`
-  succeeded after the explicit-edit guardrail fix.
-- `cargo run --quiet -- dogfood live-evidence --file
-  .dscode/dogfood/live-evidence-pr-workflow-5-rerun.json --out
-  .dscode/dogfood/live-evidence-pr-workflow-5-rerun-verification.json --json`:
-  passed evidence validation for the 5 appended online rows.
-- `cargo run --quiet -- dogfood report --limit 100 --require-live-runs 30
-  --require-live-success-rate 85 --require-live-category write_validate:5:90
-  --require-live-category recovery:10:90 --require-live-category
-  pr_workflow:15:80`: passed as the current smoke gate.
 - `cargo run --quiet -- dogfood report --limit 100 --require-live-runs 100
   --require-live-success-rate 90 --require-live-category write_validate:25:90
   --require-live-category recovery:25:90 --require-live-category
-  pr_workflow:25:90`: failed closed because model-backed runs are `30/100`,
-  model-backed success rate is `26/30` (`86.7%`), `write_validate` is `5/25`,
-  `recovery` is `10/25`, and `pr_workflow` is `12/15` (`80.0%`) with only
-  `15/25` required samples.
-- `cargo run --quiet -- update publish-status --strict --json`: failed closed
-  with 5 not-ready/skipped checks: npm token, release assets, npm artifacts, live
-  evidence verification, and Homebrew tap credentials.
+  pr_workflow:25:90`: passed. `live-plan` reports `100` online runs, `94`
+  successes, `write_validate 24/25`, `recovery 23/25`, and `pr_workflow 47/50`.
+- `cargo run --quiet -- dogfood live-evidence --file
+  .dscode/dogfood/live-evidence-final-total-pr-4.json --require-report-gate
+  --out .dscode/dogfood/live-evidence-final-total-pr-4-release-verification.json
+  --json`: passed release evidence validation with `report_gate_passed=true`.
+- `cargo run --quiet -- update publish-status --strict --json
+  --live-evidence-verification
+  .dscode/dogfood/live-evidence-final-total-pr-4-release-verification.json`:
+  failed closed with 4 not-ready/skipped checks: npm token, npm artifacts,
+  release assets, and Homebrew tap credentials. Live evidence is now ready.
 - `node editors/vscode/test-extension-host.js`: skipped because no `VSCODE_BIN`,
   `code`, `code-insiders`, or `codium` CLI is available on this machine.
 
@@ -55,10 +47,6 @@ fixture smoke, release packaging metadata, and deterministic README demo assets.
 
 Live execution update from this pass:
 
-- `dogfood live-run --api-key-file <outside-repo-key> --category write_validate
-  --limit 1 --execute`: online, success.
-- `dogfood live-run --api-key-file <outside-repo-key> --category recovery
-  --limit 1 --execute`: online, success.
 - The first `pr_workflow` live run exposed a real stuck case: the model repeatedly
   called `project_map` instead of applying an explicit `replace X with Y in
   path` instruction after reading the target file.
@@ -79,25 +67,31 @@ Live execution update from this pass:
   target content.
 - Re-running that same 5-case `pr_workflow` batch succeeded `5/5`, including
   the previously stuck Python and Rust reproduce-and-fix cases.
-- Current local live ledger is `30` online runs, `26` successes, and `4`
-  historical stuck runs. The latest small gate passed at `live-runs=30`,
-  overall success `85%`, `write_validate:5:90`, `recovery:10:90`, and
-  `pr_workflow:15:80`. This is useful smoke evidence but does not satisfy the
-  release gate below.
+- Expanding `write_validate` exposed a Python pytest retry case where the last
+  readback was the test file rather than the edited file. The retry detector now
+  treats `def test_` and `assert ` as test readbacks, so the guardrail can retry
+  from the intentionally wrong `a * b` edit to `a + b` and pass pytest.
+- Expanding `recovery` exposed an empty-search task that found no matches and
+  inspected the repository layout, then kept listing files. The recovery
+  guardrail now finishes once a no-match search and successful layout inspection
+  are both observed.
+- Current local live ledger satisfies the release gate: `100` online runs, `94`
+  successes, `0` manual interventions; category counts are `write_validate
+  24/25`, `recovery 23/25`, and `pr_workflow 47/50`.
 
 ## Residual Gap Table
 
 | Area | Current state | Gap to close | Gate |
 |---|---|---|---|
 | Core CLI/TUI coding loop | Usable; full tests and 82-case benchmark baseline are green in existing reports | Mostly evidence depth, not missing local primitives | Full test + default benchmark + recent no-stuck dogfood |
-| Model-backed dogfood | Offline replay evidence exists; live plan reports `0` model-backed runs | Need 100 online runs; `write_validate`, `recovery`, `pr_workflow` each need 25 runs at >=90% success | `dogfood report --require-live-runs 100 --require-live-success-rate 90 --require-live-category write_validate:25:90 --require-live-category recovery:25:90 --require-live-category pr_workflow:25:90` |
+| Model-backed dogfood | Release live gate passed with `100` online runs and `94` successes; categories are `write_validate 24/25`, `recovery 23/25`, `pr_workflow 47/50` | Preserve verified evidence and keep the gate fail-closed in release status | `dogfood report --require-live-runs 100 --require-live-success-rate 90 --require-live-category write_validate:25:90 --require-live-category recovery:25:90 --require-live-category pr_workflow:25:90` |
 | External write fixtures | Tooling and evidence JSON exist | Need 3-5 disposable real repo online write-fixture samples | `dogfood external-fixture ... --evidence-out` plus verifier |
 | README real demo | Deterministic SVG exists; recorder/verifier exist | Need reviewed model-backed media artifact, not offline rehearsal | `record-model-backed-demo.sh`, verifier, rendered media committed |
 | Windows Shell/PTY proof | Linux PTY fd/proxy path is strong; Windows ConPTY/TCP compile and workflow wiring exist | Need actual Windows runner evidence for ConPTY/TCP shell supervisor and fixture smoke | Windows CI/release job logs and artifact summary |
 | Installed service proof | service-doctor/service-smoke local gates exist | Need clean-machine installed systemd/launchd smoke evidence | `agents service-smoke --installed ... --json` on real install |
 | VS Code workbench | Native panel and headless fixture exist | Need extension-host run with real VS Code CLI and manual GUI fixture evidence | `VSCODE_BIN=... npm --prefix editors/vscode run test:extension-host` plus manual checklist |
 | GitHub automation | Local event parser, write workflow, and fixture smoke exist | Need hosted fixture PR review and write workflow run evidence with online model | GitHub Actions run links/artifacts |
-| Release channels | GitHub/GHCR/package metadata exist; publish-status is fail-closed | Need npm token, Homebrew tap token/repo, release dist/npm artifacts, live evidence verification artifact | `update publish-status --strict --dist ... --npm-dist ... --live-evidence-verification ...` |
+| Release channels | GitHub/GHCR/package metadata exist; publish-status accepts the live evidence artifact | Need npm token, Homebrew tap token/repo, release dist/npm artifacts | `update publish-status --strict --dist ... --npm-dist ... --live-evidence-verification ...` |
 | Public docs | README/current-status are good but long | Need final concise user path once evidence exists | README/current-status/release docs updated from evidence |
 
 ## Execution Order
@@ -107,16 +101,13 @@ Live execution update from this pass:
      log snapshot race, and verified the workspace.
 
 2. Produce online model-backed evidence.
-   - Run `deepseek dogfood live-run --api-key-file <outside-repo-key>
-     --category write_validate --limit 5 --execute --evidence-out <path>`.
-   - Repeat for `recovery` and `pr_workflow`.
-   - Continue until the live evidence gate reaches 100 model-backed runs and all
-     three categories meet 25 runs at >=90%.
-   - Verify each batch with `deepseek dogfood live-evidence --file <path>
-     --require-report-gate --out <verification-path>`.
-   - This is no longer blocked on local key availability for this workspace, but
-     the key must stay outside the repository and should be rotated if it was
-     exposed in chat or terminal output.
+   - Done in this pass: the release gate reached `100` online runs and all three
+     required categories are at or above 25 runs and 90% success.
+   - Done in this pass: `.dscode/dogfood/live-evidence-final-total-pr-4-release-verification.json`
+     verifies online readiness, appended model-backed rows, matching ledger
+     fingerprint, and `report_gate_passed=true`.
+   - Continue to keep model keys outside the repository and rotate any key that
+     was exposed in chat or terminal output.
 
 3. Capture real demo and external fixture evidence.
    - Run `docs/demo/record-model-backed-demo.sh` with a repo-external key file.
@@ -124,7 +115,8 @@ Live execution update from this pass:
    - Run at least 3 disposable real repositories through
      `deepseek dogfood external-fixture --workdir <repo> --benchmark-gate
      --evidence-out <path>`.
-   - This is blocked on online model access and disposable repos.
+   - This is blocked on disposable repos and reviewed demo capture, not on the
+     internal live dogfood gate.
 
 4. Close IDE/GitHub hosted evidence gaps.
    - Run the VS Code extension-host smoke on a machine with `code` or `codium`.
@@ -149,11 +141,14 @@ Live execution update from this pass:
 
 ## Stop Conditions
 
-Do not claim the 5% target while any of these are true:
+Cleared in this pass:
 
-- model-backed live dogfood remains below 100 runs;
-- any of `write_validate`, `recovery`, or `pr_workflow` is below 25 online runs
-  or below 90% success;
+- model-backed live dogfood is now at `100` online runs with `94%` success;
+- `write_validate`, `recovery`, and `pr_workflow` are each above 25 online runs
+  and above 90% success.
+
+Do not claim the 5% target while any of these remaining conditions are true:
+
 - VS Code and GitHub hosted evidence is only local/headless;
 - npm/Homebrew publish checks remain credential-skipped;
 - Windows shell-supervisor ConPTY/TCP evidence has not completed on a real
@@ -162,7 +157,7 @@ Do not claim the 5% target while any of these are true:
 ## Next Local Action
 
 The next unblocked local action is to keep the repo green and preserve the
-fail-closed gates while waiting for external evidence inputs. Once a DeepSeek
-key file is available outside the repository, start with the `write_validate`
-live-run batch because it directly proves the core inspect -> edit -> validate
-loop.
+fail-closed gates while collecting external evidence: disposable-repo
+`dogfood external-fixture` samples, a reviewed model-backed README demo, hosted
+GitHub workflow runs, VS Code CLI evidence, Windows ConPTY/TCP CI evidence, and
+release-channel publish artifacts.

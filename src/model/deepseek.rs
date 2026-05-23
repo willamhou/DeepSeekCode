@@ -1623,6 +1623,15 @@ fn next_required_action_for_prompt(input: &ModelRequest) -> Option<String> {
 
 fn required_action_response(input: &ModelRequest) -> Option<ModelResponse> {
     let task_lower = input.task.to_lowercase();
+    if empty_search_layout_recovery_complete(input, &task_lower) {
+        return Some(ModelResponse {
+            message:
+                "DeepSeekCode guardrail observed no search matches and inspected the repository layout."
+                    .to_string(),
+            action: ModelAction::Finish,
+        });
+    }
+
     if let Some(edit_request) = derive_edit_request(&input.task) {
         let has_patch_tool = input
             .available_tools
@@ -1731,6 +1740,39 @@ fn required_action_response(input: &ModelRequest) -> Option<ModelResponse> {
             },
         }),
     }
+}
+
+fn empty_search_layout_recovery_complete(input: &ModelRequest, task_lower: &str) -> bool {
+    if !(task_lower.contains("if there are no matches")
+        || task_lower.contains("if no matches")
+        || task_lower.contains("if there are no search results"))
+    {
+        return false;
+    }
+    if !(task_lower.contains("inspect the repository layout")
+        || task_lower.contains("inspect repository layout"))
+    {
+        return false;
+    }
+
+    let saw_no_matches = input.observations.iter().any(|observation| {
+        matches!(observation.tool_name.as_str(), "search_text" | "grep_files")
+            && !observation.is_failure()
+            && observation
+                .summary
+                .to_ascii_lowercase()
+                .contains("no matches")
+    });
+    if !saw_no_matches {
+        return false;
+    }
+
+    input.observations.iter().any(|observation| {
+        matches!(
+            observation.tool_name.as_str(),
+            "list_files" | "list_dir" | "project_map"
+        ) && !observation.is_failure()
+    })
 }
 
 fn explicit_failed_validation_readback_complete(
@@ -2779,6 +2821,8 @@ fn derive_failed_validation_retry_edit_request(
     let readback_looks_like_test = readback_text.contains("test(")
         || readback_text.contains("node:test")
         || readback_text.contains("assert.")
+        || readback_text.contains("def test_")
+        || readback_text.contains("assert ")
         || readback_text.contains("describe(")
         || readback_text.contains("it(");
     if !readback_matches_edit && !readback_looks_like_test {
@@ -6515,6 +6559,67 @@ mod tests {
             }
             _ => panic!("expected retry apply_patch"),
         }
+    }
+
+    #[test]
+    fn required_action_response_retries_after_python_test_readback() {
+        let mut req = empty_request_with_todos(Vec::new());
+        req.task = "replace `a - b` with `a * b` in src/math_ops.py and validate with pytest until the tests pass".to_string();
+        req.suggested_test_command = Some("uv run pytest".to_string());
+        req.available_tools = vec![
+            "apply_patch".to_string(),
+            "run_shell".to_string(),
+            "read_file".to_string(),
+        ];
+        req.observations = vec![
+            Observation::ok(
+                "apply_patch",
+                "Updated src/math_ops.py using single replacement mode.",
+            ),
+            Observation::ok(
+                "run_shell",
+                "meta.command_kind=test\nmeta.exit_code=1\nmeta.result=failed\nmeta.failure_kind=test_failure\nmeta.failed_tests=tests/test_math_ops.py::test_add",
+            ),
+            Observation::ok(
+                "read_file",
+                "def add(a: int, b: int) -> int:\n    return a * b",
+            ),
+            Observation::ok(
+                "read_file",
+                "from math_ops import add\n\n\ndef test_add():\n    assert add(2, 3) == 5",
+            ),
+        ];
+
+        let response = required_action_response(&req).expect("expected guardrail response");
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "apply_patch");
+                assert_eq!(input.get("path"), Some("src/math_ops.py"));
+                assert_eq!(input.get("find"), Some("a * b"));
+                assert_eq!(input.get("replace"), Some("a + b"));
+            }
+            _ => panic!("expected retry apply_patch"),
+        }
+    }
+
+    #[test]
+    fn required_action_response_finishes_empty_search_layout_recovery() {
+        let mut req = empty_request_with_todos(Vec::new());
+        req.task = "find where `missing_fixture_symbol_20260505` is implemented, and if there are no matches inspect the repository layout instead".to_string();
+        req.available_tools = vec!["search_text".to_string(), "list_files".to_string()];
+        req.observations = vec![
+            Observation::ok(
+                "search_text",
+                "No matches for `missing_fixture_symbol_20260505`.",
+            ),
+            Observation::ok(
+                "list_files",
+                "Cargo.toml\nREADME.md\nsrc/\nsrc/cli/\nsrc/cli/app.rs",
+            ),
+        ];
+
+        let response = required_action_response(&req).expect("expected guardrail response");
+        assert!(matches!(response.action, ModelAction::Finish));
     }
 
     #[test]
