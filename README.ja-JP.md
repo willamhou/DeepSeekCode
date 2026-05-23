@@ -125,8 +125,8 @@ CLI に絞ると、残差は主に evidence depth と配布面の polish です�
 
 - macOS shell/runtime の hosted CI evidence は PR #14 / CI run #35 で通過済み。
   release binary evidence は次回 release matrix run で取得します。
-- よりリッチな multi-file external fixture サンプル。disposable Python invoice
-  fixture の scaffold script を追加しています。
+- disposable Python invoice fixture の online multi-file external evidence は記録済み。
+  追加の外部サンプルは任意の hardening です。
 - Homebrew 公開。tap 資格情報が未設定です。
 - コミット済み model-backed SVG を超える、任意の polish 済み GIF/MP4 キャプチャ。
 

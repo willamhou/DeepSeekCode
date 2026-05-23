@@ -4,6 +4,7 @@ use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cli::app::{
@@ -67,6 +68,15 @@ fn run_live_task_with_policy(
     args: DogfoodRunArgs,
     policy: DogfoodRunPolicy,
 ) -> AppResult<()> {
+    run_live_task_with_policy_and_post_check(config, args, policy, None)
+}
+
+fn run_live_task_with_policy_and_post_check(
+    config: &crate::config::types::AppConfig,
+    args: DogfoodRunArgs,
+    policy: DogfoodRunPolicy,
+    post_run_check: Option<Box<dyn FnOnce(&Path) -> AppResult<()>>>,
+) -> AppResult<()> {
     let args = resolve_run_args(config, args)?;
     let started = Instant::now();
     let repo_root = std::env::current_dir()?;
@@ -96,6 +106,11 @@ fn run_live_task_with_policy(
             },
         )
     });
+    let run_result = match (run_result, post_run_check) {
+        (Ok(result), Some(check)) => check(&run_workdir).map(|()| result),
+        (Ok(result), None) => Ok(result),
+        (Err(error), _) => Err(error),
+    };
     if let Some(path) = cleanup_workdir.as_ref() {
         let _ = fs::remove_dir_all(path);
     }
@@ -180,6 +195,7 @@ fn run_external_fixture_command(
     let requested_workdir = resolve_run_workdir(&repo_root, Some(&args.workdir))?;
     validate_external_fixture_workdir(&repo_root, &requested_workdir)?;
     validate_external_fixture_task(&args.task)?;
+    let validation_command = external_fixture_validation_command(&args.task)?;
 
     println!("DeepSeekCode dogfood external write fixture");
     println!("workdir: {}", requested_workdir.display());
@@ -201,7 +217,8 @@ fn run_external_fixture_command(
     let ledger_path = config.workspace.dogfood_ledger_path();
     let report_path = config.workspace.dogfood_report_path();
     let before_records = load_records_or_empty(&ledger_path)?;
-    let run_result = run_live_task_with_policy(
+    let validation_command_for_run = validation_command.clone();
+    let run_result = run_live_task_with_policy_and_post_check(
         config,
         DogfoodRunArgs {
             task: args.task.clone(),
@@ -219,6 +236,9 @@ fn run_external_fixture_command(
         DogfoodRunPolicy {
             auto_approve_isolated: true,
         },
+        Some(Box::new(move |run_workdir| {
+            run_external_fixture_post_validation(run_workdir, &validation_command_for_run)
+        })),
     );
     let after_records = load_records_or_empty(&ledger_path)?;
     if let Some(evidence_out) = args.evidence_out.as_deref() {
@@ -234,6 +254,7 @@ fn run_external_fixture_command(
                 &after_records,
                 dogfood_file_fingerprint_json(&ledger_path),
                 run_result.as_ref().err().map(|error| error.to_string()),
+                &validation_command,
             ),
         )?;
         println!("external_fixture_evidence: {evidence_out}");
@@ -380,6 +401,64 @@ fn validate_external_fixture_task(task: &str) -> AppResult<()> {
     Err(app_error(
         "dogfood external-fixture task must describe an edit and validation command, for example: replace `a - b` with `a + b` in src/lib.rs and validate with cargo test",
     ))
+}
+
+fn external_fixture_validation_command(task: &str) -> AppResult<String> {
+    let task_lower = task.to_ascii_lowercase();
+    let marker = "validate with ";
+    let Some(index) = task_lower.rfind(marker) else {
+        return Err(app_error(
+            "dogfood external-fixture task must include `validate with <command>`",
+        ));
+    };
+    let command = task[index + marker.len()..]
+        .trim()
+        .trim_end_matches('.')
+        .trim();
+    if command.is_empty() {
+        return Err(app_error(
+            "dogfood external-fixture validation command is empty",
+        ));
+    }
+    Ok(command.to_string())
+}
+
+fn run_external_fixture_post_validation(workdir: &Path, validation_command: &str) -> AppResult<()> {
+    println!("external_fixture_post_validation: {validation_command}");
+    let output = validation_shell_command(validation_command)
+        .current_dir(workdir)
+        .output()
+        .map_err(|error| {
+            app_error(format!(
+                "failed to run external fixture validation `{validation_command}`: {error}"
+            ))
+        })?;
+    if output.status.success() {
+        println!("external_fixture_post_validation: pass");
+        return Ok(());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(app_error(format!(
+        "external fixture post-validation failed: `{validation_command}` exited with {}; stdout: {}; stderr: {}",
+        output.status,
+        clip(stdout.trim(), 600),
+        clip(stderr.trim(), 600)
+    )))
+}
+
+#[cfg(windows)]
+fn validation_shell_command(validation_command: &str) -> Command {
+    let mut command = Command::new("cmd");
+    command.args(["/C", validation_command]);
+    command
+}
+
+#[cfg(not(windows))]
+fn validation_shell_command(validation_command: &str) -> Command {
+    let mut command = Command::new("sh");
+    command.args(["-c", validation_command]);
+    command
 }
 
 fn validate_external_fixture_model_transport(
@@ -1150,6 +1229,18 @@ fn external_evidence_failures(
     {
         failures.push("release_evidence_ready is not true".to_string());
     }
+    if args.require_successful_external_fixtures.is_some() {
+        if live_evidence_string(root, "post_validation_command")
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+            .is_none()
+        {
+            failures.push("post_validation_command is missing".to_string());
+        }
+        if live_evidence_bool(root, "post_validation_passed") != Some(true) {
+            failures.push("post_validation_passed is not true".to_string());
+        }
+    }
     if let Some(required) = args.require_successful_external_fixtures {
         let actual =
             live_evidence_u64(root, "appended_successful_external_write_fixtures").unwrap_or(0);
@@ -1170,7 +1261,12 @@ fn external_evidence_failures(
             let computed_success = records
                 .iter()
                 .filter_map(live_evidence_object)
-                .filter(|record| external_evidence_record_is_successful_external_fixture(record))
+                .filter(|record| {
+                    external_evidence_record_is_successful_external_fixture(record)
+                        || (live_evidence_bool(root, "post_validation_passed") == Some(true)
+                            && external_evidence_record_is_external_fixture(record)
+                            && live_evidence_bool(record, "model_backed") == Some(true))
+                })
                 .count() as u64;
             if live_evidence_u64(root, "appended_external_write_fixtures").unwrap_or(0)
                 != computed_external
@@ -1384,6 +1480,18 @@ fn external_evidence_verification_json(
     out.insert(
         "release_evidence_ready".to_string(),
         live_evidence_bool(root, "release_evidence_ready")
+            .map(JsonValue::Bool)
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "post_validation_command".to_string(),
+        live_evidence_string(root, "post_validation_command")
+            .map(|value| JsonValue::String(value.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "post_validation_passed".to_string(),
+        live_evidence_bool(root, "post_validation_passed")
             .map(JsonValue::Bool)
             .unwrap_or(JsonValue::Null),
     );
@@ -3288,6 +3396,7 @@ fn external_fixture_evidence_summary_json(
     after_records: &[DogfoodRecord],
     ledger_fingerprint: JsonValue,
     run_error: Option<String>,
+    post_validation_command: &str,
 ) -> JsonValue {
     let appended_records = after_records.get(before_records.len()..).unwrap_or(&[]);
     let appended_external_write_fixtures = appended_records
@@ -3299,7 +3408,7 @@ fn external_fixture_evidence_summary_json(
         .filter(|record| {
             is_external_write_fixture_record(record)
                 && record_is_model_backed(record)
-                && matches!(record.outcome, DogfoodOutcome::Success)
+                && (matches!(record.outcome, DogfoodOutcome::Success) || run_error.is_none())
         })
         .count();
     let appended_model_backed_records = appended_records
@@ -3345,6 +3454,14 @@ fn external_fixture_evidence_summary_json(
     root.insert(
         "benchmark_gate_requested".to_string(),
         JsonValue::Bool(args.benchmark_gate),
+    );
+    root.insert(
+        "post_validation_command".to_string(),
+        JsonValue::String(post_validation_command.to_string()),
+    );
+    root.insert(
+        "post_validation_passed".to_string(),
+        JsonValue::Bool(completed),
     );
     root.insert(
         "model_transport".to_string(),
@@ -4698,6 +4815,21 @@ mod tests {
     }
 
     #[test]
+    fn external_fixture_extracts_validation_command() {
+        let command = super::external_fixture_validation_command(
+            "replace `a - b` with `a + b` in src/lib.rs and validate with cargo test.",
+        )
+        .expect("validation command");
+        assert_eq!(command, "cargo test");
+
+        let error = super::external_fixture_validation_command(
+            "replace `a - b` with `a + b` in src/lib.rs",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("validate with <command>"));
+    }
+
+    #[test]
     fn external_fixture_requires_online_transport_unless_rehearsal() {
         let error =
             super::validate_external_fixture_model_transport(MODEL_TRANSPORT_OFFLINE, false)
@@ -5501,11 +5633,14 @@ mod tests {
             &after_records,
             dogfood_file_fingerprint_json(&ledger),
             None,
+            "cargo test",
         );
         let json = json_value_to_string(&summary);
 
         assert!(json.contains("\"kind\":\"deepseek.dogfood.external_fixture_evidence.v1\""));
         assert!(json.contains("\"release_evidence_ready\":true"));
+        assert!(json.contains("\"post_validation_command\":\"cargo test\""));
+        assert!(json.contains("\"post_validation_passed\":true"));
         assert!(json.contains("\"appended_records\":1"));
         assert!(json.contains("\"appended_model_backed_records\":1"));
         assert!(json.contains("\"appended_external_write_fixtures\":1"));

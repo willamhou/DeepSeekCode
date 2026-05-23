@@ -1573,21 +1573,17 @@ fn build_user_prompt(input: &ModelRequest) -> String {
 }
 
 fn next_required_action_for_prompt(input: &ModelRequest) -> Option<String> {
-    if let Some(edit_request) = derive_edit_request(&input.task) {
+    if let Some(edit_request) = next_pending_edit_request(input) {
         let has_patch_tool = input
             .available_tools
             .iter()
             .any(|tool| tool == "apply_patch");
-        let patch_already_succeeded = input
-            .observations
-            .iter()
-            .any(|observation| observation.tool_name == "apply_patch" && !observation.is_failure());
         let read_confirmed_target = input.observations.iter().any(|observation| {
             observation.tool_name == "read_file"
                 && !observation.is_failure()
                 && observation.summary.contains(&edit_request.find)
         });
-        if has_patch_tool && !patch_already_succeeded && read_confirmed_target {
+        if has_patch_tool && read_confirmed_target {
             return Some(format!(
                 "call apply_patch with path `{}`, find `{}`, and replace `{}` now; do not call read_file again before patching",
                 edit_request.path, edit_request.find, edit_request.replace
@@ -1632,15 +1628,11 @@ fn required_action_response(input: &ModelRequest) -> Option<ModelResponse> {
         });
     }
 
-    if let Some(edit_request) = derive_edit_request(&input.task) {
+    if let Some(edit_request) = next_pending_edit_request(input) {
         let has_patch_tool = input
             .available_tools
             .iter()
             .any(|tool| tool == "apply_patch");
-        let patch_already_succeeded = input
-            .observations
-            .iter()
-            .any(|observation| observation.tool_name == "apply_patch" && !observation.is_failure());
         let read_confirmed_target = input.observations.iter().any(|observation| {
             observation.tool_name == "read_file"
                 && !observation.is_failure()
@@ -1654,10 +1646,7 @@ fn required_action_response(input: &ModelRequest) -> Option<ModelResponse> {
                 )
         });
 
-        if has_patch_tool
-            && !patch_already_succeeded
-            && (read_confirmed_target || explicit_edit_has_repo_context)
-        {
+        if has_patch_tool && (read_confirmed_target || explicit_edit_has_repo_context) {
             return Some(ModelResponse {
                 message: format!(
                     "DeepSeekCode guardrail is applying the explicit edit request in {} before further exploration.",
@@ -1672,7 +1661,13 @@ fn required_action_response(input: &ModelRequest) -> Option<ModelResponse> {
                 },
             });
         }
+    }
 
+    if let Some(edit_request) = derive_edit_request(&input.task) {
+        let has_patch_tool = input
+            .available_tools
+            .iter()
+            .any(|tool| tool == "apply_patch");
         if has_patch_tool {
             if let Some(retry_request) = derive_failed_validation_retry_edit_request(
                 &edit_request,
@@ -5216,13 +5211,40 @@ pub(crate) fn task_has_direct_edit_request(task: &str) -> bool {
 }
 
 fn derive_edit_request(task: &str) -> Option<EditRequest> {
-    let task_lower = task.to_lowercase();
+    derive_edit_requests(task).into_iter().next()
+}
+
+fn derive_edit_requests(task: &str) -> Vec<EditRequest> {
+    let task_lower = task.to_ascii_lowercase();
     if !task_lower.contains("replace ")
         || !task_lower.contains(" with ")
         || !task_lower.contains(" in ")
     {
-        return None;
+        return Vec::new();
     }
+
+    let mut requests = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative_start) = task_lower[cursor..].find("replace ") {
+        let segment_start = cursor + relative_start;
+        let after_replace = segment_start + "replace ".len();
+        let next_replace = task_lower[after_replace..]
+            .find(" and replace ")
+            .map(|index| after_replace + index);
+        let segment_end = next_replace.unwrap_or(task.len());
+        if let Some(request) = derive_single_edit_request(&task[segment_start..segment_end]) {
+            requests.push(request);
+        }
+        cursor = match next_replace {
+            Some(index) => index + " and ".len(),
+            None => break,
+        };
+    }
+    requests
+}
+
+fn derive_single_edit_request(task: &str) -> Option<EditRequest> {
+    let task_lower = task.to_ascii_lowercase();
 
     let quoted = quoted_segments(task);
     if quoted.len() < 2 {
@@ -5244,6 +5266,20 @@ fn derive_edit_request(task: &str) -> Option<EditRequest> {
         path,
         find: replacement_pair[0].clone(),
         replace: replacement_pair[1].clone(),
+    })
+}
+
+fn next_pending_edit_request(input: &ModelRequest) -> Option<EditRequest> {
+    derive_edit_requests(&input.task)
+        .into_iter()
+        .find(|request| !edit_request_patch_succeeded(input, request))
+}
+
+fn edit_request_patch_succeeded(input: &ModelRequest, request: &EditRequest) -> bool {
+    input.observations.iter().any(|observation| {
+        observation.tool_name == "apply_patch"
+            && !observation.is_failure()
+            && observation.summary.contains(&request.path)
     })
 }
 
@@ -5317,8 +5353,9 @@ fn is_supported_quote_delimiter(bytes: &[u8], index: usize, byte: u8) -> bool {
 mod tests {
     use super::{
         anthropic_tool_fields, api_flavor, build_anthropic_tools, build_openai_tools,
-        child_files_from_summary, derive_edit_request, derive_github_pr_context_request,
-        derive_search_query, last_patched_file_path, openai_tool_fields, parse_anthropic_messages,
+        child_files_from_summary, derive_edit_request, derive_edit_requests,
+        derive_github_pr_context_request, derive_search_query, last_patched_file_path,
+        next_pending_edit_request, openai_tool_fields, parse_anthropic_messages,
         parse_anthropic_translation_response, parse_anthropic_usage, parse_openai_chat_completion,
         parse_openai_translation_response, parse_openai_usage, required_action_response,
         translation_system_prompt, ApiFlavor, DeepSeekClient, GithubPrContextRequest,
@@ -7365,6 +7402,61 @@ mod tests {
         assert_eq!(request.path, "src/lib.rs");
         assert_eq!(request.find, "a - b");
         assert_eq!(request.replace, "a + b");
+    }
+
+    #[test]
+    fn derive_edit_requests_supports_multiple_file_replacements() {
+        let requests = derive_edit_requests(
+            "replace `return amount - discount` with `return max(amount - discount, 0.0)` in src/invoice_math/pricing.py and replace `Invoice total` with `Final total` in src/invoice_math/summary.py, validate with python3 -m unittest discover -s tests",
+        );
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].path, "src/invoice_math/pricing.py");
+        assert_eq!(requests[0].find, "return amount - discount");
+        assert_eq!(requests[0].replace, "return max(amount - discount, 0.0)");
+        assert_eq!(requests[1].path, "src/invoice_math/summary.py");
+        assert_eq!(requests[1].find, "Invoice total");
+        assert_eq!(requests[1].replace, "Final total");
+    }
+
+    #[test]
+    fn explicit_edit_guardrail_applies_second_pending_multifile_edit() {
+        let request = ModelRequest {
+            system_prompt: String::new(),
+            task: "replace `return amount - discount` with `return max(amount - discount, 0.0)` in src/invoice_math/pricing.py and replace `Invoice total` with `Final total` in src/invoice_math/summary.py, validate with python3 -m unittest discover -s tests".to_string(),
+            image_inputs: Vec::new(),
+            profile_name: "python".to_string(),
+            profile_hints: Vec::new(),
+            primary_file: None,
+            suggested_test_command: Some("python3 -m unittest discover -s tests".to_string()),
+            available_tools: vec!["apply_patch".to_string(), "read_file".to_string()],
+            observations: vec![
+                Observation::ok("list_files", "src/invoice_math/pricing.py\nsrc/invoice_math/summary.py"),
+                Observation::ok("apply_patch", "Updated src/invoice_math/summary.py using single replacement mode."),
+                Observation::ok(
+                    "read_file",
+                    "5 def apply_discount(amount, discount):\n6     return amount - discount",
+                ),
+            ],
+            todos: Vec::new(),
+            planning_mode: false,
+            recent_steps: Vec::new(),
+        };
+
+        let pending = next_pending_edit_request(&request).expect("expected pending edit");
+        assert_eq!(pending.path, "src/invoice_math/pricing.py");
+        let response = required_action_response(&request).expect("expected guardrail response");
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "apply_patch");
+                assert_eq!(input.get("path"), Some("src/invoice_math/pricing.py"));
+                assert_eq!(input.get("find"), Some("return amount - discount"));
+                assert_eq!(
+                    input.get("replace"),
+                    Some("return max(amount - discount, 0.0)")
+                );
+            }
+            other => panic!("expected pending multi-file apply_patch, got {other:?}"),
+        }
     }
 
     #[test]

@@ -93,7 +93,7 @@ Live execution update from this pass:
 | Core CLI/TUI coding loop | Usable; full tests and 82-case benchmark baseline are green in existing reports | Mostly evidence depth, not missing local primitives | Full test + default benchmark + recent no-stuck dogfood |
 | Linux/macOS local CLI gate | TUI entrypoint, task worktree, GitHub fixture smoke, online dogfood, Linux shell/runtime smoke, and PR #14 / CI run #35 hosted macOS shell/runtime smoke are available | Next release matrix run still needs to publish release-binary shell/runtime smoke results | Non-Windows `agents shell-fixture-smoke --json`, `agents service-smoke --json`, and TUI entrypoint smoke |
 | Model-backed dogfood | Release live gate passed; current live plan reports `105` online runs and `99` successes, with categories `write_validate 29/30`, `recovery 23/25`, `pr_workflow 47/50` | Preserve verified evidence and keep the gate fail-closed in release status | `dogfood report --require-live-runs 100 --require-live-success-rate 90 --require-live-category write_validate:25:90 --require-live-category recovery:25:90 --require-live-category pr_workflow:25:90` |
-| External write fixtures | `3` disposable real repo online write-fixture samples verified for Rust, Python, and JavaScript; multi-file Python invoice fixture scaffold is now repo-native | Run the new multi-file fixture with an online model and verify evidence | `scripts/create-multifile-external-fixture.sh`, then `dogfood external-fixture ... --evidence-out` plus `dogfood external-evidence --require-successful-external-fixtures 1` |
+| External write fixtures | `4` disposable real repo online write-fixture samples verified for Rust, Python, JavaScript, and Python invoice multi-file; external fixture evidence now includes CLI post-validation | Optional: broaden sample depth beyond the current minimum | `scripts/create-multifile-external-fixture.sh`, then `dogfood external-fixture ... --evidence-out` plus `dogfood external-evidence --require-successful-external-fixtures 1` |
 | README real demo | Committed model-backed SVG exists at `docs/demo/deepseek-code-model-demo.svg`, generated from a verified online transcript | Optional polish: TUI/GIF/MP4 capture for launch pages | `record-model-backed-demo.sh`, verifier, rendered media committed |
 | Windows Shell/PTY proof | Linux PTY fd/proxy path is strong; Windows ConPTY/TCP compile and workflow wiring exist | Need actual Windows runner evidence for ConPTY/TCP shell supervisor and fixture smoke | Windows CI/release job logs and artifact summary |
 | Installed service proof | service-doctor/service-smoke local gates exist | Need clean-machine installed systemd/launchd smoke evidence | `agents service-smoke --installed ... --json` on real install |
@@ -132,6 +132,14 @@ Live execution update from this pass:
      `.dscode/dogfood/external-fixture-rust-add-v3-verification.json`,
      `.dscode/dogfood/external-fixture-python-add-verification.json`, and
      `.dscode/dogfood/external-fixture-js-add-verification.json`.
+   - Done in this pass: the Python invoice multi-file fixture produced online
+     evidence and passed verifier output:
+     `.dscode/dogfood/external-fixture-python-invoice-multifile-verification.json`;
+     `post_validation_passed=true` and `release_evidence_ready=true`.
+   - Done in this pass: `dogfood external-fixture` now runs the parsed
+     `validate with ...` command as a CLI post-validation before deleting the
+     isolated workdir, and explicit edit guardrails handle multiple
+     `replace ... with ... in ...` requests in one task.
    - Done in this pass: external fixture evidence records now include
      `model_backed`, so verifier ledger matching works for online rows.
    - Remaining external evidence work is reviewed demo capture and optional
@@ -181,13 +189,11 @@ Do not claim the 5% target while any of these remaining conditions are true:
   shell-supervisor ConPTY/TCP evidence has not completed on a real Windows
   runner.
 - For the narrower Linux/macOS local CLI milestone: hosted non-Windows CI gates
-  have passed; do not claim closure until at least one online multi-file
-  external fixture evidence artifact is recorded. Next release-binary smoke
-  evidence remains release hardening.
+  and online multi-file external fixture evidence have passed. Next
+  release-binary smoke evidence remains release hardening.
 
 ## Next Local Action
 
-The next unblocked local action, once an online model key is available, is to
-run the new multi-file external fixture and verify the evidence artifact. The
-hosted Linux/macOS CI link is now recorded; the next release matrix run link
-should be added after release binaries execute the same gates.
+The next unblocked local actions are release hardening: add the next release
+matrix run link after release binaries execute the same gates, then finish
+Homebrew/npm credential-backed publishing checks when credentials are available.
