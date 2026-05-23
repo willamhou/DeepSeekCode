@@ -58,10 +58,10 @@ Live execution update from this pass:
   not be counted as release live success samples; live-plan now skips those
   cases. The retry case now succeeds by applying `a * b`, reading back the failed
   validation state, retrying with `a + b`, and passing `cargo test`.
-- Current local live ledger is `17` online runs, `15` successes, and `2`
-  historical stuck runs. The latest small gate passed at `live-runs=17`,
-  overall success `>=88%`, `write_validate:4:75`, `recovery:9:88`, and
-  `pr_workflow:4:75`. This is useful smoke evidence but does not satisfy the
+- Current local live ledger is `20` online runs, `18` successes, and `2`
+  historical stuck runs. The latest small gate passed at `live-runs=20`,
+  overall success `90%`, `write_validate:5:90`, `recovery:10:90`, and
+  `pr_workflow:5:80`. This is useful smoke evidence but does not satisfy the
   release gate below.
 
 ## Residual Gap Table
