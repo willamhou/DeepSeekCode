@@ -97,6 +97,9 @@ deepseek agents shell-fixture-smoke --json
 
 建议按这个顺序推进，避免在低价值 polish 上分散：
 
+当前执行 spec：`docs/superpowers/specs/2026-05-23-final-parity-execution-spec.md`。
+该 spec 固化了本轮重新核对后的剩余差距、可执行命令、外部阻塞项和停止条件。
+
 1. 做 Shell/PTY 跨平台和安装态证明
    - 在现有 `raw_base64` terminal event、`attach_stream` frame channel、duplex `byte_stream` proxy slice、human `agents shell proxy` wrapper、Windows ConPTY/TCP daemon smoke wiring 和 Linux `pty_fd` fd handoff edge coverage 基础上，收集 Windows CI ConPTY/TCP smoke 结果和 installed service smoke。
    - Windows shell-supervisor 下一步是拿到 CI runner 的 TCP daemon/client、真实二进制 shell fixture、targeted start/resize smoke 证据；如果 loopback TCP 不能满足安装态要求，再评估 named pipe。
