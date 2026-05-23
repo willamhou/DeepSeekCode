@@ -9,7 +9,7 @@ use crate::util::json::{
 };
 use std::collections::BTreeMap;
 use std::error::Error;
-#[cfg(all(unix, target_os = "linux"))]
+#[cfg(unix)]
 use std::fs::File;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};

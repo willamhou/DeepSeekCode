@@ -7269,6 +7269,11 @@ fn shell_supervisor_windows_tcp_control_smoke(
             "shell supervisor Windows TCP smoke did not start a native-supervisor ConPTY job",
         ));
     }
+    let cursor_response_request = format!(
+        "{{\"method\":\"stdin\",\"arguments\":{{\"task_id\":\"{}\",\"input_base64\":\"G1sxOzFS\",\"timeout_ms\":{wait_timeout}}}}}\n",
+        json_escape(&task_id)
+    );
+    let _ = shell_supervisor_tcp_request_raw(endpoint, "stdin", &cursor_response_request);
 
     let wait_request = format!(
         "{{\"method\":\"wait\",\"arguments\":{{\"task_id\":\"{}\",\"timeout_ms\":{wait_timeout}}}}}\n",
@@ -7288,7 +7293,7 @@ fn shell_supervisor_windows_tcp_control_smoke(
     }
 
     let stream_request = format!(
-        "{{\"method\":\"attach_stream\",\"arguments\":{{\"task_id\":\"{}\",\"cursor\":0,\"limit_bytes\":4096,\"max_ms\":500,\"poll_ms\":25}}}}\n",
+        "{{\"method\":\"attach_stream\",\"arguments\":{{\"task_id\":\"{}\",\"cursor\":0,\"limit_bytes\":4096,\"max_ms\":500,\"max_events\":1,\"poll_ms\":25}}}}\n",
         json_escape(&task_id)
     );
     let stream_response =
@@ -7302,7 +7307,7 @@ fn shell_supervisor_windows_tcp_control_smoke(
     }
 
     let resize_start_request = format!(
-        "{{\"method\":\"start\",\"arguments\":{{\"command\":\"ping -n 6 127.0.0.1 >NUL\",\"tty\":true,\"tty_rows\":24,\"tty_cols\":80,\"timeout_ms\":{wait_timeout}}}}}\n"
+        "{{\"method\":\"start\",\"arguments\":{{\"command\":\"ping -n 6 127.0.0.1\",\"tty\":true,\"tty_rows\":24,\"tty_cols\":80,\"timeout_ms\":{wait_timeout}}}}}\n"
     );
     let resize_start_response =
         shell_supervisor_tcp_request_raw(endpoint, "start", &resize_start_request)?;
@@ -10111,6 +10116,19 @@ mod tests {
             Some("native-supervisor")
         );
         assert!(matches!(object.get("job_tty"), Some(JsonValue::Bool(true))));
+        #[cfg(windows)]
+        {
+            let stdin = parse_shell_supervisor_request(&format!(
+                r#"{{"method":"stdin","arguments":{{"task_id":"{task_id}","input_base64":"G1sxOzFS","timeout_ms":1000}}}}"#
+            ))
+            .unwrap();
+            let _ = shell_supervisor_protocol_response_for_request(
+                &stdin,
+                &root,
+                &socket,
+                "epoch+cursor-response",
+            );
+        }
 
         let wait = parse_shell_supervisor_request(&format!(
             r#"{{"method":"wait","arguments":{{"task_id":"{task_id}","timeout_ms":2000}}}}"#
@@ -10290,7 +10308,7 @@ mod tests {
         std::fs::create_dir_all(&state_dir).unwrap();
         let socket = state_dir.join("supervisor.sock");
         let command = if cfg!(windows) {
-            "ping -n 6 127.0.0.1 >NUL"
+            "ping -n 6 127.0.0.1"
         } else {
             "tail -f /dev/null"
         };
