@@ -2866,8 +2866,8 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
             .filter(|case| case.category == "pr_workflow")
             .count();
         assert!(
-            pr_workflow_cases >= 25,
-            "default manifest should keep Phase 12C pr_workflow coverage at or above 25 cases"
+            pr_workflow_cases >= 26,
+            "default manifest should keep Phase 12C pr_workflow coverage at or above 26 cases"
         );
 
         let review_case = cases
@@ -2908,6 +2908,22 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
         assert_eq!(patch_case.expect_tool.as_deref(), Some("apply_patch"));
         assert_eq!(
             patch_case.expect_last_tool_output_contains.as_deref(),
+            Some("meta.result=ok")
+        );
+
+        let exact_patch_case = cases
+            .iter()
+            .find(|case| {
+                case.name == "fixture-github-action-patch-trigger-exact-replacement-rust-mini"
+            })
+            .expect("default manifest should include exact action patch replacement fixture");
+        assert_eq!(exact_patch_case.category, "pr_workflow");
+        assert!(exact_patch_case.isolate_workdir);
+        assert!(exact_patch_case.task.contains("@deepseek patch change"));
+        assert!(exact_patch_case.task.contains(" becomes "));
+        assert_eq!(exact_patch_case.expect_tool.as_deref(), Some("apply_patch"));
+        assert_eq!(
+            exact_patch_case.expect_last_tool_output_contains.as_deref(),
             Some("meta.result=ok")
         );
     }

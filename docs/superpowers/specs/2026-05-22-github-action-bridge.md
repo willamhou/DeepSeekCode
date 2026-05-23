@@ -92,8 +92,10 @@ convert GitHub event payloads into a PR review run.
   - action-labeled review comment planning case
   - action-labeled `@deepseek fix` JavaScript write/validate fixture
   - action-labeled `@deepseek patch` Rust write/validate fixture
-  - default `.dscode/benchmarks.txt` now has `25` `pr_workflow` cases, matching
-    the Phase 12C benchmark-count target.
+  - action-labeled exact replacement request fixture for
+    `@deepseek patch change ... becomes ...`
+  - default `.dscode/benchmarks.txt` now has `26` `pr_workflow` cases,
+    exceeding the Phase 12C benchmark-count target.
 
 ## Verification
 
@@ -115,6 +117,9 @@ convert GitHub event payloads into a PR review run.
   - Python `pytest`/`uv run pytest` fixtures are covered by `run_shell` fallback
   - Go write-validate fixtures are covered by user-level Go toolchain discovery
   - live gate passes after offline dogfood coverage reached `runs=20`
+- `cargo run --quiet -- benchmark --case fixture-github-action-patch-trigger-exact-replacement-rust-mini --out /tmp/deepseek-hosted-exact-patch-benchmark.md`
+  - targeted result: `1/1`
+  - filtered run did not update benchmark history
 - `cargo run --quiet -- github action --event <tmp-event> --event-name issue_comment --dry-run --trigger @deepseek`
 - `cargo run --quiet -- github pr-head owner/repo#11 --repo-owner owner --github-output --json-file <tmp-pr-json>`
 - `cargo run --quiet -- github fixture-smoke --json`
@@ -139,16 +144,21 @@ convert GitHub event payloads into a PR review run.
 - dry-run samples for `@deepseek fix`, `@deepseek patch`, and explicit
   `--mode review`
 - YAML parse checks for both workflow examples
+- Hosted workflow evidence:
+  - PR #10 proved the hosted write bridge and produced
+    `6fd5010 deepseek: apply requested PR update` from GitHub Actions.
+  - PR #11 repeated the same write flow after the fixes were merged to the
+    default branch and produced `f0fe9a7 deepseek: apply requested PR update`.
+  - PR #12 removed the temporary evidence fixtures after the proof was
+    preserved in PR history.
 
 ## Remaining
 
-- Execute the workflow in a fixture repository and capture evidence that it
-  reads PR diff and posts a review comment.
-- Execute the write workflow in a fixture repository and capture evidence that
-  it checks out PR head, writes a fix/patch, and pushes back to the PR branch.
+- Promote or schedule a stable periodic hosted workflow smoke if this should
+  stay continuously monitored instead of relying on PR #10/#11 evidence.
 - Promote the refreshed benchmark report/history once the surrounding worktree
-  is ready.
+  is ready and a full unfiltered run is desired.
 - Collect online/model-backed `pr_workflow` dogfood evidence for the new
   action-labeled cases. The current `14/14` `pr_workflow` replay evidence uses
   offline transport and is useful for deterministic coverage, not a substitute
-  for hosted workflow/model-backed proof.
+  for model-backed proof.
