@@ -1,7 +1,7 @@
 {
   "name": "deepseek-code",
   "displayName": "DeepseekCode",
-  "description": "Run DeepseekCode CLI tasks from VS Code.",
+  "description": "Run DeepseekCode agent tasks from a VS Code workbench panel.",
   "version": "0.1.0",
   "publisher": "deepseekcode",
   "license": "MIT",
@@ -25,6 +25,11 @@
     "onView:deepseek.actions",
     "onView:deepseek.panel"
   ],
+  "scripts": {
+    "test:smoke": "node test-extension-smoke.js",
+    "test:panel-fixture": "node test-panel-fixture.js",
+    "test:extension-host": "node test-extension-host.js"
+  },
   "main": "./extension.js",
   "contributes": {
     "commands": [
