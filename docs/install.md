@@ -79,13 +79,22 @@ deepseek dogfood report --limit 5
 
 外部 write-fixture 证据需要当前 checkout 之外的 disposable git 仓库。先 dry-run
 检查，真实运行会复制到 isolated workdir，并在 dogfood report 里计入
-`external-write-fixture`：
+`external-write-fixture`。真实 evidence 还会从 task 里的 `validate with ...`
+抽取后置验证命令，在 isolated workdir 中执行，并要求
+`post_validation_passed=true` 才能通过 `dogfood external-evidence`：
 
 ```bash
-deepseek dogfood external-fixture --workdir /tmp/disposable-repo --dry-run \
-  'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
-deepseek dogfood external-fixture --workdir /tmp/disposable-repo --benchmark-gate \
-  'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
+fixture_dir=/tmp/deepseek-external-fixtures/python-invoice-multifile
+scripts/create-multifile-external-fixture.sh "$fixture_dir"
+task='replace `return amount - discount` with `return max(amount - discount, 0.0)` in src/invoice_math/pricing.py and replace `Invoice total` with `Final total` in src/invoice_math/summary.py, validate with python3 -m unittest discover -s tests'
+deepseek dogfood external-fixture --workdir "$fixture_dir" --dry-run "$task"
+deepseek dogfood external-fixture --workdir "$fixture_dir" \
+  --evidence-out .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
+  "$task"
+deepseek dogfood external-evidence \
+  --file .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
+  --out .dscode/dogfood/external-fixture-python-invoice-multifile-verification.json \
+  --require-successful-external-fixtures 1
 deepseek dogfood report --limit 10
 deepseek dogfood live-plan --limit 10
 deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 3 --json
@@ -380,7 +389,7 @@ reasoning delta 保存为 durable `reasoning` item。默认仍保持 `off`，直
 reasoning transcript replay 和更完整的 thinking/tool-call 兼容性验证完成。
 
 `deepseek` 每次任务开始前也会读取 workspace instruction 文件。团队共享规则可放在 repo root 或子目录的
-`AGENTS.md`；已有 Claude Code 项目也可继续用 `CLAUDE.md` 或 `.claude/CLAUDE.md`，DeepseekCode 会在同一目录没有
+`AGENTS.md`；已有 Claude Code 项目也可继续用 `CLAUDE.md` 或 `.claude/CLAUDE.md`，DeepSeekCode 会在同一目录没有
 `AGENTS*.md` 时把它们作为 fallback。个人默认指令文件是 `~/.config/dscode/AGENTS.md`，可通过
 `workspace.user_instructions_file` 改路径或设为空字符串禁用。
 

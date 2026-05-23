@@ -77,12 +77,12 @@ Invoke them by filename:
 
 Inside the markdown body, `$ARGUMENTS` expands to all arguments, `$0` / `$1` expand positional
 arguments, and `$ARGUMENTS[0]` / `$ARGUMENTS[1]` are the long indexed forms. If no argument
-placeholder appears, DeepseekCode appends `ARGUMENTS: ...` to the prompt automatically.
+placeholder appears, DeepSeekCode appends `ARGUMENTS: ...` to the prompt automatically.
 
 ### MCP Prompt Slash Commands
 
 Connected MCP servers can expose prompt templates through `prompts/list` and `prompts/get`.
-DeepseekCode can load those prompts directly from the REPL:
+DeepSeekCode can load those prompts directly from the REPL:
 
 ```text
 > /mcp/github/review_pr {"number":42}
@@ -109,7 +109,7 @@ tests and fixtures can feed `/help\n/quit\n` without requiring a real terminal.
 
 ## Workspace Instructions
 
-At the start of each agent loop, DeepseekCode loads bounded markdown instructions into the system
+At the start of each agent loop, DeepSeekCode loads bounded markdown instructions into the system
 prompt. This gives repeated project rules a first-class place instead of requiring users to paste
 them into every task.
 
@@ -123,7 +123,7 @@ Default sources:
 <git-root>/.claude/CLAUDE.md
 ```
 
-For subdirectories, DeepseekCode walks from the git root to the current directory. At each directory
+For subdirectories, DeepSeekCode walks from the git root to the current directory. At each directory
 level it reads the first existing file in this precedence order: `AGENTS.override.md`, `AGENTS.md`,
 `CLAUDE.md`, `.claude/CLAUDE.md`. Later files are appended later in the prompt, so more local
 instructions naturally win when they conflict. Each loaded file is capped at 32 KiB.
@@ -158,7 +158,7 @@ Supported event directories:
 .dscode/hooks/shell_env/*
 ```
 
-Scripts must be executable. DeepseekCode runs user hooks first, then project hooks, in lexical path
+Scripts must be executable. DeepSeekCode runs user hooks first, then project hooks, in lexical path
 order. Each script receives a JSON payload on stdin and `DSCODE_HOOK_EVENT` in the environment.
 `user_prompt_submit`, `pre_tool_use`, and `permission_request` scripts block the turn or tool call
 when they exit nonzero or return `{"decision":"deny","reason":"..."}`. Other hook failures are
@@ -182,7 +182,7 @@ prompt. To keep token usage bounded:
 
 `/compact` mutates the transcript: older turns are replaced by one
 assistant summary turn, while the latest 8 turns are kept verbatim. If
-hooks are enabled, DeepseekCode runs `pre_compact` before rewriting the
+hooks are enabled, DeepSeekCode runs `pre_compact` before rewriting the
 transcript; hook output is printed as advisory context.
 
 `/clear` wipes the transcript when you want to start fresh without

@@ -123,10 +123,11 @@ DeepSeekCode は自身の開発に使える段階ですが、Claude Code CLI / C
 ほどの製品成熟度にはまだ届いていません。Linux/macOS のローカル coding-agent
 CLI に絞ると、残差は主に evidence depth と配布面の polish です。
 
-- macOS shell/runtime の hosted CI evidence は PR #14 / CI run #35 で通過済み。
-  release binary evidence は次回 release matrix run で取得します。
-- disposable Python invoice fixture の online multi-file external evidence は記録済み。
-  追加の外部サンプルは任意の hardening です。
+- Linux/macOS shell/runtime と multi-file fixture scaffold の hosted CI
+  evidence は記録済みです。PR #16 / CI run #39 が現在の全 platform green
+  run で、release binary evidence は次回 release matrix run で取得します。
+- disposable Python invoice fixture の online multi-file external evidence と
+  verifier 結果は記録済みです。追加の外部サンプルは任意の hardening です。
 - Homebrew 公開。tap 資格情報が未設定です。
 - コミット済み model-backed SVG を超える、任意の polish 済み GIF/MP4 キャプチャ。
 
@@ -188,10 +189,13 @@ node packaging/homebrew/verify-formula.js
 
 ```bash
 deepseek update publish-status
-deepseek update publish-status --dist dist-assets --npm-dist npm-dist --strict
+deepseek update publish-status --dist dist-assets --npm-dist npm-dist \
+  --live-evidence-verification .dscode/dogfood/live-evidence-verification.json \
+  --strict
 deepseek update publish-status --json
 deepseek agents service-doctor --kind all --workdir "$PWD" --bin "$(command -v deepseek)" --json
-deepseek agents service-smoke --workdir "$PWD" --bin "$(command -v deepseek)" --json
+mkdir -p /tmp/dsc-smk
+deepseek agents service-smoke --workdir /tmp/dsc-smk --bin "$(command -v deepseek)" --json
 deepseek agents shell-fixture-smoke --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
@@ -209,20 +213,37 @@ repository を使います。まず dry-run で preflight し、その後 isolat
 実行して dogfood report に記録します。
 
 ```bash
-scripts/create-multifile-external-fixture.sh /tmp/deepseek-external-fixtures/python-invoice-multifile
-deepseek dogfood external-fixture --workdir /tmp/disposable-repo --dry-run \
-  'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
-deepseek dogfood external-fixture --workdir /tmp/disposable-repo --benchmark-gate \
-  'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
+fixture_dir=/tmp/deepseek-external-fixtures/python-invoice-multifile
+scripts/create-multifile-external-fixture.sh "$fixture_dir"
+task='replace `return amount - discount` with `return max(amount - discount, 0.0)` in src/invoice_math/pricing.py and replace `Invoice total` with `Final total` in src/invoice_math/summary.py, validate with python3 -m unittest discover -s tests'
+deepseek dogfood external-fixture --workdir "$fixture_dir" --dry-run "$task"
+deepseek dogfood external-fixture --workdir "$fixture_dir" \
+  --evidence-out .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
+  "$task"
+deepseek dogfood external-evidence \
+  --file .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
+  --out .dscode/dogfood/external-fixture-python-invoice-multifile-verification.json \
+  --require-successful-external-fixtures 1
 deepseek dogfood report --limit 10
+deepseek dogfood live-plan --limit 10
+deepseek dogfood live-run --limit 3 --json
+deepseek dogfood live-run --limit 3 --evidence-out .dscode/dogfood/live-evidence.json --execute
+deepseek dogfood live-evidence --file .dscode/dogfood/live-evidence.json \
+  --out .dscode/dogfood/live-evidence-verification.json \
+  --require-benchmark-gate --require-report-gate
 deepseek dogfood report --limit 20 \
   --require-min-runs 100 \
   --require-success-rate 90 \
+  --require-live-runs 100 \
+  --require-live-success-rate 90 \
   --require-recent-clean 20 \
   --require-external-write-fixtures 3 \
   --require-category write_validate:25:90 \
   --require-category recovery:25:90 \
-  --require-category pr_workflow:25:90
+  --require-category pr_workflow:25:90 \
+  --require-live-category write_validate:25:90 \
+  --require-live-category recovery:25:90 \
+  --require-live-category pr_workflow:25:90
 ```
 
 ## ドキュメント

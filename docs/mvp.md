@@ -1,102 +1,50 @@
-# MVP 与路线图
+# Historical MVP
 
-## v0.1 目标
+This page records the original v0.1 target. It is historical context, not the
+current product roadmap. For current status and next work, use:
 
-`v0.1` 的目标不是“最强 code agent”，而是“稳定跑通本地代码修改闭环”。
+- [Current status](./current-status.md)
+- [Roadmap](./roadmap.md)
+- [Release checklist](./release.md)
 
-主命令以 `deepseek` 为准；`dscode` 仍保留为兼容别名。
+## Original v0.1 Goal
 
-一句话：
+The first milestone was not "the strongest code agent"; it was a stable local
+code-editing loop:
 
-> 在本地仓库中，能够围绕 DeepSeek 完成读代码、改代码、跑命令、继续修复的基本代理流程。
+> In a local repository, use DeepSeek to read code, edit code, run commands, and
+> continue fixing based on validation output.
 
-## v0.1 功能清单
+The primary command is `deepseek`; `dscode` remains only as a compatibility
+alias.
 
-### 基础交互
+## Original Scope
 
-- `deepseek`
-- `deepseek "task"`
-- `deepseek diff`
-- `deepseek resume`
-- `deepseek config`
-- `deepseek doctor`
+- Start the CLI with `deepseek`.
+- Inspect a repository with file listing, file reading, and text search.
+- Apply patches instead of overwriting whole files.
+- Run approved shell commands.
+- Show diffs and save/resume session state.
+- Use `doctor` and `smoke` to diagnose local setup.
 
-### 项目理解
+That milestone is complete and has been superseded by the current Linux/macOS
+code-agent CLI goal.
 
-- 扫描目录结构
-- 检测主要语言
-- 推断包管理器与常见命令
-- 识别忽略目录
+## What Changed Since v0.1
 
-### 工具能力
+Several items that were explicitly out of scope for the first version now exist
+as implemented features or working prototypes:
 
-- `list_files`
-- `read_file`
-- `search_text`
-- `apply_patch`
-- `run_shell`
-- `git_diff`
+- multi-provider/model configuration and pickers;
+- TUI workbench and REPL line editor;
+- durable runtime with HTTP/SSE surfaces;
+- MCP/ACP client and server surfaces;
+- local skills, remote skill installers, custom slash commands, and hooks;
+- subagents and background worktree tasks;
+- GitHub Action review/write bridge;
+- VS Code native panel prototype;
+- release matrix, GHCR image, npm package staging, and Homebrew formula
+  rendering.
 
-### Runtime 能力
-
-- agent loop
-- 上下文裁剪
-- 会话保存和恢复
-- diff 展示
-- 审批策略
-
-## 首版不做
-
-- 多模型 provider
-- IDE 插件
-- 远程 skill 安装
-- 多 agent 并行
-- 自动提交和推送 git
-- AST 级大规模重构
-
-## 开发阶段建议
-
-### Phase 1: 基础骨架
-
-- 初始化 CLI
-- 接入配置加载
-- 接入 DeepSeek API
-- 打通最简单的单轮问答
-
-### Phase 2: Tool 闭环
-
-- 实现文件读取与搜索
-- 实现 patch 应用
-- 实现 shell 执行
-- 跑通模型请求工具 -> 工具执行 -> 模型继续
-
-### Phase 3: 仓库策略
-
-- 语言检测
-- profile 加载
-- 命令推断
-- 忽略规则
-
-### Phase 4: 任务策略
-
-- skill 加载
-- 工具白名单
-- shell allowlist
-- skill-based prompt augmentation
-
-### Phase 5: 体验打磨
-
-- diff 渲染
-- 流式输出
-- 会话恢复
-- `doctor` 命令
-
-## 验收标准
-
-如果下面几类任务能稳定完成，`v0.1` 就是成立的：
-
-- “解释这个模块是干什么的”
-- “修复这个 failing test”
-- “修复 lint / typecheck 错误”
-- “基于报错做一轮小范围修改”
-- “给一个函数加一处小功能并跑验证命令”
+The current remaining work is therefore not MVP closure. It is release and
+product hardening.

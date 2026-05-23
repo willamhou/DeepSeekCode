@@ -118,10 +118,11 @@ DeepSeekCode 已经可以直接拿来写自己的代码，但还没有达到 Cla
 Codex CLI 的产品成熟度。如果只看 Linux/macOS 本地 coding-agent CLI，剩余差距主要是
 证据厚度和分发打磨：
 
-- macOS shell/runtime 的 hosted CI 证据已经在 PR #14 / CI run #35 通过；
-  release binary 证据等待下一次 release matrix 产出；
-- disposable Python invoice fixture 已有 online multi-file external evidence；
-  继续增加外部样本属于可选加固；
+- Linux/macOS shell/runtime 和 multi-file fixture scaffold 已有 hosted CI
+  证据；PR #16 / CI run #39 是当前全平台绿色 run，release binary 证据等待
+  下一次 release matrix 产出；
+- disposable Python invoice fixture 已有 online multi-file external evidence
+  和 verifier 结果；继续增加外部样本属于可选加固；
 - Homebrew 发布仍缺 tap 凭据；
 - 已提交 model-backed SVG 之外，可选的更精致 GIF/MP4 录屏素材。
 
@@ -181,10 +182,13 @@ node packaging/homebrew/verify-formula.js
 
 ```bash
 deepseek update publish-status
-deepseek update publish-status --dist dist-assets --npm-dist npm-dist --strict
+deepseek update publish-status --dist dist-assets --npm-dist npm-dist \
+  --live-evidence-verification .dscode/dogfood/live-evidence-verification.json \
+  --strict
 deepseek update publish-status --json
 deepseek agents service-doctor --kind all --workdir "$PWD" --bin "$(command -v deepseek)" --json
-deepseek agents service-smoke --workdir "$PWD" --bin "$(command -v deepseek)" --json
+mkdir -p /tmp/dsc-smk
+deepseek agents service-smoke --workdir /tmp/dsc-smk --bin "$(command -v deepseek)" --json
 deepseek agents shell-fixture-smoke --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
@@ -201,20 +205,37 @@ deepseek pr live-status owner/repo#42 --json
 命令会先 dry-run 检查，然后在 isolated copy 中执行，并把结果写入 dogfood report：
 
 ```bash
-scripts/create-multifile-external-fixture.sh /tmp/deepseek-external-fixtures/python-invoice-multifile
-deepseek dogfood external-fixture --workdir /tmp/disposable-repo --dry-run \
-  'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
-deepseek dogfood external-fixture --workdir /tmp/disposable-repo --benchmark-gate \
-  'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
+fixture_dir=/tmp/deepseek-external-fixtures/python-invoice-multifile
+scripts/create-multifile-external-fixture.sh "$fixture_dir"
+task='replace `return amount - discount` with `return max(amount - discount, 0.0)` in src/invoice_math/pricing.py and replace `Invoice total` with `Final total` in src/invoice_math/summary.py, validate with python3 -m unittest discover -s tests'
+deepseek dogfood external-fixture --workdir "$fixture_dir" --dry-run "$task"
+deepseek dogfood external-fixture --workdir "$fixture_dir" \
+  --evidence-out .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
+  "$task"
+deepseek dogfood external-evidence \
+  --file .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
+  --out .dscode/dogfood/external-fixture-python-invoice-multifile-verification.json \
+  --require-successful-external-fixtures 1
 deepseek dogfood report --limit 10
+deepseek dogfood live-plan --limit 10
+deepseek dogfood live-run --limit 3 --json
+deepseek dogfood live-run --limit 3 --evidence-out .dscode/dogfood/live-evidence.json --execute
+deepseek dogfood live-evidence --file .dscode/dogfood/live-evidence.json \
+  --out .dscode/dogfood/live-evidence-verification.json \
+  --require-benchmark-gate --require-report-gate
 deepseek dogfood report --limit 20 \
   --require-min-runs 100 \
   --require-success-rate 90 \
+  --require-live-runs 100 \
+  --require-live-success-rate 90 \
   --require-recent-clean 20 \
   --require-external-write-fixtures 3 \
   --require-category write_validate:25:90 \
   --require-category recovery:25:90 \
-  --require-category pr_workflow:25:90
+  --require-category pr_workflow:25:90 \
+  --require-live-category write_validate:25:90 \
+  --require-live-category recovery:25:90 \
+  --require-live-category pr_workflow:25:90
 ```
 
 ## 文档

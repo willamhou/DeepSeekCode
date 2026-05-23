@@ -1,191 +1,147 @@
-# 架构设计
+# Architecture
 
-## 总体原则
+DeepSeekCode is a terminal-first code-agent CLI. The implementation is organized
+around a local agent loop, a durable runtime store, permissioned tools, and
+multiple human/operator surfaces over the same core behavior.
 
-架构按四层划分：
+## Layers
 
-1. `CLI / UI`
-2. `Core Runtime`
-3. `Model Adapter`
-4. `Tooling + Strategy`
+### CLI And UI
 
-设计目标：
+The public entrypoint is `deepseek`.
 
-- 模型适配与 agent 运行时解耦
-- 工具原子化，方便权限控制和审计
-- `Skill` 与 `Language Profile` 作为策略层存在，不污染核心运行时
-- 先保证闭环稳定，再做生态扩展
+- Bare `deepseek` opens the full-screen TUI when stdin/stdout are real TTYs.
+- `deepseek chat` opens the line-oriented REPL.
+- `deepseek run` / `deepseek exec` run one-shot or scriptable tasks.
+- `deepseek agents`, `deepseek task`, `deepseek github`, `deepseek mcp`,
+  `deepseek dogfood`, and `deepseek update` expose operational surfaces for
+  runtime workers, CI, release, and evidence.
 
-## 目录建议
+The TUI and REPL are separate frontends over the same agent/runtime/tooling
+contracts. The TUI emphasizes durable sessions, approvals, task panels, MCP
+manager screens, and live runtime refresh. The REPL emphasizes fast local prompt
+iteration, slash commands, raw-mode line editing, and session save/load.
 
-```text
-DeepSeek Code/
-  Cargo.toml
-  src/
-    main.rs
+### Agent Loop
 
-    cli/
-      mod.rs
-      app.rs
-      commands/
-        chat.rs
-        run.rs
-        diff.rs
-        resume.rs
-        config.rs
-        doctor.rs
+The agent loop builds a `ModelRequest` from:
 
-    core/
-      mod.rs
-      agent.rs
-      loop.rs
-      planner.rs
-      executor.rs
-      memory.rs
-      session.rs
-      context.rs
-      approval.rs
+- user task text;
+- workspace instructions (`AGENTS.md`, compatible Claude instruction files, and
+  optional user instructions);
+- selected profile/model/provider settings;
+- recent transcript/runtime context;
+- tool observations and recovery hints;
+- skill/custom command prompt additions.
 
-    model/
-      mod.rs
-      client.rs
-      deepseek.rs
-      protocol.rs
-      stream.rs
-
-    tools/
-      mod.rs
-      registry.rs
-      types.rs
-      read_file.rs
-      list_files.rs
-      search_text.rs
-      apply_patch.rs
-      run_shell.rs
-      git_diff.rs
-
-    language/
-      mod.rs
-      detect.rs
-      profile.rs
-      infer.rs
-      profiles/
-        generic.rs
-        rust.rs
-        python.rs
-        typescript.rs
-        go.rs
-        java.rs
-
-    skills/
-      mod.rs
-      schema.rs
-      loader.rs
-      registry.rs
-      resolver.rs
-
-    config/
-      mod.rs
-      types.rs
-      load.rs
-      paths.rs
-
-    ui/
-      mod.rs
-      render.rs
-      diff.rs
-      confirm.rs
-      stream.rs
-
-    error/
-      mod.rs
-
-  skills/
-  profiles/
-```
-
-## 分层说明
-
-### CLI / UI
-
-职责：
-
-- 解析参数
-- 呈现交互式会话
-- 展示 diff、确认框、流式输出
-- 提供 `chat/run/diff/resume/config/doctor` 命令
-
-### Core Runtime
-
-职责：
-
-- 维护 agent loop
-- 管理上下文和记忆
-- 驱动工具调用
-- 处理 approval policy
-- 保存会话状态
-
-`Core` 应尽量不依赖具体模型供应商。
+The model returns either a final response or a tool call. Tool calls are routed
+through the same permission, policy, hook, execution, observation, and recovery
+paths regardless of whether the request came from TUI, REPL, exec, runtime
+daemon, GitHub Action bridge, or dogfood.
 
 ### Model Adapter
 
-职责：
+The model layer normalizes DeepSeek/OpenAI-compatible and Anthropic-compatible
+responses into the same internal action types.
 
-- 与 DeepSeek API 通信
-- 统一消息格式
-- 解析模型输出
-- 适配流式输出与 tool-call 风格
+Supported behavior includes:
 
-这里先只做 `DeepSeek`，但接口上保留扩展空间。
+- OpenAI-compatible function/tool calls;
+- same-turn batch tool calls;
+- Anthropic-style `tool_use` content blocks;
+- streaming assistant deltas and reasoning/thinking deltas;
+- provider/model aliases, including DeepSeek V4 aliases and `auto` routing.
 
-### Tooling + Strategy
+The default provider is DeepSeek-first, but the rest of the runtime is not tied
+to one provider-specific response shape.
 
-职责：
+### Tools And Policy
 
-- 提供可执行工具
-- 识别语言与仓库类型
-- 加载 `Skill` 和 `Language Profile`
-- 选择合理命令与文件优先级
+Tools are small, auditable operations behind a registry. Core tools include:
 
-## 核心运行循环
+- file and repository inspection (`list_files`, `read_file`, `search_text`,
+  `git_diff`, project map/status helpers);
+- edits (`apply_patch`, write/move/copy/delete helpers where enabled);
+- shell execution and shell-supervisor control;
+- diagnostics, tests, review helpers, todo/plan state, notes, memory, rollback;
+- MCP/ACP bridge tools;
+- runtime task, automation, subagent, and user-input tools;
+- web/search/finance/image/document helper tools where configured.
 
-第一版建议采用简单 loop：
+Before side effects run, policy and approval checks decide whether the tool may
+execute. Hooks can add context, deny actions, or inject shell environment keys.
+Tool results are summarized into observations and persisted into runtime records
+when a durable thread is active.
 
-1. 用户输入任务
-2. 检测语言 profile
-3. 解析可选 skill
-4. 组装 system prompt
-5. 调用模型
-6. 如果模型请求工具，则执行工具
-7. 将工具结果回填模型
-8. 循环直到完成或达到 step limit
-9. 展示变更 diff 和最终总结
+### Durable Runtime
 
-第一版不要过早把 planner/executor 做得很重，`loop.rs` 可以先承载主流程。
+The runtime store lives under `.dscode/runtime/` and records:
 
-## 核心抽象
+- sessions and linked threads;
+- turns and item timelines;
+- usage and cost/cache telemetry;
+- events such as permission requests, approvals, cancellations, and user-input
+  requests;
+- task and automation records.
 
-建议保留两个基础 trait：
+The same store is exposed through:
 
-```rust
-pub trait ModelClient {
-    async fn respond(&self, input: ModelRequest) -> anyhow::Result<ModelResponse>;
-}
-```
+- local file-backed TUI access;
+- `deepseek serve --http` REST/SSE endpoints;
+- `deepseek agents daemon` and `deepseek agents run-task`;
+- local service templates for systemd/launchd;
+- release and smoke checks.
 
-```rust
-pub trait Tool {
-    fn name(&self) -> &'static str;
-    async fn execute(&self, input: ToolInput) -> anyhow::Result<ToolOutput>;
-}
-```
+Runtime events use append-only records so UI clients and background workers can
+coordinate without sharing process memory.
 
-统一通过 `ToolRegistry` 做分发和权限控制。
+### Shell Supervisor
 
-## 关键工程原则
+The shell-supervisor is the long-running shell control plane. It supports:
 
-- 文件修改优先走 patch，不做整文件覆盖式写入
-- shell 执行必须受控，并支持审批
-- 所有工具调用都要保留日志和可审计记录
-- 策略配置数据驱动，避免把语言和任务逻辑写死在 prompt 里
+- safe background shell jobs;
+- start/wait/attach/replay/stdin/resize/cancel;
+- Linux native PTY jobs;
+- byte-stream and raw-proxy modes;
+- Linux `pty_fd` handoff for direct PTY master control;
+- Windows ConPTY/TCP smoke paths;
+- service smoke and installed-service probes.
 
+This lets the agent keep terminal work observable, cancellable, replayable, and
+separate from the parent CLI process.
+
+### MCP And ACP
+
+DeepSeekCode can act as:
+
+- an MCP server exposing workspace/runtime tools, resources, and prompts;
+- an MCP client for configured stdio/HTTP/SSE servers;
+- an ACP stdio adapter for runtime sessions and tool events.
+
+Agent-visible MCP calls go through approval and allowlist policy. Remote MCP
+tools can be exposed as dynamic `mcp__server__tool` tools when explicitly
+enabled.
+
+### Automation And CI
+
+The automation layer includes:
+
+- `deepseek task` background worktree runner;
+- `deepseek github action` bridge for review/fix/patch workflows;
+- local fixture smoke commands for tasks, GitHub bridge, hooks, MCP, subagents,
+  shell supervisor, and services;
+- dogfood live/external evidence recorders and verifiers;
+- release packaging and public install readiness checks.
+
+The release goal is to make important behavior repeatable through one-command
+gates rather than relying on ad hoc manual proof.
+
+## Safety Principles
+
+- Prefer patches over whole-file overwrites.
+- Keep side effects permissioned and auditable.
+- Keep credentials out of transcripts, evidence, and committed files.
+- Bind release evidence to ledger fingerprints and verifier output.
+- Treat historical specs as audit records, not current truth.
+- Keep Linux/macOS local CLI readiness separate from broader Windows, hosted
+  IDE, and publishing hardening.

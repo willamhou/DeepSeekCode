@@ -122,11 +122,12 @@ DeepSeekCode is close enough to use as its own coding CLI, but it is not yet at
 Claude Code CLI / Codex CLI polish. For a Linux/macOS local coding-agent CLI,
 the remaining gaps are mostly evidence depth and distribution polish:
 
-- macOS shell/runtime CI evidence beyond the entrypoint smoke is now recorded
-  in PR #14 / CI run #35; release-binary evidence will come from the next
-  release matrix run;
-- online multi-file external fixture evidence is now recorded for the
-  disposable Python invoice fixture; additional external samples are optional;
+- Linux/macOS shell/runtime and multi-file fixture scaffold evidence is now
+  recorded in hosted CI; PR #16 / CI run #39 is the current all-platform green
+  run, and release-binary evidence will come from the next release matrix run;
+- online multi-file external fixture evidence is now recorded and verified for
+  the disposable Python invoice fixture; additional external samples are
+  optional hardening;
 - Homebrew publishing, still blocked on tap credentials;
 - optional polished GIF/MP4 capture beyond the committed model-backed SVG.
 
@@ -213,11 +214,17 @@ outside this checkout. The command dry-runs preflight first, then runs against
 an isolated copy and records the result in the dogfood report:
 
 ```bash
-scripts/create-multifile-external-fixture.sh /tmp/deepseek-external-fixtures/python-invoice-multifile
-deepseek dogfood external-fixture --workdir /tmp/disposable-repo --dry-run \
-  'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
-deepseek dogfood external-fixture --workdir /tmp/disposable-repo --benchmark-gate \
-  'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
+fixture_dir=/tmp/deepseek-external-fixtures/python-invoice-multifile
+scripts/create-multifile-external-fixture.sh "$fixture_dir"
+task='replace `return amount - discount` with `return max(amount - discount, 0.0)` in src/invoice_math/pricing.py and replace `Invoice total` with `Final total` in src/invoice_math/summary.py, validate with python3 -m unittest discover -s tests'
+deepseek dogfood external-fixture --workdir "$fixture_dir" --dry-run "$task"
+deepseek dogfood external-fixture --workdir "$fixture_dir" \
+  --evidence-out .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
+  "$task"
+deepseek dogfood external-evidence \
+  --file .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
+  --out .dscode/dogfood/external-fixture-python-invoice-multifile-verification.json \
+  --require-successful-external-fixtures 1
 deepseek dogfood report --limit 10
 deepseek dogfood live-plan --limit 10
 deepseek dogfood live-run --limit 3
