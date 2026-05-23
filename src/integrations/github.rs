@@ -267,24 +267,47 @@ fn run_gh(args: &[&str]) -> AppResult<String> {
     run_capture_stdout("gh", args)
 }
 
-fn pr_ref_arg(reference: &PrRef) -> String {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GhPrSelector {
+    arg: String,
+    repo: Option<String>,
+}
+
+fn gh_pr_selector(reference: &PrRef) -> GhPrSelector {
     match reference {
-        PrRef::Number(n) => n.to_string(),
-        PrRef::Qualified { repo, number } => format!("{repo}#{number}"),
+        PrRef::Number(n) => GhPrSelector {
+            arg: n.to_string(),
+            repo: None,
+        },
+        PrRef::Qualified { repo, number } => GhPrSelector {
+            arg: number.to_string(),
+            repo: Some(repo.to_string()),
+        },
     }
 }
 
 pub fn fetch_pr(reference: &PrRef) -> AppResult<PrContext> {
-    let view = run_gh(&[
+    let selector = gh_pr_selector(reference);
+    let mut view_args = vec![
         "pr",
         "view",
-        &pr_ref_arg(reference),
+        selector.arg.as_str(),
         "--json",
         "number,title,headRefName,baseRefName,headRepository,headRepositoryOwner,files",
-    ])?;
+    ];
+    if let Some(repo) = selector.repo.as_deref() {
+        view_args.push("--repo");
+        view_args.push(repo);
+    }
+    let view = run_gh(&view_args)?;
     let mut context = parse_pr_view_json(&view)?;
 
-    let diff = run_gh(&["pr", "diff", &pr_ref_arg(reference)])?;
+    let mut diff_args = vec!["pr", "diff", selector.arg.as_str()];
+    if let Some(repo) = selector.repo.as_deref() {
+        diff_args.push("--repo");
+        diff_args.push(repo);
+    }
+    let diff = run_gh(&diff_args)?;
     context.diff = diff;
     Ok(context)
 }
@@ -511,6 +534,23 @@ mod tests {
                 number: 5,
             }
         );
+    }
+
+    #[test]
+    fn gh_pr_selector_uses_repo_flag_for_qualified_reference() {
+        let selector = gh_pr_selector(&PrRef::Qualified {
+            repo: "willamhou/DeepSeekCode".to_string(),
+            number: 10,
+        });
+        assert_eq!(selector.arg, "10");
+        assert_eq!(selector.repo.as_deref(), Some("willamhou/DeepSeekCode"));
+    }
+
+    #[test]
+    fn gh_pr_selector_uses_plain_number_for_local_reference() {
+        let selector = gh_pr_selector(&PrRef::Number(10));
+        assert_eq!(selector.arg, "10");
+        assert_eq!(selector.repo, None);
     }
 
     #[test]
