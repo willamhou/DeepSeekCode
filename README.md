@@ -122,9 +122,9 @@ DeepSeekCode is close enough to use as its own coding CLI, but it is not yet at
 Claude Code CLI / Codex CLI polish. For a Linux/macOS local coding-agent CLI,
 the remaining gaps are mostly evidence depth and distribution polish:
 
-- macOS shell/runtime CI and release-binary evidence beyond the entrypoint
-  smoke, now covered by `agents shell-fixture-smoke` and `agents service-smoke`
-  workflow gates;
+- macOS shell/runtime CI evidence beyond the entrypoint smoke is now recorded
+  in PR #14 / CI run #35; release-binary evidence will come from the next
+  release matrix run;
 - richer multi-file external fixture samples, with a scaffold script for a
   disposable Python invoice fixture;
 - Homebrew publishing, still blocked on tap credentials;

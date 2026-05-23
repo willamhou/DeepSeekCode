@@ -91,7 +91,7 @@ Live execution update from this pass:
 | Area | Current state | Gap to close | Gate |
 |---|---|---|---|
 | Core CLI/TUI coding loop | Usable; full tests and 82-case benchmark baseline are green in existing reports | Mostly evidence depth, not missing local primitives | Full test + default benchmark + recent no-stuck dogfood |
-| Linux/macOS local CLI gate | TUI entrypoint, task worktree, GitHub fixture smoke, online dogfood, and Linux shell/runtime smoke are available | CI/release matrix now needs to publish macOS shell/runtime smoke results | Non-Windows `agents shell-fixture-smoke --json`, `agents service-smoke --json`, and TUI entrypoint smoke |
+| Linux/macOS local CLI gate | TUI entrypoint, task worktree, GitHub fixture smoke, online dogfood, Linux shell/runtime smoke, and PR #14 / CI run #35 hosted macOS shell/runtime smoke are available | Next release matrix run still needs to publish release-binary shell/runtime smoke results | Non-Windows `agents shell-fixture-smoke --json`, `agents service-smoke --json`, and TUI entrypoint smoke |
 | Model-backed dogfood | Release live gate passed; current live plan reports `105` online runs and `99` successes, with categories `write_validate 29/30`, `recovery 23/25`, `pr_workflow 47/50` | Preserve verified evidence and keep the gate fail-closed in release status | `dogfood report --require-live-runs 100 --require-live-success-rate 90 --require-live-category write_validate:25:90 --require-live-category recovery:25:90 --require-live-category pr_workflow:25:90` |
 | External write fixtures | `3` disposable real repo online write-fixture samples verified for Rust, Python, and JavaScript; multi-file Python invoice fixture scaffold is now repo-native | Run the new multi-file fixture with an online model and verify evidence | `scripts/create-multifile-external-fixture.sh`, then `dogfood external-fixture ... --evidence-out` plus `dogfood external-evidence --require-successful-external-fixtures 1` |
 | README real demo | Committed model-backed SVG exists at `docs/demo/deepseek-code-model-demo.svg`, generated from a verified online transcript | Optional polish: TUI/GIF/MP4 capture for launch pages | `record-model-backed-demo.sh`, verifier, rendered media committed |
@@ -151,7 +151,11 @@ Live execution update from this pass:
    - Added to CI/release: non-Windows debug/release binaries now run
      `agents shell-fixture-smoke --json`, `agents service-smoke --json`, and
      the multi-file external fixture scaffold smoke.
-   - Remaining for this milestone: record the hosted macOS CI/release run links.
+   - Done in PR #14: CI run #35 passed hosted Linux/macOS debug binary
+     `agents shell-fixture-smoke --json`, `agents service-smoke --json`, and
+     multi-file external fixture scaffold smoke:
+     https://github.com/willamhou/DeepSeekCode/actions/runs/26333425574 .
+   - Remaining for release hardening: record the next release matrix run links.
    - Windows ConPTY/TCP remains a later cross-platform proof item.
 
 6. Publish and update final public docs.
@@ -176,13 +180,14 @@ Do not claim the 5% target while any of these remaining conditions are true:
   npm/Homebrew publish checks remain credential-skipped, or Windows
   shell-supervisor ConPTY/TCP evidence has not completed on a real Windows
   runner.
-- For the narrower Linux/macOS local CLI milestone: do not claim closure until
-  the non-Windows shell/runtime CI/release gates have passed and at least one
-  online multi-file external fixture evidence artifact is recorded.
+- For the narrower Linux/macOS local CLI milestone: hosted non-Windows CI gates
+  have passed; do not claim closure until at least one online multi-file
+  external fixture evidence artifact is recorded. Next release-binary smoke
+  evidence remains release hardening.
 
 ## Next Local Action
 
-The next unblocked local action is to run the new multi-file external fixture
-with an online model key, verify the evidence artifact, and then record the
-Linux/macOS CI/release run links once GitHub Actions has executed the new
-non-Windows shell/runtime gates.
+The next unblocked local action, once an online model key is available, is to
+run the new multi-file external fixture and verify the evidence artifact. The
+hosted Linux/macOS CI link is now recorded; the next release matrix run link
+should be added after release binaries execute the same gates.

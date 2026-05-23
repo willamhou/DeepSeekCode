@@ -123,8 +123,8 @@ DeepSeekCode は自身の開発に使える段階ですが、Claude Code CLI / C
 ほどの製品成熟度にはまだ届いていません。Linux/macOS のローカル coding-agent
 CLI に絞ると、残差は主に evidence depth と配布面の polish です。
 
-- macOS shell/runtime evidence を entrypoint smoke 以上に厚くすること。CI/release
-  matrix は `agents shell-fixture-smoke` と `agents service-smoke` を実行します。
+- macOS shell/runtime の hosted CI evidence は PR #14 / CI run #35 で通過済み。
+  release binary evidence は次回 release matrix run で取得します。
 - よりリッチな multi-file external fixture サンプル。disposable Python invoice
   fixture の scaffold script を追加しています。
 - Homebrew 公開。tap 資格情報が未設定です。
