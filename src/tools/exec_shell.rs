@@ -12,7 +12,9 @@ use std::error::Error;
 #[cfg(unix)]
 use std::fs::File;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+#[cfg(any(all(unix, target_os = "linux"), windows))]
+use std::io::Read;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 #[cfg(all(unix, target_os = "linux"))]

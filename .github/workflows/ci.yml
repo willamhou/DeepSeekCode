@@ -44,8 +44,29 @@ jobs:
       - name: GitHub Action Bridge Smoke
         run: target/debug/deepseek github fixture-smoke --json
 
+      - name: Shell Supervisor Fixture Smoke
+        run: |
+          if command -v timeout >/dev/null 2>&1; then
+            timeout 20s target/debug/deepseek agents shell-fixture-smoke --json
+          else
+            target/debug/deepseek agents shell-fixture-smoke --json
+          fi
+
+      - name: Local Runtime Service Smoke
+        run: |
+          smoke_workdir="/tmp/deepseek-service-smoke-${GITHUB_RUN_ID:-local}"
+          mkdir -p "$smoke_workdir"
+          if command -v timeout >/dev/null 2>&1; then
+            timeout 25s target/debug/deepseek agents service-smoke --workdir "$smoke_workdir" --bin target/debug/deepseek --json
+          else
+            target/debug/deepseek agents service-smoke --workdir "$smoke_workdir" --bin target/debug/deepseek --json
+          fi
+
       - name: TUI Entrypoint Smoke
         run: target/debug/deepseek tui --entrypoint-smoke --smoke-bin target/debug/deepseek
+
+      - name: Multi-file External Fixture Scaffold Smoke
+        run: scripts/create-multifile-external-fixture.sh "$RUNNER_TEMP/deepseek-external-fixture"
 
       - name: Secret Scan
         run: node scripts/check-secrets.js
@@ -105,6 +126,30 @@ jobs:
 
       - name: GitHub Action Bridge Smoke
         run: ${{ matrix.binary }} github fixture-smoke --json
+
+      - name: Shell Supervisor Fixture Smoke
+        if: runner.os != 'Windows'
+        run: |
+          if command -v timeout >/dev/null 2>&1; then
+            timeout 20s ${{ matrix.binary }} agents shell-fixture-smoke --json
+          else
+            ${{ matrix.binary }} agents shell-fixture-smoke --json
+          fi
+
+      - name: Local Runtime Service Smoke
+        if: runner.os != 'Windows'
+        run: |
+          smoke_workdir="/tmp/deepseek-service-smoke-${GITHUB_RUN_ID:-local}"
+          mkdir -p "$smoke_workdir"
+          if command -v timeout >/dev/null 2>&1; then
+            timeout 25s ${{ matrix.binary }} agents service-smoke --workdir "$smoke_workdir" --bin ${{ matrix.binary }} --json
+          else
+            ${{ matrix.binary }} agents service-smoke --workdir "$smoke_workdir" --bin ${{ matrix.binary }} --json
+          fi
+
+      - name: Multi-file External Fixture Scaffold Smoke
+        if: runner.os != 'Windows'
+        run: scripts/create-multifile-external-fixture.sh "$RUNNER_TEMP/deepseek-external-fixture"
 
       - name: Windows Shell Supervisor ConPTY Smoke
         if: runner.os == 'Windows'

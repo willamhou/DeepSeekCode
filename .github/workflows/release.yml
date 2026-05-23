@@ -74,6 +74,30 @@ jobs:
       - name: Verify Release Binary GitHub Action Bridge
         run: ${{ matrix.binary }} github fixture-smoke --json
 
+      - name: Verify Release Binary Shell Supervisor Fixture
+        if: runner.os != 'Windows'
+        run: |
+          if command -v timeout >/dev/null 2>&1; then
+            timeout 20s ${{ matrix.binary }} agents shell-fixture-smoke --json
+          else
+            ${{ matrix.binary }} agents shell-fixture-smoke --json
+          fi
+
+      - name: Verify Release Binary Local Runtime Service Smoke
+        if: runner.os != 'Windows'
+        run: |
+          smoke_workdir="/tmp/deepseek-service-smoke-${GITHUB_RUN_ID:-local}"
+          mkdir -p "$smoke_workdir"
+          if command -v timeout >/dev/null 2>&1; then
+            timeout 25s ${{ matrix.binary }} agents service-smoke --workdir "$smoke_workdir" --bin ${{ matrix.binary }} --json
+          else
+            ${{ matrix.binary }} agents service-smoke --workdir "$smoke_workdir" --bin ${{ matrix.binary }} --json
+          fi
+
+      - name: Verify Multi-file External Fixture Scaffold
+        if: runner.os != 'Windows'
+        run: scripts/create-multifile-external-fixture.sh "$RUNNER_TEMP/deepseek-external-fixture"
+
       - name: Verify Release Binary TUI Snapshot
         if: runner.os != 'Windows'
         env:

@@ -6550,7 +6550,15 @@ fn temp_shell_fixture_smoke_root() -> PathBuf {
         .unwrap_or_default()
         .as_millis()
         % 100_000;
-    std::env::temp_dir().join(format!("dsc-shell-fixture-{}-{suffix}", std::process::id()))
+    short_temp_root().join(format!("dsc-shell-fixture-{}-{suffix}", std::process::id()))
+}
+
+fn short_temp_root() -> PathBuf {
+    let tmp = PathBuf::from("/tmp");
+    if tmp.is_dir() {
+        return tmp;
+    }
+    std::env::temp_dir()
 }
 
 fn run_shell_fixture_smoke_checks(report: &mut ShellFixtureSmokeReport) {
@@ -7180,11 +7188,15 @@ fn shell_supervisor_control_smoke(
 ) -> AppResult<String> {
     let tty = cfg!(all(unix, target_os = "linux"));
     let wait_timeout = timeout_ms.min(5000);
-    let start_request = format!(
-        "{{\"method\":\"start\",\"arguments\":{{\"command\":\"echo deepseek-shell-supervisor-smoke\",\"tty\":{},\"tty_rows\":24,\"tty_cols\":80,\"timeout_ms\":{}}}}}\n",
-        if tty { "true" } else { "false" },
-        wait_timeout
-    );
+    let start_request = if tty {
+        format!(
+            "{{\"method\":\"start\",\"arguments\":{{\"command\":\"echo deepseek-shell-supervisor-smoke\",\"tty\":true,\"tty_rows\":24,\"tty_cols\":80,\"timeout_ms\":{wait_timeout}}}}}\n"
+        )
+    } else {
+        format!(
+            "{{\"method\":\"start\",\"arguments\":{{\"command\":\"echo deepseek-shell-supervisor-smoke\",\"tty\":false,\"timeout_ms\":{wait_timeout}}}}}\n"
+        )
+    };
     let start_response = shell_supervisor_request_raw(socket, "start", &start_request)?;
     let task_id = shell_supervisor_response_string(&start_response, "task_id")
         .ok_or_else(|| app_error("shell supervisor start smoke response missing task_id"))?;

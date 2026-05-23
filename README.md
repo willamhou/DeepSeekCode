@@ -9,9 +9,9 @@ iterating from the same terminal.
 
 > Status: usable for dogfooding and repository work. `v0.1.1` has GitHub
 > Release binaries and a verified GHCR image; the bare `deepseek` TUI entrypoint
-> is CI-smoked on Linux, macOS, and Windows. npm and Homebrew publishing still
-> need registry/tap credentials, and hosted IDE/GitHub evidence remains in
-> progress.
+> is CI-smoked on Linux, macOS, and Windows. Hosted GitHub write workflow
+> evidence is recorded; hosted IDE evidence and npm/Homebrew publishing still
+> need external credentials or machines.
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
@@ -119,15 +119,20 @@ git.
 ## Current Gap
 
 DeepSeekCode is close enough to use as its own coding CLI, but it is not yet at
-Claude Code CLI / Codex CLI polish. The largest remaining gaps are:
+Claude Code CLI / Codex CLI polish. For a Linux/macOS local coding-agent CLI,
+the remaining gaps are mostly evidence depth and distribution polish:
 
-- Windows shell-supervisor ConPTY/TCP daemon runtime proof beyond the new
-  compile-checked backend, current Linux PTY fd handoff, bounded interactive
-  attach, and CI-smoked default TUI entrypoint;
-- hosted GitHub/VS Code workflow evidence and richer multi-file external
-  fixture samples;
-- npm registry publishing and a Homebrew tap, both blocked on credentials;
+- macOS shell/runtime CI and release-binary evidence beyond the entrypoint
+  smoke, now covered by `agents shell-fixture-smoke` and `agents service-smoke`
+  workflow gates;
+- richer multi-file external fixture samples, with a scaffold script for a
+  disposable Python invoice fixture;
+- Homebrew publishing, still blocked on tap credentials;
 - optional polished GIF/MP4 capture beyond the committed model-backed SVG.
+
+Windows ConPTY/service proof, hosted IDE evidence, and npm publishing remain
+broader product-hardening work, but they are not blockers for the Linux/macOS
+local CLI milestone.
 
 See [docs/current-status.md](./docs/current-status.md) for the current Chinese
 status, roadmap, and final target.
@@ -191,6 +196,7 @@ deepseek update publish-status --json
 deepseek agents service-doctor --kind all --workdir "$PWD" --bin "$(command -v deepseek)" --json
 mkdir -p /tmp/dsc-smk
 deepseek agents service-smoke --workdir /tmp/dsc-smk --bin "$(command -v deepseek)" --json
+deepseek agents shell-fixture-smoke --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
 
@@ -207,6 +213,7 @@ outside this checkout. The command dry-runs preflight first, then runs against
 an isolated copy and records the result in the dogfood report:
 
 ```bash
+scripts/create-multifile-external-fixture.sh /tmp/deepseek-external-fixtures/python-invoice-multifile
 deepseek dogfood external-fixture --workdir /tmp/disposable-repo --dry-run \
   'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
 deepseek dogfood external-fixture --workdir /tmp/disposable-repo --benchmark-gate \
