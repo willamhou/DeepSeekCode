@@ -41,6 +41,7 @@ jobs:
       - name: Run DeepSeekCode GitHub Action bridge
         if: ${{ env.DEEPSEEK_API_KEY != '' }}
         env:
+          GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
         run: cargo run --locked -- github action --mode review --post --trigger "@deepseek"
 

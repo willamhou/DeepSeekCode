@@ -83,10 +83,12 @@ pub enum PrAction {
     Fix {
         reference: String,
         job: Option<String>,
+        request: Option<String>,
         benchmark_gate: bool,
     },
     Patch {
         reference: String,
+        request: Option<String>,
         commit: bool,
         benchmark_gate: bool,
     },
@@ -587,6 +589,7 @@ pub fn parse_pr_subcommand(args: Vec<String>) -> Result<PrAction, String> {
             Ok(PrAction::Fix {
                 reference,
                 job,
+                request: None,
                 benchmark_gate,
             })
         }
@@ -611,6 +614,7 @@ pub fn parse_pr_subcommand(args: Vec<String>) -> Result<PrAction, String> {
             }
             Ok(PrAction::Patch {
                 reference,
+                request: None,
                 commit,
                 benchmark_gate,
             })
@@ -6720,10 +6724,12 @@ mod tests {
             PrAction::Fix {
                 reference,
                 job,
+                request,
                 benchmark_gate,
             } => {
                 assert_eq!(reference, "owner/repo#7");
                 assert_eq!(job.as_deref(), Some("test-rust"));
+                assert_eq!(request, None);
                 assert!(benchmark_gate);
             }
             _ => panic!("expected fix"),
@@ -6788,6 +6794,7 @@ mod tests {
             PrAction::Patch {
                 commit: true,
                 benchmark_gate: true,
+                request: None,
                 ref reference,
             } if reference == "5"
         ));

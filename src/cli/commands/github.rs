@@ -18,6 +18,7 @@ struct GithubActionTarget {
     repo: String,
     number: u64,
     mode: GithubActionMode,
+    request: Option<String>,
     trigger_matched: bool,
     reason: String,
 }
@@ -132,10 +133,12 @@ fn run_action(args: GithubActionArgs) -> AppResult<()> {
         GithubActionMode::Fix => PrAction::Fix {
             reference,
             job: args.job,
+            request: target.request.clone(),
             benchmark_gate: false,
         },
         GithubActionMode::Patch => PrAction::Patch {
             reference,
+            request: target.request.clone(),
             commit: args.commit,
             benchmark_gate: false,
         },
@@ -399,6 +402,14 @@ fn github_background_task_prompt(
     ];
     if let Some(job) = job.map(str::trim).filter(|job| !job.is_empty()) {
         lines.push(format!("- CI job focus: {job}"));
+    }
+    if let Some(request) = target
+        .request
+        .as_deref()
+        .map(str::trim)
+        .filter(|request| !request.is_empty())
+    {
+        lines.push(format!("- Requested action: {request}"));
     }
     lines.push(String::new());
     match target.mode {
@@ -664,6 +675,7 @@ fn github_action_target_from_event(
                 repo,
                 number,
                 mode: resolve_action_mode(requested_mode, ""),
+                request: None,
                 trigger_matched: true,
                 reason: "pull_request events review without comment trigger".to_string(),
             })
@@ -680,11 +692,14 @@ fn github_action_target_from_event(
                 .and_then(|comment| string_field(comment, "body").ok())
                 .unwrap_or("");
             let matched = trigger_matches(comment_body, trigger, allow_untriggered)?;
+            let command = command_after_trigger(comment_body, trigger);
+            let mode = resolve_action_mode(requested_mode, command);
             Ok(GithubActionTarget {
                 event_name: event_name.to_string(),
                 repo,
                 number: u64_field(issue, "number")?,
-                mode: resolve_action_mode(requested_mode, command_after_trigger(comment_body, trigger)),
+                mode,
+                request: action_request_from_command(command, mode),
                 trigger_matched: matched,
                 reason: "issue_comment trigger matched on pull request".to_string(),
             })
@@ -696,11 +711,14 @@ fn github_action_target_from_event(
                 .and_then(|comment| string_field(comment, "body").ok())
                 .unwrap_or("");
             let matched = trigger_matches(comment_body, trigger, allow_untriggered)?;
+            let command = command_after_trigger(comment_body, trigger);
+            let mode = resolve_action_mode(requested_mode, command);
             Ok(GithubActionTarget {
                 event_name: event_name.to_string(),
                 repo,
                 number: u64_field(pull_request, "number")?,
-                mode: resolve_action_mode(requested_mode, command_after_trigger(comment_body, trigger)),
+                mode,
+                request: action_request_from_command(command, mode),
                 trigger_matched: matched,
                 reason: "pull_request_review_comment trigger matched".to_string(),
             })
@@ -712,11 +730,14 @@ fn github_action_target_from_event(
                 .and_then(|review| string_field(review, "body").ok())
                 .unwrap_or("");
             let matched = trigger_matches(review_body, trigger, allow_untriggered)?;
+            let command = command_after_trigger(review_body, trigger);
+            let mode = resolve_action_mode(requested_mode, command);
             Ok(GithubActionTarget {
                 event_name: event_name.to_string(),
                 repo,
                 number: u64_field(pull_request, "number")?,
-                mode: resolve_action_mode(requested_mode, command_after_trigger(review_body, trigger)),
+                mode,
+                request: action_request_from_command(command, mode),
                 trigger_matched: matched,
                 reason: "pull_request_review trigger matched".to_string(),
             })
@@ -757,6 +778,46 @@ fn command_after_trigger<'a>(body: &'a str, trigger: &str) -> &'a str {
         return "";
     };
     body.get(index + trigger.len()..).unwrap_or("").trim()
+}
+
+fn action_request_from_command(command: &str, mode: GithubActionMode) -> Option<String> {
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+    let request = match leading_action_word(command) {
+        Some((word, rest_index)) if action_words_for_mode(mode).contains(&word.as_str()) => command
+            .get(rest_index..)
+            .unwrap_or("")
+            .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ':' | '-' | ','))
+            .trim(),
+        _ => command,
+    };
+    if request.is_empty() {
+        None
+    } else {
+        Some(request.to_string())
+    }
+}
+
+fn leading_action_word(command: &str) -> Option<(String, usize)> {
+    let start = command
+        .char_indices()
+        .find_map(|(index, ch)| ch.is_ascii_alphanumeric().then_some(index))?;
+    let end = command[start..]
+        .char_indices()
+        .find_map(|(index, ch)| (!ch.is_ascii_alphanumeric()).then_some(start + index))
+        .unwrap_or(command.len());
+    Some((command[start..end].to_ascii_lowercase(), end))
+}
+
+fn action_words_for_mode(mode: GithubActionMode) -> &'static [&'static str] {
+    match mode {
+        GithubActionMode::Fix => &["fix", "repair"],
+        GithubActionMode::Patch => &["patch", "apply"],
+        GithubActionMode::Review => &["review"],
+        GithubActionMode::Auto => &[],
+    }
 }
 
 fn repository_full_name(root: &std::collections::BTreeMap<String, JsonValue>) -> AppResult<String> {
@@ -802,14 +863,19 @@ fn u64_field(map: &std::collections::BTreeMap<String, JsonValue>, key: &str) -> 
 }
 
 fn render_action_target_json(target: &GithubActionTarget, post: bool) -> String {
+    let request = match target.request.as_deref() {
+        Some(request) => format!("\"{}\"", json_escape(request)),
+        None => "null".to_string(),
+    };
     format!(
-        "{{\"kind\":\"deepseek.github_action_target.v1\",\"event\":\"{}\",\"repo\":\"{}\",\"number\":{},\"reference\":\"{}#{}\",\"mode\":\"{}\",\"post\":{},\"trigger_matched\":{},\"reason\":\"{}\"}}",
+        "{{\"kind\":\"deepseek.github_action_target.v1\",\"event\":\"{}\",\"repo\":\"{}\",\"number\":{},\"reference\":\"{}#{}\",\"mode\":\"{}\",\"request\":{},\"post\":{},\"trigger_matched\":{},\"reason\":\"{}\"}}",
         json_escape(&target.event_name),
         json_escape(&target.repo),
         target.number,
         json_escape(&target.repo),
         target.number,
         github_action_mode_label(target.mode),
+        request,
         post,
         target.trigger_matched,
         json_escape(&target.reason)
@@ -1012,6 +1078,43 @@ mod tests {
 
         assert_eq!(fix.mode, GithubActionMode::Fix);
         assert_eq!(patch.mode, GithubActionMode::Patch);
+        assert_eq!(fix.request.as_deref(), Some("the failing CI"));
+        assert_eq!(patch.request.as_deref(), Some("this follow-up"));
+    }
+
+    #[test]
+    fn issue_comment_captures_patch_request_after_command_word() {
+        let target = github_action_target_from_event(
+            "issue_comment",
+            &issue_comment_event(
+                "@deepseek patch change docs/hosted-workflow-fixture.md Current state to after",
+            ),
+            GithubActionMode::Auto,
+            "@deepseek",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(target.mode, GithubActionMode::Patch);
+        assert_eq!(
+            target.request.as_deref(),
+            Some("change docs/hosted-workflow-fixture.md Current state to after")
+        );
+    }
+
+    #[test]
+    fn issue_comment_empty_action_command_has_no_request() {
+        let target = github_action_target_from_event(
+            "issue_comment",
+            &issue_comment_event("@deepseek patch"),
+            GithubActionMode::Auto,
+            "@deepseek",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(target.mode, GithubActionMode::Patch);
+        assert_eq!(target.request, None);
     }
 
     #[test]
@@ -1083,6 +1186,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             number: 7,
             mode: GithubActionMode::Patch,
+            request: Some("tighten validation".to_string()),
             trigger_matched: true,
             reason: "ok".to_string(),
         };
@@ -1090,6 +1194,7 @@ mod tests {
 
         assert!(rendered.contains("\"reference\":\"owner/repo#7\""));
         assert!(rendered.contains("\"mode\":\"patch\""));
+        assert!(rendered.contains("\"request\":\"tighten validation\""));
         assert!(rendered.contains("\"post\":true"));
     }
 
@@ -1100,6 +1205,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             number: 7,
             mode: GithubActionMode::Review,
+            request: None,
             trigger_matched: true,
             reason: "ok".to_string(),
         };
@@ -1117,6 +1223,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             number: 7,
             mode: GithubActionMode::Patch,
+            request: None,
             trigger_matched: true,
             reason: "ok".to_string(),
         };
@@ -1132,6 +1239,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             number: 11,
             mode: GithubActionMode::Fix,
+            request: None,
             trigger_matched: true,
             reason: "ok".to_string(),
         };
@@ -1260,6 +1368,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             number: 11,
             mode: GithubActionMode::Fix,
+            request: Some("fix the background task".to_string()),
             trigger_matched: true,
             reason: "issue_comment trigger matched on pull request".to_string(),
         };
@@ -1269,6 +1378,7 @@ mod tests {
 
         assert!(prompt.contains("owner/repo#11"));
         assert!(prompt.contains("Mode: fix"));
+        assert!(prompt.contains("Requested action: fix the background task"));
         assert!(prompt.contains("CI job focus: test-ci"));
         assert!(prompt.contains("isolated task worktree"));
         assert!(prompt.contains("Do not push"));

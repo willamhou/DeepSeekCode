@@ -253,6 +253,9 @@ pub fn parse_failed_job_from_run(body: &str, job_name: &str) -> AppResult<(u64, 
 use crate::util::process::{run_capture, run_capture_stdout};
 
 pub fn ensure_gh_auth() -> AppResult<()> {
+    if gh_env_token_present() {
+        return Ok(());
+    }
     let captured = run_capture("gh", &["auth", "status"])?;
     if !captured.success {
         return Err(crate::error::policy_denied(format!(
@@ -263,8 +266,31 @@ pub fn ensure_gh_auth() -> AppResult<()> {
     Ok(())
 }
 
+fn gh_env_token_present() -> bool {
+    gh_env_token_present_with(|name| std::env::var(name).ok())
+}
+
+fn gh_env_token_present_with(mut get_var: impl FnMut(&str) -> Option<String>) -> bool {
+    ["GH_TOKEN", "GITHUB_TOKEN"]
+        .iter()
+        .filter_map(|name| get_var(name))
+        .any(|value| !value.trim().is_empty())
+}
+
 fn run_gh(args: &[&str]) -> AppResult<String> {
     run_capture_stdout("gh", args)
+}
+
+fn pr_comment_args(repo: &str, number: u64, body_file: &str) -> Vec<String> {
+    vec![
+        "pr".to_string(),
+        "comment".to_string(),
+        number.to_string(),
+        "--repo".to_string(),
+        repo.to_string(),
+        "--body-file".to_string(),
+        body_file.to_string(),
+    ]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -405,9 +431,10 @@ pub fn post_pr_comment(repo: &str, number: u64, body: &str) -> AppResult<()> {
     file.flush()?;
     drop(file);
 
-    let target = format!("{repo}#{number}");
     let path_str = path.to_string_lossy().into_owned();
-    let result = run_gh(&["pr", "comment", &target, "--body-file", &path_str]).map(|_| ());
+    let args = pr_comment_args(repo, number, &path_str);
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let result = run_gh(&arg_refs).map(|_| ());
     let _ = std::fs::remove_file(&path);
     result
 }
@@ -498,6 +525,22 @@ mod tests {
     }
 
     #[test]
+    fn gh_env_token_present_accepts_github_actions_tokens() {
+        assert!(gh_env_token_present_with(|name| match name {
+            "GH_TOKEN" => Some("  token  ".to_string()),
+            _ => None,
+        }));
+        assert!(gh_env_token_present_with(|name| match name {
+            "GITHUB_TOKEN" => Some("token".to_string()),
+            _ => None,
+        }));
+        assert!(!gh_env_token_present_with(|name| match name {
+            "GH_TOKEN" => Some("  ".to_string()),
+            _ => None,
+        }));
+    }
+
+    #[test]
     fn parses_url_with_query_string() {
         let parsed =
             parse_pr_ref("https://github.com/willamhou/DeepSeekCode/pull/5?diff=split").unwrap();
@@ -551,6 +594,23 @@ mod tests {
         let selector = gh_pr_selector(&PrRef::Number(10));
         assert_eq!(selector.arg, "10");
         assert_eq!(selector.repo, None);
+    }
+
+    #[test]
+    fn pr_comment_args_use_number_with_repo_flag() {
+        let args = pr_comment_args("willamhou/DeepSeekCode", 10, "/tmp/body.md");
+        assert_eq!(
+            args,
+            vec![
+                "pr",
+                "comment",
+                "10",
+                "--repo",
+                "willamhou/DeepSeekCode",
+                "--body-file",
+                "/tmp/body.md"
+            ]
+        );
     }
 
     #[test]
