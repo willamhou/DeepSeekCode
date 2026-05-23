@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -7,7 +8,7 @@ use crate::cli::app::{
     UpdateVerifyInstallArgs,
 };
 use crate::error::{app_error, AppResult};
-use crate::util::json::json_escape;
+use crate::util::json::{json_as_string, json_as_u64, json_escape, parse_root_object, JsonValue};
 
 const DEFAULT_RELEASE_DIR: &str = "target/deepseek-release";
 const DEFAULT_ROLLBACK_DIR: &str = ".local/bin/deepseek-rollback";
@@ -47,7 +48,7 @@ fn run_status(args: UpdateArgs) -> AppResult<()> {
     );
     println!("  install_verify: deepseek update verify-install --bin <path-to-deepseek>");
     println!("  homebrew_formula: deepseek update homebrew-formula --dist <release-sha-dir>");
-    println!("  publish_status: deepseek update publish-status --dist <release-asset-dir> --npm-dist <npm-artifact-dir>");
+    println!("  publish_status: deepseek update publish-status --dist <release-asset-dir> --npm-dist <npm-artifact-dir> --live-evidence-verification <verification-json>");
     if args.check {
         println!("  check: update command is available");
     } else {
@@ -553,6 +554,9 @@ fn build_publish_status_report(
     checks.push(npm_token_status(env));
     checks.push(npm_artifacts_status(args.npm_dist.as_deref(), &version));
     checks.push(release_asset_status(args.dist.as_deref()));
+    checks.push(live_evidence_verification_status(
+        args.live_evidence_verification.as_deref(),
+    ));
     checks.push(homebrew_template_status(repo, &version));
     checks.push(homebrew_tap_status(env));
     let public_install =
@@ -574,12 +578,15 @@ fn build_public_install_checks(
     env: &impl Fn(&str) -> Option<String>,
 ) -> Vec<PublicInstallCheck> {
     let release_ready = publish_check_ready(checks, "release_assets");
+    let live_evidence_ready = publish_check_ready(checks, "live_evidence");
     let npm_ready = publish_check_ready(checks, "npm_metadata")
         && publish_check_ready(checks, "npm_token")
-        && publish_check_ready(checks, "npm_artifacts");
+        && publish_check_ready(checks, "npm_artifacts")
+        && live_evidence_ready;
     let homebrew_ready = publish_check_ready(checks, "homebrew_formula")
         && publish_check_ready(checks, "homebrew_tap")
-        && release_ready;
+        && release_ready
+        && live_evidence_ready;
     let cargo_source_only = toml_bool_value(cargo_toml, "publish") == Some(false);
     let tag = format!("v{version}");
     let repository_url = format!("https://github.com/{repository}");
@@ -596,13 +603,15 @@ fn build_public_install_checks(
         ),
         PublicInstallCheck::new(
             "github_release",
-            if release_ready {
+            if release_ready && live_evidence_ready {
                 PublicInstallStatus::ReadyToPublish
             } else {
                 PublicInstallStatus::RequiresPublish
             },
-            if release_ready {
-                "local release archives and checksums are present; tag workflow still needs live release verification"
+            if release_ready && live_evidence_ready {
+                "local release archives, checksums, and verified live dogfood evidence are present; tag workflow can publish after CI gates pass"
+            } else if release_ready {
+                "local release archives and checksums are present; pass --live-evidence-verification after online dogfood verification"
             } else {
                 "public binary release evidence is not verified; pass --dist after the release matrix assets are available"
             },
@@ -617,6 +626,11 @@ fn build_public_install_checks(
             },
             if npm_ready {
                 "npm metadata, registry token, and platform tarballs are ready; publish before advertising npm install"
+            } else if publish_check_ready(checks, "npm_metadata")
+                && publish_check_ready(checks, "npm_token")
+                && publish_check_ready(checks, "npm_artifacts")
+            {
+                "npm package materials are ready; verified live dogfood evidence is still required before advertising npm install"
             } else {
                 "npm registry availability is not verified; configure NPM_TOKEN/NODE_AUTH_TOKEN and pass --npm-dist"
             },
@@ -631,6 +645,11 @@ fn build_public_install_checks(
             },
             if homebrew_ready {
                 "tap configuration, formula template, and release checksums are ready; publish the tap before advertising brew install"
+            } else if publish_check_ready(checks, "homebrew_formula")
+                && publish_check_ready(checks, "homebrew_tap")
+                && release_ready
+            {
+                "Homebrew package materials are ready; verified live dogfood evidence is still required before advertising brew install"
             } else {
                 "Homebrew tap availability is not verified; configure HOMEBREW_TAP_REPOSITORY/HOMEBREW_TAP_TOKEN and pass --dist"
             },
@@ -638,13 +657,15 @@ fn build_public_install_checks(
         ),
         PublicInstallCheck::new(
             "ghcr",
-            if release_ready {
+            if release_ready && live_evidence_ready {
                 PublicInstallStatus::ReadyToPublish
             } else {
                 PublicInstallStatus::RequiresPublish
             },
-            if release_ready {
-                "release assets are present locally; tag workflow must still publish and verify the GHCR image"
+            if release_ready && live_evidence_ready {
+                "release assets and verified live evidence are present locally; tag workflow must still publish and verify the GHCR image"
+            } else if release_ready {
+                "release assets are present locally; live dogfood verification is still required before advertising docker pull"
             } else {
                 "GHCR image availability is not verified; publish from a tag workflow before advertising docker pull"
             },
@@ -808,6 +829,115 @@ fn release_asset_status(dist: Option<&str>) -> PublishStatusCheck {
             details.push(format!("invalid checksum(s): {}", invalid.join("; ")));
         }
         PublishStatusCheck::blocked("release_assets", details.join("; "))
+    }
+}
+
+fn json_field_string<'a>(root: &'a BTreeMap<String, JsonValue>, key: &str) -> Option<&'a str> {
+    root.get(key).and_then(json_as_string)
+}
+
+fn json_field_u64(root: &BTreeMap<String, JsonValue>, key: &str) -> Option<u64> {
+    root.get(key).and_then(json_as_u64)
+}
+
+fn json_field_bool(root: &BTreeMap<String, JsonValue>, key: &str) -> Option<bool> {
+    match root.get(key) {
+        Some(JsonValue::Bool(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn json_field_object<'a>(
+    root: &'a BTreeMap<String, JsonValue>,
+    key: &str,
+) -> Option<&'a BTreeMap<String, JsonValue>> {
+    match root.get(key) {
+        Some(JsonValue::Object(value)) => Some(value),
+        _ => None,
+    }
+}
+
+fn live_evidence_verification_status(path: Option<&str>) -> PublishStatusCheck {
+    let Some(path) = path else {
+        return PublishStatusCheck::skipped(
+            "live_evidence",
+            "pass --live-evidence-verification <path> after `deepseek dogfood live-evidence --require-report-gate --out <path>`",
+        );
+    };
+    let path = Path::new(path);
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return PublishStatusCheck::blocked(
+                "live_evidence",
+                format!(
+                    "failed to read live evidence verification {}: {error}",
+                    path.display()
+                ),
+            )
+        }
+    };
+    let root = match parse_root_object(&raw) {
+        Ok(root) => root,
+        Err(error) => {
+            return PublishStatusCheck::blocked(
+                "live_evidence",
+                format!(
+                    "failed to parse live evidence verification {}: {error}",
+                    path.display()
+                ),
+            )
+        }
+    };
+    let mut failures = Vec::new();
+    if json_field_string(&root, "kind") != Some("deepseek.dogfood.live_evidence_verification.v1") {
+        failures.push("unexpected verification kind".to_string());
+    }
+    if json_field_bool(&root, "ok") != Some(true) {
+        failures.push("verification ok is not true".to_string());
+    }
+    if json_field_bool(&root, "completed") != Some(true) {
+        failures.push("verified batch is not completed".to_string());
+    }
+    if json_field_string(&root, "model_transport") != Some("online") {
+        failures.push("verified batch is not online model-backed evidence".to_string());
+    }
+    if json_field_u64(&root, "appended_model_backed_records").unwrap_or(0) == 0 {
+        failures.push("verification has no appended model-backed records".to_string());
+    }
+    if json_field_bool(&root, "report_gate_required") != Some(true) {
+        failures.push("verification did not require the report gate".to_string());
+    }
+    if json_field_bool(&root, "report_gate_passed") != Some(true) {
+        failures.push("report gate did not pass".to_string());
+    }
+    if json_field_object(&root, "ledger_fingerprint").is_none() {
+        failures.push("verification is missing the evidence ledger fingerprint".to_string());
+    }
+    if !json_field_object(&root, "current_ledger_fingerprint")
+        .is_some_and(|fingerprint| json_field_bool(fingerprint, "ok") == Some(true))
+    {
+        failures.push("verification is missing a current ledger fingerprint".to_string());
+    }
+    if failures.is_empty() {
+        let appended = json_field_u64(&root, "appended_model_backed_records").unwrap_or(0);
+        PublishStatusCheck::ready(
+            "live_evidence",
+            format!(
+                "verified online dogfood evidence is present ({} appended model-backed row(s)): {}",
+                appended,
+                path.display()
+            ),
+        )
+    } else {
+        PublishStatusCheck::blocked(
+            "live_evidence",
+            format!(
+                "live evidence verification {} is not release-ready: {}",
+                path.display(),
+                failures.join("; ")
+            ),
+        )
     }
 }
 
@@ -1249,10 +1379,10 @@ task and live RLM worker daemon (`deepseek agents daemon --json`), the
 diagnostics watch worker (`deepseek diagnostics --watch --changed --json`), and
 the workspace shell supervisor protocol bridge
 (`deepseek agents shell-supervisor --json`). The shell supervisor currently
-publishes workspace-local status/show/start/wait/replay/attach/stdin/resize/cancel
-over the socket and controls durable safe shell jobs, including supervisor-owned
-native PTY sessions on Linux. Use `deepseek agents shell ...` as the human CLI
-wrapper for those protocol controls.
+publishes workspace-local status/show/start/wait/replay/attach/attach_stream/
+byte_stream/stdin/resize/cancel over the socket and controls durable safe shell
+jobs, including supervisor-owned native PTY sessions on Linux. Use `deepseek
+agents shell ...` as the human CLI wrapper for those protocol controls.
 The agents daemon triggers due automations, executes pending runtime tasks,
 recovers stale live RLM ownership, and runs one queued live RLM turn per tick.
 Review the generated WorkingDirectory, bind address, poll interval, and budget
@@ -1768,6 +1898,7 @@ mod tests {
         assert_eq!(status_of(&report, "npm_token"), PublishStatus::Blocked);
         assert_eq!(status_of(&report, "npm_artifacts"), PublishStatus::Skipped);
         assert_eq!(status_of(&report, "release_assets"), PublishStatus::Skipped);
+        assert_eq!(status_of(&report, "live_evidence"), PublishStatus::Skipped);
         assert_eq!(status_of(&report, "homebrew_formula"), PublishStatus::Ready);
         assert_eq!(status_of(&report, "homebrew_tap"), PublishStatus::Blocked);
         assert_eq!(report.repository, "willamhou/DeepSeekCode");
@@ -1787,7 +1918,7 @@ mod tests {
             public_status_of(&report, "cargo_registry"),
             PublicInstallStatus::SourceOnlyPolicy
         );
-        assert_eq!(report.not_ready_count(), 4);
+        assert_eq!(report.not_ready_count(), 5);
     }
 
     #[test]
@@ -1824,10 +1955,17 @@ mod tests {
             )
             .unwrap();
         }
+        let live_evidence = root.join("live-evidence-verification.json");
+        std::fs::write(
+            &live_evidence,
+            r#"{"kind":"deepseek.dogfood.live_evidence_verification.v1","ok":true,"completed":true,"online_ready":true,"model_transport":"online","appended_model_backed_records":3,"report_gate_required":true,"report_gate_passed":true,"ledger_fingerprint":{"ok":true,"algorithm":"fnv1a64","path":".dscode/dogfood/ledger.jsonl","bytes":123,"fnv1a64":"abc"},"current_ledger_fingerprint":{"ok":true,"algorithm":"fnv1a64","path":".dscode/dogfood/ledger.jsonl","bytes":123,"fnv1a64":"abc"}}"#,
+        )
+        .unwrap();
 
         let args = UpdatePublishStatusArgs {
             dist: Some(dist.display().to_string()),
             npm_dist: Some(npm_dist.display().to_string()),
+            live_evidence_verification: Some(live_evidence.display().to_string()),
             strict: true,
             json: false,
         };
@@ -1842,6 +1980,7 @@ mod tests {
         assert_eq!(report.not_ready_count(), 0);
         assert_eq!(status_of(&report, "release_assets"), PublishStatus::Ready);
         assert_eq!(status_of(&report, "npm_artifacts"), PublishStatus::Ready);
+        assert_eq!(status_of(&report, "live_evidence"), PublishStatus::Ready);
         assert_eq!(status_of(&report, "homebrew_tap"), PublishStatus::Ready);
         assert_eq!(
             public_status_of(&report, "github_release"),
@@ -1858,6 +1997,27 @@ mod tests {
     }
 
     #[test]
+    fn publish_status_blocks_unverified_live_evidence_artifact() {
+        let root = temp_root("publish-live-evidence-blocked");
+        std::fs::create_dir_all(&root).unwrap();
+        let live_evidence = root.join("live-evidence-verification.json");
+        std::fs::write(
+            &live_evidence,
+            r#"{"kind":"deepseek.dogfood.live_evidence_verification.v1","ok":true,"completed":true,"model_transport":"offline","appended_model_backed_records":0,"report_gate_required":false,"report_gate_passed":false,"ledger_fingerprint":null,"current_ledger_fingerprint":null}"#,
+        )
+        .unwrap();
+
+        let check = live_evidence_verification_status(Some(
+            live_evidence.to_str().expect("utf8 live evidence path"),
+        ));
+
+        assert_eq!(check.status, PublishStatus::Blocked);
+        assert!(check.detail.contains("not release-ready"));
+        assert!(check.detail.contains("not online"));
+        assert!(check.detail.contains("report gate"));
+    }
+
+    #[test]
     fn render_publish_status_json_includes_blockers() {
         let args = UpdatePublishStatusArgs::default();
         let report = build_publish_status_report(&repo_root(), &args, &|_| None).unwrap();
@@ -1867,8 +2027,9 @@ mod tests {
         assert!(json.contains("\"kind\":\"deepseek.publish_status.v1\""));
         assert!(json.contains("\"version\":\""));
         assert!(json.contains("\"strict\":true"));
-        assert!(json.contains("\"not_ready\":4"));
+        assert!(json.contains("\"not_ready\":5"));
         assert!(json.contains("\"name\":\"npm_token\""));
+        assert!(json.contains("\"name\":\"live_evidence\""));
         assert!(json.contains("\"status\":\"blocked\""));
         assert!(json.contains("NPM_TOKEN/NODE_AUTH_TOKEN is missing"));
         assert!(json.contains("\"public_install\""));

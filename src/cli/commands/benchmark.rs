@@ -16,7 +16,7 @@ use crate::core::loop_runtime::{AgentLoop, AgentLoopOptions, RunResult};
 use crate::error::{app_error, AppResult};
 use crate::model::protocol::Observation;
 use crate::util::json::{
-    json_as_array, json_as_object, json_as_string, json_as_u64, json_value_to_string,
+    json_as_array, json_as_object, json_as_string, json_as_u64, json_escape, json_value_to_string,
     parse_root_object, JsonValue,
 };
 
@@ -36,10 +36,12 @@ pub fn run(args: BenchmarkArgs) -> AppResult<()> {
 pub fn run_with_config(config: AppConfig, args: BenchmarkArgs) -> AppResult<()> {
     let manifest_path = args
         .manifest
+        .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MANIFEST));
     let out_path = args
         .out
+        .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_REPORT));
 
@@ -49,19 +51,34 @@ pub fn run_with_config(config: AppConfig, args: BenchmarkArgs) -> AppResult<()> 
             manifest_path.display()
         ))
     })?;
-    let cases = parse_manifest(&manifest_text)?;
-    if cases.is_empty() {
+    let all_cases = parse_manifest(&manifest_text)?;
+    if all_cases.is_empty() {
         return Err(app_error(format!(
             "benchmark manifest {} did not contain any cases",
+            manifest_path.display()
+        )));
+    }
+    let total_cases = all_cases.len();
+    let filter_label = benchmark_filter_label(&args);
+    let filtered = filter_label.is_some();
+    let cases = select_benchmark_cases(all_cases, &args);
+    if cases.is_empty() {
+        let filter = filter_label.unwrap_or_else(|| "none".to_string());
+        return Err(app_error(format!(
+            "benchmark filters selected no cases from {} ({filter})",
             manifest_path.display()
         )));
     }
 
     println!("DeepSeekCode benchmark");
     println!("manifest: {}", manifest_path.display());
-    println!("cases: {}", cases.len());
+    if let Some(filter) = filter_label.as_deref() {
+        println!("filter: {filter}");
+        println!("cases: {} (filtered from {total_cases})", cases.len());
+    } else {
+        println!("cases: {}", cases.len());
+    }
 
-    let agent = AgentLoop::new(config.clone());
     let benchmark_started = Instant::now();
     let manifest_dir = manifest_path
         .parent()
@@ -74,8 +91,10 @@ pub fn run_with_config(config: AppConfig, args: BenchmarkArgs) -> AppResult<()> 
         let resolved_workdir = resolve_case_workdir(&manifest_dir, case.workdir.as_deref())?;
         let (execution_workdir, cleanup_workdir) =
             prepare_case_workdir(resolved_workdir.as_deref(), case.isolate_workdir)?;
+        let case_config = prepare_case_config(&config, case, execution_workdir.as_deref())?;
         let result =
             run_case_in_workdir(execution_workdir.as_deref(), case.isolate_workdir, || {
+                let agent = AgentLoop::new(case_config);
                 agent.run_with(
                     TaskContext::new(case.task.clone(), case.skill.clone()),
                     AgentLoopOptions {
@@ -137,15 +156,27 @@ pub fn run_with_config(config: AppConfig, args: BenchmarkArgs) -> AppResult<()> 
     let dogfood_snapshot = load_dogfood_snapshot(&config.workspace.dogfood_ledger_path())?;
     let current_record = BenchmarkRunRecord::from_results(
         unix_now_secs()?,
-        manifest_path.display().to_string(),
+        benchmark_manifest_label(&manifest_path, filter_label.as_deref()),
         benchmark_started.elapsed().as_millis() as u64,
         &results,
         dogfood_snapshot.as_ref(),
     );
-    let trend_gate = evaluate_trend_gate(&current_record, &previous_history);
-    let live_gate = evaluate_live_gate(&current_record, &previous_history);
+    let trend_gate = if filtered {
+        skipped_trend_gate("filtered benchmark selection")
+    } else {
+        evaluate_trend_gate(&current_record, &previous_history)
+    };
+    let live_gate = if filtered {
+        skipped_live_gate("filtered benchmark selection")
+    } else {
+        evaluate_live_gate(&current_record, &previous_history)
+    };
     let live_gate_line = live_gate_summary_line(&live_gate, args.accept_live_baseline);
-    let mut report_history = previous_history.clone();
+    let mut report_history = if filtered {
+        Vec::new()
+    } else {
+        previous_history.clone()
+    };
     report_history.push(current_record.clone());
     let report = render_report(
         &manifest_path,
@@ -154,20 +185,27 @@ pub fn run_with_config(config: AppConfig, args: BenchmarkArgs) -> AppResult<()> 
         dogfood_snapshot.as_ref(),
         &trend_gate,
         &live_gate_line,
+        filter_label.as_deref(),
     );
     fs::write(&out_path, report)?;
     println!("report: {}", out_path.display());
     let passed = results.iter().filter(|result| result.passed).count();
-    let should_append_history = should_append_history_record(
-        passed as u64,
-        results.len() as u64,
-        &trend_gate,
-        &live_gate,
-        args.accept_live_baseline,
-    );
+    let should_append_history = !filtered
+        && should_append_history_record(
+            passed as u64,
+            results.len() as u64,
+            &trend_gate,
+            &live_gate,
+            args.accept_live_baseline,
+        );
     if should_append_history {
         append_history_record(&history_path, &current_record)?;
         println!("history: {}", history_path.display());
+    } else if filtered {
+        println!(
+            "history: {} (not updated; filtered benchmark selection)",
+            history_path.display()
+        );
     } else {
         println!(
             "history: {} (not updated; benchmark gate did not pass)",
@@ -182,13 +220,13 @@ pub fn run_with_config(config: AppConfig, args: BenchmarkArgs) -> AppResult<()> 
             results.len()
         )));
     }
-    if trend_gate.failed() {
+    if !filtered && trend_gate.failed() {
         return Err(app_error(format!(
             "benchmark trend gate failed: {}",
             trend_gate.summary_line()
         )));
     }
-    if live_gate.failed() && !args.accept_live_baseline {
+    if !filtered && live_gate.failed() && !args.accept_live_baseline {
         return Err(app_error(format!(
             "benchmark live gate failed: {}",
             live_gate.summary_line()
@@ -205,6 +243,7 @@ struct BenchmarkCase {
     skill: Option<String>,
     workdir: Option<String>,
     isolate_workdir: bool,
+    mcp_fixture: BenchmarkMcpFixture,
     budget: usize,
     seed_observations: Vec<crate::model::protocol::Observation>,
     expect_tool: Option<String>,
@@ -218,6 +257,13 @@ struct BenchmarkCase {
     max_tool_calls: Option<usize>,
     max_failed_tools: Option<usize>,
     notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct BenchmarkMcpFixture {
+    enabled: bool,
+    expose_remote_tools: bool,
+    allowlist: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -692,6 +738,7 @@ enum TrendGateStatus {
     Passed,
     Failed,
     InsufficientHistory,
+    Skipped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -752,6 +799,11 @@ impl TrendGateEvaluation {
                 "skipped (need at least {} prior comparable runs, found {})",
                 TREND_GATE_MIN_HISTORY, self.comparable_runs
             ),
+            TrendGateStatus::Skipped => self
+                .reasons
+                .first()
+                .map(|reason| format!("skipped ({reason})"))
+                .unwrap_or_else(|| "skipped".to_string()),
         }
     }
 }
@@ -781,6 +833,11 @@ impl LiveGateEvaluation {
             TrendGateStatus::InsufficientHistory => {
                 "skipped (need current and previous dogfood snapshots)".to_string()
             }
+            TrendGateStatus::Skipped => self
+                .reasons
+                .first()
+                .map(|reason| format!("skipped ({reason})"))
+                .unwrap_or_else(|| "skipped".to_string()),
         }
     }
 }
@@ -802,6 +859,75 @@ fn should_append_history_record(
     accept_live_baseline: bool,
 ) -> bool {
     passed == cases && !trend_gate.failed() && (!live_gate.failed() || accept_live_baseline)
+}
+
+fn benchmark_filter_label(args: &BenchmarkArgs) -> Option<String> {
+    let mut filters = Vec::new();
+    if let Some(category) = args
+        .category
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        filters.push(format!("category={category}"));
+    }
+    if !args.cases.is_empty() {
+        filters.push(format!("case={}", args.cases.join(",")));
+    }
+    if filters.is_empty() {
+        None
+    } else {
+        Some(filters.join(", "))
+    }
+}
+
+fn benchmark_manifest_label(manifest_path: &Path, filter_label: Option<&str>) -> String {
+    let manifest = manifest_path.display().to_string();
+    match filter_label {
+        Some(filter) => format!("{manifest} [{filter}]"),
+        None => manifest,
+    }
+}
+
+fn select_benchmark_cases(cases: Vec<BenchmarkCase>, args: &BenchmarkArgs) -> Vec<BenchmarkCase> {
+    cases
+        .into_iter()
+        .filter(|case| {
+            let category_matches = match args
+                .category
+                .as_deref()
+                .map(str::trim)
+                .filter(|category| !category.is_empty())
+            {
+                Some(category) => case.category == category,
+                None => true,
+            };
+            category_matches
+                && (args.cases.is_empty() || args.cases.iter().any(|name| name == &case.name))
+        })
+        .collect()
+}
+
+fn skipped_trend_gate(reason: &str) -> TrendGateEvaluation {
+    TrendGateEvaluation {
+        status: TrendGateStatus::Skipped,
+        comparable_runs: 0,
+        best_passed: None,
+        median_tool_calls: None,
+        tool_call_limit: None,
+        median_failed_tool_calls: None,
+        category_summaries: Vec::new(),
+        reasons: vec![reason.to_string()],
+    }
+}
+
+fn skipped_live_gate(reason: &str) -> LiveGateEvaluation {
+    LiveGateEvaluation {
+        status: TrendGateStatus::Skipped,
+        current_runs: None,
+        previous_runs: None,
+        reasons: vec![reason.to_string()],
+    }
 }
 
 fn parse_manifest(content: &str) -> AppResult<Vec<BenchmarkCase>> {
@@ -855,6 +981,9 @@ struct PendingCase {
     skill: Option<String>,
     workdir: Option<String>,
     isolate_workdir: bool,
+    mcp_fixture: bool,
+    mcp_expose_remote_tools: bool,
+    mcp_call_allowlist: Vec<String>,
     budget: Option<usize>,
     seed_observations: Vec<crate::model::protocol::Observation>,
     expect_tool: Option<String>,
@@ -879,6 +1008,9 @@ impl PendingCase {
             || self.skill.is_some()
             || self.workdir.is_some()
             || self.isolate_workdir
+            || self.mcp_fixture
+            || self.mcp_expose_remote_tools
+            || !self.mcp_call_allowlist.is_empty()
             || self.budget.is_some()
             || !self.seed_observations.is_empty()
             || self.expect_tool.is_some()
@@ -902,6 +1034,13 @@ impl PendingCase {
             "skill" => self.skill = Some(value),
             "workdir" => self.workdir = Some(value),
             "isolate_workdir" => self.isolate_workdir = parse_manifest_bool(key, &value)?,
+            "mcp_fixture" => self.mcp_fixture = parse_manifest_bool(key, &value)?,
+            "mcp_expose_remote_tools" => {
+                self.mcp_expose_remote_tools = parse_manifest_bool(key, &value)?
+            }
+            "mcp_call_allowlist" => {
+                self.mcp_call_allowlist = parse_manifest_string_list(key, &value)?;
+            }
             "notes" => self.notes = Some(value),
             "seed_observations" => {
                 self.seed_observations = parse_seed_observations(&value)?;
@@ -962,6 +1101,11 @@ impl PendingCase {
             skill: self.skill,
             workdir: self.workdir,
             isolate_workdir: self.isolate_workdir,
+            mcp_fixture: BenchmarkMcpFixture {
+                enabled: self.mcp_fixture,
+                expose_remote_tools: self.mcp_expose_remote_tools,
+                allowlist: self.mcp_call_allowlist,
+            },
             budget: self.budget.unwrap_or(8),
             seed_observations: self.seed_observations,
             expect_tool: self.expect_tool.or(assertion_defaults.expect_tool),
@@ -1147,6 +1291,7 @@ fn render_report(
     dogfood_snapshot: Option<&DogfoodSnapshot>,
     trend_gate: &TrendGateEvaluation,
     live_gate_line: &str,
+    filter_label: Option<&str>,
 ) -> String {
     let passed = results.iter().filter(|result| result.passed).count();
     let total_tool_calls = results
@@ -1165,6 +1310,9 @@ fn render_report(
     let mut out = String::new();
     out.push_str("# DeepSeekCode Benchmark Report\n\n");
     out.push_str(&format!("- Manifest: `{}`\n", manifest_path.display()));
+    if let Some(filter) = filter_label {
+        out.push_str(&format!("- Filter: `{filter}`\n"));
+    }
     out.push_str(&format!("- Cases: {}\n", results.len()));
     out.push_str(&format!(
         "- Passed expectations: {passed}/{}\n",
@@ -1809,6 +1957,11 @@ fn trend_summary_line(summary: Option<&CategoryTrendSummary>) -> String {
             "skipped ({}/{})",
             summary.comparable_runs, TREND_GATE_MIN_HISTORY
         ),
+        TrendGateStatus::Skipped => summary
+            .reasons
+            .first()
+            .map(|reason| format!("skipped ({reason})"))
+            .unwrap_or_else(|| "skipped".to_string()),
     }
 }
 
@@ -1939,6 +2092,48 @@ fn prepare_case_workdir(
     ));
     copy_dir_recursive(workdir, &temp_root)?;
     Ok((Some(temp_root.clone()), Some(temp_root)))
+}
+
+fn prepare_case_config(
+    base_config: &AppConfig,
+    case: &BenchmarkCase,
+    execution_workdir: Option<&Path>,
+) -> AppResult<AppConfig> {
+    let mut config = base_config.clone();
+    if !case.mcp_fixture.enabled {
+        return Ok(config);
+    }
+    let workdir = execution_workdir.ok_or_else(|| {
+        app_error("benchmark mcp_fixture requires a case workdir; set `workdir` on the case")
+    })?;
+    write_benchmark_mcp_fixture(workdir)?;
+    config.mcp.enabled = true;
+    config.mcp.expose_remote_tools = case.mcp_fixture.expose_remote_tools;
+    config.mcp.project_file = ".dscode/mcp.json".to_string();
+    config.mcp.user_file = workdir
+        .join(".dscode/missing-user-mcp.json")
+        .display()
+        .to_string();
+    config.approval.require_mcp_confirmation = false;
+    config.approval.mcp_call_allowlist = case.mcp_fixture.allowlist.clone();
+    Ok(config)
+}
+
+fn write_benchmark_mcp_fixture(workdir: &Path) -> AppResult<()> {
+    let config_dir = workdir.join(".dscode");
+    fs::create_dir_all(&config_dir)?;
+    let command = env::current_exe().map_err(|error| {
+        app_error(format!(
+            "failed to resolve current executable for benchmark MCP fixture: {error}"
+        ))
+    })?;
+    let config = format!(
+        "{{\n  \"mcpServers\": {{\n    \"stdio-self\": {{\n      \"transport\": \"stdio\",\n      \"command\": \"{}\",\n      \"args\": [\"serve\", \"--mcp\", \"--workspace\", \"{}\"]\n    }}\n  }}\n}}\n",
+        json_escape(&command.display().to_string()),
+        json_escape(&workdir.display().to_string())
+    );
+    fs::write(config_dir.join("mcp.json"), config)?;
+    Ok(())
 }
 
 fn run_case_in_workdir<T>(
@@ -2467,6 +2662,62 @@ max_tool_calls = 5
     }
 
     #[test]
+    fn benchmark_filters_select_category_and_case_names() {
+        let manifest = r#"
+name = "readme"
+task = "inspect repository"
+category = "read_only"
+
+name = "subagent-readback"
+task = "inspect dispatch_subagent output"
+category = "subagent"
+
+name = "subagent-parallel"
+task = "inspect dispatch_subagents output"
+category = "subagent"
+"#;
+        let cases = parse_manifest(manifest).unwrap();
+        let args = BenchmarkArgs {
+            category: Some("subagent".to_string()),
+            cases: vec!["subagent-parallel".to_string()],
+            ..BenchmarkArgs::default()
+        };
+
+        let selected = select_benchmark_cases(cases, &args);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "subagent-parallel");
+        assert_eq!(
+            benchmark_filter_label(&args).as_deref(),
+            Some("category=subagent, case=subagent-parallel")
+        );
+        assert_eq!(
+            benchmark_manifest_label(
+                Path::new(".dscode/benchmarks.txt"),
+                Some("category=subagent")
+            ),
+            ".dscode/benchmarks.txt [category=subagent]"
+        );
+    }
+
+    #[test]
+    fn filtered_benchmark_gates_are_report_only() {
+        let trend_gate = skipped_trend_gate("filtered benchmark selection");
+        let live_gate = skipped_live_gate("filtered benchmark selection");
+
+        assert!(!trend_gate.failed());
+        assert!(!live_gate.failed());
+        assert_eq!(
+            trend_gate.summary_line(),
+            "skipped (filtered benchmark selection)"
+        );
+        assert_eq!(
+            live_gate.summary_line(),
+            "skipped (filtered benchmark selection)"
+        );
+    }
+
+    #[test]
     fn parse_manifest_bundle_defaults_allow_explicit_overrides() {
         let manifest = r#"
 name = "retry-validate"
@@ -2594,7 +2845,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
             case.expect_tool_output_contains,
             Some(ToolOutputExpectation {
                 tool_name: "pr_review_comment_plan".to_string(),
-                needle: "previous_comment_error".to_string(),
+                needle: "github_comment_input".to_string(),
             })
         );
         assert!(case.seed_observations.iter().any(|observation| {
@@ -2605,6 +2856,111 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
                 )
                 && observation.summary.contains("line is not part of the diff")
         }));
+    }
+
+    #[test]
+    fn default_manifest_includes_github_action_bridge_pr_workflow_cases() {
+        let cases = parse_manifest(include_str!("../../../.dscode/benchmarks.txt")).unwrap();
+        let pr_workflow_cases = cases
+            .iter()
+            .filter(|case| case.category == "pr_workflow")
+            .count();
+        assert!(
+            pr_workflow_cases >= 25,
+            "default manifest should keep Phase 12C pr_workflow coverage at or above 25 cases"
+        );
+
+        let review_case = cases
+            .iter()
+            .find(|case| case.name == "fixture-github-action-review-comment-plan")
+            .expect("default manifest should include action review comment planning");
+        assert_eq!(review_case.category, "pr_workflow");
+        assert_eq!(
+            review_case.expect_tool.as_deref(),
+            Some("pr_review_comment_plan")
+        );
+        assert_eq!(
+            review_case.expect_tool_output_contains,
+            Some(ToolOutputExpectation {
+                tool_name: "pr_review_comment_plan".to_string(),
+                needle: "github_comment_input".to_string(),
+            })
+        );
+
+        let fix_case = cases
+            .iter()
+            .find(|case| case.name == "fixture-github-action-fix-trigger-js-cli-failing-mini")
+            .expect("default manifest should include action fix trigger fixture");
+        assert_eq!(fix_case.category, "pr_workflow");
+        assert!(fix_case.isolate_workdir);
+        assert_eq!(fix_case.expect_tool.as_deref(), Some("apply_patch"));
+        assert_eq!(
+            fix_case.expect_last_tool_output_contains.as_deref(),
+            Some("meta.result=ok")
+        );
+
+        let patch_case = cases
+            .iter()
+            .find(|case| case.name == "fixture-github-action-patch-trigger-rust-mini")
+            .expect("default manifest should include action patch trigger fixture");
+        assert_eq!(patch_case.category, "pr_workflow");
+        assert!(patch_case.isolate_workdir);
+        assert_eq!(patch_case.expect_tool.as_deref(), Some("apply_patch"));
+        assert_eq!(
+            patch_case.expect_last_tool_output_contains.as_deref(),
+            Some("meta.result=ok")
+        );
+    }
+
+    #[test]
+    fn default_manifest_includes_mcp_fixture_cases() {
+        let cases = parse_manifest(include_str!("../../../.dscode/benchmarks.txt")).unwrap();
+        let mcp_cases = cases
+            .iter()
+            .filter(|case| case.category == "mcp")
+            .collect::<Vec<_>>();
+        assert!(
+            mcp_cases.len() >= 3,
+            "default manifest should include dynamic, generic, and deny-recovery MCP cases"
+        );
+
+        let dynamic_case = cases
+            .iter()
+            .find(|case| case.name == "fixture-mcp-dynamic-readme")
+            .expect("default manifest should include dynamic MCP fixture");
+        assert!(dynamic_case.mcp_fixture.enabled);
+        assert!(dynamic_case.mcp_fixture.expose_remote_tools);
+        assert_eq!(
+            dynamic_case.mcp_fixture.allowlist,
+            vec!["stdio-self/*".to_string()]
+        );
+        assert_eq!(
+            dynamic_case.expect_tool.as_deref(),
+            Some("mcp__stdio-self__read_file")
+        );
+
+        let deny_case = cases
+            .iter()
+            .find(|case| case.name == "fixture-mcp-allowlist-deny-recovery")
+            .expect("default manifest should include MCP deny recovery fixture");
+        assert_eq!(
+            deny_case.expect_tool_sequence.as_ref().unwrap(),
+            &vec!["mcp_call".to_string(), "mcp_list_tools".to_string()]
+        );
+        assert_eq!(deny_case.max_failed_tools, Some(1));
+    }
+
+    #[test]
+    fn default_manifest_includes_subagent_target_coverage() {
+        let cases = parse_manifest(include_str!("../../../.dscode/benchmarks.txt")).unwrap();
+        let subagent_cases = cases
+            .iter()
+            .filter(|case| case.category == "subagent")
+            .count();
+        assert!(
+            subagent_cases >= 20,
+            "default manifest should keep Phase 12D subagent coverage at or above 20 cases"
+        );
     }
 
     #[test]
@@ -2641,6 +2997,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
                     skill: None,
                     workdir: Some("fixtures/rust-cli-mini".to_string()),
                     isolate_workdir: false,
+                    mcp_fixture: BenchmarkMcpFixture::default(),
                     budget: 8,
                     seed_observations: Vec::new(),
                     expect_tool: Some("list_files".to_string()),
@@ -2671,6 +3028,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
             None,
             &trend_gate,
             &live_gate.summary_line(),
+            None,
         );
         assert!(report.contains("# DeepSeekCode Benchmark Report"));
         assert!(report.contains("- Total tool calls: 2"));
@@ -2688,6 +3046,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
             skill: None,
             workdir: None,
             isolate_workdir: false,
+            mcp_fixture: BenchmarkMcpFixture::default(),
             budget: 8,
             seed_observations: Vec::new(),
             expect_tool: Some("search_text".to_string()),
@@ -2787,9 +3146,19 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
 
     #[test]
     fn resolve_case_workdir_uses_manifest_relative_paths() {
-        let manifest_dir = Path::new(".dscode");
-        let resolved = resolve_case_workdir(manifest_dir, Some("fixtures")).unwrap();
-        assert_eq!(resolved, Some(PathBuf::from(".dscode/fixtures")));
+        let root = env::temp_dir().join(format!(
+            "deepseek-bench-manifest-{}-{}",
+            std::process::id(),
+            next_temp_suffix()
+        ));
+        let manifest_dir = root.join(".dscode");
+        let fixture_dir = manifest_dir.join("fixtures");
+        fs::create_dir_all(&fixture_dir).unwrap();
+
+        let resolved = resolve_case_workdir(&manifest_dir, Some("fixtures")).unwrap();
+        assert_eq!(resolved, Some(fixture_dir));
+
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -2820,6 +3189,59 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
         if let Some(path) = cleanup.as_deref() {
             let _ = fs::remove_dir_all(path);
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepare_case_config_writes_self_mcp_fixture() {
+        let root = std::env::temp_dir().join(format!(
+            "deepseek-bench-mcp-config-{}-{}",
+            std::process::id(),
+            next_temp_suffix()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let case = BenchmarkCase {
+            name: "mcp".to_string(),
+            task: "Use MCP".to_string(),
+            category: "mcp".to_string(),
+            skill: None,
+            workdir: Some("fixture".to_string()),
+            isolate_workdir: true,
+            mcp_fixture: BenchmarkMcpFixture {
+                enabled: true,
+                expose_remote_tools: true,
+                allowlist: vec!["stdio-self/*".to_string()],
+            },
+            budget: 2,
+            seed_observations: Vec::new(),
+            expect_tool: None,
+            expect_tool_sequence: None,
+            forbid_tool: None,
+            expect_message_contains: None,
+            expect_tool_input_contains: None,
+            expect_tool_output_contains: None,
+            expect_last_tool_output_contains: None,
+            min_tool_calls: None,
+            max_tool_calls: None,
+            max_failed_tools: None,
+            notes: None,
+        };
+
+        let config = prepare_case_config(&AppConfig::default(), &case, Some(&root)).unwrap();
+        assert!(config.mcp.enabled);
+        assert!(config.mcp.expose_remote_tools);
+        assert!(!config.approval.require_mcp_confirmation);
+        assert_eq!(
+            config.approval.mcp_call_allowlist,
+            vec!["stdio-self/*".to_string()]
+        );
+        let mcp_config = fs::read_to_string(root.join(".dscode/mcp.json")).unwrap();
+        assert!(mcp_config.contains("\"stdio-self\""));
+        assert!(mcp_config.contains("\"serve\""));
+        assert!(mcp_config.contains("\"--mcp\""));
+        assert!(mcp_config.contains("\"--workspace\""));
+
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2916,6 +3338,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
                 skill: None,
                 workdir: Some("fixtures/rust-cli-mini".to_string()),
                 isolate_workdir: false,
+                mcp_fixture: BenchmarkMcpFixture::default(),
                 budget: 8,
                 seed_observations: Vec::new(),
                 expect_tool: Some("list_files".to_string()),
@@ -3036,6 +3459,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
                 .and_then(|record| record.dogfood_snapshot.as_ref()),
             &trend_gate,
             &live_gate.summary_line(),
+            None,
         );
         assert!(report.contains("Previous benchmark: 0/1 passed"));
         assert!(report.contains("Δ passed +1"));
@@ -3059,6 +3483,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
             skill: None,
             workdir: None,
             isolate_workdir: false,
+            mcp_fixture: BenchmarkMcpFixture::default(),
             budget: 4,
             seed_observations: Vec::new(),
             expect_tool: Some("run_shell".to_string()),
@@ -3096,6 +3521,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
             skill: None,
             workdir: None,
             isolate_workdir: false,
+            mcp_fixture: BenchmarkMcpFixture::default(),
             budget: 4,
             seed_observations: Vec::new(),
             expect_tool: Some("run_shell".to_string()),
@@ -3137,6 +3563,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
             skill: None,
             workdir: None,
             isolate_workdir: false,
+            mcp_fixture: BenchmarkMcpFixture::default(),
             budget: 6,
             seed_observations: Vec::new(),
             expect_tool: Some("run_shell".to_string()),
@@ -3185,6 +3612,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
             skill: None,
             workdir: None,
             isolate_workdir: false,
+            mcp_fixture: BenchmarkMcpFixture::default(),
             budget: 4,
             seed_observations: Vec::new(),
             expect_tool: Some("review".to_string()),

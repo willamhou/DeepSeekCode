@@ -92,6 +92,61 @@ pub enum PrAction {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GithubAction {
+    Action(GithubActionArgs),
+    PrHead(GithubPrHeadArgs),
+    FixtureSmoke(GithubFixtureSmokeArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubActionArgs {
+    pub event_path: Option<String>,
+    pub event_name: Option<String>,
+    pub mode: GithubActionMode,
+    pub require_modes: Vec<GithubActionMode>,
+    pub trigger: String,
+    pub job: Option<String>,
+    pub commit: bool,
+    pub post: bool,
+    pub dry_run: bool,
+    pub allow_untriggered: bool,
+    pub github_output: bool,
+    pub background_task: bool,
+    pub task_no_run: bool,
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubPrHeadArgs {
+    pub reference: String,
+    pub repo_owner: Option<String>,
+    pub github_output: bool,
+    pub json_file: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubFixtureSmokeArgs {
+    pub mode: GithubFixtureSmokeMode,
+    pub keep_workdir: bool,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubFixtureSmokeMode {
+    All,
+    Review,
+    Write,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubActionMode {
+    Auto,
+    Review,
+    Fix,
+    Patch,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DogfoodOutcome {
     Success,
@@ -104,9 +159,11 @@ pub enum DogfoodOutcome {
 pub enum DogfoodAction {
     Run(DogfoodRunArgs),
     ExternalFixture(DogfoodExternalFixtureArgs),
+    ExternalEvidence(DogfoodExternalEvidenceArgs),
     ReplayBenchmark(DogfoodReplayArgs),
     LivePlan(DogfoodLivePlanArgs),
     LiveRun(DogfoodLiveRunArgs),
+    LiveEvidence(DogfoodLiveEvidenceArgs),
     Report(DogfoodReportArgs),
     ExportBenchmark(DogfoodExportArgs),
     PromoteBenchmark(DogfoodPromoteArgs),
@@ -124,6 +181,9 @@ pub enum RestoreAction {
 pub enum McpAction {
     List,
     Doctor,
+    FixtureSmoke {
+        json: bool,
+    },
     Tools {
         server: Option<String>,
     },
@@ -187,6 +247,107 @@ pub enum McpAction {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HooksAction {
+    FixtureSmoke { json: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillsAction {
+    List(SkillsListArgs),
+    Validate(SkillsValidateArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskAction {
+    Start(TaskStartArgs),
+    List(TaskListArgs),
+    Show(TaskShowArgs),
+    Stop(TaskStopArgs),
+    Diff(TaskDiffArgs),
+    Merge(TaskMergeArgs),
+    Reject(TaskRejectArgs),
+    FixtureSmoke(TaskFixtureSmokeArgs),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskStartArgs {
+    pub task: String,
+    pub cwd: Option<String>,
+    pub id: Option<String>,
+    pub base: Option<String>,
+    pub branch: Option<String>,
+    pub skill: Option<String>,
+    pub budget: Option<usize>,
+    pub no_run: bool,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskListArgs {
+    pub cwd: Option<String>,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskShowArgs {
+    pub id: String,
+    pub cwd: Option<String>,
+    pub tail: usize,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskStopArgs {
+    pub id: String,
+    pub cwd: Option<String>,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDiffArgs {
+    pub id: String,
+    pub cwd: Option<String>,
+    pub stat: bool,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskMergeArgs {
+    pub id: String,
+    pub cwd: Option<String>,
+    pub check: bool,
+    pub allow_dirty: bool,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRejectArgs {
+    pub id: String,
+    pub cwd: Option<String>,
+    pub keep_worktree: bool,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskFixtureSmokeArgs {
+    pub keep_workdir: bool,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillsListArgs {
+    pub json: bool,
+    pub dirs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillsValidateArgs {
+    pub json: bool,
+    pub strict: bool,
+    pub dirs: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpConfigScope {
     User,
@@ -214,8 +375,35 @@ pub struct DogfoodExternalFixtureArgs {
     pub workdir: String,
     pub budget: Option<usize>,
     pub benchmark_gate: bool,
+    pub evidence_out: Option<String>,
     pub notes: Option<String>,
     pub dry_run: bool,
+    pub allow_offline: bool,
+}
+
+#[derive(Debug)]
+pub struct DogfoodExternalEvidenceArgs {
+    pub file: Option<String>,
+    pub out: Option<String>,
+    pub require_completed: bool,
+    pub require_online: bool,
+    pub require_successful_external_fixtures: Option<usize>,
+    pub require_ledger_match: bool,
+    pub json: bool,
+}
+
+impl Default for DogfoodExternalEvidenceArgs {
+    fn default() -> Self {
+        Self {
+            file: None,
+            out: None,
+            require_completed: true,
+            require_online: true,
+            require_successful_external_fixtures: Some(1),
+            require_ledger_match: true,
+            json: false,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -239,6 +427,8 @@ pub struct DogfoodLivePlanArgs {
 #[derive(Debug, Default)]
 pub struct DogfoodLiveRunArgs {
     pub manifest: Option<String>,
+    pub api_key_file: Option<String>,
+    pub evidence_out: Option<String>,
     pub target_live_runs: Option<usize>,
     pub target_live_success_rate: Option<f64>,
     pub target_categories: Vec<DogfoodCategoryRequirement>,
@@ -246,6 +436,34 @@ pub struct DogfoodLiveRunArgs {
     pub limit: Option<usize>,
     pub execute: bool,
     pub benchmark_gate: bool,
+    pub json: bool,
+}
+
+#[derive(Debug)]
+pub struct DogfoodLiveEvidenceArgs {
+    pub file: Option<String>,
+    pub out: Option<String>,
+    pub require_completed: bool,
+    pub require_online: bool,
+    pub require_appended_model_backed: Option<usize>,
+    pub require_benchmark_gate: bool,
+    pub require_report_gate: bool,
+    pub json: bool,
+}
+
+impl Default for DogfoodLiveEvidenceArgs {
+    fn default() -> Self {
+        Self {
+            file: None,
+            out: None,
+            require_completed: true,
+            require_online: true,
+            require_appended_model_backed: Some(1),
+            require_benchmark_gate: false,
+            require_report_gate: false,
+            json: false,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -403,6 +621,250 @@ pub fn parse_pr_subcommand(args: Vec<String>) -> Result<PrAction, String> {
     }
 }
 
+pub fn parse_github_subcommand(args: Vec<String>) -> Result<GithubAction, String> {
+    let mut iter = args.into_iter();
+    let action = iter
+        .next()
+        .ok_or_else(|| "github requires a sub-action: action|pr-head|fixture-smoke".to_string())?;
+    match action.as_str() {
+        "action" => {
+            let rest: Vec<String> = iter.collect();
+            let mut event_path = None;
+            let mut event_name = None;
+            let mut mode = GithubActionMode::Auto;
+            let mut require_modes = Vec::new();
+            let mut trigger = "@deepseek".to_string();
+            let mut job = None;
+            let mut commit = false;
+            let mut post = false;
+            let mut dry_run = false;
+            let mut allow_untriggered = false;
+            let mut github_output = false;
+            let mut background_task = false;
+            let mut task_no_run = false;
+            let mut task_id = None;
+            let mut index = 0;
+            while index < rest.len() {
+                match rest[index].as_str() {
+                    "--event" | "--event-path" if index + 1 < rest.len() => {
+                        event_path = Some(rest[index + 1].clone());
+                        index += 2;
+                    }
+                    "--event-name" if index + 1 < rest.len() => {
+                        event_name = Some(rest[index + 1].clone());
+                        index += 2;
+                    }
+                    "--trigger" if index + 1 < rest.len() => {
+                        trigger = rest[index + 1].clone();
+                        index += 2;
+                    }
+                    "--mode" if index + 1 < rest.len() => {
+                        mode = parse_github_action_mode(&rest[index + 1])?;
+                        index += 2;
+                    }
+                    "--require-mode" if index + 1 < rest.len() => {
+                        require_modes.extend(parse_github_action_mode_list(&rest[index + 1])?);
+                        index += 2;
+                    }
+                    "--job" if index + 1 < rest.len() => {
+                        job = Some(rest[index + 1].clone());
+                        index += 2;
+                    }
+                    "--commit" => {
+                        commit = true;
+                        index += 1;
+                    }
+                    "--post" => {
+                        post = true;
+                        index += 1;
+                    }
+                    "--dry-run" => {
+                        dry_run = true;
+                        index += 1;
+                    }
+                    "--allow-untriggered" => {
+                        allow_untriggered = true;
+                        index += 1;
+                    }
+                    "--github-output" => {
+                        github_output = true;
+                        index += 1;
+                    }
+                    "--background-task" | "--task" => {
+                        background_task = true;
+                        index += 1;
+                    }
+                    "--task-no-run" => {
+                        task_no_run = true;
+                        index += 1;
+                    }
+                    "--task-id" if index + 1 < rest.len() => {
+                        task_id = Some(rest[index + 1].clone());
+                        index += 2;
+                    }
+                    "--task-id" => {
+                        return Err("github action --task-id requires a value".to_string())
+                    }
+                    other => {
+                        return Err(format!(
+                            "unknown flag for `github action`: {other}; expected --event|--event-name|--mode|--require-mode|--trigger|--job|--commit|--post|--dry-run|--allow-untriggered|--github-output|--background-task|--task-no-run|--task-id"
+                        ));
+                    }
+                }
+            }
+            if trigger.trim().is_empty() && !allow_untriggered {
+                return Err(
+                    "`github action --trigger` cannot be empty unless --allow-untriggered is set"
+                        .to_string(),
+                );
+            }
+            if task_no_run && !background_task {
+                return Err("github action --task-no-run requires --background-task".to_string());
+            }
+            Ok(GithubAction::Action(GithubActionArgs {
+                event_path,
+                event_name,
+                mode,
+                require_modes,
+                trigger,
+                job,
+                commit,
+                post,
+                dry_run,
+                allow_untriggered,
+                github_output,
+                background_task,
+                task_no_run,
+                task_id,
+            }))
+        }
+        "pr-head" => parse_github_pr_head_args(iter.collect()).map(GithubAction::PrHead),
+        "fixture-smoke" | "workflow-smoke" => {
+            parse_github_fixture_smoke_args(iter.collect()).map(GithubAction::FixtureSmoke)
+        }
+        other => Err(format!(
+            "unknown github sub-action `{other}`; expected action|pr-head|fixture-smoke"
+        )),
+    }
+}
+
+fn parse_github_pr_head_args(args: Vec<String>) -> Result<GithubPrHeadArgs, String> {
+    let mut reference = None;
+    let mut repo_owner = None;
+    let mut github_output = false;
+    let mut json_file = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--repo-owner" if index + 1 < args.len() => {
+                repo_owner = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--github-output" => {
+                github_output = true;
+                index += 1;
+            }
+            "--json-file" if index + 1 < args.len() => {
+                json_file = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--repo-owner" | "--json-file" => {
+                return Err(format!("{} requires a value", args[index]));
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown flag for `github pr-head`: {value}; expected --repo-owner|--github-output|--json-file"
+                ));
+            }
+            value => {
+                if reference.is_some() {
+                    return Err("github pr-head accepts exactly one PR reference".to_string());
+                }
+                reference = Some(value.to_string());
+                index += 1;
+            }
+        }
+    }
+    Ok(GithubPrHeadArgs {
+        reference: reference.ok_or_else(|| {
+            "github pr-head requires a PR reference such as owner/repo#123".to_string()
+        })?,
+        repo_owner,
+        github_output,
+        json_file,
+    })
+}
+
+fn parse_github_fixture_smoke_args(args: Vec<String>) -> Result<GithubFixtureSmokeArgs, String> {
+    let mut mode = GithubFixtureSmokeMode::All;
+    let mut keep_workdir = false;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--mode" if index + 1 < args.len() => {
+                mode = parse_github_fixture_smoke_mode(&args[index + 1])?;
+                index += 2;
+            }
+            "--keep-workdir" => {
+                keep_workdir = true;
+                index += 1;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            "--mode" => return Err("github fixture-smoke --mode requires a value".to_string()),
+            value => {
+                return Err(format!(
+                    "unknown flag for `github fixture-smoke`: {value}; expected --mode|--keep-workdir|--json"
+                ));
+            }
+        }
+    }
+    Ok(GithubFixtureSmokeArgs {
+        mode,
+        keep_workdir,
+        json,
+    })
+}
+
+fn parse_github_fixture_smoke_mode(value: &str) -> Result<GithubFixtureSmokeMode, String> {
+    match value {
+        "all" => Ok(GithubFixtureSmokeMode::All),
+        "review" => Ok(GithubFixtureSmokeMode::Review),
+        "write" => Ok(GithubFixtureSmokeMode::Write),
+        other => Err(format!(
+            "unknown github fixture-smoke mode `{other}`; expected all|review|write"
+        )),
+    }
+}
+
+fn parse_github_action_mode(value: &str) -> Result<GithubActionMode, String> {
+    match value {
+        "auto" => Ok(GithubActionMode::Auto),
+        "review" => Ok(GithubActionMode::Review),
+        "fix" => Ok(GithubActionMode::Fix),
+        "patch" => Ok(GithubActionMode::Patch),
+        other => Err(format!(
+            "unknown github action mode `{other}`; expected auto|review|fix|patch"
+        )),
+    }
+}
+
+fn parse_github_action_mode_list(value: &str) -> Result<Vec<GithubActionMode>, String> {
+    let modes = value
+        .split(',')
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+        .map(parse_github_action_mode)
+        .collect::<Result<Vec<_>, _>>()?;
+    if modes.is_empty() {
+        return Err("--require-mode requires at least one mode".to_string());
+    }
+    Ok(modes)
+}
+
 impl Cli {
     pub fn parse() -> Result<Self, String> {
         let argv = env::args().skip(1).collect::<Vec<_>>();
@@ -477,7 +939,11 @@ impl Cli {
             "update" => Command::Update(parse_update_args(args)?),
             "smoke" => Command::Smoke(parse_smoke_args(args)),
             "pr" => Command::Pr(parse_pr_subcommand(args)?),
+            "github" => Command::Github(parse_github_subcommand(args)?),
             "mcp" => Command::Mcp(parse_mcp_subcommand(args)?),
+            "hooks" => Command::Hooks(parse_hooks_subcommand(args)?),
+            "skills" => Command::Skills(parse_skills_subcommand(args)?),
+            "task" | "tasks" => Command::Task(parse_task_subcommand(args)?),
             _ => {
                 let mut combined = vec![first];
                 combined.extend(args);
@@ -514,7 +980,11 @@ pub enum Command {
     Update(UpdateArgs),
     Smoke(SmokeArgs),
     Pr(PrAction),
+    Github(GithubAction),
     Mcp(McpAction),
+    Hooks(HooksAction),
+    Skills(SkillsAction),
+    Task(TaskAction),
     Help(HelpArgs),
     Version,
 }
@@ -557,6 +1027,8 @@ pub struct ChatArgs {
 pub struct BenchmarkArgs {
     pub manifest: Option<String>,
     pub out: Option<String>,
+    pub category: Option<String>,
+    pub cases: Vec<String>,
     pub accept_live_baseline: bool,
 }
 
@@ -626,6 +1098,12 @@ pub enum AgentsAction {
     Service(AgentsServiceArgs),
     ServiceDoctor(AgentsServiceDoctorArgs),
     ServiceSmoke(AgentsServiceSmokeArgs),
+    ShellFixtureSmoke {
+        json: bool,
+    },
+    SubagentFixtureSmoke {
+        json: bool,
+    },
     Threads,
     ShowThread {
         id: String,
@@ -674,7 +1152,30 @@ pub enum AgentsShellAction {
         tail: bool,
         follow: bool,
         interactive: bool,
+        raw: bool,
         poll_ms: Option<u64>,
+        max_ms: Option<u64>,
+    },
+    ByteStream {
+        task_id: String,
+        cursor: Option<u64>,
+        wait_ms: Option<u64>,
+        limit_bytes: Option<u64>,
+        tail: bool,
+        input: Option<String>,
+        close_stdin: bool,
+        tty_rows: Option<u64>,
+        tty_cols: Option<u64>,
+        poll_ms: Option<u64>,
+        max_ms: Option<u64>,
+        max_events: Option<u64>,
+        raw_proxy: bool,
+        terminal_proxy: bool,
+    },
+    FdProxy {
+        task_id: String,
+        tty_rows: Option<u64>,
+        tty_cols: Option<u64>,
         max_ms: Option<u64>,
     },
     Stdin {
@@ -798,15 +1299,18 @@ pub struct AgentsServiceDoctorArgs {
     pub addr: String,
     pub interval_ms: u64,
     pub budget: Option<usize>,
+    pub installed: bool,
     pub json: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentsServiceSmokeArgs {
+    pub kind: AgentsServiceKind,
     pub bin: Option<String>,
     pub workdir: Option<String>,
     pub addr: String,
     pub timeout_ms: u64,
+    pub installed: bool,
     pub json: bool,
 }
 
@@ -959,6 +1463,7 @@ impl Default for UpdateHomebrewFormulaArgs {
 pub struct UpdatePublishStatusArgs {
     pub dist: Option<String>,
     pub npm_dist: Option<String>,
+    pub live_evidence_verification: Option<String>,
     pub strict: bool,
     pub json: bool,
 }
@@ -1034,6 +1539,16 @@ fn parse_mcp_subcommand(args: Vec<String>) -> Result<McpAction, String> {
                 return Err("mcp doctor accepts no arguments".to_string());
             }
             Ok(McpAction::Doctor)
+        }
+        "fixture-smoke" => {
+            let mut json = false;
+            for flag in args.iter().skip(1) {
+                match flag.as_str() {
+                    "--json" => json = true,
+                    other => return Err(format!("unknown flag for `mcp fixture-smoke`: {other}")),
+                }
+            }
+            Ok(McpAction::FixtureSmoke { json })
         }
         "tools" => {
             if args.len() > 2 {
@@ -1185,9 +1700,483 @@ fn parse_mcp_subcommand(args: Vec<String>) -> Result<McpAction, String> {
             })
         }
         other => Err(format!(
-            "unknown mcp sub-action `{other}`; expected list|doctor|tools|prompts|call|prompt|add|get|remove|enable|disable|validate|init|add-self"
+            "unknown mcp sub-action `{other}`; expected list|doctor|fixture-smoke|tools|prompts|call|prompt|add|get|remove|enable|disable|validate|init|add-self"
         )),
     }
+}
+
+fn parse_hooks_subcommand(args: Vec<String>) -> Result<HooksAction, String> {
+    if args.is_empty() {
+        return Err("hooks requires a sub-action: fixture-smoke".to_string());
+    }
+
+    match args[0].as_str() {
+        "fixture-smoke" => {
+            let mut json = false;
+            for flag in args.iter().skip(1) {
+                match flag.as_str() {
+                    "--json" => json = true,
+                    other => {
+                        return Err(format!(
+                            "unknown flag for `hooks fixture-smoke`: {other}; expected --json"
+                        ));
+                    }
+                }
+            }
+            Ok(HooksAction::FixtureSmoke { json })
+        }
+        other => Err(format!(
+            "unknown hooks sub-action `{other}`; expected fixture-smoke"
+        )),
+    }
+}
+
+fn parse_skills_subcommand(args: Vec<String>) -> Result<SkillsAction, String> {
+    if args.is_empty() || args.first().is_some_and(|arg| arg.starts_with('-')) {
+        return parse_skills_list_args(&args).map(SkillsAction::List);
+    }
+
+    match args[0].as_str() {
+        "list" => parse_skills_list_args(&args[1..]).map(SkillsAction::List),
+        "validate" => parse_skills_validate_args(&args[1..]).map(SkillsAction::Validate),
+        other => Err(format!(
+            "unknown skills sub-action `{other}`; expected list|validate"
+        )),
+    }
+}
+
+fn parse_skills_list_args(args: &[String]) -> Result<SkillsListArgs, String> {
+    let mut parsed = SkillsListArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" => {
+                parsed.json = true;
+                index += 1;
+            }
+            "--dir" | "--skills-dir" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(format!("skills list {} requires a value", args[index]));
+                };
+                parsed.dirs.push(value.clone());
+                index += 2;
+            }
+            other => {
+                return Err(format!(
+                    "unknown flag for `skills list`: {other}; expected --json|--dir"
+                ));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_skills_validate_args(args: &[String]) -> Result<SkillsValidateArgs, String> {
+    let mut parsed = SkillsValidateArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" => {
+                parsed.json = true;
+                index += 1;
+            }
+            "--strict" => {
+                parsed.strict = true;
+                index += 1;
+            }
+            "--dir" | "--skills-dir" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(format!("skills validate {} requires a value", args[index]));
+                };
+                parsed.dirs.push(value.clone());
+                index += 2;
+            }
+            other => {
+                return Err(format!(
+                    "unknown flag for `skills validate`: {other}; expected --json|--strict|--dir"
+                ));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_task_subcommand(args: Vec<String>) -> Result<TaskAction, String> {
+    if args.is_empty() {
+        return parse_task_list_args(&[]).map(TaskAction::List);
+    }
+
+    match args[0].as_str() {
+        "start" | "run" => parse_task_start_args(&args[1..]).map(TaskAction::Start),
+        "list" | "ls" => parse_task_list_args(&args[1..]).map(TaskAction::List),
+        "show" | "read" => parse_task_show_args(&args[1..]).map(TaskAction::Show),
+        "stop" | "cancel" => parse_task_stop_args(&args[1..]).map(TaskAction::Stop),
+        "diff" => parse_task_diff_args(&args[1..]).map(TaskAction::Diff),
+        "merge" | "apply" => parse_task_merge_args(&args[1..]).map(TaskAction::Merge),
+        "reject" | "drop" => parse_task_reject_args(&args[1..]).map(TaskAction::Reject),
+        "fixture-smoke" => parse_task_fixture_smoke_args(&args[1..]).map(TaskAction::FixtureSmoke),
+        other => Err(format!(
+            "unknown task sub-action `{other}`; expected start|list|show|stop|diff|merge|reject|fixture-smoke"
+        )),
+    }
+}
+
+fn parse_task_start_args(args: &[String]) -> Result<TaskStartArgs, String> {
+    let mut parsed = TaskStartArgs::default();
+    let mut positional = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--" => {
+                positional.extend(args.iter().skip(index + 1).cloned());
+                break;
+            }
+            "--cwd" | "--workdir" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(format!("task start {} requires a value", args[index]));
+                };
+                parsed.cwd = Some(value.clone());
+                index += 2;
+            }
+            "--id" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("task start --id requires a value".to_string());
+                };
+                parsed.id = Some(value.clone());
+                index += 2;
+            }
+            "--base" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("task start --base requires a value".to_string());
+                };
+                parsed.base = Some(value.clone());
+                index += 2;
+            }
+            "--branch" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("task start --branch requires a value".to_string());
+                };
+                parsed.branch = Some(value.clone());
+                index += 2;
+            }
+            "--skill" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("task start --skill requires a value".to_string());
+                };
+                parsed.skill = Some(value.clone());
+                index += 2;
+            }
+            "--budget" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("task start --budget requires a value".to_string());
+                };
+                parsed.budget = parse_budget_flag("task start", value)?;
+                index += 2;
+            }
+            "--no-run" => {
+                parsed.no_run = true;
+                index += 1;
+            }
+            "--json" => {
+                parsed.json = true;
+                index += 1;
+            }
+            other if other.starts_with('-') => {
+                return Err(format!(
+                    "unknown flag for `task start`: {other}; expected --cwd|--id|--base|--branch|--skill|--budget|--no-run|--json"
+                ));
+            }
+            value => {
+                positional.push(value.to_string());
+                index += 1;
+            }
+        }
+    }
+
+    parsed.task = positional.join(" ");
+    if parsed.task.trim().is_empty() {
+        return Err("task start requires a prompt".to_string());
+    }
+    Ok(parsed)
+}
+
+fn parse_task_list_args(args: &[String]) -> Result<TaskListArgs, String> {
+    let mut parsed = TaskListArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--cwd" | "--workdir" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(format!("task list {} requires a value", args[index]));
+                };
+                parsed.cwd = Some(value.clone());
+                index += 2;
+            }
+            "--json" => {
+                parsed.json = true;
+                index += 1;
+            }
+            other => {
+                return Err(format!(
+                    "unknown flag for `task list`: {other}; expected --cwd|--json"
+                ));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_task_show_args(args: &[String]) -> Result<TaskShowArgs, String> {
+    let mut id = None;
+    let mut cwd = None;
+    let mut tail = 80;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--cwd" | "--workdir" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(format!("task show {} requires a value", args[index]));
+                };
+                cwd = Some(value.clone());
+                index += 2;
+            }
+            "--tail" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("task show --tail requires a value".to_string());
+                };
+                tail = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|value| (1..=500).contains(value))
+                    .ok_or_else(|| "task show --tail must be a number from 1 to 500".to_string())?;
+                index += 2;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown flag for `task show`: {value}; expected --cwd|--tail|--json"
+                ));
+            }
+            value => {
+                if id.is_some() {
+                    return Err("task show accepts exactly one task id".to_string());
+                }
+                id = Some(value.to_string());
+                index += 1;
+            }
+        }
+    }
+
+    Ok(TaskShowArgs {
+        id: id.ok_or_else(|| "task show requires a task id".to_string())?,
+        cwd,
+        tail,
+        json,
+    })
+}
+
+fn parse_task_stop_args(args: &[String]) -> Result<TaskStopArgs, String> {
+    let mut id = None;
+    let mut cwd = None;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--cwd" | "--workdir" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(format!("task stop {} requires a value", args[index]));
+                };
+                cwd = Some(value.clone());
+                index += 2;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown flag for `task stop`: {value}; expected --cwd|--json"
+                ));
+            }
+            value => {
+                if id.is_some() {
+                    return Err("task stop accepts exactly one task id".to_string());
+                }
+                id = Some(value.to_string());
+                index += 1;
+            }
+        }
+    }
+
+    Ok(TaskStopArgs {
+        id: id.ok_or_else(|| "task stop requires a task id".to_string())?,
+        cwd,
+        json,
+    })
+}
+
+fn parse_task_diff_args(args: &[String]) -> Result<TaskDiffArgs, String> {
+    let mut id = None;
+    let mut cwd = None;
+    let mut stat = false;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--cwd" | "--workdir" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(format!("task diff {} requires a value", args[index]));
+                };
+                cwd = Some(value.clone());
+                index += 2;
+            }
+            "--stat" => {
+                stat = true;
+                index += 1;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown flag for `task diff`: {value}; expected --cwd|--stat|--json"
+                ));
+            }
+            value => {
+                if id.is_some() {
+                    return Err("task diff accepts exactly one task id".to_string());
+                }
+                id = Some(value.to_string());
+                index += 1;
+            }
+        }
+    }
+
+    Ok(TaskDiffArgs {
+        id: id.ok_or_else(|| "task diff requires a task id".to_string())?,
+        cwd,
+        stat,
+        json,
+    })
+}
+
+fn parse_task_merge_args(args: &[String]) -> Result<TaskMergeArgs, String> {
+    let mut id = None;
+    let mut cwd = None;
+    let mut check = false;
+    let mut allow_dirty = false;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--cwd" | "--workdir" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(format!("task merge {} requires a value", args[index]));
+                };
+                cwd = Some(value.clone());
+                index += 2;
+            }
+            "--check" | "--dry-run" => {
+                check = true;
+                index += 1;
+            }
+            "--allow-dirty" => {
+                allow_dirty = true;
+                index += 1;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown flag for `task merge`: {value}; expected --cwd|--check|--dry-run|--allow-dirty|--json"
+                ));
+            }
+            value => {
+                if id.is_some() {
+                    return Err("task merge accepts exactly one task id".to_string());
+                }
+                id = Some(value.to_string());
+                index += 1;
+            }
+        }
+    }
+
+    Ok(TaskMergeArgs {
+        id: id.ok_or_else(|| "task merge requires a task id".to_string())?,
+        cwd,
+        check,
+        allow_dirty,
+        json,
+    })
+}
+
+fn parse_task_reject_args(args: &[String]) -> Result<TaskRejectArgs, String> {
+    let mut id = None;
+    let mut cwd = None;
+    let mut keep_worktree = false;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--cwd" | "--workdir" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(format!("task reject {} requires a value", args[index]));
+                };
+                cwd = Some(value.clone());
+                index += 2;
+            }
+            "--keep-worktree" => {
+                keep_worktree = true;
+                index += 1;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown flag for `task reject`: {value}; expected --cwd|--keep-worktree|--json"
+                ));
+            }
+            value => {
+                if id.is_some() {
+                    return Err("task reject accepts exactly one task id".to_string());
+                }
+                id = Some(value.to_string());
+                index += 1;
+            }
+        }
+    }
+
+    Ok(TaskRejectArgs {
+        id: id.ok_or_else(|| "task reject requires a task id".to_string())?,
+        cwd,
+        keep_worktree,
+        json,
+    })
+}
+
+fn parse_task_fixture_smoke_args(args: &[String]) -> Result<TaskFixtureSmokeArgs, String> {
+    let mut parsed = TaskFixtureSmokeArgs::default();
+    for arg in args {
+        match arg.as_str() {
+            "--json" => parsed.json = true,
+            "--keep-workdir" => parsed.keep_workdir = true,
+            other => {
+                return Err(format!(
+                    "unknown flag for `task fixture-smoke`: {other}; expected --json|--keep-workdir"
+                ));
+            }
+        }
+    }
+    Ok(parsed)
 }
 
 fn parse_mcp_add_args(args: &[String]) -> Result<McpAction, String> {
@@ -1826,6 +2815,16 @@ fn parse_update_publish_status_args(args: Vec<String>) -> Result<UpdatePublishSt
             "--npm-dist" => {
                 return Err("update publish-status --npm-dist requires a path".to_string())
             }
+            "--live-evidence-verification" | "--live-evidence" if index + 1 < args.len() => {
+                parsed.live_evidence_verification = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--live-evidence-verification" | "--live-evidence" => {
+                return Err(
+                    "update publish-status --live-evidence-verification requires a path"
+                        .to_string(),
+                )
+            }
             "--strict" => {
                 parsed.strict = true;
                 index += 1;
@@ -1836,7 +2835,7 @@ fn parse_update_publish_status_args(args: Vec<String>) -> Result<UpdatePublishSt
             }
             other => {
                 return Err(format!(
-                    "unknown flag for `update publish-status`: {other}; expected --dist|--npm-dist|--strict|--json"
+                    "unknown flag for `update publish-status`: {other}; expected --dist|--npm-dist|--live-evidence-verification|--strict|--json"
                 ));
             }
         }
@@ -1905,6 +2904,20 @@ fn parse_benchmark_args(args: Vec<String>) -> BenchmarkArgs {
             "--out" => {
                 if index + 1 < args.len() {
                     benchmark.out = Some(args[index + 1].clone());
+                    index += 2;
+                    continue;
+                }
+            }
+            "--category" => {
+                if index + 1 < args.len() {
+                    benchmark.category = Some(args[index + 1].clone());
+                    index += 2;
+                    continue;
+                }
+            }
+            "--case" => {
+                if index + 1 < args.len() {
+                    benchmark.cases.push(args[index + 1].clone());
                     index += 2;
                     continue;
                 }
@@ -2182,6 +3195,34 @@ fn parse_agents_subcommand(args: Vec<String>) -> Result<AgentsAction, String> {
         "service" => parse_agents_service_args(args.into_iter().skip(1).collect()),
         "service-doctor" => parse_agents_service_doctor_args(args.into_iter().skip(1).collect()),
         "service-smoke" => parse_agents_service_smoke_args(args.into_iter().skip(1).collect()),
+        "shell-fixture-smoke" => {
+            let mut json = false;
+            for flag in args.iter().skip(1) {
+                match flag.as_str() {
+                    "--json" => json = true,
+                    other => {
+                        return Err(format!(
+                            "unknown flag for `agents shell-fixture-smoke`: {other}; expected --json"
+                        ));
+                    }
+                }
+            }
+            Ok(AgentsAction::ShellFixtureSmoke { json })
+        }
+        "subagent-fixture-smoke" => {
+            let mut json = false;
+            for flag in args.iter().skip(1) {
+                match flag.as_str() {
+                    "--json" => json = true,
+                    other => {
+                        return Err(format!(
+                            "unknown flag for `agents subagent-fixture-smoke`: {other}; expected --json"
+                        ));
+                    }
+                }
+            }
+            Ok(AgentsAction::SubagentFixtureSmoke { json })
+        }
         "threads" => {
             if args.len() > 1 {
                 return Err("agents threads accepts no arguments".to_string());
@@ -2217,14 +3258,14 @@ fn parse_agents_subcommand(args: Vec<String>) -> Result<AgentsAction, String> {
             Ok(AgentsAction::ClearThread)
         }
         other => Err(format!(
-            "unknown agents sub-action `{other}`; expected list|show|validate|run-task|daemon|rlm-status|rlm-events|rlm-wait|rlm-cancel|rlm-recover|rlm-stop|rlm-run-next|rlm-drain|shell|shell-supervisor|service|service-doctor|service-smoke|threads|show-thread|switch|current|clear-current"
+            "unknown agents sub-action `{other}`; expected list|show|validate|run-task|daemon|rlm-status|rlm-events|rlm-wait|rlm-cancel|rlm-recover|rlm-stop|rlm-run-next|rlm-drain|shell|shell-supervisor|service|service-doctor|service-smoke|shell-fixture-smoke|subagent-fixture-smoke|threads|show-thread|switch|current|clear-current"
         )),
     }
 }
 
 fn parse_agents_shell_args(args: Vec<String>) -> Result<AgentsAction, String> {
     if args.is_empty() {
-        return Err("agents shell requires an action: status|show|start|wait|replay|attach|stdin|send|resize|cancel|shutdown".to_string());
+        return Err("agents shell requires an action: status|show|start|wait|replay|attach|byte-stream|proxy|fd-proxy|stdin|send|resize|cancel|shutdown".to_string());
     }
     let action = args[0].clone();
     let rest = args.into_iter().skip(1).collect::<Vec<_>>();
@@ -2237,12 +3278,19 @@ fn parse_agents_shell_args(args: Vec<String>) -> Result<AgentsAction, String> {
         "wait" => parse_agents_shell_wait_args(rest),
         "replay" => parse_agents_shell_replay_args(rest),
         "attach" => parse_agents_shell_attach_args(rest),
+        "byte-stream" | "byte_stream" => parse_agents_shell_byte_stream_args(&action, rest, false),
+        "proxy" | "pty-proxy" | "pty_proxy" => {
+            parse_agents_shell_byte_stream_args(&action, rest, true)
+        }
+        "fd-proxy" | "fd_proxy" | "fd-handoff" | "pty-fd" | "pty_fd" => {
+            parse_agents_shell_fd_proxy_args(&action, rest)
+        }
         "stdin" | "send" => parse_agents_shell_stdin_args(&action, rest),
         "resize" => parse_agents_shell_resize_args(rest),
         "cancel" => parse_agents_shell_cancel_args(rest),
         "shutdown" => parse_agents_shell_empty_args(&action, rest, AgentsShellAction::Shutdown),
         other => Err(format!(
-            "unknown agents shell action `{other}`; expected status|show|start|wait|replay|attach|stdin|send|resize|cancel|shutdown"
+            "unknown agents shell action `{other}`; expected status|show|start|wait|replay|attach|byte-stream|proxy|fd-proxy|stdin|send|resize|cancel|shutdown"
         )),
     }
 }
@@ -2411,6 +3459,7 @@ fn parse_agents_shell_attach_args(args: Vec<String>) -> Result<AgentsAction, Str
     let mut tail = false;
     let mut follow = false;
     let mut interactive = false;
+    let mut raw = false;
     let mut poll_ms = None;
     let mut max_ms = None;
     let mut i = 0;
@@ -2420,6 +3469,7 @@ fn parse_agents_shell_attach_args(args: Vec<String>) -> Result<AgentsAction, Str
             "--tail" => tail = true,
             "--follow" => follow = true,
             "--interactive" | "--takeover" => interactive = true,
+            "--raw" => raw = true,
             "--cursor" => {
                 i += 1;
                 cursor = Some(parse_agents_shell_u64(&args, i, "attach", "--cursor")?);
@@ -2442,7 +3492,7 @@ fn parse_agents_shell_attach_args(args: Vec<String>) -> Result<AgentsAction, Str
             }
             value if value.starts_with("--") => {
                 return Err(format!(
-                    "unknown flag for `agents shell attach`: {value}; expected --cursor|--wait-ms|--poll-ms|--max-ms|--limit-bytes|--tail|--follow|--interactive|--takeover|--json"
+                    "unknown flag for `agents shell attach`: {value}; expected --cursor|--wait-ms|--poll-ms|--max-ms|--limit-bytes|--tail|--follow|--interactive|--takeover|--raw|--json"
                 ));
             }
             value => set_agents_shell_task_id(&mut task_id, value, "attach")?,
@@ -2459,7 +3509,183 @@ fn parse_agents_shell_attach_args(args: Vec<String>) -> Result<AgentsAction, Str
             tail,
             follow,
             interactive,
+            raw,
             poll_ms,
+            max_ms,
+        },
+        json,
+    }))
+}
+
+fn parse_agents_shell_byte_stream_args(
+    action_name: &str,
+    args: Vec<String>,
+    terminal_proxy: bool,
+) -> Result<AgentsAction, String> {
+    let mut json = false;
+    let mut task_id = None;
+    let mut cursor = None;
+    let mut wait_ms = None;
+    let mut limit_bytes = None;
+    let mut tail = false;
+    let mut input = None;
+    let mut close_stdin = false;
+    let mut tty_rows = None;
+    let mut tty_cols = None;
+    let mut poll_ms = None;
+    let mut max_ms = None;
+    let mut max_events = None;
+    let mut raw_proxy = terminal_proxy;
+    let mut positional_input = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json = true,
+            "--tail" => tail = true,
+            "--close-stdin" => close_stdin = true,
+            "--raw-proxy" | "--raw" => raw_proxy = true,
+            "--input" | "--stdin" | "--data" => {
+                i += 1;
+                input = Some(require_agents_shell_value(
+                    &args,
+                    i,
+                    action_name,
+                    "--input",
+                )?);
+            }
+            "--cursor" => {
+                i += 1;
+                cursor = Some(parse_agents_shell_u64(&args, i, action_name, "--cursor")?);
+            }
+            "--wait-ms" => {
+                i += 1;
+                wait_ms = Some(parse_agents_shell_u64(&args, i, action_name, "--wait-ms")?);
+            }
+            "--poll-ms" => {
+                i += 1;
+                poll_ms = Some(parse_agents_shell_u64(&args, i, action_name, "--poll-ms")?);
+            }
+            "--max-ms" => {
+                i += 1;
+                max_ms = Some(parse_agents_shell_u64(&args, i, action_name, "--max-ms")?);
+            }
+            "--max-events" => {
+                i += 1;
+                max_events = Some(parse_agents_shell_u64(
+                    &args,
+                    i,
+                    action_name,
+                    "--max-events",
+                )?);
+            }
+            "--limit-bytes" => {
+                i += 1;
+                limit_bytes = Some(parse_agents_shell_u64(
+                    &args,
+                    i,
+                    action_name,
+                    "--limit-bytes",
+                )?);
+            }
+            "--rows" | "--tty-rows" => {
+                i += 1;
+                tty_rows = Some(parse_agents_shell_u64(&args, i, action_name, "--rows")?);
+            }
+            "--cols" | "--tty-cols" => {
+                i += 1;
+                tty_cols = Some(parse_agents_shell_u64(&args, i, action_name, "--cols")?);
+            }
+            "--" => {
+                positional_input.extend(args.iter().skip(i + 1).cloned());
+                break;
+            }
+            value if value.starts_with("--") => {
+                return Err(format!(
+                    "unknown flag for `agents shell {action_name}`: {value}; expected --cursor|--wait-ms|--poll-ms|--max-ms|--max-events|--limit-bytes|--tail|--input|--close-stdin|--rows|--cols|--raw-proxy|--raw|--json|--"
+                ));
+            }
+            value if task_id.is_none() => task_id = Some(value.to_string()),
+            value => positional_input.push(value.to_string()),
+        }
+        i += 1;
+    }
+    if input.is_none() && !positional_input.is_empty() {
+        input = Some(positional_input.join(" "));
+    }
+    if tty_rows.is_some() != tty_cols.is_some() {
+        return Err(format!(
+            "agents shell {action_name} requires both --rows and --cols when resizing"
+        ));
+    }
+    let task_id =
+        task_id.ok_or_else(|| format!("agents shell {action_name} requires a task id"))?;
+    Ok(AgentsAction::Shell(AgentsShellArgs {
+        action: AgentsShellAction::ByteStream {
+            task_id,
+            cursor,
+            wait_ms,
+            limit_bytes,
+            tail,
+            input,
+            close_stdin,
+            tty_rows,
+            tty_cols,
+            poll_ms,
+            max_ms,
+            max_events,
+            raw_proxy,
+            terminal_proxy,
+        },
+        json,
+    }))
+}
+
+fn parse_agents_shell_fd_proxy_args(
+    action_name: &str,
+    args: Vec<String>,
+) -> Result<AgentsAction, String> {
+    let mut json = false;
+    let mut task_id = None;
+    let mut tty_rows = None;
+    let mut tty_cols = None;
+    let mut max_ms = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json = true,
+            "--rows" | "--tty-rows" => {
+                i += 1;
+                tty_rows = Some(parse_agents_shell_u64(&args, i, action_name, "--rows")?);
+            }
+            "--cols" | "--tty-cols" => {
+                i += 1;
+                tty_cols = Some(parse_agents_shell_u64(&args, i, action_name, "--cols")?);
+            }
+            "--max-ms" => {
+                i += 1;
+                max_ms = Some(parse_agents_shell_u64(&args, i, action_name, "--max-ms")?);
+            }
+            value if value.starts_with("--") => {
+                return Err(format!(
+                    "unknown flag for `agents shell {action_name}`: {value}; expected --rows|--cols|--max-ms|--json"
+                ));
+            }
+            value => set_agents_shell_task_id(&mut task_id, value, action_name)?,
+        }
+        i += 1;
+    }
+    if tty_rows.is_some() != tty_cols.is_some() {
+        return Err(format!(
+            "agents shell {action_name} requires both --rows and --cols when resizing"
+        ));
+    }
+    let task_id =
+        task_id.ok_or_else(|| format!("agents shell {action_name} requires a task id"))?;
+    Ok(AgentsAction::Shell(AgentsShellArgs {
+        action: AgentsShellAction::FdProxy {
+            task_id,
+            tty_rows,
+            tty_cols,
             max_ms,
         },
         json,
@@ -3290,6 +4516,7 @@ fn parse_agents_service_doctor_args(args: Vec<String>) -> Result<AgentsAction, S
         addr: "127.0.0.1:8765".to_string(),
         interval_ms: 1_000,
         budget: None,
+        installed: false,
         json: false,
     };
     let mut index = 0;
@@ -3348,13 +4575,17 @@ fn parse_agents_service_doctor_args(args: Vec<String>) -> Result<AgentsAction, S
                 index += 2;
             }
             "--budget" => return Err("agents service-doctor --budget requires a value".to_string()),
+            "--installed" => {
+                parsed.installed = true;
+                index += 1;
+            }
             "--json" => {
                 parsed.json = true;
                 index += 1;
             }
             value => {
                 return Err(format!(
-                    "unknown flag for `agents service-doctor`: {value}; expected --kind|--out|--bin|--workdir|--addr|--interval-ms|--budget|--json"
+                    "unknown flag for `agents service-doctor`: {value}; expected --kind|--out|--bin|--workdir|--addr|--interval-ms|--budget|--installed|--json"
                 ));
             }
         }
@@ -3364,15 +4595,31 @@ fn parse_agents_service_doctor_args(args: Vec<String>) -> Result<AgentsAction, S
 
 fn parse_agents_service_smoke_args(args: Vec<String>) -> Result<AgentsAction, String> {
     let mut parsed = AgentsServiceSmokeArgs {
+        kind: default_agents_service_kind(),
         bin: None,
         workdir: None,
         addr: "127.0.0.1:0".to_string(),
         timeout_ms: 5_000,
+        installed: false,
         json: false,
     };
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
+            "--kind" if index + 1 < args.len() => {
+                parsed.kind = match args[index + 1].as_str() {
+                    "systemd" => AgentsServiceKind::Systemd,
+                    "launchd" => AgentsServiceKind::Launchd,
+                    "all" => AgentsServiceKind::All,
+                    value => {
+                        return Err(format!(
+                            "agents service-smoke --kind must be systemd, launchd, or all; got {value}"
+                        ));
+                    }
+                };
+                index += 2;
+            }
+            "--kind" => return Err("agents service-smoke --kind requires a value".to_string()),
             "--bin" if index + 1 < args.len() => {
                 parsed.bin = Some(args[index + 1].clone());
                 index += 2;
@@ -3397,13 +4644,17 @@ fn parse_agents_service_smoke_args(args: Vec<String>) -> Result<AgentsAction, St
             "--timeout-ms" => {
                 return Err("agents service-smoke --timeout-ms requires a value".to_string());
             }
+            "--installed" => {
+                parsed.installed = true;
+                index += 1;
+            }
             "--json" => {
                 parsed.json = true;
                 index += 1;
             }
             value => {
                 return Err(format!(
-                    "unknown flag for `agents service-smoke`: {value}; expected --bin|--workdir|--addr|--timeout-ms|--json"
+                    "unknown flag for `agents service-smoke`: {value}; expected --kind|--bin|--workdir|--addr|--timeout-ms|--installed|--json"
                 ));
             }
         }
@@ -3581,7 +4832,7 @@ fn parse_dogfood_subcommand(args: Vec<String>) -> Result<DogfoodAction, String> 
     let action = iter
         .next()
         .ok_or_else(|| {
-            "dogfood requires a sub-action: run|external-fixture|replay-benchmark|live-plan|live-run|report|export-benchmark|promote-benchmark"
+            "dogfood requires a sub-action: run|external-fixture|external-evidence|replay-benchmark|live-plan|live-run|live-evidence|report|export-benchmark|promote-benchmark"
                 .to_string()
         })?;
     let rest: Vec<String> = iter.collect();
@@ -3590,6 +4841,9 @@ fn parse_dogfood_subcommand(args: Vec<String>) -> Result<DogfoodAction, String> 
         "external-fixture" | "external-write-fixture" => {
             parse_dogfood_external_fixture_args(rest).map(DogfoodAction::ExternalFixture)
         }
+        "external-evidence" | "external-fixture-evidence" | "verify-external-fixture-evidence" => {
+            parse_dogfood_external_evidence_args(rest).map(DogfoodAction::ExternalEvidence)
+        }
         "replay-benchmark" | "replay-bench" => {
             Ok(DogfoodAction::ReplayBenchmark(parse_dogfood_replay_args(rest)))
         }
@@ -3597,6 +4851,9 @@ fn parse_dogfood_subcommand(args: Vec<String>) -> Result<DogfoodAction, String> 
             parse_dogfood_live_plan_args(rest).map(DogfoodAction::LivePlan)
         }
         "live-run" | "run-live" => parse_dogfood_live_run_args(rest).map(DogfoodAction::LiveRun),
+        "live-evidence" | "verify-live-evidence" => {
+            parse_dogfood_live_evidence_args(rest).map(DogfoodAction::LiveEvidence)
+        }
         "report" => parse_dogfood_report_args(rest).map(DogfoodAction::Report),
         "export-benchmark" | "export-bench" => {
             Ok(DogfoodAction::ExportBenchmark(parse_dogfood_export_args(rest)))
@@ -3607,7 +4864,7 @@ fn parse_dogfood_subcommand(args: Vec<String>) -> Result<DogfoodAction, String> 
             )))
         }
         other => Err(format!(
-            "unknown dogfood sub-action `{other}`; expected run|external-fixture|replay-benchmark|live-plan|live-run|report|export-benchmark|promote-benchmark"
+            "unknown dogfood sub-action `{other}`; expected run|external-fixture|external-evidence|replay-benchmark|live-plan|live-run|live-evidence|report|export-benchmark|promote-benchmark"
         )),
     }
 }
@@ -3727,8 +4984,10 @@ fn parse_dogfood_external_fixture_args(
     let mut workdir = None;
     let mut budget = None;
     let mut benchmark_gate = false;
+    let mut evidence_out = None;
     let mut notes = None;
     let mut dry_run = false;
+    let mut allow_offline = false;
     let mut positional = Vec::new();
     let mut index = 0;
 
@@ -3753,6 +5012,11 @@ fn parse_dogfood_external_fixture_args(
                 index += 1;
                 continue;
             }
+            "--evidence-out" if index + 1 < args.len() => {
+                evidence_out = Some(args[index + 1].clone());
+                index += 2;
+                continue;
+            }
             "--notes" if index + 1 < args.len() => {
                 notes = Some(args[index + 1].clone());
                 index += 2;
@@ -3760,6 +5024,11 @@ fn parse_dogfood_external_fixture_args(
             }
             "--dry-run" => {
                 dry_run = true;
+                index += 1;
+                continue;
+            }
+            "--allow-offline" => {
+                allow_offline = true;
                 index += 1;
                 continue;
             }
@@ -3783,9 +5052,71 @@ fn parse_dogfood_external_fixture_args(
         workdir,
         budget,
         benchmark_gate,
+        evidence_out,
         notes,
         dry_run,
+        allow_offline,
     })
+}
+
+fn parse_dogfood_external_evidence_args(
+    args: Vec<String>,
+) -> Result<DogfoodExternalEvidenceArgs, String> {
+    let mut evidence = DogfoodExternalEvidenceArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--file" | "--evidence" | "--evidence-file" if index + 1 < args.len() => {
+                evidence.file = Some(args[index + 1].clone());
+                index += 2;
+                continue;
+            }
+            "--out" if index + 1 < args.len() => {
+                evidence.out = Some(args[index + 1].clone());
+                index += 2;
+                continue;
+            }
+            "--require-successful-external-fixtures" if index + 1 < args.len() => {
+                evidence.require_successful_external_fixtures = Some(parse_required_usize(
+                    "--require-successful-external-fixtures",
+                    &args[index + 1],
+                    1,
+                    100_000,
+                )?);
+                index += 2;
+                continue;
+            }
+            "--allow-incomplete" => {
+                evidence.require_completed = false;
+                index += 1;
+                continue;
+            }
+            "--allow-offline" => {
+                evidence.require_online = false;
+                index += 1;
+                continue;
+            }
+            "--allow-ledger-mismatch" => {
+                evidence.require_ledger_match = false;
+                index += 1;
+                continue;
+            }
+            "--json" => {
+                evidence.json = true;
+                index += 1;
+                continue;
+            }
+            "--file"
+            | "--evidence"
+            | "--evidence-file"
+            | "--out"
+            | "--require-successful-external-fixtures" => {
+                return Err(format!("{} requires a value", args[index]));
+            }
+            other => return Err(format!("unknown dogfood external-evidence flag `{other}`")),
+        }
+    }
+    Ok(evidence)
 }
 
 fn parse_dogfood_replay_args(args: Vec<String>) -> DogfoodReplayArgs {
@@ -3898,6 +5229,16 @@ fn parse_dogfood_live_run_args(args: Vec<String>) -> Result<DogfoodLiveRunArgs, 
                 index += 2;
                 continue;
             }
+            "--api-key-file" | "--key-file" if index + 1 < args.len() => {
+                run.api_key_file = Some(args[index + 1].clone());
+                index += 2;
+                continue;
+            }
+            "--evidence-out" if index + 1 < args.len() => {
+                run.evidence_out = Some(args[index + 1].clone());
+                index += 2;
+                continue;
+            }
             "--target-live-runs" if index + 1 < args.len() => {
                 run.target_live_runs = Some(parse_required_usize(
                     "--target-live-runs",
@@ -3952,7 +5293,15 @@ fn parse_dogfood_live_run_args(args: Vec<String>) -> Result<DogfoodLiveRunArgs, 
                 index += 1;
                 continue;
             }
+            "--json" => {
+                run.json = true;
+                index += 1;
+                continue;
+            }
             "--manifest"
+            | "--api-key-file"
+            | "--key-file"
+            | "--evidence-out"
             | "--target-live-runs"
             | "--target-live-success-rate"
             | "--target-category"
@@ -3964,6 +5313,69 @@ fn parse_dogfood_live_run_args(args: Vec<String>) -> Result<DogfoodLiveRunArgs, 
         }
     }
     Ok(run)
+}
+
+fn parse_dogfood_live_evidence_args(args: Vec<String>) -> Result<DogfoodLiveEvidenceArgs, String> {
+    let mut evidence = DogfoodLiveEvidenceArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--file" | "--evidence" | "--evidence-file" if index + 1 < args.len() => {
+                evidence.file = Some(args[index + 1].clone());
+                index += 2;
+                continue;
+            }
+            "--out" if index + 1 < args.len() => {
+                evidence.out = Some(args[index + 1].clone());
+                index += 2;
+                continue;
+            }
+            "--require-appended-model-backed" if index + 1 < args.len() => {
+                evidence.require_appended_model_backed = Some(parse_required_usize(
+                    "--require-appended-model-backed",
+                    &args[index + 1],
+                    1,
+                    100_000,
+                )?);
+                index += 2;
+                continue;
+            }
+            "--allow-incomplete" => {
+                evidence.require_completed = false;
+                index += 1;
+                continue;
+            }
+            "--allow-offline" => {
+                evidence.require_online = false;
+                index += 1;
+                continue;
+            }
+            "--require-benchmark-gate" => {
+                evidence.require_benchmark_gate = true;
+                index += 1;
+                continue;
+            }
+            "--require-report-gate" => {
+                evidence.require_report_gate = true;
+                index += 1;
+                continue;
+            }
+            "--json" => {
+                evidence.json = true;
+                index += 1;
+                continue;
+            }
+            "--file"
+            | "--evidence"
+            | "--evidence-file"
+            | "--out"
+            | "--require-appended-model-backed" => {
+                return Err(format!("{} requires a value", args[index]));
+            }
+            other => return Err(format!("unknown dogfood live-evidence flag `{other}`")),
+        }
+    }
+    Ok(evidence)
 }
 
 fn parse_dogfood_report_args(args: Vec<String>) -> Result<DogfoodReportArgs, String> {
@@ -4392,6 +5804,153 @@ mod tests {
     }
 
     #[test]
+    fn cli_from_argv_routes_task_runner_subcommands() {
+        let start = Cli::from_argv(vec![
+            "task".to_string(),
+            "start".to_string(),
+            "--cwd".to_string(),
+            "/repo".to_string(),
+            "--id".to_string(),
+            "task-1".to_string(),
+            "--base".to_string(),
+            "main".to_string(),
+            "--branch".to_string(),
+            "deepseek-task/task-1".to_string(),
+            "--skill".to_string(),
+            "review".to_string(),
+            "--budget".to_string(),
+            "12".to_string(),
+            "--no-run".to_string(),
+            "--json".to_string(),
+            "--".to_string(),
+            "fix tests".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            start.command,
+            Some(Command::Task(TaskAction::Start(TaskStartArgs {
+                ref task,
+                cwd: Some(ref cwd),
+                id: Some(ref id),
+                base: Some(ref base),
+                branch: Some(ref branch),
+                skill: Some(ref skill),
+                budget: Some(12),
+                no_run: true,
+                json: true,
+            }))) if task == "fix tests"
+                && cwd == "/repo"
+                && id == "task-1"
+                && base == "main"
+                && branch == "deepseek-task/task-1"
+                && skill == "review"
+        ));
+
+        let list = Cli::from_argv(vec![
+            "tasks".to_string(),
+            "ls".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            list.command,
+            Some(Command::Task(TaskAction::List(TaskListArgs {
+                cwd: None,
+                json: true
+            })))
+        ));
+
+        let show = Cli::from_argv(vec![
+            "task".to_string(),
+            "show".to_string(),
+            "task-1".to_string(),
+            "--tail".to_string(),
+            "20".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            show.command,
+            Some(Command::Task(TaskAction::Show(TaskShowArgs {
+                ref id,
+                cwd: None,
+                tail: 20,
+                json: false,
+            }))) if id == "task-1"
+        ));
+
+        let stop = Cli::from_argv(vec![
+            "task".to_string(),
+            "stop".to_string(),
+            "task-1".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            stop.command,
+            Some(Command::Task(TaskAction::Stop(TaskStopArgs {
+                ref id,
+                cwd: None,
+                json: true,
+            }))) if id == "task-1"
+        ));
+
+        let diff = Cli::from_argv(vec![
+            "task".to_string(),
+            "diff".to_string(),
+            "task-1".to_string(),
+            "--stat".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            diff.command,
+            Some(Command::Task(TaskAction::Diff(TaskDiffArgs {
+                ref id,
+                cwd: None,
+                stat: true,
+                json: true,
+            }))) if id == "task-1"
+        ));
+
+        let merge = Cli::from_argv(vec![
+            "task".to_string(),
+            "merge".to_string(),
+            "task-1".to_string(),
+            "--check".to_string(),
+            "--allow-dirty".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            merge.command,
+            Some(Command::Task(TaskAction::Merge(TaskMergeArgs {
+                ref id,
+                cwd: None,
+                check: true,
+                allow_dirty: true,
+                json: true,
+            }))) if id == "task-1"
+        ));
+
+        let reject = Cli::from_argv(vec![
+            "task".to_string(),
+            "reject".to_string(),
+            "task-1".to_string(),
+            "--keep-worktree".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            reject.command,
+            Some(Command::Task(TaskAction::Reject(TaskRejectArgs {
+                ref id,
+                cwd: None,
+                keep_worktree: true,
+                json: false,
+            }))) if id == "task-1"
+        ));
+    }
+
+    #[test]
     fn parses_tui_args() {
         let parsed = Cli::from_argv(vec![
             "tui".to_string(),
@@ -4467,6 +6026,17 @@ mod tests {
         assert!(matches!(
             doctor.command,
             Some(Command::Mcp(McpAction::Doctor))
+        ));
+
+        let fixture_smoke = Cli::from_argv(vec![
+            "mcp".to_string(),
+            "fixture-smoke".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            fixture_smoke.command,
+            Some(Command::Mcp(McpAction::FixtureSmoke { json: true }))
         ));
 
         let tools = Cli::from_argv(vec![
@@ -4646,6 +6216,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_hooks_fixture_smoke_subcommand() {
+        let fixture_smoke = Cli::from_argv(vec![
+            "hooks".to_string(),
+            "fixture-smoke".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            fixture_smoke.command,
+            Some(Command::Hooks(HooksAction::FixtureSmoke { json: true }))
+        ));
+    }
+
+    #[test]
+    fn parses_skills_subcommands() {
+        let list = Cli::from_argv(vec!["skills".to_string(), "--json".to_string()]).unwrap();
+        assert!(matches!(
+            list.command,
+            Some(Command::Skills(SkillsAction::List(SkillsListArgs {
+                json: true,
+                dirs
+            }))) if dirs.is_empty()
+        ));
+
+        let validate = Cli::from_argv(vec![
+            "skills".to_string(),
+            "validate".to_string(),
+            "--strict".to_string(),
+            "--json".to_string(),
+            "--dir".to_string(),
+            "skills".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            validate.command,
+            Some(Command::Skills(SkillsAction::Validate(SkillsValidateArgs {
+                json: true,
+                strict: true,
+                dirs
+            }))) if dirs == vec!["skills".to_string()]
+        ));
+    }
+
+    #[test]
     fn parses_dogfood_run_subcommand_with_flags() {
         let parsed = parse_dogfood_subcommand(vec![
             "run".to_string(),
@@ -4687,9 +6302,11 @@ mod tests {
                 assert_eq!(args.task, "");
             }
             DogfoodAction::ExternalFixture(_) => panic!("expected dogfood run args"),
+            DogfoodAction::ExternalEvidence(_) => panic!("expected dogfood run args"),
             DogfoodAction::ReplayBenchmark(_) => panic!("expected dogfood run args"),
             DogfoodAction::LivePlan(_) => panic!("expected dogfood run args"),
             DogfoodAction::LiveRun(_) => panic!("expected dogfood run args"),
+            DogfoodAction::LiveEvidence(_) => panic!("expected dogfood run args"),
             DogfoodAction::Report(_) => panic!("expected dogfood run args"),
             DogfoodAction::ExportBenchmark(_) => panic!("expected dogfood run args"),
             DogfoodAction::PromoteBenchmark(_) => panic!("expected dogfood run args"),
@@ -4712,7 +6329,10 @@ mod tests {
             "12".to_string(),
             "--notes".to_string(),
             "live write fixture".to_string(),
+            "--evidence-out".to_string(),
+            ".dscode/dogfood/external-fixture-evidence.json".to_string(),
             "--dry-run".to_string(),
+            "--allow-offline".to_string(),
             "replace".to_string(),
             "`a".to_string(),
             "-".to_string(),
@@ -4735,17 +6355,58 @@ mod tests {
             DogfoodAction::ExternalFixture(args) => {
                 assert_eq!(args.workdir, "/tmp/external-repo");
                 assert_eq!(args.budget, Some(12));
+                assert_eq!(
+                    args.evidence_out.as_deref(),
+                    Some(".dscode/dogfood/external-fixture-evidence.json")
+                );
                 assert!(args.dry_run);
+                assert!(args.allow_offline);
                 assert_eq!(args.notes.as_deref(), Some("live write fixture"));
                 assert!(args.task.contains("validate with cargo test"));
             }
             DogfoodAction::Run(_) => panic!("expected external fixture args"),
+            DogfoodAction::ExternalEvidence(_) => panic!("expected external fixture args"),
             DogfoodAction::ReplayBenchmark(_) => panic!("expected external fixture args"),
             DogfoodAction::LivePlan(_) => panic!("expected external fixture args"),
             DogfoodAction::LiveRun(_) => panic!("expected external fixture args"),
+            DogfoodAction::LiveEvidence(_) => panic!("expected external fixture args"),
             DogfoodAction::Report(_) => panic!("expected external fixture args"),
             DogfoodAction::ExportBenchmark(_) => panic!("expected external fixture args"),
             DogfoodAction::PromoteBenchmark(_) => panic!("expected external fixture args"),
+        }
+    }
+
+    #[test]
+    fn parses_dogfood_external_evidence_subcommand() {
+        let parsed = parse_dogfood_subcommand(vec![
+            "external-evidence".to_string(),
+            "--file".to_string(),
+            ".dscode/dogfood/external-fixture-evidence.json".to_string(),
+            "--out".to_string(),
+            ".dscode/dogfood/external-fixture-evidence-verification.json".to_string(),
+            "--require-successful-external-fixtures".to_string(),
+            "2".to_string(),
+            "--json".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match parsed {
+            DogfoodAction::ExternalEvidence(args) => {
+                assert_eq!(
+                    args.file.as_deref(),
+                    Some(".dscode/dogfood/external-fixture-evidence.json")
+                );
+                assert_eq!(
+                    args.out.as_deref(),
+                    Some(".dscode/dogfood/external-fixture-evidence-verification.json")
+                );
+                assert_eq!(args.require_successful_external_fixtures, Some(2));
+                assert!(args.require_completed);
+                assert!(args.require_online);
+                assert!(args.require_ledger_match);
+                assert!(args.json);
+            }
+            other => panic!("expected external evidence args, got {other:?}"),
         }
     }
 
@@ -4797,9 +6458,11 @@ mod tests {
             }
             DogfoodAction::Run(_) => panic!("expected dogfood report args"),
             DogfoodAction::ExternalFixture(_) => panic!("expected dogfood report args"),
+            DogfoodAction::ExternalEvidence(_) => panic!("expected dogfood report args"),
             DogfoodAction::ReplayBenchmark(_) => panic!("expected dogfood report args"),
             DogfoodAction::LivePlan(_) => panic!("expected dogfood report args"),
             DogfoodAction::LiveRun(_) => panic!("expected dogfood report args"),
+            DogfoodAction::LiveEvidence(_) => panic!("expected dogfood report args"),
             DogfoodAction::ExportBenchmark(_) => panic!("expected dogfood report args"),
             DogfoodAction::PromoteBenchmark(_) => panic!("expected dogfood report args"),
         }
@@ -4839,8 +6502,10 @@ mod tests {
             }
             DogfoodAction::Run(_) => panic!("expected replay args"),
             DogfoodAction::ExternalFixture(_) => panic!("expected replay args"),
+            DogfoodAction::ExternalEvidence(_) => panic!("expected replay args"),
             DogfoodAction::LivePlan(_) => panic!("expected replay args"),
             DogfoodAction::LiveRun(_) => panic!("expected replay args"),
+            DogfoodAction::LiveEvidence(_) => panic!("expected replay args"),
             DogfoodAction::Report(_) => panic!("expected replay args"),
             DogfoodAction::ExportBenchmark(_) => panic!("expected replay args"),
             DogfoodAction::PromoteBenchmark(_) => panic!("expected replay args"),
@@ -4879,8 +6544,10 @@ mod tests {
             }
             DogfoodAction::Run(_) => panic!("expected live plan args"),
             DogfoodAction::ExternalFixture(_) => panic!("expected live plan args"),
+            DogfoodAction::ExternalEvidence(_) => panic!("expected live plan args"),
             DogfoodAction::ReplayBenchmark(_) => panic!("expected live plan args"),
             DogfoodAction::LiveRun(_) => panic!("expected live plan args"),
+            DogfoodAction::LiveEvidence(_) => panic!("expected live plan args"),
             DogfoodAction::Report(_) => panic!("expected live plan args"),
             DogfoodAction::ExportBenchmark(_) => panic!("expected live plan args"),
             DogfoodAction::PromoteBenchmark(_) => panic!("expected live plan args"),
@@ -4893,6 +6560,10 @@ mod tests {
             "live-run".to_string(),
             "--manifest".to_string(),
             "benchmarks.txt".to_string(),
+            "--api-key-file".to_string(),
+            "/tmp/deepseek-dogfood.key".to_string(),
+            "--evidence-out".to_string(),
+            "/tmp/deepseek-live-evidence.json".to_string(),
             "--target-live-runs".to_string(),
             "100".to_string(),
             "--target-live-success-rate".to_string(),
@@ -4903,6 +6574,7 @@ mod tests {
             "write_validate".to_string(),
             "--limit".to_string(),
             "2".to_string(),
+            "--json".to_string(),
             "--execute".to_string(),
             "--benchmark-gate".to_string(),
         ])
@@ -4911,22 +6583,80 @@ mod tests {
         match parsed {
             DogfoodAction::LiveRun(args) => {
                 assert_eq!(args.manifest.as_deref(), Some("benchmarks.txt"));
+                assert_eq!(
+                    args.api_key_file.as_deref(),
+                    Some("/tmp/deepseek-dogfood.key")
+                );
+                assert_eq!(
+                    args.evidence_out.as_deref(),
+                    Some("/tmp/deepseek-live-evidence.json")
+                );
                 assert_eq!(args.target_live_runs, Some(100));
                 assert_eq!(args.target_live_success_rate, Some(90.0));
                 assert_eq!(args.target_categories.len(), 1);
                 assert_eq!(args.target_categories[0].category, "write_validate");
                 assert_eq!(args.categories, vec!["write_validate".to_string()]);
                 assert_eq!(args.limit, Some(2));
+                assert!(args.json);
                 assert!(args.execute);
                 assert!(args.benchmark_gate);
             }
             DogfoodAction::Run(_) => panic!("expected live run args"),
             DogfoodAction::ExternalFixture(_) => panic!("expected live run args"),
+            DogfoodAction::ExternalEvidence(_) => panic!("expected live run args"),
             DogfoodAction::ReplayBenchmark(_) => panic!("expected live run args"),
             DogfoodAction::LivePlan(_) => panic!("expected live run args"),
+            DogfoodAction::LiveEvidence(_) => panic!("expected live run args"),
             DogfoodAction::Report(_) => panic!("expected live run args"),
             DogfoodAction::ExportBenchmark(_) => panic!("expected live run args"),
             DogfoodAction::PromoteBenchmark(_) => panic!("expected live run args"),
+        }
+    }
+
+    #[test]
+    fn parses_dogfood_live_evidence_subcommand() {
+        let parsed = parse_dogfood_subcommand(vec![
+            "live-evidence".to_string(),
+            "--file".to_string(),
+            ".dscode/dogfood/live-evidence.json".to_string(),
+            "--out".to_string(),
+            ".dscode/dogfood/live-evidence-verification.json".to_string(),
+            "--require-appended-model-backed".to_string(),
+            "3".to_string(),
+            "--require-benchmark-gate".to_string(),
+            "--require-report-gate".to_string(),
+            "--allow-offline".to_string(),
+            "--allow-incomplete".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        match parsed {
+            DogfoodAction::LiveEvidence(args) => {
+                assert_eq!(
+                    args.file.as_deref(),
+                    Some(".dscode/dogfood/live-evidence.json")
+                );
+                assert_eq!(
+                    args.out.as_deref(),
+                    Some(".dscode/dogfood/live-evidence-verification.json")
+                );
+                assert_eq!(args.require_appended_model_backed, Some(3));
+                assert!(args.require_benchmark_gate);
+                assert!(args.require_report_gate);
+                assert!(!args.require_online);
+                assert!(!args.require_completed);
+                assert!(args.json);
+            }
+            DogfoodAction::Run(_) => panic!("expected live evidence args"),
+            DogfoodAction::ExternalFixture(_) => panic!("expected live evidence args"),
+            DogfoodAction::ExternalEvidence(_) => panic!("expected live evidence args"),
+            DogfoodAction::ReplayBenchmark(_) => panic!("expected live evidence args"),
+            DogfoodAction::LivePlan(_) => panic!("expected live evidence args"),
+            DogfoodAction::LiveRun(_) => panic!("expected live evidence args"),
+            DogfoodAction::Report(_) => panic!("expected live evidence args"),
+            DogfoodAction::ExportBenchmark(_) => panic!("expected live evidence args"),
+            DogfoodAction::PromoteBenchmark(_) => panic!("expected live evidence args"),
         }
     }
 
@@ -5070,6 +6800,112 @@ mod tests {
     }
 
     #[test]
+    fn parses_github_action_flags() {
+        let parsed = parse_github_subcommand(vec![
+            "action".to_string(),
+            "--event".to_string(),
+            "event.json".to_string(),
+            "--event-name".to_string(),
+            "issue_comment".to_string(),
+            "--mode".to_string(),
+            "patch".to_string(),
+            "--trigger".to_string(),
+            "/deepseek".to_string(),
+            "--job".to_string(),
+            "test-rust".to_string(),
+            "--commit".to_string(),
+            "--post".to_string(),
+            "--dry-run".to_string(),
+            "--allow-untriggered".to_string(),
+        ])
+        .unwrap();
+        match parsed {
+            GithubAction::Action(args) => {
+                assert_eq!(args.event_path.as_deref(), Some("event.json"));
+                assert_eq!(args.event_name.as_deref(), Some("issue_comment"));
+                assert_eq!(args.mode, GithubActionMode::Patch);
+                assert_eq!(args.trigger, "/deepseek");
+                assert_eq!(args.job.as_deref(), Some("test-rust"));
+                assert!(args.commit);
+                assert!(args.post);
+                assert!(args.dry_run);
+                assert!(args.allow_untriggered);
+            }
+            GithubAction::PrHead(_) => panic!("expected github action args"),
+            GithubAction::FixtureSmoke(_) => panic!("expected github action args"),
+        }
+    }
+
+    #[test]
+    fn rejects_empty_github_action_trigger_without_override() {
+        let parsed = parse_github_subcommand(vec![
+            "action".to_string(),
+            "--trigger".to_string(),
+            "".to_string(),
+        ]);
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_github_action_mode() {
+        let parsed = parse_github_subcommand(vec![
+            "action".to_string(),
+            "--mode".to_string(),
+            "comment".to_string(),
+        ]);
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn cli_from_argv_parses_github_pr_head_subcommand() {
+        let cli = Cli::from_argv(vec![
+            "github".to_string(),
+            "pr-head".to_string(),
+            "owner/repo#11".to_string(),
+            "--repo-owner".to_string(),
+            "owner".to_string(),
+            "--github-output".to_string(),
+            "--json-file".to_string(),
+            "pr.json".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Github(GithubAction::PrHead(args))) => {
+                assert_eq!(args.reference, "owner/repo#11");
+                assert_eq!(args.repo_owner.as_deref(), Some("owner"));
+                assert!(args.github_output);
+                assert_eq!(args.json_file.as_deref(), Some("pr.json"));
+            }
+            other => panic!("expected Command::Github(PrHead), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_parses_github_fixture_smoke_subcommand() {
+        let cli = Cli::from_argv(vec![
+            "github".to_string(),
+            "fixture-smoke".to_string(),
+            "--mode".to_string(),
+            "write".to_string(),
+            "--keep-workdir".to_string(),
+            "--json".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Github(GithubAction::FixtureSmoke(args))) => {
+                assert_eq!(args.mode, GithubFixtureSmokeMode::Write);
+                assert!(args.keep_workdir);
+                assert!(args.json);
+            }
+            other => panic!("expected Command::Github(FixtureSmoke), got {:?}", other),
+        }
+    }
+
+    #[test]
     fn cli_from_argv_routes_pr_subcommand_to_command_pr() {
         let argv = vec![
             "pr".to_string(),
@@ -5088,6 +6924,91 @@ mod tests {
                 assert!(post);
             }
             other => panic!("expected Command::Pr(Review), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_github_action_subcommand() {
+        let argv = vec![
+            "github".to_string(),
+            "action".to_string(),
+            "--event".to_string(),
+            "event.json".to_string(),
+            "--dry-run".to_string(),
+        ];
+        let cli = Cli::from_argv(argv).expect("parse should succeed");
+        match cli.command {
+            Some(Command::Github(GithubAction::Action(args))) => {
+                assert_eq!(args.event_path.as_deref(), Some("event.json"));
+                assert_eq!(args.mode, GithubActionMode::Auto);
+                assert!(args.dry_run);
+            }
+            Some(Command::Github(GithubAction::PrHead(_))) => {
+                panic!("expected Command::Github(Action)")
+            }
+            Some(Command::Github(GithubAction::FixtureSmoke(_))) => {
+                panic!("expected Command::Github(Action)")
+            }
+            other => panic!("expected Command::Github(Action), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_parses_github_action_output_and_required_modes() {
+        let cli = Cli::from_argv(vec![
+            "github".to_string(),
+            "action".to_string(),
+            "--event".to_string(),
+            "event.json".to_string(),
+            "--require-mode".to_string(),
+            "fix,patch".to_string(),
+            "--github-output".to_string(),
+        ])
+        .expect("parse should succeed");
+        match cli.command {
+            Some(Command::Github(GithubAction::Action(args))) => {
+                assert_eq!(
+                    args.require_modes,
+                    vec![GithubActionMode::Fix, GithubActionMode::Patch]
+                );
+                assert!(args.github_output);
+            }
+            Some(Command::Github(GithubAction::PrHead(_))) => {
+                panic!("expected Command::Github(Action)")
+            }
+            Some(Command::Github(GithubAction::FixtureSmoke(_))) => {
+                panic!("expected Command::Github(Action)")
+            }
+            other => panic!("expected Command::Github(Action), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_parses_github_action_background_task_flags() {
+        let cli = Cli::from_argv(vec![
+            "github".to_string(),
+            "action".to_string(),
+            "--event".to_string(),
+            "event.json".to_string(),
+            "--background-task".to_string(),
+            "--task-no-run".to_string(),
+            "--task-id".to_string(),
+            "gh-task-1".to_string(),
+        ])
+        .expect("parse should succeed");
+        match cli.command {
+            Some(Command::Github(GithubAction::Action(args))) => {
+                assert!(args.background_task);
+                assert!(args.task_no_run);
+                assert_eq!(args.task_id.as_deref(), Some("gh-task-1"));
+            }
+            Some(Command::Github(GithubAction::PrHead(_))) => {
+                panic!("expected Command::Github(Action)")
+            }
+            Some(Command::Github(GithubAction::FixtureSmoke(_))) => {
+                panic!("expected Command::Github(Action)")
+            }
+            other => panic!("expected Command::Github(Action), got {:?}", other),
         }
     }
 
@@ -5235,6 +7156,12 @@ mod tests {
             "bench.txt".to_string(),
             "--out".to_string(),
             "report.md".to_string(),
+            "--category".to_string(),
+            "subagent".to_string(),
+            "--case".to_string(),
+            "fixture-subagent-readback".to_string(),
+            "--case".to_string(),
+            "fixture-subagent-parallel".to_string(),
             "--accept-live-baseline".to_string(),
         ];
         let cli = Cli::from_argv(argv).expect("parse should succeed");
@@ -5242,6 +7169,14 @@ mod tests {
             Some(Command::Benchmark(args)) => {
                 assert_eq!(args.manifest.as_deref(), Some("bench.txt"));
                 assert_eq!(args.out.as_deref(), Some("report.md"));
+                assert_eq!(args.category.as_deref(), Some("subagent"));
+                assert_eq!(
+                    args.cases,
+                    vec![
+                        "fixture-subagent-readback".to_string(),
+                        "fixture-subagent-parallel".to_string()
+                    ]
+                );
                 assert!(args.accept_live_baseline);
             }
             other => panic!("expected Command::Benchmark, got {:?}", other),
@@ -5679,6 +7614,7 @@ mod tests {
             "1000".to_string(),
             "--limit-bytes".to_string(),
             "4096".to_string(),
+            "--raw".to_string(),
         ])
         .expect("parse should succeed");
         assert!(matches!(
@@ -5692,6 +7628,7 @@ mod tests {
                     tail: false,
                     follow: true,
                     interactive: false,
+                    raw: true,
                     poll_ms: Some(50),
                     max_ms: Some(1000),
                 },
@@ -5720,11 +7657,119 @@ mod tests {
                     tail: false,
                     follow: false,
                     interactive: true,
+                    raw: false,
                     poll_ms: None,
                     max_ms: None,
                 },
                 json: false,
             }))) if task_id == "task-2"
+        ));
+
+        let shell_byte_stream = Cli::from_argv(vec![
+            "agents".to_string(),
+            "shell".to_string(),
+            "byte-stream".to_string(),
+            "task-3".to_string(),
+            "--cursor".to_string(),
+            "2".to_string(),
+            "--input".to_string(),
+            "probe".to_string(),
+            "--rows".to_string(),
+            "33".to_string(),
+            "--cols".to_string(),
+            "101".to_string(),
+            "--poll-ms".to_string(),
+            "25".to_string(),
+            "--max-ms".to_string(),
+            "500".to_string(),
+            "--max-events".to_string(),
+            "4".to_string(),
+            "--limit-bytes".to_string(),
+            "4096".to_string(),
+            "--raw-proxy".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            shell_byte_stream.command,
+            Some(Command::Agents(AgentsAction::Shell(AgentsShellArgs {
+                action: AgentsShellAction::ByteStream {
+                    ref task_id,
+                    cursor: Some(2),
+                    wait_ms: None,
+                    limit_bytes: Some(4096),
+                    tail: false,
+                    input: Some(ref input),
+                    close_stdin: false,
+                    tty_rows: Some(33),
+                    tty_cols: Some(101),
+                    poll_ms: Some(25),
+                    max_ms: Some(500),
+                    max_events: Some(4),
+                    raw_proxy: true,
+                    terminal_proxy: false,
+                },
+                json: false,
+            }))) if task_id == "task-3" && input == "probe"
+        ));
+
+        let shell_proxy = Cli::from_argv(vec![
+            "agents".to_string(),
+            "shell".to_string(),
+            "proxy".to_string(),
+            "task-4".to_string(),
+            "--cursor".to_string(),
+            "3".to_string(),
+            "--max-ms".to_string(),
+            "1000".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            shell_proxy.command,
+            Some(Command::Agents(AgentsAction::Shell(AgentsShellArgs {
+                action: AgentsShellAction::ByteStream {
+                    ref task_id,
+                    cursor: Some(3),
+                    wait_ms: None,
+                    limit_bytes: None,
+                    tail: false,
+                    input: None,
+                    close_stdin: false,
+                    tty_rows: None,
+                    tty_cols: None,
+                    poll_ms: None,
+                    max_ms: Some(1000),
+                    max_events: None,
+                    raw_proxy: true,
+                    terminal_proxy: true,
+                },
+                json: false,
+            }))) if task_id == "task-4"
+        ));
+
+        let shell_fd_proxy = Cli::from_argv(vec![
+            "agents".to_string(),
+            "shell".to_string(),
+            "fd-proxy".to_string(),
+            "task-5".to_string(),
+            "--rows".to_string(),
+            "36".to_string(),
+            "--cols".to_string(),
+            "104".to_string(),
+            "--max-ms".to_string(),
+            "1500".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            shell_fd_proxy.command,
+            Some(Command::Agents(AgentsAction::Shell(AgentsShellArgs {
+                action: AgentsShellAction::FdProxy {
+                    ref task_id,
+                    tty_rows: Some(36),
+                    tty_cols: Some(104),
+                    max_ms: Some(1500),
+                },
+                json: false,
+            }))) if task_id == "task-5"
         ));
 
         let shell_resize = Cli::from_argv(vec![
@@ -5819,6 +7864,7 @@ mod tests {
             "500".to_string(),
             "--budget".to_string(),
             "9".to_string(),
+            "--installed".to_string(),
             "--json".to_string(),
         ])
         .expect("parse should succeed");
@@ -5832,6 +7878,7 @@ mod tests {
                 ref addr,
                 interval_ms: 500,
                 budget: Some(9),
+                installed: true,
                 json: true,
             }))) if out.as_deref() == Some("target/services")
                 && bin.as_deref() == Some("/usr/local/bin/deepseek")
@@ -5842,6 +7889,8 @@ mod tests {
         let service_smoke = Cli::from_argv(vec![
             "agents".to_string(),
             "service-smoke".to_string(),
+            "--kind".to_string(),
+            "systemd".to_string(),
             "--bin".to_string(),
             "/usr/local/bin/deepseek".to_string(),
             "--workdir".to_string(),
@@ -5850,20 +7899,36 @@ mod tests {
             "127.0.0.1:0".to_string(),
             "--timeout-ms".to_string(),
             "2500".to_string(),
+            "--installed".to_string(),
             "--json".to_string(),
         ])
         .expect("parse should succeed");
         assert!(matches!(
             service_smoke.command,
             Some(Command::Agents(AgentsAction::ServiceSmoke(AgentsServiceSmokeArgs {
+                kind: AgentsServiceKind::Systemd,
                 ref bin,
                 ref workdir,
                 ref addr,
                 timeout_ms: 2500,
+                installed: true,
                 json: true,
             }))) if bin.as_deref() == Some("/usr/local/bin/deepseek")
                 && workdir.as_deref() == Some("/work/repo")
                 && addr == "127.0.0.1:0"
+        ));
+
+        let shell_fixture = Cli::from_argv(vec![
+            "agents".to_string(),
+            "shell-fixture-smoke".to_string(),
+            "--json".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            shell_fixture.command,
+            Some(Command::Agents(AgentsAction::ShellFixtureSmoke {
+                json: true
+            }))
         ));
 
         let threads = Cli::from_argv(vec!["agents".to_string(), "threads".to_string()])
@@ -5871,6 +7936,19 @@ mod tests {
         assert!(matches!(
             threads.command,
             Some(Command::Agents(AgentsAction::Threads))
+        ));
+
+        let subagent_fixture = Cli::from_argv(vec![
+            "agents".to_string(),
+            "subagent-fixture-smoke".to_string(),
+            "--json".to_string(),
+        ])
+        .expect("parse should succeed");
+        assert!(matches!(
+            subagent_fixture.command,
+            Some(Command::Agents(AgentsAction::SubagentFixtureSmoke {
+                json: true
+            }))
         ));
 
         let show_thread = Cli::from_argv(vec![
@@ -5936,6 +8014,7 @@ mod tests {
                 ref addr,
                 interval_ms: 500,
                 budget: Some(9),
+                installed: false,
                 json: true,
             }))) if out.as_deref() == Some("target/services")
                 && bin.as_deref() == Some("/usr/local/bin/deepseek")
@@ -5949,6 +8028,8 @@ mod tests {
         let cli = Cli::from_argv(vec![
             "agents".to_string(),
             "service-smoke".to_string(),
+            "--kind".to_string(),
+            "systemd".to_string(),
             "--bin".to_string(),
             "/usr/local/bin/deepseek".to_string(),
             "--workdir".to_string(),
@@ -5964,10 +8045,12 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Agents(AgentsAction::ServiceSmoke(AgentsServiceSmokeArgs {
+                kind: AgentsServiceKind::Systemd,
                 ref bin,
                 ref workdir,
                 ref addr,
                 timeout_ms: 2500,
+                installed: false,
                 json: true,
             }))) if bin.as_deref() == Some("/usr/local/bin/deepseek")
                 && workdir.as_deref() == Some("/work/repo")
@@ -6344,6 +8427,8 @@ mod tests {
             "dist-assets".to_string(),
             "--npm-dist".to_string(),
             "npm-dist".to_string(),
+            "--live-evidence-verification".to_string(),
+            ".dscode/dogfood/live-evidence-verification.json".to_string(),
             "--strict".to_string(),
             "--json".to_string(),
         ])
@@ -6354,6 +8439,10 @@ mod tests {
                 UpdateAction::PublishStatus(status) => {
                     assert_eq!(status.dist.as_deref(), Some("dist-assets"));
                     assert_eq!(status.npm_dist.as_deref(), Some("npm-dist"));
+                    assert_eq!(
+                        status.live_evidence_verification.as_deref(),
+                        Some(".dscode/dogfood/live-evidence-verification.json")
+                    );
                     assert!(status.strict);
                     assert!(status.json);
                 }

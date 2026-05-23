@@ -37,6 +37,34 @@ pub fn load(name: &str, config: &AppConfig) -> AppResult<Repl> {
     parse_session(config, &content)
 }
 
+pub fn list_names(config: &AppConfig) -> AppResult<Vec<String>> {
+    let dir = sessions_dir(config);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if validate_session_name(stem).is_ok() {
+            names.push(stem.to_string());
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 fn sessions_dir(config: &AppConfig) -> PathBuf {
     PathBuf::from(&config.workspace.session_dir)
 }
@@ -421,6 +449,20 @@ pub(crate) mod tests {
         r.config = cfg.clone();
         let path = save("first", &r).unwrap();
         assert!(path.exists());
+    }
+
+    #[test]
+    fn list_names_returns_sorted_valid_json_sessions_only() {
+        let (cfg, tmp) = config_with_temp_session_dir();
+        let mut repl = fixture_repl();
+        repl.config = cfg.clone();
+        save("zeta", &repl).unwrap();
+        save("alpha", &repl).unwrap();
+        std::fs::write(tmp.path().join("ignored.tmp"), "{}").unwrap();
+        std::fs::write(tmp.path().join(".hidden.json"), "{}").unwrap();
+        std::fs::create_dir_all(tmp.path().join("nested.json")).unwrap();
+
+        assert_eq!(list_names(&cfg).unwrap(), vec!["alpha", "zeta"]);
     }
 
     #[test]

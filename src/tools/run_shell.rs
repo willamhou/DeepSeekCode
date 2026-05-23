@@ -46,8 +46,11 @@ impl RunShellTool {
             return Err(app_error(format!("command not allowed: {command}")));
         }
 
+        let command_plan = resolve_shell_command(command);
         let mut process = Command::new("sh");
-        process.args(["-lc", command]).current_dir(cwd);
+        process
+            .args(["-lc", command_plan.effective.as_str()])
+            .current_dir(cwd);
         apply_shell_env(&mut process, &shell_env_from_input(&input));
         if let Some(path) = augmented_path_for_toolchains() {
             process.env("PATH", path);
@@ -72,6 +75,9 @@ impl RunShellTool {
 
         let mut summary = String::new();
         summary.push_str(&format!("meta.command_kind={command_kind}\n"));
+        if let Some(fallback) = command_plan.fallback.as_deref() {
+            summary.push_str(&format!("meta.command_fallback={fallback}\n"));
+        }
         summary.push_str(&format!("meta.exit_code={exit_code}\n"));
         summary.push_str(&format!(
             "meta.result={}\n",
@@ -106,6 +112,115 @@ impl RunShellTool {
 
         Ok(ToolOutput { summary })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellCommandPlan {
+    effective: String,
+    fallback: Option<String>,
+}
+
+fn resolve_shell_command(command: &str) -> ShellCommandPlan {
+    resolve_shell_command_with(command, command_exists)
+}
+
+fn resolve_shell_command_with(
+    command: &str,
+    command_exists: impl Fn(&str) -> bool,
+) -> ShellCommandPlan {
+    let trimmed = command.trim();
+    if let Some(tail) = command_tail(trimmed, "uv run pytest") {
+        if command_exists("uv") {
+            return ShellCommandPlan {
+                effective: format!("uv run --no-project --with pytest --no-progress pytest{tail}"),
+                fallback: Some("uv_pytest".to_string()),
+            };
+        }
+        if command_exists("pytest") {
+            return ShellCommandPlan {
+                effective: format!("pytest{tail}"),
+                fallback: Some("pytest".to_string()),
+            };
+        }
+    }
+    if let Some(tail) = command_tail(trimmed, "uv run python -m pytest") {
+        if command_exists("uv") {
+            return ShellCommandPlan {
+                effective: format!(
+                    "uv run --no-project --with pytest --no-progress python -m pytest{tail}"
+                ),
+                fallback: Some("uv_pytest".to_string()),
+            };
+        }
+        if command_exists("python") {
+            return ShellCommandPlan {
+                effective: format!("python -m pytest{tail}"),
+                fallback: Some("python_pytest".to_string()),
+            };
+        }
+        if command_exists("python3") {
+            return ShellCommandPlan {
+                effective: format!("python3 -m pytest{tail}"),
+                fallback: Some("python3_pytest".to_string()),
+            };
+        }
+    }
+    if let Some(tail) = command_tail(trimmed, "pytest") {
+        if !command_exists("pytest") && command_exists("uv") {
+            return ShellCommandPlan {
+                effective: format!("uv run --no-project --with pytest --no-progress pytest{tail}"),
+                fallback: Some("uv_pytest".to_string()),
+            };
+        }
+    }
+    if let Some(tail) = command_tail(trimmed, "python -m pytest") {
+        if (!command_exists("python") || !command_exists("pytest")) && command_exists("uv") {
+            return ShellCommandPlan {
+                effective: format!(
+                    "uv run --no-project --with pytest --no-progress python -m pytest{tail}"
+                ),
+                fallback: Some("uv_pytest".to_string()),
+            };
+        }
+        if !command_exists("python") && command_exists("python3") {
+            return ShellCommandPlan {
+                effective: format!("python3 -m pytest{tail}"),
+                fallback: Some("python3_pytest".to_string()),
+            };
+        }
+    }
+    ShellCommandPlan {
+        effective: command.to_string(),
+        fallback: None,
+    }
+}
+
+fn command_tail<'a>(command: &'a str, prefix: &str) -> Option<&'a str> {
+    if command == prefix {
+        return Some("");
+    }
+    let tail = command.strip_prefix(prefix)?;
+    tail.starts_with(char::is_whitespace).then_some(tail)
+}
+
+fn command_exists(name: &str) -> bool {
+    let Some(path) = augmented_path_for_toolchains().or_else(|| std::env::var_os("PATH")) else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            dir.join(format!("{name}.exe")).is_file()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    })
 }
 
 pub(crate) fn shell_env_from_input(input: &ToolInput) -> BTreeMap<String, String> {
@@ -240,6 +355,8 @@ fn classify_command_kind(command: &str) -> &'static str {
         || command.starts_with("go test")
         || command.starts_with("pytest")
         || command.starts_with("python -m pytest")
+        || command.starts_with("uv run pytest")
+        || command.starts_with("uv run python -m pytest")
         || command.starts_with("node --test")
         || command.starts_with("gradle test")
         || command.starts_with("mvn test")
@@ -290,8 +407,11 @@ fn classify_failure_kind(command_kind: &str, failed_tests: &[String]) -> &'stati
 fn collect_failed_tests(command: &str, stdout: &str, stderr: &str) -> Vec<String> {
     let mut failures = Vec::new();
     let combined = format!("{stdout}\n{stderr}");
-    let is_pytest =
-        command.trim().starts_with("pytest") || command.trim().starts_with("python -m pytest");
+    let command = command.trim();
+    let is_pytest = command.starts_with("pytest")
+        || command.starts_with("python -m pytest")
+        || command.starts_with("uv run pytest")
+        || command.starts_with("uv run python -m pytest");
     let is_node_test = command.trim().starts_with("node --test")
         || command.trim().starts_with("npm test")
         || command.trim().starts_with("pnpm test");
@@ -393,13 +513,54 @@ fn clip_metadata_value(value: &str) -> String {
 
 fn augmented_path_for_toolchains() -> Option<OsString> {
     let home = std::env::var_os("HOME")?;
-    let cargo_bin = PathBuf::from(home).join(".cargo").join("bin");
-    if !cargo_bin.is_dir() {
+    let home = PathBuf::from(home);
+    let mut paths = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    for entry in toolchain_path_entries(&home).into_iter().rev() {
+        if entry.is_dir() && !paths.iter().any(|path| path == &entry) {
+            paths.insert(0, entry);
+        }
+    }
+    if paths.is_empty() {
         return None;
     }
-    prepend_path_entry(std::env::var_os("PATH"), &cargo_bin)
+    std::env::join_paths(paths).ok()
 }
 
+fn toolchain_path_entries(home: &Path) -> Vec<PathBuf> {
+    let mut entries = vec![
+        home.join(".cargo").join("bin"),
+        home.join(".local").join("bin"),
+        home.join(".local").join("go").join("bin"),
+        home.join(".local")
+            .join("toolchains")
+            .join("go")
+            .join("current")
+            .join("bin"),
+    ];
+    entries.extend(discover_go_toolchain_bins(
+        &home.join(".local").join("toolchains").join("go"),
+    ));
+    entries.extend(discover_go_toolchain_bins(&home.join("sdk")));
+    entries
+}
+
+fn discover_go_toolchain_bins(root: &Path) -> Vec<PathBuf> {
+    let Ok(children) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut entries = children
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("bin"))
+        .filter(|bin| bin.join("go").is_file())
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries.reverse();
+    entries
+}
+
+#[cfg(test)]
 fn prepend_path_entry(existing: Option<OsString>, entry: &Path) -> Option<OsString> {
     let existing = existing.unwrap_or_default();
     let mut paths = std::env::split_paths(&existing).collect::<Vec<_>>();
@@ -430,7 +591,10 @@ fn configure_python_cache_prefix(process: &mut Command, command: &str) -> Option
 
 fn uses_isolated_python_cache(command: &str) -> bool {
     let command = command.trim();
-    command.starts_with("pytest") || command.starts_with("python -m pytest")
+    command.starts_with("pytest")
+        || command.starts_with("python -m pytest")
+        || command.starts_with("uv run pytest")
+        || command.starts_with("uv run python -m pytest")
 }
 
 pub fn is_safe_shell_command(command: &str) -> bool {
@@ -446,6 +610,8 @@ pub fn is_safe_shell_command(command: &str) -> bool {
         "go vet",
         "pytest",
         "python -m pytest",
+        "uv run pytest",
+        "uv run python -m pytest",
         "node --test",
         "ruff check",
         "mypy",
@@ -531,6 +697,7 @@ mod tests {
     fn classify_command_kind_recognizes_test_and_build_commands() {
         assert_eq!(classify_command_kind("cargo test"), "test");
         assert_eq!(classify_command_kind("pytest -q"), "test");
+        assert_eq!(classify_command_kind("uv run pytest -q"), "test");
         assert_eq!(classify_command_kind("node --test"), "test");
         assert_eq!(classify_command_kind("cargo check"), "build");
         assert_eq!(classify_command_kind("cargo clippy"), "lint");
@@ -582,8 +749,68 @@ mod tests {
         assert!(uses_isolated_python_cache("pytest"));
         assert!(uses_isolated_python_cache("pytest -q"));
         assert!(uses_isolated_python_cache("python -m pytest tests"));
+        assert!(uses_isolated_python_cache("uv run pytest -q"));
         assert!(!uses_isolated_python_cache("python script.py"));
         assert!(!uses_isolated_python_cache("cargo test"));
+    }
+
+    #[test]
+    fn resolve_shell_command_uses_uv_for_missing_pytest() {
+        let plan = resolve_shell_command_with("pytest -q", |name| name == "uv");
+        assert_eq!(
+            plan.effective,
+            "uv run --no-project --with pytest --no-progress pytest -q"
+        );
+        assert_eq!(plan.fallback.as_deref(), Some("uv_pytest"));
+    }
+
+    #[test]
+    fn resolve_shell_command_normalizes_uv_pytest() {
+        let plan = resolve_shell_command_with("uv run pytest -q", |name| name == "uv");
+        assert_eq!(
+            plan.effective,
+            "uv run --no-project --with pytest --no-progress pytest -q"
+        );
+        assert_eq!(plan.fallback.as_deref(), Some("uv_pytest"));
+    }
+
+    #[test]
+    fn resolve_shell_command_normalizes_uv_python_pytest() {
+        let plan = resolve_shell_command_with("uv run python -m pytest tests", |name| name == "uv");
+        assert_eq!(
+            plan.effective,
+            "uv run --no-project --with pytest --no-progress python -m pytest tests"
+        );
+        assert_eq!(plan.fallback.as_deref(), Some("uv_pytest"));
+    }
+
+    #[test]
+    fn resolve_shell_command_uses_uv_for_missing_python_pytest() {
+        let plan = resolve_shell_command_with("python -m pytest tests", |name| name == "uv");
+        assert_eq!(
+            plan.effective,
+            "uv run --no-project --with pytest --no-progress python -m pytest tests"
+        );
+        assert_eq!(plan.fallback.as_deref(), Some("uv_pytest"));
+    }
+
+    #[test]
+    fn resolve_shell_command_keeps_pytest_when_available() {
+        let plan = resolve_shell_command_with("pytest -q", |name| name == "pytest");
+        assert_eq!(plan.effective, "pytest -q");
+        assert_eq!(plan.fallback, None);
+    }
+
+    #[test]
+    fn command_tail_requires_token_boundary() {
+        assert_eq!(command_tail("pytest -q", "pytest"), Some(" -q"));
+        assert_eq!(command_tail("pytest", "pytest"), Some(""));
+        assert_eq!(command_tail("pytestify -q", "pytest"), None);
+        assert_eq!(
+            command_tail("uv run pytest -q", "uv run pytest"),
+            Some(" -q")
+        );
+        assert_eq!(command_tail("uv run pytestify", "uv run pytest"), None);
     }
 
     #[test]
@@ -676,6 +903,31 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn toolchain_path_entries_discovers_user_go_toolchains() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let home = std::env::temp_dir().join(format!(
+            "deepseek-run-shell-go-home-{}-{nanos}",
+            std::process::id()
+        ));
+        let go_bin = home
+            .join(".local")
+            .join("toolchains")
+            .join("go")
+            .join("go1.26.3")
+            .join("bin");
+        fs::create_dir_all(&go_bin).unwrap();
+        fs::write(go_bin.join("go"), "").unwrap();
+
+        let entries = toolchain_path_entries(&home);
+        assert!(entries.iter().any(|entry| entry == &go_bin));
+
+        let _ = fs::remove_dir_all(home);
     }
 
     #[test]

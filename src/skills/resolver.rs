@@ -34,10 +34,14 @@ pub fn resolve_skill<'a>(
 fn auto_select_skill<'a>(registry: &'a SkillRegistry, task: &str) -> Option<&'a SkillSpec> {
     let task_lower = task.to_lowercase();
     let task_requires_patch = task_looks_like_direct_edit(task);
+    let task_requires_pr_review_tools = task_looks_like_remote_pr_review(&task_lower);
     let mut best: Option<(&SkillSpec, (usize, usize, usize))> = None;
 
     for skill in registry.iter() {
         if task_requires_patch && !skill_allows_patch(skill) {
+            continue;
+        }
+        if task_requires_pr_review_tools && !skill_allows_pr_review_tools(skill) {
             continue;
         }
         if skill.name == "research" && task_looks_like_failure_recovery(&task_lower) {
@@ -61,6 +65,15 @@ fn task_looks_like_direct_edit(task: &str) -> bool {
     task_lower.contains("replace ") && task_lower.contains(" with ") && task_lower.contains(" in ")
 }
 
+fn task_looks_like_remote_pr_review(task_lower: &str) -> bool {
+    (task_lower.contains("pull request")
+        || task_lower.contains("pr #")
+        || task_lower.contains("/pull/"))
+        && (task_lower.contains("review") || task_lower.contains("comment"))
+        && !task_lower.contains("review feedback")
+        && !task_lower.contains("address review")
+}
+
 fn task_looks_like_failure_recovery(task_lower: &str) -> bool {
     [
         "failing test",
@@ -78,6 +91,12 @@ fn task_looks_like_failure_recovery(task_lower: &str) -> bool {
 
 fn skill_allows_patch(skill: &SkillSpec) -> bool {
     skill.allowed_tools.iter().any(|tool| tool == "apply_patch")
+}
+
+fn skill_allows_pr_review_tools(skill: &SkillSpec) -> bool {
+    ["github_pr_context", "review", "pr_review_comment_plan"]
+        .iter()
+        .all(|required| skill.allowed_tools.iter().any(|tool| tool == required))
 }
 
 fn trigger_score(skill: &SkillSpec, task_lower: &str) -> (usize, usize, usize) {
@@ -284,6 +303,37 @@ shell_allowlist = []
         )
         .unwrap();
         assert_eq!(resolved.spec.name, "debug");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn auto_select_skips_skills_that_hide_remote_pr_review_tools() {
+        let dir = unique_test_dir("skip-pr-review-tool-hiding-skill");
+        write_skill(
+            &dir,
+            "debug",
+            r#"name = "debug"
+description = "test"
+allowed_tools = ["list_files", "read_file", "search_text", "apply_patch", "run_shell", "git_diff"]
+system_append = "test"
+suggested_steps = []
+triggers = ["bug", "debug"]
+
+[policy]
+require_write_confirmation = false
+require_shell_confirmation = false
+shell_allowlist = []
+"#,
+        );
+        let (registry, _) = SkillRegistry::load_dirs(&[dir.as_path()]).unwrap();
+
+        let resolved = resolve_skill(
+            &registry,
+            None,
+            "Run a semantic review of pull request #42 on owner/repo for real behavioral bugs.",
+        );
+        assert!(resolved.is_none());
 
         let _ = fs::remove_dir_all(dir);
     }

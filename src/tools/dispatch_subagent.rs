@@ -16,6 +16,18 @@ const DEFAULT_SUBAGENT_STEPS: usize = 4;
 const MAX_SUBAGENT_STEPS: usize = 12;
 const MAX_PARALLEL_SUBAGENTS: usize = 4;
 
+#[derive(Debug, Clone)]
+pub(crate) struct SubagentFixtureSmokeReport {
+    pub workdir: PathBuf,
+    pub parser_ok: bool,
+    pub disjoint_write_scope_ok: bool,
+    pub readback_required_ok: bool,
+    pub blocker_summary_ok: bool,
+    pub conflict_summary_ok: bool,
+    pub artifact_ok: bool,
+    pub child_count: usize,
+}
+
 pub struct DispatchSubagentTool {
     pub config: AppConfig,
     pub parent_depth: usize,
@@ -123,6 +135,7 @@ struct SubagentRequest {
     task: String,
     skill: Option<String>,
     agent_name: Option<String>,
+    write_scope: Option<String>,
     steps: usize,
 }
 
@@ -151,11 +164,18 @@ fn subagent_request_from_input(input: &ToolInput, tool_name: &str) -> AppResult<
         .map(str::trim)
         .filter(|agent| !agent.is_empty())
         .map(str::to_string);
+    let write_scope = input
+        .get("write_scope")
+        .or_else(|| input.get("write_set"))
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map(str::to_string);
     let steps = parse_steps(input.get("steps"))?;
     Ok(SubagentRequest {
         task,
         skill,
         agent_name,
+        write_scope,
         steps,
     })
 }
@@ -180,10 +200,15 @@ fn run_subagent_request(
                 error.message
             ))
         })?;
-    let child_task = match agent.as_ref() {
+    let mut child_task = match agent.as_ref() {
         Some(agent) => render_agent_task(agent, &request.task),
         None => request.task.clone(),
     };
+    if let Some(scope) = request.write_scope.as_deref() {
+        child_task.push_str(&format!(
+            "\n\nSubagent coordination:\nAssigned write scope: {scope}\nDo not edit outside this scope. If the scope conflicts with another child or the task needs broader writes, report the blocker instead of guessing."
+        ));
+    }
     let hooks = crate::core::hooks::HookRunner::new(&config.hooks);
     let hook_context = hooks
         .subagent_start(&request.task, &child_task, request.agent_name.as_deref())
@@ -217,6 +242,7 @@ fn run_subagent_request(
         &request.task,
         request.skill.as_deref(),
         agent.as_ref(),
+        request.write_scope.as_deref(),
         request.steps,
         &result,
     );
@@ -286,6 +312,11 @@ fn parse_parallel_requests(raw: Option<&str>) -> AppResult<Vec<SubagentRequest>>
             .map(str::trim)
             .filter(|agent| !agent.is_empty())
             .map(str::to_string);
+        let write_scope = json_string_field(object, "write_scope")
+            .or_else(|| json_string_field(object, "write_set"))
+            .map(str::trim)
+            .filter(|scope| !scope.is_empty())
+            .map(str::to_string);
         let steps = match json_string_field(object, "steps") {
             Some(value) => parse_steps(Some(value))?,
             None => DEFAULT_SUBAGENT_STEPS,
@@ -294,6 +325,7 @@ fn parse_parallel_requests(raw: Option<&str>) -> AppResult<Vec<SubagentRequest>>
             task,
             skill,
             agent_name,
+            write_scope,
             steps,
         });
     }
@@ -331,7 +363,39 @@ fn parse_steps(raw: Option<&str>) -> AppResult<usize> {
 
 fn render_parallel_summary(children: &[ParallelChildSummary]) -> String {
     let mut out = String::new();
+    let blocked_children = children
+        .iter()
+        .filter(|child| {
+            meta_value(&child.summary, "meta.child_outcome")
+                .is_some_and(|outcome| outcome == "blocked")
+        })
+        .count();
+    let readback_files = parallel_child_files(children);
+    let write_scope_conflicts = parallel_write_scope_conflicts(children);
     out.push_str(&format!("meta.parallel_children={}\n", children.len()));
+    out.push_str(&format!(
+        "meta.parallel_blocked_children={blocked_children}\n"
+    ));
+    if !readback_files.is_empty() {
+        out.push_str("meta.parallel_readback_required=true\n");
+        out.push_str(&format!(
+            "meta.parallel_next_action=read_file:{}\n",
+            sanitize_meta_value(&readback_files[0])
+        ));
+        out.push_str(&format!(
+            "meta.parallel_child_files={}\n",
+            sanitize_meta_value(&readback_files.join(","))
+        ));
+    } else {
+        out.push_str("meta.parallel_readback_required=false\n");
+        out.push_str("meta.parallel_next_action=continue_parent\n");
+    }
+    if !write_scope_conflicts.is_empty() {
+        out.push_str(&format!(
+            "meta.parallel_write_scope_conflicts={}\n",
+            sanitize_meta_value(&write_scope_conflicts.join(","))
+        ));
+    }
     for (index, child) in children.iter().enumerate() {
         let ordinal = index + 1;
         out.push_str(&format!(
@@ -342,6 +406,12 @@ fn render_parallel_summary(children: &[ParallelChildSummary]) -> String {
             "meta.parallel_child_{ordinal}_task={}\n",
             sanitize_meta_value(&child.request.task)
         ));
+        if let Some(scope) = child.request.write_scope.as_deref() {
+            out.push_str(&format!(
+                "meta.parallel_child_{ordinal}_write_scope={}\n",
+                sanitize_meta_value(scope)
+            ));
+        }
         if let Some(outcome) = meta_value(&child.summary, "meta.child_outcome") {
             out.push_str(&format!(
                 "meta.parallel_child_{ordinal}_outcome={outcome}\n"
@@ -350,6 +420,12 @@ fn render_parallel_summary(children: &[ParallelChildSummary]) -> String {
         if let Some(next_action) = meta_value(&child.summary, "meta.child_next_action") {
             out.push_str(&format!(
                 "meta.parallel_child_{ordinal}_next_action={next_action}\n"
+            ));
+        }
+        if let Some(files) = meta_value(&child.summary, "meta.child_files") {
+            out.push_str(&format!(
+                "meta.parallel_child_{ordinal}_files={}\n",
+                sanitize_meta_value(&files)
             ));
         }
         if let Some(path) = child.artifact.as_ref() {
@@ -361,8 +437,15 @@ fn render_parallel_summary(children: &[ParallelChildSummary]) -> String {
     }
 
     out.push_str(&format!(
-        "parallel subagents completed: {} child thread(s)\n",
-        children.len()
+        "parallel subagents completed: {} child thread(s), blocked={}, readback_required={}, write_scope_conflicts={}\n",
+        children.len(),
+        blocked_children,
+        if readback_files.is_empty() { "false" } else { "true" },
+        if write_scope_conflicts.is_empty() {
+            "none".to_string()
+        } else {
+            write_scope_conflicts.join(", ")
+        }
     ));
     for child in children {
         out.push_str(&format!(
@@ -374,14 +457,24 @@ fn render_parallel_summary(children: &[ParallelChildSummary]) -> String {
 }
 
 fn render_blocked_parallel_child(request: &SubagentRequest, error: &str) -> String {
-    format!(
-        "meta.child_task={}\nmeta.child_budget={}\nmeta.child_outcome=blocked\nmeta.child_next_action=replan_parent\nmeta.child_final_message={}\nsubagent failed task `{}`: {}",
+    let mut summary = format!(
+        "meta.child_task={}\nmeta.child_budget={}\n",
         sanitize_meta_value(&request.task),
-        request.steps,
+        request.steps
+    );
+    if let Some(scope) = request.write_scope.as_deref() {
+        summary.push_str(&format!(
+            "meta.child_write_scope={}\n",
+            sanitize_meta_value(scope)
+        ));
+    }
+    summary.push_str(&format!(
+        "meta.child_outcome=blocked\nmeta.child_next_action=replan_parent\nmeta.child_final_message={}\nsubagent failed task `{}`: {}",
         sanitize_meta_value(error),
         request.task,
         error
-    )
+    ));
+    summary
 }
 
 fn meta_value(summary: &str, key: &str) -> Option<String> {
@@ -421,10 +514,11 @@ fn persist_agent_thread(
 
 fn render_agent_thread_file(thread_id: &str, request: &SubagentRequest, summary: &str) -> String {
     format!(
-        "# Agent Thread {thread_id}\n\nTask: {}\nAgent: {}\nSkill: {}\nSteps: {}\n\n## Summary\n\n{}\n",
+        "# Agent Thread {thread_id}\n\nTask: {}\nAgent: {}\nSkill: {}\nWrite scope: {}\nSteps: {}\n\n## Summary\n\n{}\n",
         request.task,
         request.agent_name.as_deref().unwrap_or("-"),
         request.skill.as_deref().unwrap_or("-"),
+        request.write_scope.as_deref().unwrap_or("-"),
         request.steps,
         summary.trim()
     )
@@ -447,6 +541,131 @@ pub fn thread_file_path(config_dir: &str, id: &str) -> Option<PathBuf> {
     validate_thread_id(id).then(|| agent_threads_dir(config_dir).join(format!("{id}.md")))
 }
 
+pub(crate) fn run_subagent_fixture_smoke_at(
+    root: &PathBuf,
+) -> AppResult<SubagentFixtureSmokeReport> {
+    std::fs::create_dir_all(root)?;
+    let config_dir = root.join(".dscode");
+    let raw = r#"[
+        {"task":"Inspect src/cli/app.rs for CLI parser changes","steps":"2","write_scope":"src/cli/app.rs"},
+        {"task":"Inspect docs/agents.md for subagent docs","steps":"2","write_scope":"docs/agents.md"}
+    ]"#;
+    let requests = parse_parallel_requests(Some(raw))?;
+    let parser_ok = requests.len() == 2
+        && requests[0].write_scope.as_deref() == Some("src/cli/app.rs")
+        && requests[1].write_scope.as_deref() == Some("docs/agents.md");
+    let disjoint_write_scope_ok = parallel_write_scope_conflicts(&[
+        fixture_child(
+            "thread-fixture-1",
+            requests[0].clone(),
+            "src/cli/app.rs",
+            "ok",
+        ),
+        fixture_child(
+            "thread-fixture-2",
+            requests[1].clone(),
+            "docs/agents.md",
+            "ok",
+        ),
+    ])
+    .is_empty();
+
+    let children = vec![
+        fixture_child(
+            "thread-fixture-1",
+            requests[0].clone(),
+            "src/cli/app.rs",
+            "ok",
+        ),
+        fixture_child(
+            "thread-fixture-2",
+            requests[1].clone(),
+            "docs/agents.md",
+            "blocked",
+        ),
+    ];
+    let summary = render_parallel_summary(&children);
+    let readback_required_ok = summary.contains("meta.parallel_readback_required=true")
+        && summary.contains("meta.parallel_next_action=read_file:src/cli/app.rs")
+        && summary.contains("meta.parallel_child_1_files=src/cli/app.rs");
+    let blocker_summary_ok = summary.contains("meta.parallel_blocked_children=1")
+        && summary.contains("meta.parallel_child_2_outcome=blocked");
+
+    let conflict_request = SubagentRequest {
+        task: "Inspect overlapping file".to_string(),
+        skill: None,
+        agent_name: None,
+        write_scope: Some("src/cli/app.rs".to_string()),
+        steps: 2,
+    };
+    let conflict_summary = render_parallel_summary(&[
+        fixture_child(
+            "thread-conflict-1",
+            requests[0].clone(),
+            "src/cli/app.rs",
+            "ok",
+        ),
+        fixture_child(
+            "thread-conflict-2",
+            conflict_request,
+            "src/cli/app.rs",
+            "ok",
+        ),
+    ]);
+    let conflict_summary_ok =
+        conflict_summary.contains("meta.parallel_write_scope_conflicts=src/cli/app.rs");
+
+    let artifact = persist_agent_thread(
+        &config_dir.display().to_string(),
+        "thread-fixture-1",
+        &requests[0],
+        &children[0].summary,
+    )?;
+    let artifact_body = std::fs::read_to_string(&artifact)?;
+    let artifact_ok = artifact.exists()
+        && artifact_body.contains("Write scope: src/cli/app.rs")
+        && artifact_body.contains("meta.child_files=src/cli/app.rs");
+
+    Ok(SubagentFixtureSmokeReport {
+        workdir: root.clone(),
+        parser_ok,
+        disjoint_write_scope_ok,
+        readback_required_ok,
+        blocker_summary_ok,
+        conflict_summary_ok,
+        artifact_ok,
+        child_count: requests.len(),
+    })
+}
+
+fn fixture_child(
+    thread_id: &str,
+    request: SubagentRequest,
+    file: &str,
+    outcome: &str,
+) -> ParallelChildSummary {
+    let next_action = if outcome == "blocked" {
+        "replan_parent".to_string()
+    } else {
+        format!("read_file:{file}")
+    };
+    let mut summary = format!(
+        "meta.child_task={}\nmeta.child_budget={}\nmeta.child_outcome={outcome}\nmeta.child_next_action={next_action}\n",
+        sanitize_meta_value(&request.task),
+        request.steps
+    );
+    if outcome != "blocked" {
+        summary.push_str(&format!("meta.child_files={file}\n"));
+    }
+    summary.push_str("meta.child_final_message=fixture child summary");
+    ParallelChildSummary {
+        thread_id: thread_id.to_string(),
+        request,
+        summary,
+        artifact: None,
+    }
+}
+
 fn render_agent_task(agent: &crate::core::agents::AgentSpec, task: &str) -> String {
     let tools = if agent.tools.is_empty() {
         "all available child tools".to_string()
@@ -463,6 +682,7 @@ fn render_summary(
     task: &str,
     skill: Option<&str>,
     agent: Option<&crate::core::agents::AgentSpec>,
+    write_scope: Option<&str>,
     steps: usize,
     result: &RunResult,
 ) -> String {
@@ -507,6 +727,12 @@ fn render_summary(
         summary.push_str(&format!(
             "meta.child_agent={}\n",
             sanitize_meta_value(&agent.name)
+        ));
+    }
+    if let Some(scope) = write_scope {
+        summary.push_str(&format!(
+            "meta.child_write_scope={}\n",
+            sanitize_meta_value(scope)
         ));
     }
     summary.push_str(&format!("meta.child_budget={steps}\n"));
@@ -568,6 +794,42 @@ fn message_looks_blocked(message: &str) -> bool {
 
 fn sanitize_meta_value(value: &str) -> String {
     value.replace('\n', " ").trim().to_string()
+}
+
+fn parallel_child_files(children: &[ParallelChildSummary]) -> Vec<String> {
+    let mut files = Vec::new();
+    for child in children {
+        if let Some(next_action) = meta_value(&child.summary, "meta.child_next_action") {
+            if let Some(path) = next_action.strip_prefix("read_file:") {
+                push_unique(&mut files, path.trim());
+            }
+        }
+        if let Some(child_files) = meta_value(&child.summary, "meta.child_files") {
+            for path in child_files.split(',').map(str::trim) {
+                if !path.is_empty() && path != "none" {
+                    push_unique(&mut files, path);
+                }
+            }
+        }
+    }
+    files
+}
+
+fn parallel_write_scope_conflicts(children: &[ParallelChildSummary]) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut conflicts = Vec::new();
+    for child in children {
+        let Some(scope) = child.request.write_scope.as_deref().map(str::trim) else {
+            continue;
+        };
+        if scope.is_empty() {
+            continue;
+        }
+        if !seen.insert(scope.to_string()) {
+            push_unique(&mut conflicts, scope);
+        }
+    }
+    conflicts
 }
 
 fn extract_child_files(result: &RunResult) -> Vec<String> {
@@ -746,7 +1008,7 @@ mod tests {
             }],
             usage: TokenUsage::default(),
         };
-        let summary = render_summary("inspect file", None, None, 2, &result);
+        let summary = render_summary("inspect file", None, None, None, 2, &result);
         assert!(summary.contains("meta.child_outcome=blocked"));
         assert!(summary.contains("meta.child_next_action=replan_parent"));
         assert!(summary.contains("meta.child_files=src/lib.rs"));
@@ -769,7 +1031,7 @@ mod tests {
             }],
             usage: TokenUsage::default(),
         };
-        let summary = render_summary("inspect entrypoint", None, None, 2, &result);
+        let summary = render_summary("inspect entrypoint", None, None, None, 2, &result);
         assert!(summary.contains("meta.child_next_action=read_file:src/main.rs"));
     }
 
@@ -780,7 +1042,7 @@ mod tests {
             tool_events: Vec::new(),
             usage: TokenUsage::default(),
         };
-        let summary = render_summary("inspect symbol", None, None, 2, &result);
+        let summary = render_summary("inspect symbol", None, None, None, 2, &result);
         assert!(summary.contains("meta.child_next_action=search_text:route_benchmark_subcommand"));
     }
 
@@ -807,8 +1069,9 @@ mod tests {
             ],
             usage: TokenUsage::default(),
         };
-        let summary = render_summary("fix route", None, None, 4, &result);
+        let summary = render_summary("fix route", None, None, Some("src/lib.rs"), 4, &result);
         assert!(summary.contains("meta.child_files=src/lib.rs"));
+        assert!(summary.contains("meta.child_write_scope=src/lib.rs"));
         assert!(summary.contains("meta.child_next_action=read_file:src/lib.rs"));
     }
 
@@ -829,7 +1092,7 @@ mod tests {
             usage: TokenUsage::default(),
         };
 
-        let summary = render_summary("review code", None, Some(&agent), 2, &result);
+        let summary = render_summary("review code", None, Some(&agent), None, 2, &result);
 
         assert!(summary.contains("meta.child_agent=reviewer"));
     }
@@ -857,15 +1120,17 @@ mod tests {
     #[test]
     fn parse_parallel_requests_reads_json_array() {
         let requests = parse_parallel_requests(Some(
-            r#"[{"task":"review src/a.rs","agent":"reviewer","steps":"3"},{"task":"inspect docs","skill":"doc"}]"#,
+            r#"[{"task":"review src/a.rs","agent":"reviewer","steps":"3","write_scope":"src/a.rs"},{"task":"inspect docs","skill":"doc","write_set":"docs/"}]"#,
         ))
         .unwrap();
 
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].task, "review src/a.rs");
         assert_eq!(requests[0].agent_name.as_deref(), Some("reviewer"));
+        assert_eq!(requests[0].write_scope.as_deref(), Some("src/a.rs"));
         assert_eq!(requests[0].steps, 3);
         assert_eq!(requests[1].skill.as_deref(), Some("doc"));
+        assert_eq!(requests[1].write_scope.as_deref(), Some("docs/"));
         assert_eq!(requests[1].steps, DEFAULT_SUBAGENT_STEPS);
     }
 
@@ -890,9 +1155,10 @@ mod tests {
                 task: "inspect src/lib.rs".to_string(),
                 skill: None,
                 agent_name: None,
+                write_scope: Some("src/lib.rs".to_string()),
                 steps: 2,
             },
-            summary: "meta.child_outcome=ok\nmeta.child_next_action=read_file:src/lib.rs\nchild final message".to_string(),
+            summary: "meta.child_outcome=ok\nmeta.child_next_action=read_file:src/lib.rs\nmeta.child_files=src/lib.rs\nchild final message".to_string(),
             artifact: Some(".dscode/agent-threads/thread-1.md".into()),
         };
 
@@ -900,9 +1166,49 @@ mod tests {
 
         assert!(summary.contains("meta.parallel_children=1"));
         assert!(summary.contains("meta.parallel_child_1_thread=thread-1"));
+        assert!(summary.contains("meta.parallel_readback_required=true"));
+        assert!(summary.contains("meta.parallel_next_action=read_file:src/lib.rs"));
+        assert!(summary.contains("meta.parallel_child_1_write_scope=src/lib.rs"));
+        assert!(summary.contains("meta.parallel_child_1_files=src/lib.rs"));
         assert!(summary.contains("meta.parallel_child_1_outcome=ok"));
         assert!(summary.contains("meta.parallel_child_1_next_action=read_file:src/lib.rs"));
         assert!(summary.contains("[thread-1] task: inspect src/lib.rs"));
+    }
+
+    #[test]
+    fn render_parallel_summary_reports_blockers_and_write_scope_conflicts() {
+        let children = vec![
+            ParallelChildSummary {
+                thread_id: "thread-1".to_string(),
+                request: SubagentRequest {
+                    task: "edit api".to_string(),
+                    skill: None,
+                    agent_name: None,
+                    write_scope: Some("src/api.rs".to_string()),
+                    steps: 2,
+                },
+                summary: "meta.child_outcome=ok\nmeta.child_next_action=read_file:src/api.rs\nmeta.child_files=src/api.rs".to_string(),
+                artifact: None,
+            },
+            ParallelChildSummary {
+                thread_id: "thread-2".to_string(),
+                request: SubagentRequest {
+                    task: "also edit api".to_string(),
+                    skill: None,
+                    agent_name: None,
+                    write_scope: Some("src/api.rs".to_string()),
+                    steps: 2,
+                },
+                summary: "meta.child_outcome=blocked\nmeta.child_next_action=replan_parent".to_string(),
+                artifact: None,
+            },
+        ];
+
+        let summary = render_parallel_summary(&children);
+
+        assert!(summary.contains("meta.parallel_blocked_children=1"));
+        assert!(summary.contains("meta.parallel_write_scope_conflicts=src/api.rs"));
+        assert!(summary.contains("write_scope_conflicts=src/api.rs"));
     }
 
     #[test]
@@ -918,6 +1224,7 @@ mod tests {
             task: "review".to_string(),
             skill: Some("security".to_string()),
             agent_name: Some("reviewer".to_string()),
+            write_scope: Some("src/security.rs".to_string()),
             steps: 4,
         };
 
@@ -927,6 +1234,7 @@ mod tests {
         assert!(body.contains("Task: review"));
         assert!(body.contains("Agent: reviewer"));
         assert!(body.contains("Skill: security"));
+        assert!(body.contains("Write scope: src/security.rs"));
         assert!(body.contains("summary"));
     }
 }

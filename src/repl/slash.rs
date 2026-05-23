@@ -11,6 +11,37 @@ pub enum SlashOutcome {
     Quit,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReplCompletion {
+    Applied {
+        start: usize,
+        end: usize,
+        replacement: String,
+    },
+    Suggestions(Vec<String>),
+}
+
+const BUILTIN_SLASH_COMMANDS: &[&str] = &[
+    "/quit",
+    "/q",
+    "/exit",
+    "/help",
+    "/h",
+    "/?",
+    "/clear",
+    "/compact",
+    "/budget",
+    "/skill",
+    "/diff",
+    "/restore",
+    "/revert_turn",
+    "/save",
+    "/load",
+    "/sessions",
+    "/todos",
+    "/cost",
+];
+
 pub fn try_handle_slash(repl: &mut Repl, line: &str) -> AppResult<SlashOutcome> {
     if !line.starts_with('/') {
         return Ok(SlashOutcome::NotASlash);
@@ -76,6 +107,10 @@ pub fn try_handle_slash(repl: &mut Repl, line: &str) -> AppResult<SlashOutcome> 
             handle_load(repl, &args);
             Ok(SlashOutcome::Continue)
         }
+        "/sessions" => {
+            handle_sessions(repl, &args);
+            Ok(SlashOutcome::Continue)
+        }
         "/todos" => {
             let inner = repl.todos.borrow();
             if inner.is_empty() {
@@ -111,6 +146,7 @@ fn print_help() {
     println!("  /revert_turn <id|last> [--apply] dry-run or apply rollback snapshot");
     println!("  /save <name>                  save the session to .dscode/sessions/<name>.json");
     println!("  /load <name>                  restore a saved session");
+    println!("  /sessions [prefix]            list saved session names");
     println!("  /todos                        show the current todo list (read-only)");
     println!("  /cost                         show prompt/completion token totals");
     println!("  /mcp/<server>/<prompt> [json] load an MCP prompt as the next user turn");
@@ -472,6 +508,127 @@ fn handle_load(repl: &mut Repl, args: &[&str]) {
         }
         Err(error) => println!("load failed: {error}"),
     }
+}
+
+fn handle_sessions(repl: &Repl, args: &[&str]) {
+    let prefix = match args {
+        [] => None,
+        [prefix] => Some(*prefix),
+        _ => {
+            println!("usage: /sessions [prefix]");
+            return;
+        }
+    };
+    match crate::repl::session::list_names(&repl.config) {
+        Ok(names) => {
+            let names = names
+                .into_iter()
+                .filter(|name| match prefix {
+                    Some(prefix) => name.starts_with(prefix),
+                    None => true,
+                })
+                .collect::<Vec<_>>();
+            if names.is_empty() {
+                match prefix {
+                    Some(prefix) => println!("no saved sessions matching `{prefix}`"),
+                    None => println!("no saved sessions"),
+                }
+            } else {
+                println!("saved sessions:");
+                for name in names {
+                    println!("  {name}");
+                }
+            }
+        }
+        Err(error) => println!("sessions failed: {error}"),
+    }
+}
+
+pub(crate) fn complete_repl_input(
+    config: &AppConfig,
+    buffer: &str,
+    cursor: usize,
+) -> AppResult<Option<ReplCompletion>> {
+    if cursor != buffer.len() || !buffer.is_char_boundary(cursor) {
+        return Ok(None);
+    }
+    let before_cursor = &buffer[..cursor];
+    if let Some(prefix) = before_cursor.strip_prefix("/load ") {
+        if prefix.contains(char::is_whitespace) {
+            return Ok(None);
+        }
+        let candidates = crate::repl::session::list_names(config)?;
+        return Ok(completion_from_candidates(
+            prefix,
+            candidates.iter().map(String::as_str),
+            "/load ".len(),
+            cursor,
+        ));
+    }
+
+    if before_cursor.starts_with('/') && !before_cursor.contains(char::is_whitespace) {
+        return Ok(completion_from_candidates(
+            before_cursor,
+            BUILTIN_SLASH_COMMANDS.iter().copied(),
+            0,
+            cursor,
+        ));
+    }
+
+    Ok(None)
+}
+
+fn completion_from_candidates<'a>(
+    prefix: &str,
+    candidates: impl Iterator<Item = &'a str>,
+    start: usize,
+    end: usize,
+) -> Option<ReplCompletion> {
+    let matches = candidates
+        .filter(|candidate| candidate.starts_with(prefix))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => None,
+        [only] if only != prefix => Some(ReplCompletion::Applied {
+            start,
+            end,
+            replacement: only.clone(),
+        }),
+        [only] => Some(ReplCompletion::Suggestions(vec![only.clone()])),
+        _ => {
+            let common = longest_common_prefix(&matches);
+            if common.len() > prefix.len() {
+                Some(ReplCompletion::Applied {
+                    start,
+                    end,
+                    replacement: common,
+                })
+            } else {
+                Some(ReplCompletion::Suggestions(matches))
+            }
+        }
+    }
+}
+
+fn longest_common_prefix(values: &[String]) -> String {
+    let Some(first) = values.first() else {
+        return String::new();
+    };
+    let mut end = first.len();
+    for value in values.iter().skip(1) {
+        while end > 0 && !value.starts_with(&first[..end]) {
+            end = previous_char_boundary(first, end);
+        }
+    }
+    first[..end].to_string()
+}
+
+fn previous_char_boundary(value: &str, index: usize) -> usize {
+    value[..index]
+        .char_indices()
+        .last()
+        .map_or(0, |(pos, _)| pos)
 }
 
 fn load_custom_slash_command(
@@ -1172,5 +1329,58 @@ mod tests {
         assert_eq!(inner.items.len(), 1);
         assert_eq!(inner.items[0].content, "T");
         assert_eq!(inner.items[0].status, TodoStatus::Completed);
+    }
+
+    #[test]
+    fn sessions_slash_lists_without_mutating_repl() {
+        let (cfg, _tmp) = crate::repl::session::tests::config_with_temp_session_dir();
+        let mut repl = Repl::new(cfg.clone(), None);
+        crate::repl::session::save("alpha", &repl).unwrap();
+
+        let outcome = try_handle_slash(&mut repl, "/sessions").unwrap();
+
+        assert!(matches!(outcome, SlashOutcome::Continue));
+        assert!(repl.transcript.turns.is_empty());
+        assert!(crate::repl::session::list_names(&cfg)
+            .unwrap()
+            .contains(&"alpha".to_string()));
+    }
+
+    #[test]
+    fn complete_repl_input_completes_load_session_names() {
+        let (cfg, _tmp) = crate::repl::session::tests::config_with_temp_session_dir();
+        let repl = Repl::new(cfg.clone(), None);
+        crate::repl::session::save("alpha", &repl).unwrap();
+        crate::repl::session::save("alpine", &repl).unwrap();
+        crate::repl::session::save("beta", &repl).unwrap();
+
+        assert_eq!(
+            complete_repl_input(&cfg, "/loa", 4).unwrap(),
+            Some(ReplCompletion::Applied {
+                start: 0,
+                end: 4,
+                replacement: "/load".to_string()
+            })
+        );
+        assert_eq!(
+            complete_repl_input(&cfg, "/load alpi", 10).unwrap(),
+            Some(ReplCompletion::Applied {
+                start: 6,
+                end: 10,
+                replacement: "alpine".to_string()
+            })
+        );
+        assert_eq!(
+            complete_repl_input(&cfg, "/load a", 7).unwrap(),
+            Some(ReplCompletion::Applied {
+                start: 6,
+                end: 7,
+                replacement: "alp".to_string()
+            })
+        );
+        assert!(matches!(
+            complete_repl_input(&cfg, "/load ", 6).unwrap(),
+            Some(ReplCompletion::Suggestions(names)) if names.len() == 3
+        ));
     }
 }

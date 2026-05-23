@@ -8,8 +8,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cli::app::{
     BenchmarkArgs, DogfoodAction, DogfoodCategoryRequirement, DogfoodExportArgs,
-    DogfoodExternalFixtureArgs, DogfoodLivePlanArgs, DogfoodLiveRunArgs, DogfoodOutcome,
-    DogfoodPromoteArgs, DogfoodReplayArgs, DogfoodReportArgs, DogfoodRunArgs,
+    DogfoodExternalEvidenceArgs, DogfoodExternalFixtureArgs, DogfoodLiveEvidenceArgs,
+    DogfoodLivePlanArgs, DogfoodLiveRunArgs, DogfoodOutcome, DogfoodPromoteArgs, DogfoodReplayArgs,
+    DogfoodReportArgs, DogfoodRunArgs,
 };
 use crate::cli::commands::benchmark::BenchmarkCaseSummary;
 use crate::config::load::load_or_default;
@@ -18,7 +19,7 @@ use crate::core::loop_runtime::{AgentLoop, AgentLoopOptions, RunResult};
 use crate::error::{app_error, AppError, AppErrorKind, AppResult};
 use crate::model::protocol::ObservationStatus;
 use crate::util::json::{
-    json_as_string, json_as_u64, json_value_to_string, parse_root_object, JsonValue,
+    json_as_array, json_as_string, json_as_u64, json_value_to_string, parse_root_object, JsonValue,
 };
 
 const DEFAULT_REPORT_LIMIT: usize = 20;
@@ -41,9 +42,11 @@ pub fn run(action: DogfoodAction) -> AppResult<()> {
     match action {
         DogfoodAction::Run(args) => run_live_task(&config, args),
         DogfoodAction::ExternalFixture(args) => run_external_fixture_command(&config, args),
+        DogfoodAction::ExternalEvidence(args) => external_evidence_command(args),
         DogfoodAction::ReplayBenchmark(args) => replay_benchmark_command(&config, args),
         DogfoodAction::LivePlan(args) => live_plan_command(&config, args),
         DogfoodAction::LiveRun(args) => live_run_command(&config, args),
+        DogfoodAction::LiveEvidence(args) => live_evidence_command(args),
         DogfoodAction::Report(args) => render_report_command(&config, args),
         DogfoodAction::ExportBenchmark(args) => export_benchmark_command(&config, args),
         DogfoodAction::PromoteBenchmark(args) => promote_benchmark_command(&config, args),
@@ -182,15 +185,26 @@ fn run_external_fixture_command(
     println!("workdir: {}", requested_workdir.display());
     println!("isolate_workdir: yes");
     println!("auto_approve: isolated writes/shell/mcp");
+    let model_transport = model_transport_for_config(config);
+    println!("current_model_transport: {model_transport}");
     if args.dry_run {
+        if model_transport != MODEL_TRANSPORT_ONLINE {
+            println!(
+                "release evidence warning: current model transport is not online; real external write-fixture evidence requires an online model-backed run"
+            );
+        }
         println!("dry run only; no model call, shell command, or ledger write");
         return Ok(());
     }
+    validate_external_fixture_model_transport(model_transport, args.allow_offline)?;
 
-    run_live_task_with_policy(
+    let ledger_path = config.workspace.dogfood_ledger_path();
+    let report_path = config.workspace.dogfood_report_path();
+    let before_records = load_records_or_empty(&ledger_path)?;
+    let run_result = run_live_task_with_policy(
         config,
         DogfoodRunArgs {
-            task: args.task,
+            task: args.task.clone(),
             from_benchmark: None,
             benchmark_manifest: None,
             skill: None,
@@ -205,7 +219,26 @@ fn run_external_fixture_command(
         DogfoodRunPolicy {
             auto_approve_isolated: true,
         },
-    )
+    );
+    let after_records = load_records_or_empty(&ledger_path)?;
+    if let Some(evidence_out) = args.evidence_out.as_deref() {
+        write_external_fixture_evidence_summary(
+            evidence_out,
+            &external_fixture_evidence_summary_json(
+                &requested_workdir,
+                &ledger_path,
+                &report_path,
+                &args,
+                model_transport,
+                &before_records,
+                &after_records,
+                dogfood_file_fingerprint_json(&ledger_path),
+                run_result.as_ref().err().map(|error| error.to_string()),
+            ),
+        )?;
+        println!("external_fixture_evidence: {evidence_out}");
+    }
+    run_result
 }
 
 fn dogfood_error_is_environment_transport_failure(
@@ -347,6 +380,18 @@ fn validate_external_fixture_task(task: &str) -> AppResult<()> {
     Err(app_error(
         "dogfood external-fixture task must describe an edit and validation command, for example: replace `a - b` with `a + b` in src/lib.rs and validate with cargo test",
     ))
+}
+
+fn validate_external_fixture_model_transport(
+    model_transport: &str,
+    allow_offline: bool,
+) -> AppResult<()> {
+    if model_transport == MODEL_TRANSPORT_ONLINE || allow_offline {
+        return Ok(());
+    }
+    Err(app_error(format!(
+        "dogfood external-fixture requires online model-backed transport for release evidence; current_model_transport={model_transport}. Use --dry-run to inspect the plan, or pass --allow-offline only for rehearsal runs that will not satisfy release gates"
+    )))
 }
 
 fn external_fixture_notes(notes: Option<&str>) -> String {
@@ -680,6 +725,10 @@ fn live_run_command(
     config: &crate::config::types::AppConfig,
     args: DogfoodLiveRunArgs,
 ) -> AppResult<()> {
+    let _api_key_guard = match args.api_key_file.as_deref() {
+        Some(path) => Some(load_live_run_api_key_file(config, path)?),
+        None => None,
+    };
     let ledger_path = config.workspace.dogfood_ledger_path();
     let manifest_path = args
         .manifest
@@ -704,10 +753,39 @@ fn live_run_command(
     );
     let selected = select_live_run_cases(&plan, &args.categories, run_limit);
 
+    if args.json {
+        if args.execute {
+            return Err(app_error(
+                "dogfood live-run --json is a dry-run planning output and cannot be combined with --execute",
+            ));
+        }
+        println!(
+            "{}",
+            render_live_run_plan_json(
+                &plan,
+                &args.categories,
+                run_limit,
+                &selected,
+                args.api_key_file.as_deref(),
+                args.evidence_out.as_deref(),
+            )
+        );
+        return Ok(());
+    }
+
     println!("DeepSeekCode dogfood live run");
     println!("ledger: {}", ledger_path.display());
     println!("manifest: {}", manifest_path.display());
     println!("current_model_transport: {model_transport}");
+    if args.api_key_file.is_some() {
+        println!(
+            "credential_source: api-key-file -> {} (value hidden)",
+            config.model.api_key_env
+        );
+    }
+    if let Some(evidence_out) = args.evidence_out.as_deref() {
+        println!("evidence_out: {evidence_out}");
+    }
     if !args.categories.is_empty() {
         println!("categories: {}", args.categories.join(", "));
     }
@@ -717,6 +795,7 @@ fn live_run_command(
         run_limit,
         if args.execute { "yes" } else { "no" }
     );
+    println!("post_run_report_gate: {}", live_report_gate_command(&plan));
 
     if selected.is_empty() {
         println!("no recommended live dogfood cases matched the requested filters");
@@ -737,9 +816,15 @@ fn live_run_command(
         ));
     }
 
+    let before_records = load_records_or_empty(&ledger_path)?;
+    let mut latest_records = before_records.clone();
+    let mut case_evidence = Vec::new();
+    let mut first_run_error = None;
+
     for case in &selected {
         println!("replay: {} ({})", case.name, case.category);
-        run_live_task(
+        let before_case_records = latest_records.len();
+        let run_result = run_live_task(
             config,
             DogfoodRunArgs {
                 task: String::new(),
@@ -754,12 +839,943 @@ fn live_run_command(
                 benchmark_gate: false,
                 notes: Some(format!("live-dogfood; category={}", case.category)),
             },
+        );
+        let after_case_records = load_records_or_empty(&ledger_path)?;
+        let appended_records = after_case_records.get(before_case_records..).unwrap_or(&[]);
+        let run_error = run_result.as_ref().err().map(|error| error.to_string());
+        case_evidence.push(live_run_case_evidence_json(
+            case,
+            appended_records,
+            run_error.as_deref(),
+        ));
+        latest_records = after_case_records;
+        if let Err(error) = run_result {
+            first_run_error = Some(error);
+            break;
+        }
+    }
+
+    let mut benchmark_gate_error = None;
+    if first_run_error.is_none() && args.benchmark_gate {
+        println!("post-live-run benchmark gate: running default benchmark baseline");
+        if let Err(error) = crate::cli::commands::benchmark::run_with_config(
+            config.clone(),
+            BenchmarkArgs::default(),
+        ) {
+            benchmark_gate_error = Some(error);
+        }
+    }
+
+    if let Some(evidence_out) = args.evidence_out.as_deref() {
+        write_live_run_evidence_summary(
+            evidence_out,
+            &live_run_evidence_summary_json(
+                &plan,
+                &args.categories,
+                run_limit,
+                &selected,
+                &case_evidence,
+                &before_records,
+                &latest_records,
+                args.api_key_file.as_deref(),
+                args.evidence_out.as_deref(),
+                args.benchmark_gate,
+                dogfood_file_fingerprint_json(&plan.ledger_path),
+                first_run_error.as_ref().map(|error| error.to_string()),
+                benchmark_gate_error.as_ref().map(|error| error.to_string()),
+            ),
+        )?;
+        println!("evidence_summary: {evidence_out}");
+    }
+
+    if let Some(error) = first_run_error {
+        return Err(error);
+    }
+    if let Some(error) = benchmark_gate_error {
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn live_evidence_command(args: DogfoodLiveEvidenceArgs) -> AppResult<()> {
+    let file = args.file.as_deref().ok_or_else(|| {
+        app_error("dogfood live-evidence requires --file <path> to verify an evidence summary")
+    })?;
+    let raw = fs::read_to_string(file).map_err(|error| {
+        app_error(format!(
+            "failed to read dogfood live evidence file {file}: {error}"
+        ))
+    })?;
+    let root = parse_root_object(&raw).map_err(|error| {
+        app_error(format!(
+            "failed to parse dogfood live evidence {file}: {error}"
+        ))
+    })?;
+    let mut failures = live_evidence_failures(&root, &args);
+    let report_gate_failures = if args.require_report_gate {
+        match live_evidence_report_gate_failures(&root) {
+            Ok(failures) => failures,
+            Err(error) => vec![format!("report gate check failed: {error}")],
+        }
+    } else {
+        Vec::new()
+    };
+    failures.extend(
+        report_gate_failures
+            .iter()
+            .map(|failure| format!("report gate: {failure}")),
+    );
+    let result = live_evidence_verification_json(
+        file,
+        &root,
+        &failures,
+        args.require_report_gate,
+        &report_gate_failures,
+    );
+    if let Some(out) = args.out.as_deref() {
+        write_dogfood_json_artifact(out, &result, "dogfood live evidence verification")?;
+    }
+
+    if args.json {
+        println!("{}", json_value_to_string(&result));
+    } else if failures.is_empty() {
+        println!("DeepSeekCode dogfood live evidence: pass");
+        println!("file: {file}");
+        if let Some(out) = args.out.as_deref() {
+            println!("verification: {out}");
+        }
+        if let Some(value) = live_evidence_u64(&root, "appended_model_backed_records") {
+            println!("appended_model_backed_records: {value}");
+        }
+        if let Some(command) = live_evidence_string(&root, "post_run_report_command") {
+            println!("post_run_report_command: {command}");
+        }
+    } else {
+        println!("DeepSeekCode dogfood live evidence: fail");
+        println!("file: {file}");
+        if let Some(out) = args.out.as_deref() {
+            println!("verification: {out}");
+        }
+        for failure in &failures {
+            println!("- {failure}");
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(app_error(format!(
+            "dogfood live evidence failed:\n- {}",
+            failures.join("\n- ")
+        )))
+    }
+}
+
+fn external_evidence_command(args: DogfoodExternalEvidenceArgs) -> AppResult<()> {
+    let file = args.file.as_deref().ok_or_else(|| {
+        app_error("dogfood external-evidence requires --file <path> to verify an evidence summary")
+    })?;
+    let raw = fs::read_to_string(file).map_err(|error| {
+        app_error(format!(
+            "failed to read dogfood external fixture evidence file {file}: {error}"
+        ))
+    })?;
+    let root = parse_root_object(&raw).map_err(|error| {
+        app_error(format!(
+            "failed to parse dogfood external fixture evidence {file}: {error}"
+        ))
+    })?;
+    let mut failures = external_evidence_failures(&root, &args);
+    let ledger_match_failures = if args.require_ledger_match {
+        match external_evidence_ledger_match_failures(&root) {
+            Ok(failures) => failures,
+            Err(error) => vec![format!("ledger match check failed: {error}")],
+        }
+    } else {
+        Vec::new()
+    };
+    failures.extend(
+        ledger_match_failures
+            .iter()
+            .map(|failure| format!("ledger match: {failure}")),
+    );
+    let result = external_evidence_verification_json(
+        file,
+        &root,
+        &failures,
+        args.require_ledger_match,
+        &ledger_match_failures,
+    );
+    if let Some(out) = args.out.as_deref() {
+        write_dogfood_json_artifact(
+            out,
+            &result,
+            "dogfood external fixture evidence verification",
         )?;
     }
 
-    if args.benchmark_gate {
-        println!("post-live-run benchmark gate: running default benchmark baseline");
-        crate::cli::commands::benchmark::run_with_config(config.clone(), BenchmarkArgs::default())?;
+    if args.json {
+        println!("{}", json_value_to_string(&result));
+    } else if failures.is_empty() {
+        println!("DeepSeekCode dogfood external fixture evidence: pass");
+        println!("file: {file}");
+        if let Some(out) = args.out.as_deref() {
+            println!("verification: {out}");
+        }
+        if let Some(value) = live_evidence_u64(&root, "appended_successful_external_write_fixtures")
+        {
+            println!("appended_successful_external_write_fixtures: {value}");
+        }
+    } else {
+        println!("DeepSeekCode dogfood external fixture evidence: fail");
+        println!("file: {file}");
+        if let Some(out) = args.out.as_deref() {
+            println!("verification: {out}");
+        }
+        for failure in &failures {
+            println!("- {failure}");
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(app_error(format!(
+            "dogfood external fixture evidence failed:\n- {}",
+            failures.join("\n- ")
+        )))
+    }
+}
+
+fn live_evidence_failures(
+    root: &BTreeMap<String, JsonValue>,
+    args: &DogfoodLiveEvidenceArgs,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    match live_evidence_string(root, "kind") {
+        Some("deepseek.dogfood.live_run_evidence.v1") => {}
+        Some(other) => failures.push(format!(
+            "unexpected evidence kind `{other}`, expected deepseek.dogfood.live_run_evidence.v1"
+        )),
+        None => failures.push("missing evidence kind".to_string()),
+    }
+    if args.require_completed && live_evidence_bool(root, "completed") != Some(true) {
+        failures.push("live evidence is not completed".to_string());
+    }
+    if args.require_online {
+        if live_evidence_string(root, "model_transport") != Some(MODEL_TRANSPORT_ONLINE) {
+            failures.push("model_transport is not online".to_string());
+        }
+        if live_evidence_bool(root, "online_ready") != Some(true) {
+            failures.push("online_ready is not true".to_string());
+        }
+    }
+    if let Some(required) = args.require_appended_model_backed {
+        let actual = live_evidence_u64(root, "appended_model_backed_records").unwrap_or(0);
+        if actual < required as u64 {
+            failures.push(format!(
+                "appended model-backed records {actual} below required {required}"
+            ));
+        }
+    }
+    match live_evidence_cases(root) {
+        Some(cases) if cases.is_empty() => {
+            failures.push("evidence has no case records".to_string())
+        }
+        Some(cases) => {
+            for (index, case) in cases.iter().enumerate() {
+                let Some(case_root) = live_evidence_object(case) else {
+                    failures.push(format!("case evidence #{index} is not an object"));
+                    continue;
+                };
+                let appended = live_evidence_u64(case_root, "ledger_records_appended").unwrap_or(0);
+                let model_backed = live_evidence_bool(case_root, "model_backed").unwrap_or(false);
+                if appended > 0 && !model_backed {
+                    failures.push(format!(
+                        "case evidence #{index} appended ledger records without model_backed=true"
+                    ));
+                }
+                if args.require_completed
+                    && !matches!(case_root.get("error"), Some(JsonValue::Null))
+                {
+                    failures.push(format!("case evidence #{index} has a run error"));
+                }
+            }
+        }
+        None => failures.push("missing case evidence array".to_string()),
+    }
+    if args.require_benchmark_gate {
+        let passed = root
+            .get("benchmark_gate")
+            .and_then(live_evidence_object)
+            .and_then(|gate| live_evidence_bool(gate, "passed"));
+        if passed != Some(true) {
+            failures.push("benchmark gate did not pass".to_string());
+        }
+    }
+    let report_command = live_evidence_string(root, "post_run_report_command").unwrap_or("");
+    if !report_command.contains("--require-live-runs")
+        || !report_command.contains("--require-live-category")
+    {
+        failures.push("post_run_report_command is missing live evidence gates".to_string());
+    }
+    failures
+}
+
+fn external_evidence_failures(
+    root: &BTreeMap<String, JsonValue>,
+    args: &DogfoodExternalEvidenceArgs,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    match live_evidence_string(root, "kind") {
+        Some("deepseek.dogfood.external_fixture_evidence.v1") => {}
+        Some(other) => failures.push(format!(
+            "unexpected evidence kind `{other}`, expected deepseek.dogfood.external_fixture_evidence.v1"
+        )),
+        None => failures.push("missing evidence kind".to_string()),
+    }
+    if args.require_completed && live_evidence_bool(root, "completed") != Some(true) {
+        failures.push("external fixture evidence is not completed".to_string());
+    }
+    if args.require_online {
+        if live_evidence_string(root, "model_transport") != Some(MODEL_TRANSPORT_ONLINE) {
+            failures.push("model_transport is not online".to_string());
+        }
+        if live_evidence_bool(root, "online_ready") != Some(true) {
+            failures.push("online_ready is not true".to_string());
+        }
+    }
+    if live_evidence_bool(root, "release_evidence_ready") != Some(true)
+        && args.require_successful_external_fixtures.is_some()
+    {
+        failures.push("release_evidence_ready is not true".to_string());
+    }
+    if let Some(required) = args.require_successful_external_fixtures {
+        let actual =
+            live_evidence_u64(root, "appended_successful_external_write_fixtures").unwrap_or(0);
+        if actual < required as u64 {
+            failures.push(format!(
+                "successful external write fixtures {actual} below required {required}"
+            ));
+        }
+    }
+    match external_evidence_records(root) {
+        Some(records) if records.is_empty() => failures.push("evidence has no records".to_string()),
+        Some(records) => {
+            let computed_external = records
+                .iter()
+                .filter_map(live_evidence_object)
+                .filter(|record| external_evidence_record_is_external_fixture(record))
+                .count() as u64;
+            let computed_success = records
+                .iter()
+                .filter_map(live_evidence_object)
+                .filter(|record| external_evidence_record_is_successful_external_fixture(record))
+                .count() as u64;
+            if live_evidence_u64(root, "appended_external_write_fixtures").unwrap_or(0)
+                != computed_external
+            {
+                failures
+                    .push("appended_external_write_fixtures does not match records".to_string());
+            }
+            if live_evidence_u64(root, "appended_successful_external_write_fixtures").unwrap_or(0)
+                != computed_success
+            {
+                failures.push(
+                    "appended_successful_external_write_fixtures does not match records"
+                        .to_string(),
+                );
+            }
+            for (index, record) in records.iter().enumerate() {
+                let Some(record_root) = live_evidence_object(record) else {
+                    failures.push(format!(
+                        "external evidence record #{index} is not an object"
+                    ));
+                    continue;
+                };
+                if !external_evidence_record_is_external_fixture(record_root) {
+                    failures.push(format!(
+                        "external evidence record #{index} is not marked external-write-fixture"
+                    ));
+                }
+                if args.require_online
+                    && live_evidence_string(record_root, "model_transport")
+                        != Some(MODEL_TRANSPORT_ONLINE)
+                {
+                    failures.push(format!(
+                        "external evidence record #{index} is not online model-backed"
+                    ));
+                }
+            }
+        }
+        None => failures.push("missing external fixture evidence records array".to_string()),
+    }
+    failures
+}
+
+fn external_evidence_ledger_match_failures(
+    root: &BTreeMap<String, JsonValue>,
+) -> AppResult<Vec<String>> {
+    let ledger = live_evidence_string(root, "ledger")
+        .ok_or_else(|| app_error("external evidence missing ledger path"))?;
+    let ledger_path = Path::new(ledger);
+    let records = load_records(ledger_path)?;
+    let mut failures = live_evidence_ledger_fingerprint_failures(root, ledger_path);
+    let Some(evidence_records) = external_evidence_records(root) else {
+        failures.push("missing external fixture evidence records array".to_string());
+        return Ok(failures);
+    };
+    for (index, record) in evidence_records.iter().enumerate() {
+        let Some(record_root) = live_evidence_object(record) else {
+            failures.push(format!(
+                "external evidence record #{index} is not an object"
+            ));
+            continue;
+        };
+        if !live_evidence_case_matches_any_record(record_root, &records) {
+            let timestamp = live_evidence_u64(record_root, "timestamp_secs")
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string());
+            let outcome = live_evidence_string(record_root, "outcome").unwrap_or("null");
+            let transport = live_evidence_string(record_root, "model_transport").unwrap_or("null");
+            failures.push(format!(
+                "external evidence record #{index} was not found in ledger (timestamp_secs={timestamp}, outcome={outcome}, model_transport={transport})"
+            ));
+        }
+    }
+    Ok(failures)
+}
+
+fn live_evidence_verification_json(
+    file: &str,
+    root: &BTreeMap<String, JsonValue>,
+    failures: &[String],
+    report_gate_required: bool,
+    report_gate_failures: &[String],
+) -> JsonValue {
+    let mut out = BTreeMap::new();
+    out.insert(
+        "kind".to_string(),
+        JsonValue::String("deepseek.dogfood.live_evidence_verification.v1".to_string()),
+    );
+    out.insert("file".to_string(), JsonValue::String(file.to_string()));
+    out.insert("ok".to_string(), JsonValue::Bool(failures.is_empty()));
+    out.insert(
+        "failures".to_string(),
+        JsonValue::Array(failures.iter().cloned().map(JsonValue::String).collect()),
+    );
+    out.insert(
+        "completed".to_string(),
+        live_evidence_bool(root, "completed")
+            .map(JsonValue::Bool)
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "online_ready".to_string(),
+        live_evidence_bool(root, "online_ready")
+            .map(JsonValue::Bool)
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "model_transport".to_string(),
+        live_evidence_string(root, "model_transport")
+            .map(|value| JsonValue::String(value.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "appended_model_backed_records".to_string(),
+        live_evidence_u64(root, "appended_model_backed_records")
+            .map(|value| JsonValue::Number(value.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "case_count".to_string(),
+        live_evidence_cases(root)
+            .map(|cases| JsonValue::Number(cases.len().to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "benchmark_gate_passed".to_string(),
+        root.get("benchmark_gate")
+            .and_then(live_evidence_object)
+            .and_then(|gate| live_evidence_bool(gate, "passed"))
+            .map(JsonValue::Bool)
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "report_gate_required".to_string(),
+        JsonValue::Bool(report_gate_required),
+    );
+    out.insert(
+        "report_gate_passed".to_string(),
+        JsonValue::Bool(report_gate_required && report_gate_failures.is_empty()),
+    );
+    out.insert(
+        "report_gate_failures".to_string(),
+        JsonValue::Array(
+            report_gate_failures
+                .iter()
+                .cloned()
+                .map(JsonValue::String)
+                .collect(),
+        ),
+    );
+    out.insert(
+        "post_run_report_command".to_string(),
+        live_evidence_string(root, "post_run_report_command")
+            .map(|value| JsonValue::String(value.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "ledger_fingerprint".to_string(),
+        root.get("ledger_fingerprint")
+            .cloned()
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "current_ledger_fingerprint".to_string(),
+        if report_gate_required {
+            live_evidence_string(root, "ledger")
+                .map(|ledger| dogfood_file_fingerprint_json(Path::new(ledger)))
+                .unwrap_or(JsonValue::Null)
+        } else {
+            JsonValue::Null
+        },
+    );
+    JsonValue::Object(out)
+}
+
+fn external_evidence_verification_json(
+    file: &str,
+    root: &BTreeMap<String, JsonValue>,
+    failures: &[String],
+    ledger_match_required: bool,
+    ledger_match_failures: &[String],
+) -> JsonValue {
+    let mut out = BTreeMap::new();
+    out.insert(
+        "kind".to_string(),
+        JsonValue::String("deepseek.dogfood.external_fixture_evidence_verification.v1".to_string()),
+    );
+    out.insert("file".to_string(), JsonValue::String(file.to_string()));
+    out.insert("ok".to_string(), JsonValue::Bool(failures.is_empty()));
+    out.insert(
+        "failures".to_string(),
+        JsonValue::Array(failures.iter().cloned().map(JsonValue::String).collect()),
+    );
+    out.insert(
+        "completed".to_string(),
+        live_evidence_bool(root, "completed")
+            .map(JsonValue::Bool)
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "online_ready".to_string(),
+        live_evidence_bool(root, "online_ready")
+            .map(JsonValue::Bool)
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "model_transport".to_string(),
+        live_evidence_string(root, "model_transport")
+            .map(|value| JsonValue::String(value.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "release_evidence_ready".to_string(),
+        live_evidence_bool(root, "release_evidence_ready")
+            .map(JsonValue::Bool)
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "appended_model_backed_records".to_string(),
+        live_evidence_u64(root, "appended_model_backed_records")
+            .map(|value| JsonValue::Number(value.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "appended_external_write_fixtures".to_string(),
+        live_evidence_u64(root, "appended_external_write_fixtures")
+            .map(|value| JsonValue::Number(value.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "appended_successful_external_write_fixtures".to_string(),
+        live_evidence_u64(root, "appended_successful_external_write_fixtures")
+            .map(|value| JsonValue::Number(value.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "record_count".to_string(),
+        external_evidence_records(root)
+            .map(|records| JsonValue::Number(records.len().to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "ledger_match_required".to_string(),
+        JsonValue::Bool(ledger_match_required),
+    );
+    out.insert(
+        "ledger_match_passed".to_string(),
+        JsonValue::Bool(ledger_match_required && ledger_match_failures.is_empty()),
+    );
+    out.insert(
+        "ledger_match_failures".to_string(),
+        JsonValue::Array(
+            ledger_match_failures
+                .iter()
+                .cloned()
+                .map(JsonValue::String)
+                .collect(),
+        ),
+    );
+    out.insert(
+        "ledger_fingerprint".to_string(),
+        root.get("ledger_fingerprint")
+            .cloned()
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
+        "current_ledger_fingerprint".to_string(),
+        if ledger_match_required {
+            live_evidence_string(root, "ledger")
+                .map(|ledger| dogfood_file_fingerprint_json(Path::new(ledger)))
+                .unwrap_or(JsonValue::Null)
+        } else {
+            JsonValue::Null
+        },
+    );
+    JsonValue::Object(out)
+}
+
+fn live_evidence_report_gate_failures(
+    root: &BTreeMap<String, JsonValue>,
+) -> AppResult<Vec<String>> {
+    let ledger = live_evidence_string(root, "ledger")
+        .ok_or_else(|| app_error("live evidence missing ledger path"))?;
+    let records = load_records(Path::new(ledger))?;
+    let args = live_evidence_report_gate_args(root)?;
+    let mut failures = report_requirement_failures(&records, &args);
+    failures.extend(live_evidence_ledger_fingerprint_failures(
+        root,
+        Path::new(ledger),
+    ));
+    failures.extend(live_evidence_ledger_match_failures(root, &records));
+    Ok(failures)
+}
+
+fn live_evidence_report_gate_args(
+    root: &BTreeMap<String, JsonValue>,
+) -> AppResult<DogfoodReportArgs> {
+    let gate = root
+        .get("evidence_gate")
+        .and_then(live_evidence_object)
+        .ok_or_else(|| app_error("live evidence missing evidence_gate object"))?;
+    let mut args = DogfoodReportArgs::default();
+    args.require_live_runs = Some(read_live_evidence_usize(
+        gate,
+        "require_live_runs",
+        "evidence_gate",
+    )?);
+    args.require_live_success_rate = Some(read_live_evidence_f64(
+        gate,
+        "require_live_success_rate",
+        "evidence_gate",
+    )?);
+    let categories = gate
+        .get("require_live_categories")
+        .and_then(json_as_array)
+        .ok_or_else(|| app_error("evidence_gate missing require_live_categories array"))?;
+    for (index, value) in categories.iter().enumerate() {
+        let category = live_evidence_object(value).ok_or_else(|| {
+            app_error(format!(
+                "evidence_gate require_live_categories[{index}] must be an object"
+            ))
+        })?;
+        let category_name = live_evidence_string(category, "category").ok_or_else(|| {
+            app_error(format!(
+                "evidence_gate require_live_categories[{index}] missing category"
+            ))
+        })?;
+        args.require_live_categories
+            .push(DogfoodCategoryRequirement {
+                category: category_name.to_string(),
+                min_runs: read_live_evidence_usize(
+                    category,
+                    "min_runs",
+                    "evidence_gate require_live_categories",
+                )?,
+                min_success_percent: read_live_evidence_f64(
+                    category,
+                    "min_success_rate",
+                    "evidence_gate require_live_categories",
+                )?,
+            });
+    }
+    Ok(args)
+}
+
+fn read_live_evidence_usize(
+    root: &BTreeMap<String, JsonValue>,
+    key: &str,
+    context: &str,
+) -> AppResult<usize> {
+    let value = live_evidence_u64(root, key)
+        .ok_or_else(|| app_error(format!("{context} missing numeric {key}")))?;
+    usize::try_from(value).map_err(|_| app_error(format!("{context} {key} is too large")))
+}
+
+fn read_live_evidence_f64(
+    root: &BTreeMap<String, JsonValue>,
+    key: &str,
+    context: &str,
+) -> AppResult<f64> {
+    let Some(JsonValue::Number(value)) = root.get(key) else {
+        return Err(app_error(format!("{context} missing numeric {key}")));
+    };
+    value
+        .parse::<f64>()
+        .map_err(|_| app_error(format!("{context} {key} is not a valid number")))
+}
+
+fn live_evidence_ledger_match_failures(
+    root: &BTreeMap<String, JsonValue>,
+    records: &[DogfoodRecord],
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    let summary_model_backed =
+        live_evidence_u64(root, "appended_model_backed_records").unwrap_or(0);
+    let Some(cases) = live_evidence_cases(root) else {
+        return failures;
+    };
+    let mut case_model_backed_total = 0u64;
+    for (index, case) in cases.iter().enumerate() {
+        let Some(case_root) = live_evidence_object(case) else {
+            continue;
+        };
+        let appended = live_evidence_u64(case_root, "ledger_records_appended").unwrap_or(0);
+        if appended == 0 {
+            continue;
+        }
+        let model_backed_appended =
+            live_evidence_u64(case_root, "model_backed_records_appended").unwrap_or(0);
+        case_model_backed_total = case_model_backed_total.saturating_add(model_backed_appended);
+        if live_evidence_case_matches_any_record(case_root, records) {
+            continue;
+        }
+        let name = live_evidence_string(case_root, "name").unwrap_or("unknown");
+        let timestamp = live_evidence_u64(case_root, "timestamp_secs")
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "null".to_string());
+        let outcome = live_evidence_string(case_root, "outcome").unwrap_or("null");
+        let transport = live_evidence_string(case_root, "model_transport").unwrap_or("null");
+        failures.push(format!(
+            "case evidence #{index} `{name}` was not found in ledger (timestamp_secs={timestamp}, outcome={outcome}, model_transport={transport})"
+        ));
+    }
+    if case_model_backed_total != summary_model_backed {
+        failures.push(format!(
+            "case model-backed total {case_model_backed_total} does not match summary appended_model_backed_records {summary_model_backed}"
+        ));
+    }
+    failures
+}
+
+fn live_evidence_ledger_fingerprint_failures(
+    root: &BTreeMap<String, JsonValue>,
+    ledger: &Path,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    let Some(expected_value) = root.get("ledger_fingerprint") else {
+        failures.push("missing ledger_fingerprint".to_string());
+        return failures;
+    };
+    let Some(expected) = live_evidence_object(expected_value) else {
+        failures.push("ledger_fingerprint is not an object".to_string());
+        return failures;
+    };
+    let current_value = dogfood_file_fingerprint_json(ledger);
+    let Some(current) = live_evidence_object(&current_value) else {
+        failures.push("current ledger fingerprint is not an object".to_string());
+        return failures;
+    };
+    if live_evidence_bool(expected, "ok") != Some(true) {
+        failures.push("ledger_fingerprint is not ok".to_string());
+        return failures;
+    }
+    if live_evidence_bool(current, "ok") != Some(true) {
+        let error = live_evidence_string(current, "error").unwrap_or("unknown error");
+        failures.push(format!("failed to fingerprint current ledger: {error}"));
+        return failures;
+    }
+    for key in ["algorithm", "path", "fnv1a64"] {
+        let expected_value = live_evidence_string(expected, key).unwrap_or("");
+        let current_value = live_evidence_string(current, key).unwrap_or("");
+        if expected_value != current_value {
+            failures.push(format!(
+                "ledger_fingerprint {key} mismatch: evidence={expected_value}, current={current_value}"
+            ));
+        }
+    }
+    let expected_bytes = live_evidence_u64(expected, "bytes");
+    let current_bytes = live_evidence_u64(current, "bytes");
+    if expected_bytes != current_bytes {
+        failures.push(format!(
+            "ledger_fingerprint bytes mismatch: evidence={}, current={}",
+            expected_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string()),
+            current_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string())
+        ));
+    }
+    failures
+}
+
+fn live_evidence_case_matches_any_record(
+    case_root: &BTreeMap<String, JsonValue>,
+    records: &[DogfoodRecord],
+) -> bool {
+    let Some(timestamp_secs) = live_evidence_u64(case_root, "timestamp_secs") else {
+        return false;
+    };
+    let Some(outcome) = live_evidence_string(case_root, "outcome") else {
+        return false;
+    };
+    let Some(model_transport) = live_evidence_string(case_root, "model_transport") else {
+        return false;
+    };
+    let model_backed = live_evidence_bool(case_root, "model_backed").unwrap_or(false);
+    let category = live_evidence_string(case_root, "benchmark_category");
+    records.iter().any(|record| {
+        record.timestamp_secs == timestamp_secs
+            && record.outcome.label() == outcome
+            && record.model_transport == model_transport
+            && record_is_model_backed(record) == model_backed
+            && category
+                .is_none_or(|category| record.benchmark_category.as_deref() == Some(category))
+    })
+}
+
+fn live_evidence_object(value: &JsonValue) -> Option<&BTreeMap<String, JsonValue>> {
+    match value {
+        JsonValue::Object(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn live_evidence_cases(root: &BTreeMap<String, JsonValue>) -> Option<&Vec<JsonValue>> {
+    root.get("cases").and_then(json_as_array)
+}
+
+fn external_evidence_records(root: &BTreeMap<String, JsonValue>) -> Option<&Vec<JsonValue>> {
+    root.get("records").and_then(json_as_array)
+}
+
+fn external_evidence_record_is_external_fixture(record: &BTreeMap<String, JsonValue>) -> bool {
+    live_evidence_string(record, "notes")
+        .is_some_and(|notes| notes.contains("external-write-fixture"))
+        && live_evidence_string(record, "benchmark_category") == Some("write_validate")
+}
+
+fn external_evidence_record_is_successful_external_fixture(
+    record: &BTreeMap<String, JsonValue>,
+) -> bool {
+    external_evidence_record_is_external_fixture(record)
+        && live_evidence_string(record, "model_transport") == Some(MODEL_TRANSPORT_ONLINE)
+        && live_evidence_string(record, "outcome") == Some(DogfoodOutcome::Success.label())
+}
+
+fn live_evidence_string<'a>(root: &'a BTreeMap<String, JsonValue>, key: &str) -> Option<&'a str> {
+    root.get(key).and_then(json_as_string)
+}
+
+fn live_evidence_u64(root: &BTreeMap<String, JsonValue>, key: &str) -> Option<u64> {
+    root.get(key).and_then(json_as_u64)
+}
+
+fn live_evidence_bool(root: &BTreeMap<String, JsonValue>, key: &str) -> Option<bool> {
+    match root.get(key) {
+        Some(JsonValue::Bool(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+struct EnvVarGuard {
+    name: String,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.previous.as_ref() {
+            Some(value) => unsafe { env::set_var(&self.name, value) },
+            None => unsafe { env::remove_var(&self.name) },
+        }
+    }
+}
+
+fn load_live_run_api_key_file(
+    config: &crate::config::types::AppConfig,
+    path: &str,
+) -> AppResult<EnvVarGuard> {
+    let api_key_env = config.model.api_key_env.trim();
+    if api_key_env.is_empty() || api_key_env.to_ascii_uppercase().contains("OFFLINE") {
+        return Err(app_error(
+            "dogfood live-run --api-key-file requires model.api_key_env to name a real provider environment variable",
+        ));
+    }
+    let path = PathBuf::from(path);
+    validate_live_run_api_key_file_path(&path)?;
+    let key = fs::read_to_string(&path).map_err(|error| {
+        app_error(format!(
+            "failed to read dogfood live-run API key file {}: {error}",
+            path.display()
+        ))
+    })?;
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(app_error(format!(
+            "dogfood live-run API key file is empty: {}",
+            path.display()
+        )));
+    }
+    let guard = EnvVarGuard {
+        name: api_key_env.to_string(),
+        previous: env::var_os(api_key_env),
+    };
+    unsafe {
+        env::set_var(api_key_env, key);
+    }
+    Ok(guard)
+}
+
+fn validate_live_run_api_key_file_path(path: &Path) -> AppResult<()> {
+    if !path.is_file() {
+        return Err(app_error(format!(
+            "dogfood live-run API key file is missing or not a file: {}",
+            path.display()
+        )));
+    }
+    let repo_root = env::current_dir()?;
+    let repo_root = fs::canonicalize(&repo_root).map_err(|error| {
+        app_error(format!(
+            "failed to canonicalize repository root {}: {error}",
+            repo_root.display()
+        ))
+    })?;
+    let key_path = fs::canonicalize(path).map_err(|error| {
+        app_error(format!(
+            "failed to canonicalize dogfood live-run API key file {}: {error}",
+            path.display()
+        ))
+    })?;
+    if key_path.starts_with(&repo_root) {
+        return Err(app_error(format!(
+            "dogfood live-run API key file must live outside the repository: {}",
+            key_path.display()
+        )));
     }
     Ok(())
 }
@@ -1638,6 +2654,10 @@ fn render_live_plan_text(plan: &LivePlan) -> String {
     ));
     let overall_needed = plan.target_live_runs.saturating_sub(plan.live_runs);
     out.push_str(&format!("overall_needed_runs: {overall_needed}\n\n"));
+    out.push_str(&format!(
+        "post_run_report_gate: {}\n\n",
+        live_report_gate_command(plan)
+    ));
     out.push_str("Category plan:\n");
     for category in &plan.category_plans {
         out.push_str(&format!(
@@ -1656,12 +2676,24 @@ fn render_live_plan_text(plan: &LivePlan) -> String {
                 "  blocker: no replayable workdir-backed benchmark case for this category\n",
             );
         } else if !category.recommended_cases.is_empty() {
-            out.push_str(&format!(
-                "  command: deepseek dogfood replay-benchmark --manifest {} --category {} --limit {}\n",
-                shell_quote(&plan.manifest_path.display().to_string()),
-                shell_quote(&category.category),
-                category.recommended_cases.len()
-            ));
+            let dry_run_command = live_run_command_line(
+                &plan.manifest_path,
+                Some(&category.category),
+                category.recommended_cases.len(),
+                false,
+                None,
+                None,
+            );
+            let execute_command = live_run_command_line(
+                &plan.manifest_path,
+                Some(&category.category),
+                category.recommended_cases.len(),
+                true,
+                None,
+                None,
+            );
+            out.push_str(&format!("  dry_run: {dry_run_command}\n"));
+            out.push_str(&format!("  execute: {execute_command}\n"));
             out.push_str(&format!(
                 "  cases: {}\n",
                 category.recommended_cases.join(", ")
@@ -1729,6 +2761,30 @@ fn render_live_plan_json(plan: &LivePlan) -> String {
                         .collect(),
                 ),
             );
+            if !category.recommended_cases.is_empty() {
+                root.insert(
+                    "live_run_command".to_string(),
+                    JsonValue::String(live_run_command_line(
+                        &plan.manifest_path,
+                        Some(&category.category),
+                        category.recommended_cases.len(),
+                        false,
+                        None,
+                        None,
+                    )),
+                );
+                root.insert(
+                    "live_run_execute_command".to_string(),
+                    JsonValue::String(live_run_command_line(
+                        &plan.manifest_path,
+                        Some(&category.category),
+                        category.recommended_cases.len(),
+                        true,
+                        None,
+                        None,
+                    )),
+                );
+            }
             JsonValue::Object(root)
         })
         .collect::<Vec<_>>();
@@ -1770,8 +2826,749 @@ fn render_live_plan_json(plan: &LivePlan) -> String {
                 .to_string(),
         ),
     );
+    root.insert(
+        "post_run_report_command".to_string(),
+        JsonValue::String(live_report_gate_command(plan)),
+    );
+    root.insert("evidence_gate".to_string(), live_report_gate_json(plan));
     root.insert("categories".to_string(), JsonValue::Array(categories));
     json_value_to_string(&JsonValue::Object(root))
+}
+
+fn live_run_command_line(
+    manifest_path: &Path,
+    category: Option<&str>,
+    limit: usize,
+    execute: bool,
+    api_key_file: Option<&str>,
+    evidence_out: Option<&str>,
+) -> String {
+    let categories = category
+        .map(|value| vec![value.to_string()])
+        .unwrap_or_default();
+    live_run_command_line_for_categories(
+        manifest_path,
+        &categories,
+        limit,
+        execute,
+        false,
+        api_key_file,
+        evidence_out,
+    )
+}
+
+fn live_run_command_line_for_categories(
+    manifest_path: &Path,
+    categories: &[String],
+    limit: usize,
+    execute: bool,
+    json: bool,
+    api_key_file: Option<&str>,
+    evidence_out: Option<&str>,
+) -> String {
+    let mut command = format!(
+        "deepseek dogfood live-run --manifest {}",
+        shell_quote(&manifest_path.display().to_string())
+    );
+    if let Some(api_key_file) = api_key_file {
+        command.push_str(" --api-key-file ");
+        command.push_str(&shell_quote(api_key_file));
+    }
+    if let Some(evidence_out) = evidence_out {
+        command.push_str(" --evidence-out ");
+        command.push_str(&shell_quote(evidence_out));
+    }
+    for category in categories {
+        command.push_str(" --category ");
+        command.push_str(&shell_quote(category));
+    }
+    command.push_str(" --limit ");
+    command.push_str(&limit.to_string());
+    if json {
+        command.push_str(" --json");
+    }
+    if execute {
+        command.push_str(" --execute");
+    }
+    command
+}
+
+fn render_live_run_plan_json(
+    plan: &LivePlan,
+    requested_categories: &[String],
+    limit: usize,
+    selected: &[LiveRunCase],
+    api_key_file: Option<&str>,
+    evidence_out: Option<&str>,
+) -> String {
+    let selected_cases = selected
+        .iter()
+        .map(|case| {
+            let mut root = BTreeMap::new();
+            root.insert(
+                "category".to_string(),
+                JsonValue::String(case.category.clone()),
+            );
+            root.insert("name".to_string(), JsonValue::String(case.name.clone()));
+            JsonValue::Object(root)
+        })
+        .collect::<Vec<_>>();
+    let online_ready = plan.model_transport == MODEL_TRANSPORT_ONLINE;
+    let execute_blocker = if selected.is_empty() {
+        Some("no recommended live dogfood cases matched the requested filters")
+    } else if !online_ready {
+        Some("dogfood live-run --execute requires an online model transport; configure the provider API key first")
+    } else {
+        None
+    };
+
+    let mut root = BTreeMap::new();
+    root.insert(
+        "kind".to_string(),
+        JsonValue::String("deepseek.dogfood.live_run_plan.v1".to_string()),
+    );
+    root.insert(
+        "ledger".to_string(),
+        JsonValue::String(plan.ledger_path.display().to_string()),
+    );
+    root.insert(
+        "manifest".to_string(),
+        JsonValue::String(plan.manifest_path.display().to_string()),
+    );
+    root.insert(
+        "model_transport".to_string(),
+        JsonValue::String(plan.model_transport.clone()),
+    );
+    root.insert("online_ready".to_string(), JsonValue::Bool(online_ready));
+    root.insert(
+        "credential_source".to_string(),
+        JsonValue::String(if api_key_file.is_some() {
+            "api_key_file".to_string()
+        } else if online_ready {
+            "env".to_string()
+        } else {
+            "missing".to_string()
+        }),
+    );
+    root.insert(
+        "api_key_file".to_string(),
+        api_key_file
+            .map(|path| JsonValue::String(path.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    root.insert(
+        "evidence_out".to_string(),
+        evidence_out
+            .map(|path| JsonValue::String(path.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    root.insert(
+        "execute_ready".to_string(),
+        JsonValue::Bool(execute_blocker.is_none()),
+    );
+    root.insert(
+        "execute_blocker".to_string(),
+        execute_blocker
+            .map(|value| JsonValue::String(value.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    root.insert(
+        "target_live_runs".to_string(),
+        JsonValue::Number(plan.target_live_runs.to_string()),
+    );
+    root.insert(
+        "target_live_success_rate".to_string(),
+        JsonValue::Number(format!("{:.1}", plan.target_live_success_rate)),
+    );
+    root.insert(
+        "live_runs".to_string(),
+        JsonValue::Number(plan.live_runs.to_string()),
+    );
+    root.insert(
+        "live_success".to_string(),
+        JsonValue::Number(plan.live_success.to_string()),
+    );
+    root.insert(
+        "live_success_rate".to_string(),
+        JsonValue::Number(format!(
+            "{:.1}",
+            rate_percent(plan.live_success, plan.live_runs)
+        )),
+    );
+    root.insert("limit".to_string(), JsonValue::Number(limit.to_string()));
+    root.insert(
+        "requested_categories".to_string(),
+        JsonValue::Array(
+            requested_categories
+                .iter()
+                .cloned()
+                .map(JsonValue::String)
+                .collect(),
+        ),
+    );
+    root.insert(
+        "selected_count".to_string(),
+        JsonValue::Number(selected.len().to_string()),
+    );
+    root.insert(
+        "selected_cases".to_string(),
+        JsonValue::Array(selected_cases),
+    );
+    root.insert(
+        "dry_run_command".to_string(),
+        JsonValue::String(live_run_command_line_for_categories(
+            &plan.manifest_path,
+            requested_categories,
+            limit,
+            false,
+            true,
+            api_key_file,
+            evidence_out,
+        )),
+    );
+    root.insert(
+        "execute_command".to_string(),
+        JsonValue::String(live_run_command_line_for_categories(
+            &plan.manifest_path,
+            requested_categories,
+            limit,
+            true,
+            false,
+            api_key_file,
+            evidence_out,
+        )),
+    );
+    root.insert(
+        "post_run_report_command".to_string(),
+        JsonValue::String(live_report_gate_command(plan)),
+    );
+    root.insert("evidence_gate".to_string(), live_report_gate_json(plan));
+    json_value_to_string(&JsonValue::Object(root))
+}
+
+fn live_run_case_evidence_json(
+    case: &LiveRunCase,
+    appended_records: &[DogfoodRecord],
+    error: Option<&str>,
+) -> JsonValue {
+    let mut root = BTreeMap::new();
+    root.insert(
+        "category".to_string(),
+        JsonValue::String(case.category.clone()),
+    );
+    root.insert("name".to_string(), JsonValue::String(case.name.clone()));
+    root.insert(
+        "ledger_records_appended".to_string(),
+        JsonValue::Number(appended_records.len().to_string()),
+    );
+    root.insert(
+        "model_backed_records_appended".to_string(),
+        JsonValue::Number(
+            appended_records
+                .iter()
+                .filter(|record| record_is_model_backed(record))
+                .count()
+                .to_string(),
+        ),
+    );
+    root.insert(
+        "error".to_string(),
+        error
+            .map(|value| JsonValue::String(value.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+
+    if let Some(record) = appended_records.last() {
+        root.insert(
+            "timestamp_secs".to_string(),
+            JsonValue::Number(record.timestamp_secs.to_string()),
+        );
+        root.insert(
+            "duration_ms".to_string(),
+            JsonValue::Number(record.duration_ms.to_string()),
+        );
+        root.insert(
+            "outcome".to_string(),
+            JsonValue::String(record.outcome.label().to_string()),
+        );
+        root.insert(
+            "model_transport".to_string(),
+            JsonValue::String(record.model_transport.clone()),
+        );
+        root.insert(
+            "model_backed".to_string(),
+            JsonValue::Bool(record_is_model_backed(record)),
+        );
+        root.insert(
+            "manual_intervention".to_string(),
+            JsonValue::Bool(record.manual_intervention),
+        );
+        root.insert(
+            "benchmark_category".to_string(),
+            record
+                .benchmark_category
+                .as_ref()
+                .map(|value| JsonValue::String(value.clone()))
+                .unwrap_or(JsonValue::Null),
+        );
+        root.insert(
+            "error_kind".to_string(),
+            record
+                .error_kind
+                .as_ref()
+                .map(|value| JsonValue::String(value.clone()))
+                .unwrap_or(JsonValue::Null),
+        );
+    } else {
+        root.insert("timestamp_secs".to_string(), JsonValue::Null);
+        root.insert("duration_ms".to_string(), JsonValue::Null);
+        root.insert("outcome".to_string(), JsonValue::Null);
+        root.insert("model_transport".to_string(), JsonValue::Null);
+        root.insert("model_backed".to_string(), JsonValue::Bool(false));
+        root.insert("manual_intervention".to_string(), JsonValue::Bool(false));
+        root.insert("benchmark_category".to_string(), JsonValue::Null);
+        root.insert("error_kind".to_string(), JsonValue::Null);
+    }
+
+    JsonValue::Object(root)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn live_run_evidence_summary_json(
+    plan: &LivePlan,
+    requested_categories: &[String],
+    limit: usize,
+    selected: &[LiveRunCase],
+    case_evidence: &[JsonValue],
+    before_records: &[DogfoodRecord],
+    after_records: &[DogfoodRecord],
+    api_key_file: Option<&str>,
+    evidence_out: Option<&str>,
+    benchmark_gate_requested: bool,
+    ledger_fingerprint: JsonValue,
+    run_error: Option<String>,
+    benchmark_gate_error: Option<String>,
+) -> JsonValue {
+    let appended_records = after_records.get(before_records.len()..).unwrap_or(&[]);
+    let online_ready = plan.model_transport == MODEL_TRANSPORT_ONLINE;
+    let completed = run_error.is_none() && benchmark_gate_error.is_none();
+
+    let mut benchmark_gate = BTreeMap::new();
+    benchmark_gate.insert(
+        "requested".to_string(),
+        JsonValue::Bool(benchmark_gate_requested),
+    );
+    benchmark_gate.insert(
+        "passed".to_string(),
+        JsonValue::Bool(
+            benchmark_gate_requested && benchmark_gate_error.is_none() && run_error.is_none(),
+        ),
+    );
+    benchmark_gate.insert(
+        "error".to_string(),
+        benchmark_gate_error
+            .map(JsonValue::String)
+            .unwrap_or(JsonValue::Null),
+    );
+
+    let mut root = BTreeMap::new();
+    root.insert(
+        "kind".to_string(),
+        JsonValue::String("deepseek.dogfood.live_run_evidence.v1".to_string()),
+    );
+    root.insert(
+        "ledger".to_string(),
+        JsonValue::String(plan.ledger_path.display().to_string()),
+    );
+    root.insert(
+        "manifest".to_string(),
+        JsonValue::String(plan.manifest_path.display().to_string()),
+    );
+    root.insert(
+        "model_transport".to_string(),
+        JsonValue::String(plan.model_transport.clone()),
+    );
+    root.insert("online_ready".to_string(), JsonValue::Bool(online_ready));
+    root.insert(
+        "credential_source".to_string(),
+        JsonValue::String(if api_key_file.is_some() {
+            "api_key_file".to_string()
+        } else if online_ready {
+            "env".to_string()
+        } else {
+            "missing".to_string()
+        }),
+    );
+    root.insert(
+        "api_key_file".to_string(),
+        api_key_file
+            .map(|path| JsonValue::String(path.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    root.insert(
+        "evidence_out".to_string(),
+        evidence_out
+            .map(|path| JsonValue::String(path.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    root.insert("completed".to_string(), JsonValue::Bool(completed));
+    root.insert(
+        "error".to_string(),
+        run_error.map(JsonValue::String).unwrap_or(JsonValue::Null),
+    );
+    root.insert("limit".to_string(), JsonValue::Number(limit.to_string()));
+    root.insert(
+        "requested_categories".to_string(),
+        JsonValue::Array(
+            requested_categories
+                .iter()
+                .cloned()
+                .map(JsonValue::String)
+                .collect(),
+        ),
+    );
+    root.insert(
+        "selected_count".to_string(),
+        JsonValue::Number(selected.len().to_string()),
+    );
+    root.insert(
+        "cases".to_string(),
+        JsonValue::Array(case_evidence.to_vec()),
+    );
+    root.insert(
+        "before".to_string(),
+        live_run_records_snapshot_json(before_records),
+    );
+    root.insert(
+        "after".to_string(),
+        live_run_records_snapshot_json(after_records),
+    );
+    root.insert(
+        "appended_records".to_string(),
+        JsonValue::Number(appended_records.len().to_string()),
+    );
+    root.insert(
+        "appended_model_backed_records".to_string(),
+        JsonValue::Number(
+            appended_records
+                .iter()
+                .filter(|record| record_is_model_backed(record))
+                .count()
+                .to_string(),
+        ),
+    );
+    root.insert(
+        "benchmark_gate".to_string(),
+        JsonValue::Object(benchmark_gate),
+    );
+    root.insert("ledger_fingerprint".to_string(), ledger_fingerprint);
+    root.insert(
+        "post_run_report_command".to_string(),
+        JsonValue::String(live_report_gate_command(plan)),
+    );
+    root.insert("evidence_gate".to_string(), live_report_gate_json(plan));
+    JsonValue::Object(root)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn external_fixture_evidence_summary_json(
+    source_workdir: &Path,
+    ledger_path: &Path,
+    report_path: &Path,
+    args: &DogfoodExternalFixtureArgs,
+    model_transport: &str,
+    before_records: &[DogfoodRecord],
+    after_records: &[DogfoodRecord],
+    ledger_fingerprint: JsonValue,
+    run_error: Option<String>,
+) -> JsonValue {
+    let appended_records = after_records.get(before_records.len()..).unwrap_or(&[]);
+    let appended_external_write_fixtures = appended_records
+        .iter()
+        .filter(|record| is_external_write_fixture_record(record))
+        .count();
+    let appended_successful_external_write_fixtures = appended_records
+        .iter()
+        .filter(|record| {
+            is_external_write_fixture_record(record)
+                && record_is_model_backed(record)
+                && matches!(record.outcome, DogfoodOutcome::Success)
+        })
+        .count();
+    let appended_model_backed_records = appended_records
+        .iter()
+        .filter(|record| record_is_model_backed(record))
+        .count();
+    let online_ready = model_transport == MODEL_TRANSPORT_ONLINE;
+    let completed = run_error.is_none();
+    let release_evidence_ready =
+        completed && online_ready && appended_successful_external_write_fixtures > 0;
+
+    let mut root = BTreeMap::new();
+    root.insert(
+        "kind".to_string(),
+        JsonValue::String("deepseek.dogfood.external_fixture_evidence.v1".to_string()),
+    );
+    root.insert(
+        "source_workdir".to_string(),
+        JsonValue::String(source_workdir.display().to_string()),
+    );
+    root.insert(
+        "ledger".to_string(),
+        JsonValue::String(ledger_path.display().to_string()),
+    );
+    root.insert(
+        "report".to_string(),
+        JsonValue::String(report_path.display().to_string()),
+    );
+    root.insert("task".to_string(), JsonValue::String(args.task.clone()));
+    root.insert(
+        "budget".to_string(),
+        args.budget
+            .map(|budget| JsonValue::Number(budget.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    root.insert(
+        "notes".to_string(),
+        args.notes
+            .clone()
+            .map(JsonValue::String)
+            .unwrap_or(JsonValue::Null),
+    );
+    root.insert(
+        "benchmark_gate_requested".to_string(),
+        JsonValue::Bool(args.benchmark_gate),
+    );
+    root.insert(
+        "model_transport".to_string(),
+        JsonValue::String(model_transport.to_string()),
+    );
+    root.insert("online_ready".to_string(), JsonValue::Bool(online_ready));
+    root.insert(
+        "allow_offline".to_string(),
+        JsonValue::Bool(args.allow_offline),
+    );
+    root.insert(
+        "rehearsal".to_string(),
+        JsonValue::Bool(args.allow_offline || !online_ready),
+    );
+    root.insert("completed".to_string(), JsonValue::Bool(completed));
+    root.insert(
+        "error".to_string(),
+        run_error.map(JsonValue::String).unwrap_or(JsonValue::Null),
+    );
+    root.insert(
+        "release_evidence_ready".to_string(),
+        JsonValue::Bool(release_evidence_ready),
+    );
+    root.insert(
+        "before".to_string(),
+        live_run_records_snapshot_json(before_records),
+    );
+    root.insert(
+        "after".to_string(),
+        live_run_records_snapshot_json(after_records),
+    );
+    root.insert(
+        "appended_records".to_string(),
+        JsonValue::Number(appended_records.len().to_string()),
+    );
+    root.insert(
+        "appended_model_backed_records".to_string(),
+        JsonValue::Number(appended_model_backed_records.to_string()),
+    );
+    root.insert(
+        "appended_external_write_fixtures".to_string(),
+        JsonValue::Number(appended_external_write_fixtures.to_string()),
+    );
+    root.insert(
+        "appended_successful_external_write_fixtures".to_string(),
+        JsonValue::Number(appended_successful_external_write_fixtures.to_string()),
+    );
+    root.insert(
+        "records".to_string(),
+        JsonValue::Array(
+            appended_records
+                .iter()
+                .map(dogfood_record_json_value)
+                .collect(),
+        ),
+    );
+    root.insert("ledger_fingerprint".to_string(), ledger_fingerprint);
+    JsonValue::Object(root)
+}
+
+fn dogfood_record_json_value(record: &DogfoodRecord) -> JsonValue {
+    parse_root_object(&record.to_json_line())
+        .map(JsonValue::Object)
+        .unwrap_or_else(|_| JsonValue::String(record.to_json_line()))
+}
+
+fn dogfood_file_fingerprint_json(path: &Path) -> JsonValue {
+    let mut root = BTreeMap::new();
+    root.insert("ok".to_string(), JsonValue::Bool(false));
+    root.insert(
+        "path".to_string(),
+        JsonValue::String(path.display().to_string()),
+    );
+    root.insert(
+        "algorithm".to_string(),
+        JsonValue::String("fnv1a64".to_string()),
+    );
+    match fs::read(path) {
+        Ok(bytes) => {
+            root.insert("ok".to_string(), JsonValue::Bool(true));
+            root.insert(
+                "bytes".to_string(),
+                JsonValue::Number(bytes.len().to_string()),
+            );
+            root.insert(
+                "fnv1a64".to_string(),
+                JsonValue::String(fnv1a64_hex(&bytes)),
+            );
+            root.insert("error".to_string(), JsonValue::Null);
+        }
+        Err(error) => {
+            root.insert("bytes".to_string(), JsonValue::Null);
+            root.insert("fnv1a64".to_string(), JsonValue::Null);
+            root.insert("error".to_string(), JsonValue::String(error.to_string()));
+        }
+    }
+    JsonValue::Object(root)
+}
+
+fn fnv1a64_hex(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn live_run_records_snapshot_json(records: &[DogfoodRecord]) -> JsonValue {
+    let live_runs = records
+        .iter()
+        .filter(|record| record_is_model_backed(record))
+        .count();
+    let live_success = records
+        .iter()
+        .filter(|record| {
+            record_is_model_backed(record) && matches!(record.outcome, DogfoodOutcome::Success)
+        })
+        .count();
+
+    let mut root = BTreeMap::new();
+    root.insert(
+        "total_records".to_string(),
+        JsonValue::Number(records.len().to_string()),
+    );
+    root.insert(
+        "live_runs".to_string(),
+        JsonValue::Number(live_runs.to_string()),
+    );
+    root.insert(
+        "live_success".to_string(),
+        JsonValue::Number(live_success.to_string()),
+    );
+    root.insert(
+        "live_success_rate".to_string(),
+        JsonValue::Number(format!("{:.1}", rate_percent(live_success, live_runs))),
+    );
+    JsonValue::Object(root)
+}
+
+fn write_live_run_evidence_summary(path: &str, summary: &JsonValue) -> AppResult<()> {
+    write_dogfood_json_artifact(path, summary, "dogfood live-run evidence summary")
+}
+
+fn write_external_fixture_evidence_summary(path: &str, summary: &JsonValue) -> AppResult<()> {
+    write_dogfood_json_artifact(path, summary, "dogfood external-fixture evidence summary")
+}
+
+fn write_dogfood_json_artifact(path: &str, value: &JsonValue, label: &str) -> AppResult<()> {
+    let path = PathBuf::from(path);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    fs::write(&path, format!("{}\n", json_value_to_string(value))).map_err(|error| {
+        app_error(format!(
+            "failed to write {label} {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn live_report_gate_command(plan: &LivePlan) -> String {
+    let report_limit = plan.target_live_runs.clamp(DEFAULT_REPORT_LIMIT, 500);
+    let mut command = format!(
+        "deepseek dogfood report --limit {} --require-live-runs {} --require-live-success-rate {}",
+        report_limit,
+        plan.target_live_runs,
+        format_percent_command_arg(plan.target_live_success_rate)
+    );
+    for category in &plan.category_plans {
+        command.push_str(" --require-live-category ");
+        command.push_str(&shell_quote(&format!(
+            "{}:{}:{}",
+            category.category,
+            category.target_runs,
+            format_percent_command_arg(category.target_success_rate)
+        )));
+    }
+    command
+}
+
+fn live_report_gate_json(plan: &LivePlan) -> JsonValue {
+    let categories = plan
+        .category_plans
+        .iter()
+        .map(|category| {
+            let mut root = BTreeMap::new();
+            root.insert(
+                "category".to_string(),
+                JsonValue::String(category.category.clone()),
+            );
+            root.insert(
+                "min_runs".to_string(),
+                JsonValue::Number(category.target_runs.to_string()),
+            );
+            root.insert(
+                "min_success_rate".to_string(),
+                JsonValue::Number(format!("{:.1}", category.target_success_rate)),
+            );
+            JsonValue::Object(root)
+        })
+        .collect::<Vec<_>>();
+
+    let mut root = BTreeMap::new();
+    root.insert(
+        "require_live_runs".to_string(),
+        JsonValue::Number(plan.target_live_runs.to_string()),
+    );
+    root.insert(
+        "require_live_success_rate".to_string(),
+        JsonValue::Number(format!("{:.1}", plan.target_live_success_rate)),
+    );
+    root.insert(
+        "require_live_categories".to_string(),
+        JsonValue::Array(categories),
+    );
+    root.insert(
+        "command".to_string(),
+        JsonValue::String(live_report_gate_command(plan)),
+    );
+    JsonValue::Object(root)
+}
+
+fn format_percent_command_arg(value: f64) -> String {
+    if (value.fract()).abs() < f64::EPSILON {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    }
 }
 
 fn shell_quote(value: &str) -> String {
@@ -2887,6 +4684,19 @@ mod tests {
     }
 
     #[test]
+    fn external_fixture_requires_online_transport_unless_rehearsal() {
+        let error =
+            super::validate_external_fixture_model_transport(MODEL_TRANSPORT_OFFLINE, false)
+                .unwrap_err();
+        assert!(error.to_string().contains("requires online model-backed"));
+
+        super::validate_external_fixture_model_transport(MODEL_TRANSPORT_OFFLINE, true)
+            .expect("explicit offline rehearsal should pass");
+        super::validate_external_fixture_model_transport(MODEL_TRANSPORT_ONLINE, false)
+            .expect("online model-backed transport should pass");
+    }
+
+    #[test]
     fn external_fixture_notes_are_marked_for_reports() {
         assert_eq!(
             super::external_fixture_notes(Some("release evidence")),
@@ -3313,6 +5123,16 @@ mod tests {
         assert!(text.contains("write_validate: live 1/2"));
         assert!(text.contains("replayable_unique 1; recommended_now 1"));
         assert!(text.contains("fixture-write-validate-rust-mini"));
+        assert!(text.contains(
+            "dry_run: deepseek dogfood live-run --manifest .dscode/benchmarks.txt --category write_validate --limit 1"
+        ));
+        assert!(text.contains(
+            "execute: deepseek dogfood live-run --manifest .dscode/benchmarks.txt --category write_validate --limit 1 --execute"
+        ));
+        assert!(text.contains(
+            "post_run_report_gate: deepseek dogfood report --limit 20 --require-live-runs 4 --require-live-success-rate 90 --require-live-category write_validate:2:90 --require-live-category recovery:1:90"
+        ));
+        assert!(!text.contains("dogfood replay-benchmark"));
         assert!(!text.contains("seeded-write-validate,"));
         assert!(text.contains("recovery: live 0/1"));
     }
@@ -3353,6 +5173,354 @@ mod tests {
         assert!(json.contains("\"overall_needed_runs\":1"));
         assert!(json.contains("\"category\":\"pr_workflow\""));
         assert!(json.contains("\"recommended_cases\":[\"fixture-pr-retry-validate-rust-mini\"]"));
+        assert!(json.contains(
+            "\"live_run_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --category pr_workflow --limit 1\""
+        ));
+        assert!(json.contains(
+            "\"live_run_execute_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --category pr_workflow --limit 1 --execute\""
+        ));
+        assert!(json.contains(
+            "\"post_run_report_command\":\"deepseek dogfood report --limit 20 --require-live-runs 1 --require-live-success-rate 90 --require-live-category pr_workflow:1:90\""
+        ));
+        assert!(json.contains("\"require_live_runs\":1"));
+        assert!(json.contains("\"require_live_categories\":[{\"category\":\"pr_workflow\",\"min_runs\":1,\"min_success_rate\":90.0}]"));
+    }
+
+    #[test]
+    fn live_run_plan_json_is_machine_readable_dry_run() {
+        let plan = LivePlan {
+            ledger_path: PathBuf::from(".dscode/dogfood/ledger.jsonl"),
+            manifest_path: PathBuf::from(".dscode/benchmarks.txt"),
+            model_transport: MODEL_TRANSPORT_OFFLINE.to_string(),
+            target_live_runs: 100,
+            target_live_success_rate: 90.0,
+            live_runs: 20,
+            live_success: 19,
+            category_plans: vec![LiveCategoryPlan {
+                category: "write_validate".to_string(),
+                target_runs: 25,
+                target_success_rate: 90.0,
+                live_runs: 3,
+                live_success: 3,
+                needed_runs: 22,
+                replayable_cases: vec!["write-1".to_string(), "write-2".to_string()],
+                recommended_cases: vec!["write-1".to_string(), "write-2".to_string()],
+            }],
+        };
+        let requested = vec!["write_validate".to_string()];
+        let selected = select_live_run_cases(&plan, &requested, 1);
+        let json = render_live_run_plan_json(&plan, &requested, 1, &selected, None, None);
+
+        assert!(json.contains("\"kind\":\"deepseek.dogfood.live_run_plan.v1\""));
+        assert!(json.contains("\"model_transport\":\"offline\""));
+        assert!(json.contains("\"online_ready\":false"));
+        assert!(json.contains("\"execute_ready\":false"));
+        assert!(json.contains("\"selected_count\":1"));
+        assert!(json.contains(
+            "\"selected_cases\":[{\"category\":\"write_validate\",\"name\":\"write-1\"}]"
+        ));
+        assert!(json.contains(
+            "\"dry_run_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --category write_validate --limit 1 --json\""
+        ));
+        assert!(json.contains(
+            "\"execute_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --category write_validate --limit 1 --execute\""
+        ));
+        assert!(json.contains(
+            "\"post_run_report_command\":\"deepseek dogfood report --limit 100 --require-live-runs 100 --require-live-success-rate 90 --require-live-category write_validate:25:90\""
+        ));
+        assert!(json.contains("\"evidence_gate\":{\"command\":\"deepseek dogfood report --limit 100 --require-live-runs 100 --require-live-success-rate 90 --require-live-category write_validate:25:90\""));
+        assert!(json.contains("dogfood live-run --execute requires an online model transport"));
+    }
+
+    #[test]
+    fn live_run_plan_json_preserves_api_key_file_without_secret_value() {
+        let plan = LivePlan {
+            ledger_path: PathBuf::from(".dscode/dogfood/ledger.jsonl"),
+            manifest_path: PathBuf::from(".dscode/benchmarks.txt"),
+            model_transport: MODEL_TRANSPORT_ONLINE.to_string(),
+            target_live_runs: 100,
+            target_live_success_rate: 90.0,
+            live_runs: 20,
+            live_success: 19,
+            category_plans: vec![LiveCategoryPlan {
+                category: "write_validate".to_string(),
+                target_runs: 25,
+                target_success_rate: 90.0,
+                live_runs: 3,
+                live_success: 3,
+                needed_runs: 22,
+                replayable_cases: vec!["write-1".to_string()],
+                recommended_cases: vec!["write-1".to_string()],
+            }],
+        };
+        let requested = vec!["write_validate".to_string()];
+        let selected = select_live_run_cases(&plan, &requested, 1);
+        let api_key_file = "/tmp/deepseek dogfood.key";
+        let evidence_out = "/tmp/deepseek live evidence.json";
+        let secret = "sk-dogfood-secret-value";
+        let json = render_live_run_plan_json(
+            &plan,
+            &requested,
+            1,
+            &selected,
+            Some(api_key_file),
+            Some(evidence_out),
+        );
+
+        assert!(json.contains("\"credential_source\":\"api_key_file\""));
+        assert!(json.contains("\"api_key_file\":\"/tmp/deepseek dogfood.key\""));
+        assert!(json.contains("\"evidence_out\":\"/tmp/deepseek live evidence.json\""));
+        assert!(json.contains(
+            "\"dry_run_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --api-key-file '/tmp/deepseek dogfood.key' --evidence-out '/tmp/deepseek live evidence.json' --category write_validate --limit 1 --json\""
+        ));
+        assert!(json.contains(
+            "\"execute_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --api-key-file '/tmp/deepseek dogfood.key' --evidence-out '/tmp/deepseek live evidence.json' --category write_validate --limit 1 --execute\""
+        ));
+        assert!(json.contains(
+            "\"post_run_report_command\":\"deepseek dogfood report --limit 100 --require-live-runs 100 --require-live-success-rate 90 --require-live-category write_validate:25:90\""
+        ));
+        assert!(!json.contains(secret));
+    }
+
+    #[test]
+    fn live_run_evidence_summary_records_batch_delta_without_secret_value() {
+        let root = temp_test_dir("live-evidence-summary");
+        let ledger = root.join("ledger.jsonl");
+        let mut before_record = test_record(10, "write_validate", DogfoodOutcome::Success);
+        before_record.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
+        let mut appended_record = test_record(11, "write_validate", DogfoodOutcome::Success);
+        appended_record.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
+        appended_record.duration_ms = 42;
+        let before_records = vec![before_record];
+        let after_records = vec![before_records[0].clone(), appended_record.clone()];
+        append_record(&ledger, &after_records[0]).unwrap();
+        append_record(&ledger, &after_records[1]).unwrap();
+        let plan = LivePlan {
+            ledger_path: ledger.clone(),
+            manifest_path: PathBuf::from(".dscode/benchmarks.txt"),
+            model_transport: MODEL_TRANSPORT_ONLINE.to_string(),
+            target_live_runs: 2,
+            target_live_success_rate: 90.0,
+            live_runs: 1,
+            live_success: 1,
+            category_plans: vec![LiveCategoryPlan {
+                category: "write_validate".to_string(),
+                target_runs: 2,
+                target_success_rate: 90.0,
+                live_runs: 1,
+                live_success: 1,
+                needed_runs: 1,
+                replayable_cases: vec!["write-1".to_string()],
+                recommended_cases: vec!["write-1".to_string()],
+            }],
+        };
+        let selected = vec![LiveRunCase {
+            category: "write_validate".to_string(),
+            name: "write-1".to_string(),
+        }];
+        let api_key_file = "/tmp/deepseek dogfood.key";
+        let evidence_out = "/tmp/deepseek-live-evidence.json";
+        let secret = "sk-dogfood-secret-value";
+        let case_evidence = vec![live_run_case_evidence_json(
+            &selected[0],
+            &[appended_record],
+            None,
+        )];
+        let summary = live_run_evidence_summary_json(
+            &plan,
+            &["write_validate".to_string()],
+            1,
+            &selected,
+            &case_evidence,
+            &before_records,
+            &after_records,
+            Some(api_key_file),
+            Some(evidence_out),
+            true,
+            dogfood_file_fingerprint_json(&ledger),
+            None,
+            None,
+        );
+        let json = json_value_to_string(&summary);
+
+        assert!(json.contains("\"kind\":\"deepseek.dogfood.live_run_evidence.v1\""));
+        assert!(json.contains("\"credential_source\":\"api_key_file\""));
+        assert!(json.contains("\"evidence_out\":\"/tmp/deepseek-live-evidence.json\""));
+        assert!(json.contains("\"before\":{\"live_runs\":1"));
+        assert!(json.contains("\"after\":{\"live_runs\":2"));
+        assert!(json.contains("\"appended_records\":1"));
+        assert!(json.contains("\"appended_model_backed_records\":1"));
+        assert!(json.contains("\"cases\":[{\"benchmark_category\":\"write_validate\""));
+        assert!(json.contains("\"ledger_fingerprint\":{\"algorithm\":\"fnv1a64\""));
+        assert!(json.contains("\"model_backed\":true"));
+        assert!(
+            json.contains("\"benchmark_gate\":{\"error\":null,\"passed\":true,\"requested\":true}")
+        );
+        assert!(json.contains("\"post_run_report_command\":\"deepseek dogfood report --limit 20 --require-live-runs 2 --require-live-success-rate 90 --require-live-category write_validate:2:90\""));
+        assert!(!json.contains(secret));
+
+        let root_json = parse_root_object(&json).unwrap();
+        let verify_args = DogfoodLiveEvidenceArgs {
+            file: Some(evidence_out.to_string()),
+            require_benchmark_gate: true,
+            ..DogfoodLiveEvidenceArgs::default()
+        };
+        let failures = live_evidence_failures(&root_json, &verify_args);
+        assert!(failures.is_empty(), "{failures:?}");
+        let report_gate_failures = live_evidence_report_gate_failures(&root_json).unwrap();
+        assert!(report_gate_failures.is_empty(), "{report_gate_failures:?}");
+        let mut tampered_root = root_json.clone();
+        if let Some(JsonValue::Array(cases)) = tampered_root.get_mut("cases") {
+            if let Some(JsonValue::Object(case)) = cases.first_mut() {
+                case.insert(
+                    "timestamp_secs".to_string(),
+                    JsonValue::Number("999999".to_string()),
+                );
+            }
+        }
+        let tampered_failures = live_evidence_report_gate_failures(&tampered_root).unwrap();
+        assert!(tampered_failures
+            .iter()
+            .any(|failure| failure.contains("was not found in ledger")));
+        let mut tampered_fingerprint_root = root_json.clone();
+        if let Some(JsonValue::Object(fingerprint)) =
+            tampered_fingerprint_root.get_mut("ledger_fingerprint")
+        {
+            fingerprint.insert(
+                "fnv1a64".to_string(),
+                JsonValue::String("0000000000000000".to_string()),
+            );
+        }
+        let tampered_fingerprint_failures =
+            live_evidence_report_gate_failures(&tampered_fingerprint_root).unwrap();
+        assert!(tampered_fingerprint_failures
+            .iter()
+            .any(|failure| failure.contains("fnv1a64 mismatch")));
+        let verification = json_value_to_string(&live_evidence_verification_json(
+            evidence_out,
+            &root_json,
+            &failures,
+            true,
+            &report_gate_failures,
+        ));
+        assert!(
+            verification.contains("\"kind\":\"deepseek.dogfood.live_evidence_verification.v1\"")
+        );
+        assert!(verification.contains("\"ok\":true"));
+        assert!(verification.contains("\"report_gate_passed\":true"));
+        assert!(verification.contains("\"current_ledger_fingerprint\":{\"algorithm\":\"fnv1a64\""));
+
+        let mut strict_args = DogfoodLiveEvidenceArgs::default();
+        strict_args.require_appended_model_backed = Some(2);
+        let failures = live_evidence_failures(&root_json, &strict_args);
+        assert!(failures
+            .iter()
+            .any(|failure| failure.contains("below required 2")));
+
+        let out = root.join("nested/evidence.json");
+        write_live_run_evidence_summary(out.to_str().expect("utf8"), &summary).unwrap();
+        let written = fs::read_to_string(&out).unwrap();
+        assert!(written.contains("\"deepseek.dogfood.live_run_evidence.v1\""));
+        let verification_out = root.join("nested/verification.json");
+        live_evidence_command(DogfoodLiveEvidenceArgs {
+            file: Some(out.display().to_string()),
+            out: Some(verification_out.display().to_string()),
+            require_benchmark_gate: true,
+            require_report_gate: true,
+            ..DogfoodLiveEvidenceArgs::default()
+        })
+        .unwrap();
+        let verification_written = fs::read_to_string(&verification_out).unwrap();
+        assert!(verification_written.contains("\"deepseek.dogfood.live_evidence_verification.v1\""));
+        assert!(verification_written.contains("\"report_gate_passed\":true"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn external_fixture_evidence_summary_records_release_ready_row() {
+        let root = temp_test_dir("external-fixture-evidence-summary");
+        let ledger = root.join("ledger.jsonl");
+        let mut before_record = test_record(20, "write_validate", DogfoodOutcome::Success);
+        before_record.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
+        let mut external_record = test_record(21, "write_validate", DogfoodOutcome::Success);
+        external_record.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
+        external_record.notes = Some("external-write-fixture; disposable repo".to_string());
+        append_record(&ledger, &before_record).unwrap();
+        append_record(&ledger, &external_record).unwrap();
+        let before_records = vec![before_record];
+        let after_records = vec![before_records[0].clone(), external_record];
+        let args = DogfoodExternalFixtureArgs {
+            task: "replace `a - b` with `a + b` in src/lib.rs and validate with cargo test"
+                .to_string(),
+            workdir: "/tmp/disposable-repo".to_string(),
+            budget: Some(12),
+            benchmark_gate: true,
+            evidence_out: Some("/tmp/external-fixture-evidence.json".to_string()),
+            notes: Some("disposable repo".to_string()),
+            dry_run: false,
+            allow_offline: false,
+        };
+
+        let summary = external_fixture_evidence_summary_json(
+            Path::new("/tmp/disposable-repo"),
+            &ledger,
+            &root.join("latest.md"),
+            &args,
+            MODEL_TRANSPORT_ONLINE,
+            &before_records,
+            &after_records,
+            dogfood_file_fingerprint_json(&ledger),
+            None,
+        );
+        let json = json_value_to_string(&summary);
+
+        assert!(json.contains("\"kind\":\"deepseek.dogfood.external_fixture_evidence.v1\""));
+        assert!(json.contains("\"release_evidence_ready\":true"));
+        assert!(json.contains("\"appended_records\":1"));
+        assert!(json.contains("\"appended_model_backed_records\":1"));
+        assert!(json.contains("\"appended_external_write_fixtures\":1"));
+        assert!(json.contains("\"appended_successful_external_write_fixtures\":1"));
+        assert!(json.contains("\"ledger_fingerprint\":{\"algorithm\":\"fnv1a64\""));
+        assert!(json.contains("\"records\":[{\"benchmark_category\":\"write_validate\""));
+
+        let out = root.join("external/evidence.json");
+        write_external_fixture_evidence_summary(out.to_str().expect("utf8"), &summary).unwrap();
+        let written = fs::read_to_string(&out).unwrap();
+        assert!(written.contains("\"deepseek.dogfood.external_fixture_evidence.v1\""));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_run_api_key_file_sets_and_restores_env() {
+        let root = temp_test_dir("api-key-file");
+        fs::create_dir_all(&root).unwrap();
+        let key_path = root.join("deepseek.key");
+        fs::write(&key_path, "secret-from-file\n").unwrap();
+        let env_name = format!(
+            "DSCODE_DOGFOOD_KEY_FILE_TEST_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let mut config = crate::config::types::AppConfig::default();
+        config.model.api_key_env = env_name.clone();
+        unsafe {
+            env::set_var(&env_name, "previous-value");
+        }
+
+        {
+            let _guard =
+                load_live_run_api_key_file(&config, key_path.to_str().expect("utf8")).unwrap();
+            assert_eq!(env::var(&env_name).unwrap(), "secret-from-file");
+        }
+
+        assert_eq!(env::var(&env_name).unwrap(), "previous-value");
+        unsafe {
+            env::remove_var(&env_name);
+        }
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

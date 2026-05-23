@@ -1,10 +1,16 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
+use std::net::Shutdown;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -36,6 +42,8 @@ use crate::model::protocol::{ModelAction, ModelRequest, ObservationStatus};
 use crate::tools::dispatch_subagent::{
     active_agent_thread_path, agent_threads_dir, thread_file_path, validate_thread_id,
 };
+#[cfg(all(unix, target_os = "linux"))]
+use crate::tools::exec_shell::lease_native_supervisor_pty_master_fd;
 use crate::tools::exec_shell::{
     count_active_durable_shell_jobs, native_supervisor_pty_supported, ExecShellAttachTool,
     ExecShellCancelTool, ExecShellInteractTool, ExecShellListTool, ExecShellReplayTool,
@@ -78,6 +86,8 @@ pub fn run(action: AgentsAction) -> AppResult<()> {
         AgentsAction::Service(args) => render_agent_services(args),
         AgentsAction::ServiceDoctor(args) => run_service_doctor(args),
         AgentsAction::ServiceSmoke(args) => run_service_smoke(args),
+        AgentsAction::ShellFixtureSmoke { json } => run_shell_fixture_smoke(json),
+        AgentsAction::SubagentFixtureSmoke { json } => run_subagent_fixture_smoke(json),
         AgentsAction::Threads => list_threads(&config.workspace.config_dir),
         AgentsAction::ShowThread { id } => show_thread(&config.workspace.config_dir, &id),
         AgentsAction::SwitchThread { id } => switch_thread(&config.workspace.config_dir, &id),
@@ -87,10 +97,16 @@ pub fn run(action: AgentsAction) -> AppResult<()> {
 }
 
 fn run_shell_control(args: AgentsShellArgs) -> AppResult<()> {
+    if agents_shell_fd_proxy_requested(&args) {
+        return run_shell_fd_proxy(args);
+    }
+    if agents_shell_byte_stream_requested(&args) {
+        return run_shell_byte_stream(args);
+    }
     if agents_shell_attach_interactive_requested(&args) {
         return run_shell_attach_interactive(args);
     }
-    if agents_shell_attach_follow_requested(&args) {
+    if agents_shell_attach_follow_requested(&args) || agents_shell_attach_raw_requested(&args) {
         return run_shell_attach_follow(args);
     }
     let cwd = std::env::current_dir()?;
@@ -113,6 +129,18 @@ fn agents_shell_attach_follow_requested(args: &AgentsShellArgs) -> bool {
     matches!(&args.action, AgentsShellAction::Attach { follow: true, .. })
 }
 
+fn agents_shell_attach_raw_requested(args: &AgentsShellArgs) -> bool {
+    matches!(&args.action, AgentsShellAction::Attach { raw: true, .. })
+}
+
+fn agents_shell_byte_stream_requested(args: &AgentsShellArgs) -> bool {
+    matches!(&args.action, AgentsShellAction::ByteStream { .. })
+}
+
+fn agents_shell_fd_proxy_requested(args: &AgentsShellArgs) -> bool {
+    matches!(&args.action, AgentsShellAction::FdProxy { .. })
+}
+
 fn run_shell_attach_interactive(args: AgentsShellArgs) -> AppResult<()> {
     if args.json {
         return Err(app_error(
@@ -127,6 +155,7 @@ fn run_shell_attach_interactive(args: AgentsShellArgs) -> AppResult<()> {
         tail,
         follow: _,
         interactive: _,
+        raw,
         poll_ms,
         max_ms,
     } = args.action
@@ -135,6 +164,11 @@ fn run_shell_attach_interactive(args: AgentsShellArgs) -> AppResult<()> {
             "agents shell attach --interactive requires attach action",
         ));
     };
+    if raw {
+        return Err(app_error(
+            "agents shell attach --interactive cannot be combined with --raw",
+        ));
+    }
     let cwd = std::env::current_dir()?;
     let limit_bytes = limit_bytes.unwrap_or(16 * 1024);
     let poll_delay = Duration::from_millis(poll_ms.unwrap_or(50).clamp(10, 1000));
@@ -146,8 +180,17 @@ fn run_shell_attach_interactive(args: AgentsShellArgs) -> AppResult<()> {
     let _raw = ShellRawModeGuard::enter()?;
 
     let _ = shell_attach_interactive_resize_to_terminal(&cwd, &task_id);
+    #[cfg(debug_assertions)]
+    {
+        // Debug-only hook for the PTY integration smoke; no user-facing flag depends on it.
+        if let Ok(input) = std::env::var("DSCODE_TEST_AGENTS_SHELL_ATTACH_INTERACTIVE_INPUT") {
+            if !input.is_empty() {
+                shell_attach_interactive_send_stdin(&cwd, &task_id, &input)?;
+            }
+        }
+    }
     loop {
-        while event::poll(Duration::from_millis(0))? {
+        while event::poll(Duration::from_millis(1))? {
             match event::read()? {
                 Event::Key(key) if shell_attach_interactive_is_detach_key(key) => {
                     return Ok(());
@@ -214,13 +257,17 @@ fn shell_attach_interactive_poll_stdout(
     tail: bool,
 ) -> AppResult<(u64, String, bool)> {
     let request_args = AgentsShellArgs {
-        action: AgentsShellAction::Replay {
+        action: AgentsShellAction::Attach {
             task_id: task_id.to_string(),
-            stream: Some("stdout".to_string()),
-            cursor: None,
-            offset: Some(offset),
+            cursor: Some(offset),
+            wait_ms: Some(0),
             limit_bytes: Some(limit_bytes),
             tail,
+            follow: false,
+            interactive: false,
+            raw: false,
+            poll_ms: None,
+            max_ms: None,
         },
         json: false,
     };
@@ -240,21 +287,17 @@ fn shell_attach_interactive_poll_stdout(
         return Err(app_error(error.to_string()));
     }
     let summary = object
-        .get("replay_summary")
+        .get("attach_summary")
         .and_then(json_as_string)
-        .ok_or_else(|| app_error("shell supervisor replay response missing replay_summary"))?;
-    if let Some(payload) = shell_summary_section_payload(summary, "data") {
-        let mut stdout = std::io::stdout();
-        stdout.write_all(payload.as_bytes())?;
-        stdout.flush()?;
-    }
-    let next_offset = shell_summary_value(summary, "next_offset")
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(offset);
+        .ok_or_else(|| app_error("shell supervisor attach response missing attach_summary"))?;
+    let mut stdout = std::io::stdout();
+    let wrote =
+        shell_attach_write_response_terminal_payload(object, summary, &mut stdout, false, false)?;
+    let next_offset = shell_attach_summary_next_cursor(summary).unwrap_or(offset);
     let status = shell_summary_value(summary, "status")
         .unwrap_or("unknown")
         .to_string();
-    Ok((next_offset, status, next_offset > offset))
+    Ok((next_offset, status, wrote || next_offset > offset))
 }
 
 fn shell_attach_interactive_send_stdin(cwd: &Path, task_id: &str, input: &str) -> AppResult<()> {
@@ -385,8 +428,9 @@ fn run_shell_attach_follow(args: AgentsShellArgs) -> AppResult<()> {
         wait_ms,
         limit_bytes,
         tail,
-        follow: _,
+        follow,
         interactive: _,
+        raw,
         poll_ms,
         max_ms,
     } = args.action
@@ -395,8 +439,31 @@ fn run_shell_attach_follow(args: AgentsShellArgs) -> AppResult<()> {
             "agents shell attach --follow requires attach action",
         ));
     };
+    if args.json && raw {
+        return Err(app_error(
+            "agents shell attach --raw cannot be combined with --json",
+        ));
+    }
     let cwd = std::env::current_dir()?;
-    let per_request_wait_ms = wait_ms.or(Some(1000));
+    if follow {
+        return run_shell_attach_stream_follow(ShellAttachStreamFollow {
+            cwd: &cwd,
+            task_id: &task_id,
+            cursor,
+            wait_ms,
+            limit_bytes,
+            tail,
+            raw,
+            poll_ms,
+            max_ms,
+            json: args.json,
+        });
+    }
+    let per_request_wait_ms = if follow {
+        wait_ms.or(Some(1000))
+    } else {
+        wait_ms
+    };
     let poll_delay = Duration::from_millis(poll_ms.unwrap_or(100).min(5000));
     let max_duration = max_ms.map(Duration::from_millis);
     let started = Instant::now();
@@ -413,6 +480,7 @@ fn run_shell_attach_follow(args: AgentsShellArgs) -> AppResult<()> {
                 tail: tail && first_request,
                 follow: false,
                 interactive: false,
+                raw: false,
                 poll_ms: None,
                 max_ms: None,
             },
@@ -441,12 +509,15 @@ fn run_shell_attach_follow(args: AgentsShellArgs) -> AppResult<()> {
             .and_then(json_as_string)
             .ok_or_else(|| app_error("shell supervisor attach response missing attach_summary"))?;
         if !args.json {
-            print_shell_attach_follow_payload(summary)?;
+            print_shell_attach_follow_payload(object, summary, raw)?;
         }
         let next_cursor = shell_attach_summary_next_cursor(summary).unwrap_or(current_cursor);
         let advanced = next_cursor > current_cursor;
         current_cursor = next_cursor;
         first_request = false;
+        if !follow {
+            break;
+        }
         let job_status = shell_summary_value(summary, "status").unwrap_or("unknown");
         if job_status != "running" {
             break;
@@ -461,14 +532,640 @@ fn run_shell_attach_follow(args: AgentsShellArgs) -> AppResult<()> {
     Ok(())
 }
 
-fn print_shell_attach_follow_payload(summary: &str) -> AppResult<()> {
-    let Some(payload) = shell_attach_summary_terminal_payload(summary) else {
-        return Ok(());
-    };
-    let mut stdout = std::io::stdout();
-    stdout.write_all(payload.as_bytes())?;
-    stdout.write_all(b"\n")?;
+struct ShellAttachStreamFollow<'a> {
+    cwd: &'a Path,
+    task_id: &'a str,
+    cursor: Option<u64>,
+    wait_ms: Option<u64>,
+    limit_bytes: Option<u64>,
+    tail: bool,
+    raw: bool,
+    poll_ms: Option<u64>,
+    max_ms: Option<u64>,
+    json: bool,
+}
+
+fn run_shell_attach_stream_follow(args: ShellAttachStreamFollow<'_>) -> AppResult<()> {
+    let request = shell_attach_stream_request_json(&args);
+    let mut reader = open_shell_supervisor_cli_stream(args.cwd, &request)?;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            break;
+        }
+        let value = parse_json_value(line.trim())?;
+        let object = json_as_object(&value)
+            .ok_or_else(|| app_error("shell supervisor stream response must be a JSON object"))?;
+        let status = object
+            .get("status")
+            .and_then(json_as_string)
+            .unwrap_or("unknown");
+        if status == "error" || status == "unsupported" {
+            let error = object
+                .get("error")
+                .and_then(json_as_string)
+                .unwrap_or("shell supervisor attach stream failed");
+            return Err(app_error(error.to_string()));
+        }
+        if args.json {
+            println!("{}", json_value_to_string(&value));
+        } else if let Some(summary) = object.get("attach_summary").and_then(json_as_string) {
+            print_shell_attach_follow_payload(object, summary, args.raw)?;
+        }
+        if matches!(object.get("stream_done"), Some(JsonValue::Bool(true))) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn run_shell_byte_stream(args: AgentsShellArgs) -> AppResult<()> {
+    if agents_shell_byte_stream_raw_proxy_requested(&args) {
+        if args.json {
+            return Err(app_error(
+                "agents shell byte-stream --raw-proxy cannot be combined with --json",
+            ));
+        }
+        return run_shell_byte_stream_raw_proxy(args);
+    }
+    let cwd = std::env::current_dir()?;
+    let request = agents_shell_request_json(&args);
+    let mut reader = open_shell_supervisor_cli_stream(&cwd, &request)?;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            break;
+        }
+        let value = parse_json_value(line.trim())?;
+        let object = json_as_object(&value).ok_or_else(|| {
+            app_error("shell supervisor byte stream response must be a JSON object")
+        })?;
+        let status = object
+            .get("status")
+            .and_then(json_as_string)
+            .unwrap_or("unknown");
+        if status == "error" || status == "unsupported" {
+            let error = object
+                .get("error")
+                .and_then(json_as_string)
+                .unwrap_or("shell supervisor byte stream failed");
+            return Err(app_error(error.to_string()));
+        }
+        if args.json {
+            println!("{}", json_value_to_string(&value));
+        } else if let Some(summary) = object.get("attach_summary").and_then(json_as_string) {
+            let mut stdout = std::io::stdout();
+            let _ = shell_attach_write_response_terminal_payload(
+                object,
+                summary,
+                &mut stdout,
+                false,
+                true,
+            )?;
+        }
+        if matches!(object.get("stream_done"), Some(JsonValue::Bool(true))) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn agents_shell_byte_stream_raw_proxy_requested(args: &AgentsShellArgs) -> bool {
+    matches!(
+        &args.action,
+        AgentsShellAction::ByteStream {
+            raw_proxy: true,
+            ..
+        }
+    )
+}
+
+#[cfg(unix)]
+fn agents_shell_byte_stream_terminal_proxy_requested(args: &AgentsShellArgs) -> bool {
+    matches!(
+        &args.action,
+        AgentsShellAction::ByteStream {
+            terminal_proxy: true,
+            ..
+        }
+    )
+}
+
+#[cfg(unix)]
+fn run_shell_byte_stream_raw_proxy(args: AgentsShellArgs) -> AppResult<()> {
+    if agents_shell_byte_stream_terminal_proxy_requested(&args) {
+        return run_shell_byte_stream_terminal_proxy(args);
+    }
+    let cwd = std::env::current_dir()?;
+    let request = agents_shell_request_json(&args);
+    let stream = open_shell_supervisor_cli_raw_stream(&cwd, &request)?;
+    let mut reader = stream.try_clone()?;
+    let mut writer = stream;
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let _ = std::io::copy(&mut stdin, &mut writer);
+    });
+    let mut stdout = std::io::stdout().lock();
+    std::io::copy(&mut reader, &mut stdout)?;
     stdout.flush()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn run_shell_byte_stream_terminal_proxy(args: AgentsShellArgs) -> AppResult<()> {
+    let cwd = std::env::current_dir()?;
+    let (task_id, proxy_args) = shell_byte_stream_terminal_proxy_args(args)?;
+    let request = agents_shell_request_json(&proxy_args);
+    let stream = open_shell_supervisor_cli_raw_stream(&cwd, &request)?;
+    let mut reader = stream.try_clone()?;
+    let writer = stream;
+    eprintln!("proxied to {task_id}; detach with Ctrl-]");
+    let _raw = ShellRawModeGuard::enter()?;
+    let done = Arc::new(AtomicBool::new(false));
+
+    #[cfg(debug_assertions)]
+    if let Ok(input) = std::env::var("DSCODE_TEST_AGENTS_SHELL_PROXY_INPUT") {
+        let mut writer = writer;
+        if !input.is_empty() {
+            writer.write_all(input.as_bytes())?;
+            writer.flush()?;
+        }
+        let _ = writer.shutdown(Shutdown::Write);
+        let mut stdout = std::io::stdout().lock();
+        std::io::copy(&mut reader, &mut stdout)?;
+        stdout.flush()?;
+        done.store(true, Ordering::Relaxed);
+        return Ok(());
+    }
+
+    let input_done = Arc::clone(&done);
+    let input_cwd = cwd.clone();
+    let input_task_id = task_id.clone();
+    let input_handle = std::thread::spawn(move || {
+        shell_byte_stream_terminal_proxy_input_loop(writer, input_cwd, input_task_id, input_done)
+    });
+
+    let mut stdout = std::io::stdout().lock();
+    let copy_result = std::io::copy(&mut reader, &mut stdout);
+    done.store(true, Ordering::Relaxed);
+    let _ = input_handle.join();
+    copy_result?;
+    stdout.flush()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn shell_byte_stream_terminal_proxy_args(
+    args: AgentsShellArgs,
+) -> AppResult<(String, AgentsShellArgs)> {
+    let AgentsShellArgs { action, json } = args;
+    let AgentsShellAction::ByteStream {
+        task_id,
+        cursor,
+        wait_ms,
+        limit_bytes,
+        tail,
+        input,
+        close_stdin,
+        mut tty_rows,
+        mut tty_cols,
+        poll_ms,
+        max_ms,
+        max_events,
+        raw_proxy,
+        terminal_proxy,
+    } = action
+    else {
+        return Err(app_error("agents shell proxy requires byte-stream action"));
+    };
+    if tty_rows.is_none() && tty_cols.is_none() {
+        if let Ok((cols, rows)) = crossterm::terminal::size() {
+            tty_rows = Some(u64::from(rows));
+            tty_cols = Some(u64::from(cols));
+        }
+    }
+    let max_ms = max_ms.or(Some(300_000));
+    let task_id_for_return = task_id.clone();
+    Ok((
+        task_id_for_return,
+        AgentsShellArgs {
+            action: AgentsShellAction::ByteStream {
+                task_id,
+                cursor,
+                wait_ms,
+                limit_bytes,
+                tail,
+                input,
+                close_stdin,
+                tty_rows,
+                tty_cols,
+                poll_ms,
+                max_ms,
+                max_events,
+                raw_proxy,
+                terminal_proxy,
+            },
+            json,
+        },
+    ))
+}
+
+#[cfg(unix)]
+fn shell_byte_stream_terminal_proxy_input_loop(
+    mut writer: std::os::unix::net::UnixStream,
+    cwd: PathBuf,
+    task_id: String,
+    done: Arc<AtomicBool>,
+) {
+    while !done.load(Ordering::Relaxed) {
+        match event::poll(Duration::from_millis(10)) {
+            Ok(true) => match event::read() {
+                Ok(Event::Key(key)) if shell_attach_interactive_is_detach_key(key) => {
+                    done.store(true, Ordering::Relaxed);
+                    let _ = writer.shutdown(Shutdown::Both);
+                    break;
+                }
+                Ok(Event::Key(key)) => {
+                    if let Some(input) = shell_attach_interactive_key_input(key) {
+                        if writer.write_all(input.as_bytes()).is_err() {
+                            done.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                        let _ = writer.flush();
+                    }
+                }
+                Ok(Event::Resize(cols, rows)) => {
+                    let _ = shell_attach_interactive_send_resize(&cwd, &task_id, rows, cols);
+                }
+                Ok(Event::Paste(input)) => {
+                    if !input.is_empty() && writer.write_all(input.as_bytes()).is_err() {
+                        done.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    let _ = writer.flush();
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    done.store(true, Ordering::Relaxed);
+                    break;
+                }
+            },
+            Ok(false) => {}
+            Err(_) => {
+                done.store(true, Ordering::Relaxed);
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn run_shell_byte_stream_raw_proxy(_args: AgentsShellArgs) -> AppResult<()> {
+    Err(app_error(
+        "agents shell byte-stream --raw-proxy currently requires the Unix shell supervisor socket",
+    ))
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn run_shell_fd_proxy(args: AgentsShellArgs) -> AppResult<()> {
+    if args.json {
+        return Err(app_error(
+            "agents shell fd-proxy cannot be combined with --json because it receives a PTY fd",
+        ));
+    }
+    let AgentsShellAction::FdProxy {
+        task_id,
+        mut tty_rows,
+        mut tty_cols,
+        max_ms,
+    } = args.action
+    else {
+        return Err(app_error("agents shell fd-proxy requires fd-proxy action"));
+    };
+    if tty_rows.is_none() && tty_cols.is_none() {
+        if let Ok((cols, rows)) = crossterm::terminal::size() {
+            tty_rows = Some(u64::from(rows));
+            tty_cols = Some(u64::from(cols));
+        }
+    }
+    let cwd = std::env::current_dir()?;
+    let request = agents_shell_request_json(&AgentsShellArgs {
+        action: AgentsShellAction::FdProxy {
+            task_id: task_id.clone(),
+            tty_rows,
+            tty_cols,
+            max_ms,
+        },
+        json: false,
+    });
+    let mut control = open_shell_supervisor_cli_raw_stream(&cwd, &request)?;
+    let response_line = read_shell_supervisor_request_line(&mut control)?;
+    let response = parse_json_value(response_line.trim())?;
+    let object = json_as_object(&response)
+        .ok_or_else(|| app_error("shell supervisor pty_fd response must be a JSON object"))?;
+    if object
+        .get("status")
+        .and_then(json_as_string)
+        .unwrap_or("unknown")
+        != "ok"
+    {
+        let error = object
+            .get("error")
+            .and_then(json_as_string)
+            .unwrap_or("shell supervisor pty_fd failed");
+        return Err(app_error(error.to_string()));
+    }
+    let mut pty = receive_shell_supervisor_fd(&control)?;
+    eprintln!("fd-proxied to {task_id}; detach with Ctrl-]");
+    let _raw = ShellRawModeGuard::enter()?;
+    shell_fd_proxy_set_nonblocking(&pty)?;
+
+    #[cfg(debug_assertions)]
+    if let Ok(input) = std::env::var("DSCODE_TEST_AGENTS_SHELL_FD_PROXY_INPUT") {
+        if !input.is_empty() {
+            pty.write_all(input.as_bytes())?;
+            pty.flush()?;
+        }
+        let output = read_shell_fd_proxy_output_for(
+            &mut pty,
+            Duration::from_millis(max_ms.unwrap_or(1500).clamp(100, 10_000)),
+        );
+        std::io::stdout().write_all(&output)?;
+        let _ = control.shutdown(Shutdown::Both);
+        return Ok(());
+    }
+
+    run_shell_fd_proxy_loop(&mut pty, &control, max_ms.unwrap_or(300_000))?;
+    let _ = control.shutdown(Shutdown::Both);
+    Ok(())
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn run_shell_fd_proxy_loop(
+    pty: &mut std::fs::File,
+    control: &std::os::unix::net::UnixStream,
+    max_ms: u64,
+) -> AppResult<()> {
+    use std::os::fd::AsRawFd;
+
+    let deadline = Instant::now() + Duration::from_millis(max_ms.clamp(100, 300_000));
+    let mut buffer = [0u8; 4096];
+    let mut stdout = std::io::stdout().lock();
+    while Instant::now() < deadline {
+        loop {
+            match pty.read(&mut buffer) {
+                Ok(0) => return Ok(()),
+                Ok(count) => {
+                    stdout.write_all(&buffer[..count])?;
+                    stdout.flush()?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if shell_fd_proxy_read_is_eof(&error) => return Ok(()),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        while event::poll(Duration::from_millis(1))? {
+            match event::read()? {
+                Event::Key(key) if shell_attach_interactive_is_detach_key(key) => {
+                    let _ = control.shutdown(Shutdown::Both);
+                    return Ok(());
+                }
+                Event::Key(key) => {
+                    if let Some(input) = shell_attach_interactive_key_input(key) {
+                        pty.write_all(input.as_bytes())?;
+                        pty.flush()?;
+                    }
+                }
+                Event::Paste(input) => {
+                    if !input.is_empty() {
+                        pty.write_all(input.as_bytes())?;
+                        pty.flush()?;
+                    }
+                }
+                Event::Resize(cols, rows) => {
+                    shell_fd_proxy_set_winsize(pty.as_raw_fd(), rows, cols)?;
+                }
+                _ => {}
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn read_shell_fd_proxy_output_for(pty: &mut std::fs::File, duration: Duration) -> Vec<u8> {
+    let deadline = Instant::now() + duration;
+    let mut output = Vec::new();
+    let mut buffer = [0u8; 4096];
+    while Instant::now() < deadline {
+        match pty.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => output.extend_from_slice(&buffer[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if shell_fd_proxy_read_is_eof(&error) => break,
+            Err(_) => break,
+        }
+    }
+    output
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn shell_fd_proxy_read_is_eof(error: &std::io::Error) -> bool {
+    const LINUX_EIO: i32 = 5;
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe
+    ) || error.raw_os_error() == Some(LINUX_EIO)
+}
+
+#[cfg(not(all(unix, target_os = "linux")))]
+fn run_shell_fd_proxy(_args: AgentsShellArgs) -> AppResult<()> {
+    Err(app_error(
+        "agents shell fd-proxy currently requires Linux SCM_RIGHTS PTY fd handoff",
+    ))
+}
+
+fn shell_attach_stream_request_json(args: &ShellAttachStreamFollow<'_>) -> JsonValue {
+    let mut request = agents_shell_request_json(&AgentsShellArgs {
+        action: AgentsShellAction::Attach {
+            task_id: args.task_id.to_string(),
+            cursor: args.cursor,
+            wait_ms: args.wait_ms,
+            limit_bytes: args.limit_bytes,
+            tail: args.tail,
+            follow: false,
+            interactive: false,
+            raw: false,
+            poll_ms: None,
+            max_ms: None,
+        },
+        json: false,
+    });
+    if let JsonValue::Object(root) = &mut request {
+        root.insert(
+            "method".to_string(),
+            JsonValue::String("attach_stream".to_string()),
+        );
+        if let Some(poll_ms) = args.poll_ms {
+            root.insert(
+                "poll_ms".to_string(),
+                JsonValue::Number(poll_ms.to_string()),
+            );
+        }
+        if let Some(max_ms) = args.max_ms {
+            root.insert("max_ms".to_string(), JsonValue::Number(max_ms.to_string()));
+        }
+    }
+    request
+}
+
+#[cfg(unix)]
+fn open_shell_supervisor_cli_stream(
+    cwd: &Path,
+    request: &JsonValue,
+) -> AppResult<BufReader<std::os::unix::net::UnixStream>> {
+    let stream = open_shell_supervisor_cli_raw_stream(cwd, request)?;
+    Ok(BufReader::new(stream))
+}
+
+#[cfg(unix)]
+fn open_shell_supervisor_cli_raw_stream(
+    cwd: &Path,
+    request: &JsonValue,
+) -> AppResult<std::os::unix::net::UnixStream> {
+    use std::os::unix::net::UnixStream;
+
+    let socket = cwd.join(".dscode/shell-supervisor/supervisor.sock");
+    let mut stream = UnixStream::connect(&socket).map_err(|error| {
+        app_error(format!(
+            "shell supervisor socket is not active at {}: {error}. Start it with `deepseek agents shell-supervisor --json`.",
+            socket.display()
+        ))
+    })?;
+    stream.write_all(json_value_to_string(request).as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    Ok(stream)
+}
+
+#[cfg(windows)]
+fn open_shell_supervisor_cli_stream(
+    cwd: &Path,
+    request: &JsonValue,
+) -> AppResult<BufReader<std::net::TcpStream>> {
+    let stream = open_shell_supervisor_cli_tcp_stream(cwd, request)?;
+    Ok(BufReader::new(stream))
+}
+
+#[cfg(windows)]
+fn open_shell_supervisor_cli_tcp_stream(
+    cwd: &Path,
+    request: &JsonValue,
+) -> AppResult<std::net::TcpStream> {
+    use std::net::TcpStream;
+
+    let endpoint = read_shell_supervisor_tcp_endpoint(cwd)?;
+    let address = endpoint.parse::<std::net::SocketAddr>().map_err(|error| {
+        app_error(format!(
+            "shell supervisor tcp endpoint is invalid: tcp://{endpoint}: {error}"
+        ))
+    })?;
+    let mut stream =
+        TcpStream::connect_timeout(&address, Duration::from_millis(1_000)).map_err(|error| {
+            app_error(format!(
+                "shell supervisor tcp endpoint is not active at tcp://{endpoint}: {error}. Start it with `deepseek agents shell-supervisor --json`."
+            ))
+        })?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(1_000)))
+        .map_err(|error| {
+            app_error(format!(
+                "shell supervisor write timeout setup failed: {error}"
+            ))
+        })?;
+    stream.write_all(json_value_to_string(request).as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    Ok(stream)
+}
+
+#[cfg(windows)]
+fn shell_supervisor_tcp_endpoint_path(cwd: &Path) -> PathBuf {
+    cwd.join(".dscode/shell-supervisor/supervisor.tcp")
+}
+
+#[cfg(windows)]
+fn read_shell_supervisor_tcp_endpoint(cwd: &Path) -> AppResult<String> {
+    let path = shell_supervisor_tcp_endpoint_path(cwd);
+    let raw = std::fs::read_to_string(&path).map_err(|error| {
+        app_error(format!(
+            "shell supervisor tcp endpoint is not configured at {}: {error}. Start it with `deepseek agents shell-supervisor --json`.",
+            path.display()
+        ))
+    })?;
+    shell_supervisor_tcp_endpoint_from_label(&raw)
+}
+
+#[cfg(any(test, windows))]
+fn shell_supervisor_tcp_endpoint_from_label(label: &str) -> AppResult<String> {
+    let value = label.trim();
+    let endpoint = value.strip_prefix("tcp://").unwrap_or(value).trim();
+    if endpoint.is_empty() {
+        return Err(app_error("shell supervisor tcp endpoint is empty"));
+    }
+    let address = endpoint.parse::<std::net::SocketAddr>().map_err(|error| {
+        app_error(format!(
+            "shell supervisor tcp endpoint must be tcp://<loopback-ip>:<port>: {error}"
+        ))
+    })?;
+    if !address.ip().is_loopback() {
+        return Err(app_error(format!(
+            "shell supervisor tcp endpoint must use a loopback address: tcp://{endpoint}"
+        )));
+    }
+    Ok(address.to_string())
+}
+
+#[cfg(windows)]
+fn shell_supervisor_tcp_endpoint_is_active(endpoint: &str) -> bool {
+    let Ok(address) = endpoint.parse::<std::net::SocketAddr>() else {
+        return false;
+    };
+    std::net::TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_shell_supervisor_cli_stream(
+    _cwd: &Path,
+    _request: &JsonValue,
+) -> AppResult<BufReader<std::io::Cursor<Vec<u8>>>> {
+    Err(app_error(
+        "agents shell control currently requires the Unix shell supervisor socket",
+    ))
+}
+
+fn print_shell_attach_follow_payload(
+    response: &BTreeMap<String, JsonValue>,
+    summary: &str,
+    raw_only: bool,
+) -> AppResult<()> {
+    let mut stdout = std::io::stdout();
+    let _ = shell_attach_write_response_terminal_payload(
+        response,
+        summary,
+        &mut stdout,
+        true,
+        raw_only,
+    )?;
     Ok(())
 }
 
@@ -482,10 +1179,241 @@ fn shell_attach_summary_terminal_payload(summary: &str) -> Option<&str> {
     shell_summary_section_payload(summary, "terminal")
 }
 
+fn shell_attach_write_response_terminal_payload<W: Write>(
+    response: &BTreeMap<String, JsonValue>,
+    summary: &str,
+    writer: &mut W,
+    fallback_newline: bool,
+    raw_only: bool,
+) -> AppResult<bool> {
+    if shell_attach_write_response_raw_terminal_payload(response, writer)? {
+        return Ok(true);
+    }
+    shell_attach_write_terminal_payload(summary, writer, fallback_newline, raw_only)
+}
+
+fn shell_attach_write_response_raw_terminal_payload<W: Write>(
+    response: &BTreeMap<String, JsonValue>,
+    writer: &mut W,
+) -> AppResult<bool> {
+    let Some(events) = response.get("terminal_raw_outputs").and_then(json_as_array) else {
+        return Ok(false);
+    };
+    let mut wrote = false;
+    for event in events {
+        let Some(object) = json_as_object(event) else {
+            continue;
+        };
+        let kind = object
+            .get("kind")
+            .and_then(json_as_string)
+            .unwrap_or("output");
+        if kind != "output" {
+            continue;
+        }
+        let Some(encoded) = object
+            .get("raw_base64")
+            .or_else(|| object.get("rawBase64"))
+            .and_then(json_as_string)
+        else {
+            continue;
+        };
+        let bytes = decode_shell_base64(encoded)?;
+        if !bytes.is_empty() {
+            writer.write_all(&bytes)?;
+            wrote = true;
+        }
+    }
+    if wrote {
+        writer.flush()?;
+    }
+    Ok(wrote)
+}
+
+fn shell_attach_write_terminal_payload<W: Write>(
+    summary: &str,
+    writer: &mut W,
+    fallback_newline: bool,
+    raw_only: bool,
+) -> AppResult<bool> {
+    if shell_attach_write_raw_terminal_payload(summary, writer)? {
+        return Ok(true);
+    }
+    if raw_only && shell_summary_value(summary, "mode") == Some("terminal_event_attach") {
+        return Ok(false);
+    }
+    let Some(payload) = shell_attach_summary_terminal_payload(summary) else {
+        return Ok(false);
+    };
+    writer.write_all(payload.as_bytes())?;
+    if fallback_newline {
+        writer.write_all(b"\n")?;
+    }
+    writer.flush()?;
+    Ok(!payload.is_empty())
+}
+
+fn shell_attach_write_raw_terminal_payload<W: Write>(
+    summary: &str,
+    writer: &mut W,
+) -> AppResult<bool> {
+    let events = shell_attach_raw_output_events_from_summary(summary);
+    if events.is_empty() {
+        return Ok(false);
+    }
+    shell_attach_write_raw_output_events(&events, writer)
+}
+
+fn shell_attach_write_raw_output_events<W: Write>(
+    events: &[(u64, String)],
+    writer: &mut W,
+) -> AppResult<bool> {
+    let mut wrote = false;
+    for (_, encoded) in events {
+        let bytes = decode_shell_base64(encoded)?;
+        if !bytes.is_empty() {
+            writer.write_all(&bytes)?;
+            wrote = true;
+        }
+    }
+    if wrote {
+        writer.flush()?;
+    }
+    Ok(wrote)
+}
+
+fn shell_attach_raw_output_events_from_summary(summary: &str) -> Vec<(u64, String)> {
+    let Some(payload) = shell_summary_section_payload(summary, "terminal_raw_base64") else {
+        return Vec::new();
+    };
+    payload
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let seq = parts.next()?.parse::<u64>().ok()?;
+            let kind = parts.next()?;
+            if kind != "output" {
+                return None;
+            }
+            let encoded = parts.next()?;
+            Some((seq, encoded.to_string()))
+        })
+        .collect()
+}
+
+fn shell_attach_raw_outputs_json_from_summary(summary: &str) -> Option<JsonValue> {
+    let events = shell_attach_raw_output_events_from_summary(summary);
+    if events.is_empty() {
+        return None;
+    }
+    Some(JsonValue::Array(
+        events
+            .into_iter()
+            .map(|(seq, raw_base64)| {
+                JsonValue::Object(BTreeMap::from([
+                    ("seq".to_string(), JsonValue::Number(seq.to_string())),
+                    ("kind".to_string(), JsonValue::String("output".to_string())),
+                    ("raw_base64".to_string(), JsonValue::String(raw_base64)),
+                ]))
+            })
+            .collect(),
+    ))
+}
+
+#[cfg(unix)]
+fn encode_shell_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn decode_shell_base64(value: &str) -> AppResult<Vec<u8>> {
+    let encoded = value.trim();
+    if encoded.is_empty() {
+        return Ok(Vec::new());
+    }
+    if encoded.len() % 4 != 0 {
+        return Err(app_error("terminal raw_base64 payload has invalid length"));
+    }
+    let mut out = Vec::with_capacity(encoded.len() / 4 * 3);
+    for (index, chunk) in encoded.as_bytes().chunks(4).enumerate() {
+        let a = shell_base64_value(chunk[0])?;
+        let b = shell_base64_value(chunk[1])?;
+        let c_pad = chunk[2] == b'=';
+        let d_pad = chunk[3] == b'=';
+        if c_pad && !d_pad {
+            return Err(app_error("terminal raw_base64 payload has invalid padding"));
+        }
+        if (c_pad || d_pad) && index + 1 != encoded.len() / 4 {
+            return Err(app_error("terminal raw_base64 payload has invalid padding"));
+        }
+        let c = if c_pad {
+            0
+        } else {
+            shell_base64_value(chunk[2])?
+        };
+        let d = if d_pad {
+            0
+        } else {
+            shell_base64_value(chunk[3])?
+        };
+        out.push((a << 2) | (b >> 4));
+        if !c_pad {
+            out.push(((b & 0b0000_1111) << 4) | (c >> 2));
+        }
+        if !d_pad {
+            out.push(((c & 0b0000_0011) << 6) | d);
+        }
+    }
+    Ok(out)
+}
+
+fn shell_base64_value(byte: u8) -> AppResult<u8> {
+    match byte {
+        b'A'..=b'Z' => Ok(byte - b'A'),
+        b'a'..=b'z' => Ok(byte - b'a' + 26),
+        b'0'..=b'9' => Ok(byte - b'0' + 52),
+        b'+' => Ok(62),
+        b'/' => Ok(63),
+        _ => Err(app_error(
+            "terminal raw_base64 payload contains invalid byte",
+        )),
+    }
+}
+
 fn shell_summary_section_payload<'a>(summary: &'a str, section: &str) -> Option<&'a str> {
     let marker = format!("{section}:\n");
-    let (_, payload) = summary.split_once(&marker)?;
-    let payload = payload.trim_end_matches('\n');
+    let (_, rest) = summary.split_once(&marker)?;
+    let mut end = rest.len();
+    for other in ["data", "terminal_raw_base64", "terminal"] {
+        if other == section {
+            continue;
+        }
+        let other_marker = format!("\n{other}:\n");
+        if let Some(index) = rest.find(&other_marker) {
+            end = end.min(index);
+        }
+    }
+    let payload = rest[..end].trim_end_matches('\n');
     (!payload.is_empty()).then_some(payload)
 }
 
@@ -565,6 +1493,7 @@ fn agents_shell_request_json(args: &AgentsShellArgs) -> JsonValue {
             tail,
             follow: _,
             interactive: _,
+            raw: _,
             poll_ms: _,
             max_ms: _,
         } => {
@@ -579,6 +1508,63 @@ fn agents_shell_request_json(args: &AgentsShellArgs) -> JsonValue {
             if *tail {
                 object.insert("tail".to_string(), JsonValue::Bool(true));
             }
+        }
+        AgentsShellAction::ByteStream {
+            task_id,
+            cursor,
+            wait_ms,
+            limit_bytes,
+            tail,
+            input,
+            close_stdin,
+            tty_rows,
+            tty_cols,
+            poll_ms,
+            max_ms,
+            max_events,
+            raw_proxy,
+            terminal_proxy: _,
+        } => {
+            object.insert(
+                "method".to_string(),
+                JsonValue::String("byte_stream".to_string()),
+            );
+            object.insert("task_id".to_string(), JsonValue::String(task_id.clone()));
+            insert_optional_number(&mut object, "cursor", *cursor);
+            insert_optional_number(&mut object, "wait_ms", *wait_ms);
+            insert_optional_number(&mut object, "limit_bytes", *limit_bytes);
+            if *tail {
+                object.insert("tail".to_string(), JsonValue::Bool(true));
+            }
+            if let Some(input) = input {
+                object.insert("input".to_string(), JsonValue::String(input.clone()));
+            }
+            if *close_stdin {
+                object.insert("close_stdin".to_string(), JsonValue::Bool(true));
+            }
+            insert_optional_number(&mut object, "tty_rows", *tty_rows);
+            insert_optional_number(&mut object, "tty_cols", *tty_cols);
+            insert_optional_number(&mut object, "poll_ms", *poll_ms);
+            insert_optional_number(&mut object, "max_ms", *max_ms);
+            insert_optional_number(&mut object, "max_events", *max_events);
+            if *raw_proxy {
+                object.insert("raw_proxy".to_string(), JsonValue::Bool(true));
+            }
+        }
+        AgentsShellAction::FdProxy {
+            task_id,
+            tty_rows,
+            tty_cols,
+            max_ms,
+        } => {
+            object.insert(
+                "method".to_string(),
+                JsonValue::String("pty_fd".to_string()),
+            );
+            object.insert("task_id".to_string(), JsonValue::String(task_id.clone()));
+            insert_optional_number(&mut object, "tty_rows", *tty_rows);
+            insert_optional_number(&mut object, "tty_cols", *tty_cols);
+            insert_optional_number(&mut object, "max_ms", *max_ms);
         }
         AgentsShellAction::Stdin {
             task_id,
@@ -666,7 +1652,26 @@ fn send_shell_supervisor_cli_request(cwd: &Path, request: &JsonValue) -> AppResu
     })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn send_shell_supervisor_cli_request(cwd: &Path, request: &JsonValue) -> AppResult<JsonValue> {
+    let stream = open_shell_supervisor_cli_tcp_stream(cwd, request)?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(5_000)))
+        .map_err(|error| {
+            app_error(format!(
+                "shell supervisor read timeout setup failed: {error}"
+            ))
+        })?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line)?;
+    parse_json_value(line.trim()).map_err(|error| {
+        app_error(format!(
+            "shell supervisor returned invalid response JSON: {error}"
+        ))
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn send_shell_supervisor_cli_request(_cwd: &Path, _request: &JsonValue) -> AppResult<JsonValue> {
     Err(app_error(
         "agents shell control currently requires the Unix shell supervisor socket",
@@ -698,6 +1703,8 @@ fn print_shell_control_response(args: &AgentsShellArgs, response: JsonValue) -> 
         AgentsShellAction::Wait { .. } => Some("wait_summary"),
         AgentsShellAction::Replay { .. } => Some("replay_summary"),
         AgentsShellAction::Attach { .. } => Some("attach_summary"),
+        AgentsShellAction::ByteStream { .. } => Some("attach_summary"),
+        AgentsShellAction::FdProxy { .. } => None,
         AgentsShellAction::Stdin { .. } => Some("stdin_summary"),
         AgentsShellAction::Resize { .. } => Some("resize_summary"),
         AgentsShellAction::Cancel { .. } => Some("cancel_summary"),
@@ -1450,13 +2457,6 @@ fn run_shell_supervisor_daemon(cwd: &Path, json: bool) -> AppResult<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn run_shell_supervisor_daemon(_cwd: &Path, _json: bool) -> AppResult<()> {
-    Err(app_error(
-        "shell supervisor protocol bridge is currently supported only on Unix",
-    ))
-}
-
 #[cfg(unix)]
 fn handle_shell_supervisor_stream(
     mut stream: std::os::unix::net::UnixStream,
@@ -1464,12 +2464,20 @@ fn handle_shell_supervisor_stream(
     socket: &Path,
     epoch: &str,
 ) -> AppResult<bool> {
-    let mut line = String::new();
-    {
-        let mut reader = BufReader::new(&mut stream);
-        reader.read_line(&mut line)?;
-    }
+    let line = read_shell_supervisor_request_line(&mut stream)?;
     let (response, shutdown) = match parse_shell_supervisor_request(&line) {
+        Ok(request) if request.method == "attach_stream" => {
+            shell_supervisor_stream_attach(&mut stream, &request, cwd, socket, epoch)?;
+            return Ok(false);
+        }
+        Ok(request) if request.method == "byte_stream" => {
+            shell_supervisor_stream_byte(&mut stream, &request, cwd, socket, epoch)?;
+            return Ok(false);
+        }
+        Ok(request) if request.method == "pty_fd" => {
+            shell_supervisor_stream_pty_fd(&mut stream, &request, cwd, socket, epoch)?;
+            return Ok(false);
+        }
         Ok(request) => (
             shell_supervisor_protocol_response_for_request(&request, cwd, socket, epoch),
             request.method == "shutdown",
@@ -1483,6 +2491,1048 @@ fn handle_shell_supervisor_stream(
     stream.write_all(b"\n")?;
     stream.flush()?;
     Ok(shutdown)
+}
+
+#[cfg(windows)]
+fn run_shell_supervisor_daemon(cwd: &Path, json: bool) -> AppResult<()> {
+    use std::fs;
+    use std::net::TcpListener;
+
+    let state_dir = cwd.join(".dscode/shell-supervisor");
+    fs::create_dir_all(&state_dir)?;
+    let endpoint_file = shell_supervisor_tcp_endpoint_path(cwd);
+    if endpoint_file.exists() {
+        match read_shell_supervisor_tcp_endpoint(cwd) {
+            Ok(endpoint) if shell_supervisor_tcp_endpoint_is_active(&endpoint) => {
+                return Err(app_error(format!(
+                    "shell supervisor tcp endpoint is already active: tcp://{endpoint}"
+                )));
+            }
+            _ => {
+                fs::remove_file(&endpoint_file)?;
+            }
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let endpoint = format!("tcp://{}", listener.local_addr()?);
+    fs::write(&endpoint_file, format!("{endpoint}\n"))?;
+    let epoch = format_epoch_seconds(current_epoch_seconds());
+    let active_jobs = count_active_durable_shell_jobs(cwd)?;
+    write_shell_supervisor_manifest_snapshot(
+        cwd,
+        Path::new(&endpoint),
+        &epoch,
+        &epoch,
+        active_jobs,
+    )?;
+    if json {
+        println!(
+            "{}",
+            json_value_to_string(&shell_supervisor_event_json(
+                "started",
+                cwd,
+                Path::new(&endpoint),
+                &epoch,
+                None,
+            ))
+        );
+    } else {
+        println!("shell supervisor protocol bridge listening: {endpoint}");
+    }
+
+    for stream in listener.incoming() {
+        let stream = stream?;
+        let shutdown =
+            handle_shell_supervisor_tcp_stream(stream, cwd, Path::new(&endpoint), &epoch)?;
+        if shutdown {
+            break;
+        }
+    }
+    let _ = fs::remove_file(&endpoint_file);
+    if json {
+        println!(
+            "{}",
+            json_value_to_string(&shell_supervisor_event_json(
+                "stopped",
+                cwd,
+                Path::new(&endpoint),
+                &epoch,
+                None,
+            ))
+        );
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn handle_shell_supervisor_tcp_stream(
+    mut stream: std::net::TcpStream,
+    cwd: &Path,
+    endpoint: &Path,
+    epoch: &str,
+) -> AppResult<bool> {
+    let line = read_shell_supervisor_request_line(&mut stream)?;
+    let (response, shutdown) = match parse_shell_supervisor_request(&line) {
+        Ok(request) if request.method == "attach_stream" => {
+            shell_supervisor_stream_attach(&mut stream, &request, cwd, endpoint, epoch)?;
+            return Ok(false);
+        }
+        Ok(request) if request.method == "byte_stream" => (
+            shell_supervisor_stream_unsupported_response(
+                cwd,
+                endpoint,
+                epoch,
+                "byte_stream",
+                "pty_byte_stream",
+                "shell supervisor byte_stream currently requires the Unix socket streaming path",
+            ),
+            false,
+        ),
+        Ok(request) if request.method == "pty_fd" => (
+            shell_supervisor_stream_unsupported_response(
+                cwd,
+                endpoint,
+                epoch,
+                "pty_fd",
+                "pty_fd_handoff",
+                "shell supervisor pty_fd handoff requires Linux SCM_RIGHTS support",
+            ),
+            false,
+        ),
+        Ok(request) => (
+            shell_supervisor_protocol_response_for_request(&request, cwd, endpoint, epoch),
+            request.method == "shutdown",
+        ),
+        Err(error) => (
+            shell_supervisor_protocol_error_response(cwd, endpoint, epoch, &error.to_string()),
+            false,
+        ),
+    };
+    stream.write_all(json_value_to_string(&response).as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    Ok(shutdown)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn run_shell_supervisor_daemon(_cwd: &Path, _json: bool) -> AppResult<()> {
+    Err(app_error(
+        "shell supervisor protocol bridge is currently supported only on Unix and Windows",
+    ))
+}
+
+fn read_shell_supervisor_request_line<R: Read>(stream: &mut R) -> AppResult<String> {
+    const MAX_REQUEST_LINE_BYTES: usize = 1024 * 1024;
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let read = stream.read(&mut byte)?;
+        if read == 0 || byte[0] == b'\n' {
+            break;
+        }
+        line.push(byte[0]);
+        if line.len() > MAX_REQUEST_LINE_BYTES {
+            return Err(app_error("shell supervisor request line is too large"));
+        }
+    }
+    String::from_utf8(line)
+        .map_err(|_| app_error("shell supervisor request line must be UTF-8 JSON"))
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn shell_supervisor_stream_pty_fd(
+    stream: &mut std::os::unix::net::UnixStream,
+    request: &ShellSupervisorRequest,
+    cwd: &Path,
+    socket: &Path,
+    epoch: &str,
+) -> AppResult<()> {
+    let result: AppResult<()> = (|| {
+        let task_id =
+            shell_supervisor_request_task_id(request, "shell supervisor pty_fd requires task_id")?;
+        if shell_supervisor_request_value(request, "tty_rows").is_some()
+            || shell_supervisor_request_value(request, "rows").is_some()
+            || shell_supervisor_request_value(request, "tty_cols").is_some()
+            || shell_supervisor_request_value(request, "cols").is_some()
+        {
+            let _ = shell_supervisor_resize_job(request, cwd)?;
+        }
+        let lease = lease_native_supervisor_pty_master_fd(&task_id)?;
+        let response = JsonValue::Object(BTreeMap::from([
+            (
+                "kind".to_string(),
+                JsonValue::String("deepseek.exec_shell.supervisor.response.v1".to_string()),
+            ),
+            (
+                "method".to_string(),
+                JsonValue::String("pty_fd".to_string()),
+            ),
+            (
+                "stream_method".to_string(),
+                JsonValue::String("pty_fd_handoff".to_string()),
+            ),
+            ("status".to_string(), JsonValue::String("ok".to_string())),
+            ("task_id".to_string(), JsonValue::String(task_id.clone())),
+            (
+                "cwd".to_string(),
+                JsonValue::String(cwd.display().to_string()),
+            ),
+            (
+                "supervisor_pid".to_string(),
+                JsonValue::Number(std::process::id().to_string()),
+            ),
+            (
+                "supervisor_socket".to_string(),
+                JsonValue::String(socket.display().to_string()),
+            ),
+            (
+                "supervisor_epoch".to_string(),
+                JsonValue::String(epoch.to_string()),
+            ),
+            (
+                "handoff".to_string(),
+                JsonValue::String("scm_rights".to_string()),
+            ),
+            ("exclusive_reader_pause".to_string(), JsonValue::Bool(true)),
+        ]));
+        stream.write_all(json_value_to_string(&response).as_bytes())?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
+        send_shell_supervisor_fd(stream, lease.fd())?;
+        let max_ms = shell_supervisor_request_u64(request, "max_ms")
+            .unwrap_or(300_000)
+            .clamp(100, 300_000);
+        wait_for_shell_supervisor_fd_handoff_close(stream, Duration::from_millis(max_ms))?;
+        drop(lease);
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        let mut response =
+            shell_supervisor_protocol_error_response(cwd, socket, epoch, &error.to_string());
+        if let JsonValue::Object(root) = &mut response {
+            root.insert(
+                "method".to_string(),
+                JsonValue::String("pty_fd".to_string()),
+            );
+            root.insert(
+                "stream_method".to_string(),
+                JsonValue::String("pty_fd_handoff".to_string()),
+            );
+        }
+        stream.write_all(json_value_to_string(&response).as_bytes())?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn shell_supervisor_stream_pty_fd(
+    stream: &mut std::os::unix::net::UnixStream,
+    _request: &ShellSupervisorRequest,
+    cwd: &Path,
+    socket: &Path,
+    epoch: &str,
+) -> AppResult<()> {
+    let mut response = shell_supervisor_protocol_error_response(
+        cwd,
+        socket,
+        epoch,
+        "shell supervisor pty_fd handoff requires Linux SCM_RIGHTS support",
+    );
+    if let JsonValue::Object(root) = &mut response {
+        root.insert(
+            "method".to_string(),
+            JsonValue::String("pty_fd".to_string()),
+        );
+        root.insert(
+            "stream_method".to_string(),
+            JsonValue::String("pty_fd_handoff".to_string()),
+        );
+    }
+    stream.write_all(json_value_to_string(&response).as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    Ok(())
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn wait_for_shell_supervisor_fd_handoff_close(
+    stream: &mut std::os::unix::net::UnixStream,
+    timeout: Duration,
+) -> AppResult<()> {
+    stream.set_read_timeout(Some(timeout))?;
+    let mut buffer = [0u8; 1024];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn shell_supervisor_stream_attach<W: Write>(
+    stream: &mut W,
+    request: &ShellSupervisorRequest,
+    cwd: &Path,
+    socket: &Path,
+    epoch: &str,
+) -> AppResult<()> {
+    const DEFAULT_STREAM_MAX_MS: u64 = 30_000;
+    const MAX_STREAM_MAX_MS: u64 = 300_000;
+    const DEFAULT_STREAM_POLL_MS: u64 = 100;
+    const MAX_STREAM_EVENTS: u64 = 5_000;
+
+    let max_ms = shell_supervisor_request_u64(request, "max_ms")
+        .unwrap_or(DEFAULT_STREAM_MAX_MS)
+        .min(MAX_STREAM_MAX_MS);
+    let poll_ms = shell_supervisor_request_u64(request, "poll_ms")
+        .unwrap_or(DEFAULT_STREAM_POLL_MS)
+        .clamp(10, 5_000);
+    let max_events = shell_supervisor_request_u64(request, "max_events")
+        .unwrap_or(MAX_STREAM_EVENTS)
+        .clamp(1, MAX_STREAM_EVENTS);
+    let mut cursor = shell_supervisor_request_u64(request, "cursor")
+        .or_else(|| shell_supervisor_request_u64(request, "since_seq"))
+        .or_else(|| shell_supervisor_request_u64(request, "sinceSeq"))
+        .unwrap_or(0);
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(max_ms);
+    let mut emitted = 0u64;
+    let mut first = true;
+
+    loop {
+        let remaining_ms = deadline
+            .checked_duration_since(Instant::now())
+            .map(|duration| duration.as_millis().min(u128::from(poll_ms)) as u64)
+            .unwrap_or(0);
+        let attach_request =
+            shell_supervisor_attach_stream_frame_request(request, cursor, remaining_ms, first);
+        let mut response =
+            shell_supervisor_protocol_response_for_request(&attach_request, cwd, socket, epoch);
+        let (status, next_cursor, event_count, has_raw_outputs) =
+            shell_supervisor_attach_stream_frame_state(&response);
+        let response_status = json_as_object(&response)
+            .and_then(|root| root.get("status"))
+            .and_then(json_as_string)
+            .unwrap_or("unknown")
+            .to_string();
+        let stream_done = response_status == "error"
+            || response_status == "unsupported"
+            || status != "running"
+            || emitted + 1 >= max_events
+            || Instant::now() >= deadline;
+        let should_emit = first
+            || event_count > 0
+            || has_raw_outputs
+            || stream_done
+            || response_status == "error"
+            || response_status == "unsupported";
+        if should_emit {
+            if let JsonValue::Object(root) = &mut response {
+                root.insert(
+                    "method".to_string(),
+                    JsonValue::String("attach_stream".to_string()),
+                );
+                root.insert(
+                    "stream_method".to_string(),
+                    JsonValue::String("attach".to_string()),
+                );
+                root.insert(
+                    "frame_index".to_string(),
+                    JsonValue::Number((emitted + 1).to_string()),
+                );
+                root.insert("stream_done".to_string(), JsonValue::Bool(stream_done));
+                root.insert(
+                    "stream_cursor".to_string(),
+                    JsonValue::Number(cursor.to_string()),
+                );
+                root.insert(
+                    "stream_next_cursor".to_string(),
+                    JsonValue::Number(next_cursor.to_string()),
+                );
+            }
+            stream.write_all(json_value_to_string(&response).as_bytes())?;
+            stream.write_all(b"\n")?;
+            stream.flush()?;
+            emitted = emitted.saturating_add(1);
+        }
+        if stream_done {
+            break;
+        }
+        if next_cursor > cursor {
+            cursor = next_cursor;
+        } else {
+            std::thread::sleep(Duration::from_millis(poll_ms));
+        }
+        first = false;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn shell_supervisor_stream_byte(
+    stream: &mut std::os::unix::net::UnixStream,
+    request: &ShellSupervisorRequest,
+    cwd: &Path,
+    socket: &Path,
+    epoch: &str,
+) -> AppResult<()> {
+    const DEFAULT_STREAM_MAX_MS: u64 = 30_000;
+    const MAX_STREAM_MAX_MS: u64 = 300_000;
+    const DEFAULT_STREAM_POLL_MS: u64 = 25;
+    const MAX_STREAM_EVENTS: u64 = 5_000;
+
+    let control = match shell_supervisor_byte_stream_control_json(request, cwd) {
+        Ok(control) => control,
+        Err(error) => {
+            let mut response =
+                shell_supervisor_protocol_error_response(cwd, socket, epoch, &error.to_string());
+            if let JsonValue::Object(root) = &mut response {
+                root.insert(
+                    "method".to_string(),
+                    JsonValue::String("byte_stream".to_string()),
+                );
+                root.insert(
+                    "stream_method".to_string(),
+                    JsonValue::String("pty_byte_stream".to_string()),
+                );
+                root.insert("stream_done".to_string(), JsonValue::Bool(true));
+            }
+            stream.write_all(json_value_to_string(&response).as_bytes())?;
+            stream.write_all(b"\n")?;
+            stream.flush()?;
+            return Ok(());
+        }
+    };
+    if shell_supervisor_request_bool(request, "raw_proxy") {
+        return shell_supervisor_stream_byte_raw_proxy(stream, request, cwd);
+    }
+
+    let max_ms = shell_supervisor_request_u64(request, "max_ms")
+        .unwrap_or(DEFAULT_STREAM_MAX_MS)
+        .min(MAX_STREAM_MAX_MS);
+    let poll_ms = shell_supervisor_request_u64(request, "poll_ms")
+        .unwrap_or(DEFAULT_STREAM_POLL_MS)
+        .clamp(10, 5_000);
+    let max_events = shell_supervisor_request_u64(request, "max_events")
+        .unwrap_or(MAX_STREAM_EVENTS)
+        .clamp(1, MAX_STREAM_EVENTS);
+    let mut cursor = shell_supervisor_request_u64(request, "cursor")
+        .or_else(|| shell_supervisor_request_u64(request, "since_seq"))
+        .or_else(|| shell_supervisor_request_u64(request, "sinceSeq"))
+        .unwrap_or(0);
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(max_ms);
+    let mut emitted = 0u64;
+    let mut first = true;
+    let mut incoming = Vec::new();
+    let mut detach_requested = false;
+
+    loop {
+        let control_frames =
+            shell_supervisor_byte_stream_drain_control_frames(stream, request, cwd, &mut incoming)?;
+        if control_frames
+            .iter()
+            .any(shell_supervisor_byte_stream_control_frame_detaches)
+        {
+            detach_requested = true;
+        }
+        let remaining_ms = deadline
+            .checked_duration_since(Instant::now())
+            .map(|duration| duration.as_millis().min(u128::from(poll_ms)) as u64)
+            .unwrap_or(0);
+        let attach_request =
+            shell_supervisor_attach_stream_frame_request(request, cursor, remaining_ms, first);
+        let mut response =
+            shell_supervisor_protocol_response_for_request(&attach_request, cwd, socket, epoch);
+        let (status, next_cursor, event_count, has_raw_outputs) =
+            shell_supervisor_attach_stream_frame_state(&response);
+        let byte_outputs = shell_supervisor_byte_outputs_json_from_response(&response);
+        let response_status = json_as_object(&response)
+            .and_then(|root| root.get("status"))
+            .and_then(json_as_string)
+            .unwrap_or("unknown")
+            .to_string();
+        let stream_done = response_status == "error"
+            || response_status == "unsupported"
+            || status != "running"
+            || detach_requested
+            || emitted + 1 >= max_events
+            || Instant::now() >= deadline;
+        let should_emit = first
+            || event_count > 0
+            || has_raw_outputs
+            || byte_outputs.is_some()
+            || !control_frames.is_empty()
+            || stream_done
+            || response_status == "error"
+            || response_status == "unsupported";
+        if should_emit {
+            if let JsonValue::Object(root) = &mut response {
+                root.insert(
+                    "method".to_string(),
+                    JsonValue::String("byte_stream".to_string()),
+                );
+                root.insert(
+                    "stream_method".to_string(),
+                    JsonValue::String("pty_byte_stream".to_string()),
+                );
+                root.insert(
+                    "frame_index".to_string(),
+                    JsonValue::Number((emitted + 1).to_string()),
+                );
+                root.insert("stream_done".to_string(), JsonValue::Bool(stream_done));
+                root.insert(
+                    "stream_cursor".to_string(),
+                    JsonValue::Number(cursor.to_string()),
+                );
+                root.insert(
+                    "stream_next_cursor".to_string(),
+                    JsonValue::Number(next_cursor.to_string()),
+                );
+                if first {
+                    if let Some(control) = control.clone() {
+                        root.insert("control".to_string(), control);
+                    }
+                }
+                if let Some(outputs) = byte_outputs {
+                    root.insert("byte_outputs".to_string(), outputs);
+                }
+                if !control_frames.is_empty() {
+                    root.insert(
+                        "control_frames".to_string(),
+                        JsonValue::Array(control_frames.clone()),
+                    );
+                }
+            }
+            stream.write_all(json_value_to_string(&response).as_bytes())?;
+            stream.write_all(b"\n")?;
+            stream.flush()?;
+            emitted = emitted.saturating_add(1);
+        }
+        if stream_done {
+            break;
+        }
+        if next_cursor > cursor {
+            cursor = next_cursor;
+        } else {
+            std::thread::sleep(Duration::from_millis(poll_ms));
+        }
+        first = false;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn shell_supervisor_stream_byte_raw_proxy(
+    stream: &mut std::os::unix::net::UnixStream,
+    request: &ShellSupervisorRequest,
+    cwd: &Path,
+) -> AppResult<()> {
+    const DEFAULT_STREAM_MAX_MS: u64 = 30_000;
+    const MAX_STREAM_MAX_MS: u64 = 300_000;
+    const DEFAULT_STREAM_POLL_MS: u64 = 10;
+
+    let max_ms = shell_supervisor_request_u64(request, "max_ms")
+        .unwrap_or(DEFAULT_STREAM_MAX_MS)
+        .min(MAX_STREAM_MAX_MS);
+    let poll_ms = shell_supervisor_request_u64(request, "poll_ms")
+        .unwrap_or(DEFAULT_STREAM_POLL_MS)
+        .clamp(5, 1_000);
+    let limit_bytes = shell_supervisor_request_u64(request, "limit_bytes").or(Some(16 * 1024));
+    let mut cursor = shell_supervisor_request_u64(request, "cursor")
+        .or_else(|| shell_supervisor_request_u64(request, "since_seq"))
+        .or_else(|| shell_supervisor_request_u64(request, "sinceSeq"))
+        .unwrap_or(0);
+    let deadline = Instant::now() + Duration::from_millis(max_ms);
+    let mut first = true;
+    let mut input_closed = false;
+
+    loop {
+        if !input_closed {
+            match shell_supervisor_byte_stream_read_raw_proxy_input(stream)? {
+                RawProxyInput::Bytes(bytes) => {
+                    if !bytes.is_empty() {
+                        let input_request =
+                            shell_supervisor_byte_stream_raw_stdin_request(request, &bytes)?;
+                        let _ = shell_supervisor_stdin_job(&input_request, cwd)?;
+                    }
+                }
+                RawProxyInput::Closed => input_closed = true,
+                RawProxyInput::None => {}
+            }
+        }
+
+        let remaining_ms = deadline
+            .checked_duration_since(Instant::now())
+            .map(|duration| duration.as_millis().min(u128::from(poll_ms)) as u64)
+            .unwrap_or(0);
+        let mut attach_request =
+            shell_supervisor_attach_stream_frame_request(request, cursor, remaining_ms, first);
+        if let Some(limit_bytes) = limit_bytes {
+            attach_request.args.insert(
+                "limit_bytes".to_string(),
+                JsonValue::Number(limit_bytes.to_string()),
+            );
+        }
+        let response = shell_supervisor_protocol_response_for_request(
+            &attach_request,
+            cwd,
+            Path::new("raw-proxy"),
+            "raw-proxy",
+        );
+        let (status, next_cursor, event_count, has_raw_outputs) =
+            shell_supervisor_attach_stream_frame_state(&response);
+        let response_status = json_as_object(&response)
+            .and_then(|root| root.get("status"))
+            .and_then(json_as_string)
+            .unwrap_or("unknown");
+        let wrote = shell_supervisor_byte_stream_write_raw_outputs(stream, &response)?;
+        let done = response_status == "error"
+            || response_status == "unsupported"
+            || status != "running"
+            || Instant::now() >= deadline;
+        if done {
+            break;
+        }
+        if next_cursor > cursor {
+            cursor = next_cursor;
+        } else if !wrote && event_count == 0 && !has_raw_outputs {
+            std::thread::sleep(Duration::from_millis(poll_ms));
+        }
+        first = false;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+enum RawProxyInput {
+    Bytes(Vec<u8>),
+    Closed,
+    None,
+}
+
+#[cfg(unix)]
+fn shell_supervisor_byte_stream_read_raw_proxy_input(
+    stream: &mut std::os::unix::net::UnixStream,
+) -> AppResult<RawProxyInput> {
+    let mut buffer = [0u8; 4096];
+    stream.set_nonblocking(true)?;
+    let result = match stream.read(&mut buffer) {
+        Ok(0) => Ok(RawProxyInput::Closed),
+        Ok(count) => Ok(RawProxyInput::Bytes(buffer[..count].to_vec())),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(RawProxyInput::None),
+        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Ok(RawProxyInput::None),
+        Err(error) => Err(error.into()),
+    };
+    stream.set_nonblocking(false)?;
+    result
+}
+
+#[cfg(unix)]
+fn shell_supervisor_byte_stream_raw_stdin_request(
+    request: &ShellSupervisorRequest,
+    bytes: &[u8],
+) -> AppResult<ShellSupervisorRequest> {
+    let mut args = shell_supervisor_byte_stream_base_control_args(request)?;
+    args.insert(
+        "input_base64".to_string(),
+        JsonValue::String(encode_shell_base64(bytes)),
+    );
+    args.insert("timeout_ms".to_string(), JsonValue::Number("0".to_string()));
+    Ok(ShellSupervisorRequest {
+        method: "stdin".to_string(),
+        args,
+    })
+}
+
+#[cfg(unix)]
+fn shell_supervisor_byte_stream_write_raw_outputs(
+    stream: &mut std::os::unix::net::UnixStream,
+    response: &JsonValue,
+) -> AppResult<bool> {
+    let Some(outputs) = json_as_object(response)
+        .and_then(|root| root.get("terminal_raw_outputs"))
+        .and_then(json_as_array)
+    else {
+        return Ok(false);
+    };
+    let mut wrote = false;
+    for output in outputs {
+        let Some(object) = json_as_object(output) else {
+            continue;
+        };
+        let Some(encoded) = object
+            .get("raw_base64")
+            .or_else(|| object.get("rawBase64"))
+            .and_then(json_as_string)
+        else {
+            continue;
+        };
+        let bytes = decode_shell_base64(encoded)?;
+        if !bytes.is_empty() {
+            stream.write_all(&bytes)?;
+            wrote = true;
+        }
+    }
+    if wrote {
+        stream.flush()?;
+    }
+    Ok(wrote)
+}
+
+fn shell_supervisor_attach_stream_frame_request(
+    request: &ShellSupervisorRequest,
+    cursor: u64,
+    wait_ms: u64,
+    first: bool,
+) -> ShellSupervisorRequest {
+    let mut args = request.args.clone();
+    args.insert(
+        "method".to_string(),
+        JsonValue::String("attach".to_string()),
+    );
+    args.insert("cursor".to_string(), JsonValue::Number(cursor.to_string()));
+    args.insert(
+        "wait_ms".to_string(),
+        JsonValue::Number(wait_ms.to_string()),
+    );
+    if !first {
+        args.insert("tail".to_string(), JsonValue::Bool(false));
+    }
+    ShellSupervisorRequest {
+        method: "attach".to_string(),
+        args,
+    }
+}
+
+fn shell_supervisor_attach_stream_frame_state(response: &JsonValue) -> (String, u64, u64, bool) {
+    let Some(root) = json_as_object(response) else {
+        return ("unknown".to_string(), 0, 0, false);
+    };
+    let summary = root
+        .get("attach_summary")
+        .and_then(json_as_string)
+        .unwrap_or("");
+    let status = shell_summary_value(summary, "status")
+        .unwrap_or("unknown")
+        .to_string();
+    let next_cursor = shell_attach_summary_next_cursor(summary).unwrap_or(0);
+    let event_count = shell_summary_value(summary, "events")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    let has_raw_outputs = root
+        .get("terminal_raw_outputs")
+        .and_then(json_as_array)
+        .is_some_and(|items| !items.is_empty());
+    (status, next_cursor, event_count, has_raw_outputs)
+}
+
+#[cfg(unix)]
+fn shell_supervisor_byte_stream_control_json(
+    request: &ShellSupervisorRequest,
+    supervisor_cwd: &Path,
+) -> AppResult<Option<JsonValue>> {
+    let mut control = BTreeMap::new();
+    let has_rows = shell_supervisor_request_value(request, "tty_rows").is_some()
+        || shell_supervisor_request_value(request, "rows").is_some();
+    let has_cols = shell_supervisor_request_value(request, "tty_cols").is_some()
+        || shell_supervisor_request_value(request, "cols").is_some();
+    if has_rows || has_cols {
+        if has_rows != has_cols {
+            return Err(app_error(
+                "shell supervisor byte_stream resize requires both rows and cols",
+            ));
+        }
+        let output = shell_supervisor_resize_job(request, supervisor_cwd)?;
+        control.insert(
+            "resize_summary".to_string(),
+            JsonValue::String(output.summary),
+        );
+    }
+
+    let has_input = ["input", "stdin", "data"]
+        .iter()
+        .any(|key| shell_supervisor_request_value(request, key).is_some());
+    if has_input || shell_supervisor_request_bool(request, "close_stdin") {
+        let output = shell_supervisor_stdin_job(request, supervisor_cwd)?;
+        control.insert(
+            "stdin_summary".to_string(),
+            JsonValue::String(output.summary),
+        );
+    }
+
+    if control.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(JsonValue::Object(control)))
+    }
+}
+
+#[cfg(unix)]
+fn shell_supervisor_byte_stream_drain_control_frames(
+    stream: &mut std::os::unix::net::UnixStream,
+    request: &ShellSupervisorRequest,
+    supervisor_cwd: &Path,
+    incoming: &mut Vec<u8>,
+) -> AppResult<Vec<JsonValue>> {
+    const MAX_FRAME_BYTES: usize = 1024 * 1024;
+    let mut buffer = [0u8; 4096];
+    stream.set_nonblocking(true)?;
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                incoming.extend_from_slice(&buffer[..count]);
+                if incoming.len() > MAX_FRAME_BYTES {
+                    stream.set_nonblocking(false)?;
+                    return Err(app_error("shell supervisor byte_stream frame is too large"));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                stream.set_nonblocking(false)?;
+                return Err(error.into());
+            }
+        }
+    }
+    stream.set_nonblocking(false)?;
+
+    let mut frames = Vec::new();
+    while let Some(index) = incoming.iter().position(|byte| *byte == b'\n') {
+        let line = incoming.drain(..=index).collect::<Vec<_>>();
+        let line = String::from_utf8(line)
+            .map_err(|_| app_error("shell supervisor byte_stream frame must be UTF-8 JSON"))?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        frames.push(shell_supervisor_byte_stream_apply_control_frame(
+            request,
+            supervisor_cwd,
+            line,
+        )?);
+    }
+    Ok(frames)
+}
+
+#[cfg(unix)]
+fn shell_supervisor_byte_stream_apply_control_frame(
+    request: &ShellSupervisorRequest,
+    supervisor_cwd: &Path,
+    line: &str,
+) -> AppResult<JsonValue> {
+    let value = parse_json_value(line)?;
+    let object = json_as_object(&value)
+        .ok_or_else(|| app_error("shell supervisor byte_stream control frame must be an object"))?;
+    let frame_type = object
+        .get("type")
+        .or_else(|| object.get("kind"))
+        .or_else(|| object.get("method"))
+        .and_then(json_as_string)
+        .unwrap_or_else(|| {
+            if object.get("tty_rows").is_some()
+                || object.get("rows").is_some()
+                || object.get("tty_cols").is_some()
+                || object.get("cols").is_some()
+            {
+                "resize"
+            } else {
+                "stdin"
+            }
+        });
+    match frame_type {
+        "stdin" | "input" | "data" | "close_stdin" => {
+            shell_supervisor_byte_stream_apply_stdin_frame(request, supervisor_cwd, object)
+        }
+        "resize" | "winsize" => {
+            shell_supervisor_byte_stream_apply_resize_frame(request, supervisor_cwd, object)
+        }
+        "detach" | "close" => Ok(JsonValue::Object(BTreeMap::from([
+            ("type".to_string(), JsonValue::String("detach".to_string())),
+            ("status".to_string(), JsonValue::String("ok".to_string())),
+        ]))),
+        other => Err(app_error(format!(
+            "unsupported shell supervisor byte_stream control frame `{other}`"
+        ))),
+    }
+}
+
+#[cfg(unix)]
+fn shell_supervisor_byte_stream_apply_stdin_frame(
+    request: &ShellSupervisorRequest,
+    supervisor_cwd: &Path,
+    frame: &BTreeMap<String, JsonValue>,
+) -> AppResult<JsonValue> {
+    let mut args = shell_supervisor_byte_stream_base_control_args(request)?;
+    if let Some(input) = frame
+        .get("input")
+        .or_else(|| frame.get("stdin"))
+        .or_else(|| frame.get("data"))
+        .and_then(json_as_string)
+    {
+        args.insert("input".to_string(), JsonValue::String(input.to_string()));
+    } else if let Some(encoded) = frame
+        .get("bytes_base64")
+        .or_else(|| frame.get("input_base64"))
+        .or_else(|| frame.get("raw_base64"))
+        .or_else(|| frame.get("rawBase64"))
+        .and_then(json_as_string)
+    {
+        let bytes = decode_shell_base64(encoded)?;
+        let input = String::from_utf8(bytes).map_err(|_| {
+            app_error("shell supervisor byte_stream stdin bytes_base64 must decode to UTF-8")
+        })?;
+        args.insert("input".to_string(), JsonValue::String(input));
+    }
+    if frame
+        .get("close_stdin")
+        .or_else(|| frame.get("closeStdin"))
+        .is_some_and(|value| shell_json_truthy(value))
+        || frame
+            .get("type")
+            .and_then(json_as_string)
+            .is_some_and(|value| value == "close_stdin")
+    {
+        args.insert("close_stdin".to_string(), JsonValue::Bool(true));
+    }
+    if let Some(timeout_ms) = frame.get("timeout_ms").and_then(json_as_u64) {
+        args.insert(
+            "timeout_ms".to_string(),
+            JsonValue::Number(timeout_ms.to_string()),
+        );
+    }
+    if !args.contains_key("input") && !args.contains_key("close_stdin") {
+        return Err(app_error(
+            "shell supervisor byte_stream stdin frame requires input, bytes_base64, or close_stdin",
+        ));
+    }
+    let frame_request = ShellSupervisorRequest {
+        method: "stdin".to_string(),
+        args,
+    };
+    let output = shell_supervisor_stdin_job(&frame_request, supervisor_cwd)?;
+    Ok(JsonValue::Object(BTreeMap::from([
+        ("type".to_string(), JsonValue::String("stdin".to_string())),
+        ("status".to_string(), JsonValue::String("ok".to_string())),
+        (
+            "stdin_summary".to_string(),
+            JsonValue::String(output.summary),
+        ),
+    ])))
+}
+
+#[cfg(unix)]
+fn shell_supervisor_byte_stream_apply_resize_frame(
+    request: &ShellSupervisorRequest,
+    supervisor_cwd: &Path,
+    frame: &BTreeMap<String, JsonValue>,
+) -> AppResult<JsonValue> {
+    let rows = frame
+        .get("tty_rows")
+        .or_else(|| frame.get("rows"))
+        .and_then(json_as_u64)
+        .ok_or_else(|| app_error("shell supervisor byte_stream resize frame requires rows"))?;
+    let cols = frame
+        .get("tty_cols")
+        .or_else(|| frame.get("cols"))
+        .and_then(json_as_u64)
+        .ok_or_else(|| app_error("shell supervisor byte_stream resize frame requires cols"))?;
+    let mut args = shell_supervisor_byte_stream_base_control_args(request)?;
+    args.insert("tty_rows".to_string(), JsonValue::Number(rows.to_string()));
+    args.insert("tty_cols".to_string(), JsonValue::Number(cols.to_string()));
+    let frame_request = ShellSupervisorRequest {
+        method: "resize".to_string(),
+        args,
+    };
+    let output = shell_supervisor_resize_job(&frame_request, supervisor_cwd)?;
+    Ok(JsonValue::Object(BTreeMap::from([
+        ("type".to_string(), JsonValue::String("resize".to_string())),
+        ("status".to_string(), JsonValue::String("ok".to_string())),
+        (
+            "resize_summary".to_string(),
+            JsonValue::String(output.summary),
+        ),
+    ])))
+}
+
+#[cfg(unix)]
+fn shell_supervisor_byte_stream_base_control_args(
+    request: &ShellSupervisorRequest,
+) -> AppResult<BTreeMap<String, JsonValue>> {
+    let task_id = shell_supervisor_request_task_id(
+        request,
+        "shell supervisor byte_stream control frame requires task_id on the stream request",
+    )?;
+    let mut args = BTreeMap::from([("task_id".to_string(), JsonValue::String(task_id))]);
+    if let Some(cwd) = shell_supervisor_request_scalar(request, "cwd")? {
+        args.insert("cwd".to_string(), JsonValue::String(cwd));
+    }
+    Ok(args)
+}
+
+#[cfg(unix)]
+fn shell_supervisor_byte_stream_control_frame_detaches(frame: &JsonValue) -> bool {
+    json_as_object(frame)
+        .and_then(|object| object.get("type"))
+        .and_then(json_as_string)
+        .is_some_and(|value| value == "detach")
+}
+
+#[cfg(unix)]
+fn shell_json_truthy(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Bool(value) => *value,
+        JsonValue::String(value) => matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "on"),
+        JsonValue::Number(value) => value == "1",
+        JsonValue::Null | JsonValue::Array(_) | JsonValue::Object(_) => false,
+    }
+}
+
+#[cfg(unix)]
+fn shell_supervisor_byte_outputs_json_from_response(response: &JsonValue) -> Option<JsonValue> {
+    let root = json_as_object(response)?;
+    let outputs = root.get("terminal_raw_outputs").and_then(json_as_array)?;
+    let mut byte_outputs = Vec::new();
+    for output in outputs {
+        let Some(output) = json_as_object(output) else {
+            continue;
+        };
+        let Some(encoded) = output
+            .get("raw_base64")
+            .or_else(|| output.get("rawBase64"))
+            .and_then(json_as_string)
+        else {
+            continue;
+        };
+        let mut item = BTreeMap::from([
+            ("kind".to_string(), JsonValue::String("output".to_string())),
+            (
+                "bytes_base64".to_string(),
+                JsonValue::String(encoded.to_string()),
+            ),
+        ]);
+        if let Some(seq) = output.get("seq").and_then(json_as_u64) {
+            item.insert("seq".to_string(), JsonValue::Number(seq.to_string()));
+        }
+        byte_outputs.push(JsonValue::Object(item));
+    }
+    (!byte_outputs.is_empty()).then_some(JsonValue::Array(byte_outputs))
 }
 
 #[derive(Debug, Clone)]
@@ -1676,9 +3726,8 @@ fn shell_supervisor_protocol_response_for_request(
                 "replay_summary",
                 shell_supervisor_replay_job(request, cwd),
             ),
-            "attach" => shell_supervisor_apply_tool_result(
+            "attach" => shell_supervisor_apply_attach_result(
                 &mut response,
-                "attach_summary",
                 shell_supervisor_attach_job(request, cwd),
             ),
             "stdin" => shell_supervisor_apply_tool_result(
@@ -1740,6 +3789,27 @@ fn shell_supervisor_apply_tool_result(
     match result {
         Ok(output) => {
             response.insert(summary_key.to_string(), JsonValue::String(output.summary));
+        }
+        Err(error) => {
+            response.insert("status".to_string(), JsonValue::String("error".to_string()));
+            response.insert("error".to_string(), JsonValue::String(error.to_string()));
+        }
+    }
+}
+
+fn shell_supervisor_apply_attach_result(
+    response: &mut BTreeMap<String, JsonValue>,
+    result: AppResult<crate::tools::types::ToolOutput>,
+) {
+    match result {
+        Ok(output) => {
+            if let Some(raw_outputs) = shell_attach_raw_outputs_json_from_summary(&output.summary) {
+                response.insert("terminal_raw_outputs".to_string(), raw_outputs);
+            }
+            response.insert(
+                "attach_summary".to_string(),
+                JsonValue::String(output.summary),
+            );
         }
         Err(error) => {
             response.insert("status".to_string(), JsonValue::String("error".to_string()));
@@ -1853,7 +3923,15 @@ fn shell_supervisor_stdin_job(
     let input = shell_supervisor_task_tool_input(
         request,
         supervisor_cwd,
-        &["input", "stdin", "data", "close_stdin", "timeout_ms"],
+        &[
+            "input",
+            "stdin",
+            "data",
+            "input_base64",
+            "bytes_base64",
+            "close_stdin",
+            "timeout_ms",
+        ],
     )?;
     ExecShellInteractTool {
         tool_name: "exec_shell_interact",
@@ -2003,6 +4081,10 @@ fn shell_supervisor_request_bool(request: &ShellSupervisorRequest, key: &str) ->
     }
 }
 
+fn shell_supervisor_request_u64(request: &ShellSupervisorRequest, key: &str) -> Option<u64> {
+    shell_supervisor_request_value(request, key).and_then(json_as_u64)
+}
+
 fn shell_supervisor_request_object<'a>(
     request: &'a ShellSupervisorRequest,
     key: &str,
@@ -2096,6 +4178,27 @@ fn shell_supervisor_protocol_error_response(
         ),
         ("error".to_string(), JsonValue::String(error.to_string())),
     ]))
+}
+
+#[cfg(windows)]
+fn shell_supervisor_stream_unsupported_response(
+    cwd: &Path,
+    socket: &Path,
+    epoch: &str,
+    method: &str,
+    stream_method: &str,
+    error: &str,
+) -> JsonValue {
+    let mut response = shell_supervisor_protocol_error_response(cwd, socket, epoch, error);
+    if let JsonValue::Object(root) = &mut response {
+        root.insert("method".to_string(), JsonValue::String(method.to_string()));
+        root.insert(
+            "stream_method".to_string(),
+            JsonValue::String(stream_method.to_string()),
+        );
+        root.insert("stream_done".to_string(), JsonValue::Bool(true));
+    }
+    response
 }
 
 #[cfg(unix)]
@@ -2649,6 +4752,7 @@ enum ServiceDoctorStatus {
 #[derive(Debug, Clone)]
 struct ServiceDoctorReport {
     config: ServiceTemplateConfig,
+    installed: bool,
     checks: Vec<ServiceDoctorCheck>,
 }
 
@@ -2663,7 +4767,11 @@ fn run_service_doctor(args: AgentsServiceDoctorArgs) -> AppResult<()> {
         interval_ms: args.interval_ms,
         budget: args.budget,
     })?;
-    let report = build_service_doctor_report(config);
+    let report = if args.installed {
+        build_service_doctor_report_with_options(config, true)
+    } else {
+        build_service_doctor_report(config)
+    };
     if json {
         println!("{}", render_service_doctor_json(&report));
     } else {
@@ -2695,6 +4803,13 @@ impl ServiceDoctorReport {
 }
 
 fn build_service_doctor_report(config: ServiceTemplateConfig) -> ServiceDoctorReport {
+    build_service_doctor_report_with_options(config, false)
+}
+
+fn build_service_doctor_report_with_options(
+    config: ServiceTemplateConfig,
+    installed: bool,
+) -> ServiceDoctorReport {
     let templates = service_templates(&config);
     let mut checks = Vec::new();
 
@@ -2702,9 +4817,16 @@ fn build_service_doctor_report(config: ServiceTemplateConfig) -> ServiceDoctorRe
     service_doctor_check_workdir(&config, &mut checks);
     service_doctor_check_template_topology(&config, &templates, &mut checks);
     service_doctor_check_platform_tools(config.kind, &mut checks);
+    if installed {
+        service_doctor_check_installed_services(config.kind, &mut checks);
+    }
     service_doctor_check_output_dir(&config, &templates, &mut checks);
 
-    ServiceDoctorReport { config, checks }
+    ServiceDoctorReport {
+        config,
+        installed,
+        checks,
+    }
 }
 
 fn service_doctor_check_binary(
@@ -2839,6 +4961,7 @@ fn service_doctor_check_template_topology(
         &["agents", "shell-supervisor", "--json"],
         checks,
     );
+    service_doctor_check_template_command_vectors(config, templates, checks);
 }
 
 fn service_doctor_check_template_command(
@@ -2884,6 +5007,272 @@ fn service_doctor_check_template_command(
     }
 }
 
+fn service_doctor_check_template_command_vectors(
+    config: &ServiceTemplateConfig,
+    templates: &[ServiceTemplate],
+    checks: &mut Vec<ServiceDoctorCheck>,
+) {
+    let mut blockers = Vec::new();
+    for template in templates {
+        match service_template_command_vector(template) {
+            Ok(command) => {
+                if command.workdir != config.workdir {
+                    blockers.push(format!(
+                        "{} has workdir `{}`, expected `{}`",
+                        template.path, command.workdir, config.workdir
+                    ));
+                    continue;
+                }
+                let Some(expected) = expected_service_command_args(config, template.path) else {
+                    continue;
+                };
+                if command.argv != expected {
+                    blockers.push(format!(
+                        "{} command `{}` did not match expected `{}`",
+                        template.path,
+                        command.argv.join(" "),
+                        expected.join(" ")
+                    ));
+                }
+            }
+            Err(error) => blockers.push(format!("{}: {error}", template.path)),
+        }
+    }
+    if blockers.is_empty() {
+        push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Ok,
+            "template_command_vectors",
+            "all generated service templates parse to the expected argv/workdir",
+        );
+    } else {
+        push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Blocker,
+            "template_command_vectors",
+            blockers.join("; "),
+        );
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServiceTemplateCommand {
+    workdir: String,
+    argv: Vec<String>,
+}
+
+fn service_template_command_vector(
+    template: &ServiceTemplate,
+) -> AppResult<ServiceTemplateCommand> {
+    if template.path.ends_with(".service") {
+        service_template_command_vector_systemd(template)
+    } else if template.path.ends_with(".plist") {
+        service_template_command_vector_launchd(template)
+    } else {
+        Err(app_error(format!(
+            "unsupported service template kind: {}",
+            template.path
+        )))
+    }
+}
+
+fn service_template_command_vector_systemd(
+    template: &ServiceTemplate,
+) -> AppResult<ServiceTemplateCommand> {
+    let workdir = service_template_systemd_value(&template.body, "WorkingDirectory")
+        .ok_or_else(|| app_error("systemd template missing WorkingDirectory"))?;
+    let command = service_template_systemd_value(&template.body, "ExecStart")
+        .ok_or_else(|| app_error("systemd template missing ExecStart"))?;
+    let mut argv = split_service_command_line(&command)?;
+    if argv.first().is_some_and(|arg| arg == "/usr/bin/env") {
+        argv.remove(0);
+    }
+    Ok(ServiceTemplateCommand { workdir, argv })
+}
+
+fn service_template_systemd_value(body: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    body.lines()
+        .find_map(|line| line.strip_prefix(&prefix).map(systemd_unquote_value))
+}
+
+fn systemd_unquote_value(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        let mut out = String::new();
+        let mut escaped = false;
+        for ch in inner.chars() {
+            if escaped {
+                out.push(ch);
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else {
+                out.push(ch);
+            }
+        }
+        if escaped {
+            out.push('\\');
+        }
+        out
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn split_service_command_line(value: &str) -> AppResult<Vec<String>> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut escaped = false;
+    let mut saw_token = false;
+    for ch in value.chars() {
+        if escaped {
+            current.push(ch);
+            saw_token = true;
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => {
+                escaped = true;
+                saw_token = true;
+            }
+            '"' => {
+                in_quotes = !in_quotes;
+                saw_token = true;
+            }
+            ch if ch.is_whitespace() && !in_quotes => {
+                if saw_token {
+                    args.push(std::mem::take(&mut current));
+                    saw_token = false;
+                }
+            }
+            _ => {
+                current.push(ch);
+                saw_token = true;
+            }
+        }
+    }
+    if escaped {
+        current.push('\\');
+    }
+    if in_quotes {
+        return Err(app_error("unterminated quoted service command"));
+    }
+    if saw_token {
+        args.push(current);
+    }
+    if args.is_empty() {
+        return Err(app_error("service command is empty"));
+    }
+    Ok(args)
+}
+
+fn service_template_command_vector_launchd(
+    template: &ServiceTemplate,
+) -> AppResult<ServiceTemplateCommand> {
+    let workdir = launchd_string_after_key(&template.body, "WorkingDirectory")
+        .ok_or_else(|| app_error("launchd template missing WorkingDirectory"))?;
+    let args_block = launchd_array_after_key(&template.body, "ProgramArguments")
+        .ok_or_else(|| app_error("launchd template missing ProgramArguments"))?;
+    let mut argv = launchd_strings(args_block);
+    if argv.first().is_some_and(|arg| arg == "/usr/bin/env") {
+        argv.remove(0);
+    }
+    if argv.is_empty() {
+        return Err(app_error("launchd ProgramArguments is empty"));
+    }
+    Ok(ServiceTemplateCommand { workdir, argv })
+}
+
+fn launchd_string_after_key(body: &str, key: &str) -> Option<String> {
+    let marker = format!("<key>{}</key>", xml_escape(key));
+    let tail = body.split_once(&marker)?.1;
+    let start = tail.find("<string>")? + "<string>".len();
+    let end = tail[start..].find("</string>")? + start;
+    Some(xml_unescape(&tail[start..end]))
+}
+
+fn launchd_array_after_key<'a>(body: &'a str, key: &str) -> Option<&'a str> {
+    let marker = format!("<key>{}</key>", xml_escape(key));
+    let tail = body.split_once(&marker)?.1;
+    let start = tail.find("<array>")? + "<array>".len();
+    let end = tail[start..].find("</array>")? + start;
+    Some(&tail[start..end])
+}
+
+fn launchd_strings(body: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut rest = body;
+    while let Some((_, after_start)) = rest.split_once("<string>") {
+        let Some((value, after_end)) = after_start.split_once("</string>") else {
+            break;
+        };
+        values.push(xml_unescape(value));
+        rest = after_end;
+    }
+    values
+}
+
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+fn expected_service_command_args(
+    config: &ServiceTemplateConfig,
+    path: &str,
+) -> Option<Vec<String>> {
+    if path.contains("runtime") {
+        Some(vec![
+            config.bin.clone(),
+            "serve".to_string(),
+            "--http".to_string(),
+            "--addr".to_string(),
+            config.addr.clone(),
+        ])
+    } else if path.contains("agents") {
+        let mut args = vec![
+            config.bin.clone(),
+            "agents".to_string(),
+            "daemon".to_string(),
+            "--interval-ms".to_string(),
+            config.interval_ms.to_string(),
+        ];
+        if let Some(budget) = config.budget {
+            args.push("--budget".to_string());
+            args.push(budget.to_string());
+        }
+        args.push("--json".to_string());
+        Some(args)
+    } else if path.contains("diagnostics") {
+        Some(vec![
+            config.bin.clone(),
+            "diagnostics".to_string(),
+            "--watch".to_string(),
+            "--changed".to_string(),
+            "--interval-ms".to_string(),
+            config.interval_ms.to_string(),
+            "--json".to_string(),
+        ])
+    } else if path.contains("shell-supervisor") {
+        Some(vec![
+            config.bin.clone(),
+            "agents".to_string(),
+            "shell-supervisor".to_string(),
+            "--json".to_string(),
+        ])
+    } else {
+        None
+    }
+}
+
 fn service_doctor_check_platform_tools(
     kind: AgentsServiceKind,
     checks: &mut Vec<ServiceDoctorCheck>,
@@ -2921,6 +5310,353 @@ fn service_doctor_check_platform_tools(
                 "launchctl is not on PATH; generated launchd files can still be reviewed",
             );
         }
+    }
+}
+
+fn service_doctor_check_installed_services(
+    kind: AgentsServiceKind,
+    checks: &mut Vec<ServiceDoctorCheck>,
+) {
+    if matches!(kind, AgentsServiceKind::Systemd | AgentsServiceKind::All) {
+        service_doctor_check_installed_systemd_services(checks);
+    }
+    if matches!(kind, AgentsServiceKind::Launchd | AgentsServiceKind::All) {
+        service_doctor_check_installed_launchd_services(checks);
+    }
+}
+
+const SYSTEMD_SERVICE_UNITS: &[&str] = &[
+    "deepseek-runtime.service",
+    "deepseek-agents.service",
+    "deepseek-diagnostics.service",
+    "deepseek-shell-supervisor.service",
+];
+
+const LAUNCHD_SERVICE_LABELS: &[&str] = &[
+    "com.deepseek.runtime",
+    "com.deepseek.agents",
+    "com.deepseek.diagnostics",
+    "com.deepseek.shell-supervisor",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SystemdInstalledServiceStatus {
+    unit: String,
+    load_state: String,
+    active_state: String,
+    sub_state: String,
+    unit_file_state: String,
+    fragment_path: String,
+}
+
+impl SystemdInstalledServiceStatus {
+    fn is_ready(&self) -> bool {
+        self.load_state == "loaded"
+            && self.active_state == "active"
+            && matches!(
+                self.unit_file_state.as_str(),
+                "enabled" | "enabled-runtime" | "linked" | "linked-runtime" | "static"
+            )
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "load_state={} active_state={} sub_state={} unit_file_state={} fragment_path={}",
+            service_status_value(&self.load_state),
+            service_status_value(&self.active_state),
+            service_status_value(&self.sub_state),
+            service_status_value(&self.unit_file_state),
+            service_status_value(&self.fragment_path)
+        )
+    }
+}
+
+fn service_doctor_check_installed_systemd_services(checks: &mut Vec<ServiceDoctorCheck>) {
+    if !command_on_path("systemctl") {
+        push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Blocker,
+            "installed_systemd",
+            "systemctl is not on PATH; cannot verify installed user services",
+        );
+        return;
+    }
+
+    for unit in SYSTEMD_SERVICE_UNITS {
+        match read_systemd_installed_service_status(unit) {
+            Ok(status) if status.is_ready() => push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Ok,
+                "installed_systemd",
+                format!(
+                    "installed systemd service {} is ready: {}",
+                    unit,
+                    status.summary()
+                ),
+            ),
+            Ok(status) => push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Blocker,
+                "installed_systemd",
+                format!(
+                    "installed systemd service {} is not ready: {}",
+                    unit,
+                    status.summary()
+                ),
+            ),
+            Err(error) => push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Blocker,
+                "installed_systemd",
+                format!("failed to inspect installed systemd service {unit}: {error}"),
+            ),
+        }
+    }
+}
+
+fn read_systemd_installed_service_status(unit: &str) -> AppResult<SystemdInstalledServiceStatus> {
+    let output = Command::new("systemctl")
+        .arg("--user")
+        .arg("show")
+        .arg(unit)
+        .arg("--property=LoadState")
+        .arg("--property=ActiveState")
+        .arg("--property=SubState")
+        .arg("--property=UnitFileState")
+        .arg("--property=FragmentPath")
+        .arg("--no-pager")
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(app_error(format!(
+            "systemctl --user show failed with {}{}",
+            output.status,
+            child_stderr_suffix(stderr.trim())
+        )));
+    }
+    parse_systemd_installed_service_status(unit, &stdout)
+}
+
+fn parse_systemd_installed_service_status(
+    unit: &str,
+    stdout: &str,
+) -> AppResult<SystemdInstalledServiceStatus> {
+    let mut values = BTreeMap::new();
+    for line in stdout.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        values.insert(key.trim().to_string(), value.trim().to_string());
+    }
+    let load_state = values
+        .get("LoadState")
+        .cloned()
+        .ok_or_else(|| app_error("systemd show output missing LoadState"))?;
+    let active_state = values
+        .get("ActiveState")
+        .cloned()
+        .ok_or_else(|| app_error("systemd show output missing ActiveState"))?;
+    Ok(SystemdInstalledServiceStatus {
+        unit: unit.to_string(),
+        load_state,
+        active_state,
+        sub_state: values.get("SubState").cloned().unwrap_or_default(),
+        unit_file_state: values.get("UnitFileState").cloned().unwrap_or_default(),
+        fragment_path: values.get("FragmentPath").cloned().unwrap_or_default(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LaunchdInstalledServiceStatus {
+    label: String,
+    state: String,
+    pid: Option<String>,
+    last_exit_status: Option<String>,
+    path: Option<String>,
+}
+
+impl LaunchdInstalledServiceStatus {
+    fn is_ready(&self) -> bool {
+        let state_running = self.state == "running";
+        let pid_running = self
+            .pid
+            .as_deref()
+            .is_some_and(|pid| !pid.is_empty() && pid != "0" && pid != "-");
+        let clean_exit = self
+            .last_exit_status
+            .as_deref()
+            .map(|status| status == "0")
+            .unwrap_or(true);
+        (state_running || pid_running) && clean_exit
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "state={} pid={} last_exit_status={} path={}",
+            service_status_value(&self.state),
+            service_status_value(self.pid.as_deref().unwrap_or_default()),
+            service_status_value(self.last_exit_status.as_deref().unwrap_or_default()),
+            service_status_value(self.path.as_deref().unwrap_or_default())
+        )
+    }
+}
+
+fn service_doctor_check_installed_launchd_services(checks: &mut Vec<ServiceDoctorCheck>) {
+    if !command_on_path("launchctl") {
+        push_service_doctor_check(
+            checks,
+            ServiceDoctorStatus::Blocker,
+            "installed_launchd",
+            "launchctl is not on PATH; cannot verify installed user services",
+        );
+        return;
+    }
+    let uid = match current_user_id_string() {
+        Ok(uid) => uid,
+        Err(error) => {
+            push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Blocker,
+                "installed_launchd",
+                format!("failed to resolve current user id for launchctl print: {error}"),
+            );
+            return;
+        }
+    };
+
+    for label in LAUNCHD_SERVICE_LABELS {
+        match read_launchd_installed_service_status(&uid, label) {
+            Ok(status) if status.is_ready() => push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Ok,
+                "installed_launchd",
+                format!(
+                    "installed launchd service {} is ready: {}",
+                    label,
+                    status.summary()
+                ),
+            ),
+            Ok(status) => push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Blocker,
+                "installed_launchd",
+                format!(
+                    "installed launchd service {} is not ready: {}",
+                    label,
+                    status.summary()
+                ),
+            ),
+            Err(error) => push_service_doctor_check(
+                checks,
+                ServiceDoctorStatus::Blocker,
+                "installed_launchd",
+                format!("failed to inspect installed launchd service {label}: {error}"),
+            ),
+        }
+    }
+}
+
+fn current_user_id_string() -> AppResult<String> {
+    if let Ok(uid) = std::env::var("UID") {
+        let uid = uid.trim();
+        if !uid.is_empty() {
+            return Ok(uid.to_string());
+        }
+    }
+    let output = Command::new("id").arg("-u").output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(app_error(format!(
+            "id -u failed with {}{}",
+            output.status,
+            child_stderr_suffix(stderr.trim())
+        )));
+    }
+    let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if uid.is_empty() {
+        return Err(app_error("id -u returned an empty user id"));
+    }
+    Ok(uid)
+}
+
+fn read_launchd_installed_service_status(
+    uid: &str,
+    label: &str,
+) -> AppResult<LaunchdInstalledServiceStatus> {
+    let target = format!("gui/{uid}/{label}");
+    let output = Command::new("launchctl")
+        .arg("print")
+        .arg(&target)
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(app_error(format!(
+            "launchctl print {target} failed with {}{}",
+            output.status,
+            child_stderr_suffix(stderr.trim())
+        )));
+    }
+    parse_launchd_installed_service_status(label, &stdout)
+}
+
+fn parse_launchd_installed_service_status(
+    label: &str,
+    stdout: &str,
+) -> AppResult<LaunchdInstalledServiceStatus> {
+    let mut state = None;
+    let mut pid = None;
+    let mut last_exit_status = None;
+    let mut path = None;
+
+    for line in stdout.lines() {
+        let Some((key, value)) = parse_launchd_status_line(line) else {
+            continue;
+        };
+        match key.as_str() {
+            "state" => state = Some(value),
+            "pid" | "PID" => pid = Some(value),
+            "last exit code" | "last_exit_status" | "LastExitStatus" => {
+                last_exit_status = Some(value)
+            }
+            "path" => path = Some(value),
+            _ => {}
+        }
+    }
+
+    Ok(LaunchdInstalledServiceStatus {
+        label: label.to_string(),
+        state: state.ok_or_else(|| app_error("launchctl print output missing state"))?,
+        pid,
+        last_exit_status,
+        path,
+    })
+}
+
+fn parse_launchd_status_line(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim().trim_end_matches(';');
+    let (key, value) = trimmed
+        .split_once(" = ")
+        .or_else(|| trimmed.split_once('='))?;
+    let key = key.trim().trim_matches('"').trim_matches('\'').to_string();
+    let value = value
+        .trim()
+        .trim_end_matches(';')
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string();
+    if key.is_empty() {
+        return None;
+    }
+    Some((key, value))
+}
+
+fn service_status_value(value: &str) -> &str {
+    if value.is_empty() {
+        "-"
+    } else {
+        value
     }
 }
 
@@ -3090,6 +5826,7 @@ fn render_service_doctor_text(report: &ServiceDoctorReport) -> String {
     if let Some(out_dir) = &report.config.out {
         out.push_str(&format!("  output: {}\n", out_dir.display()));
     }
+    out.push_str(&format!("  installed: {}\n", report.installed));
     out.push('\n');
     for check in &report.checks {
         out.push_str(&format!(
@@ -3128,12 +5865,13 @@ fn render_service_doctor_json(report: &ServiceDoctorReport) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"kind\":\"deepseek.agents.service_doctor.v1\",\"service_kind\":\"{}\",\"binary\":\"{}\",\"workdir\":\"{}\",\"runtime_addr\":\"{}\",\"output_dir\":\"{}\",\"blockers\":{},\"warnings\":{},\"checks\":[{}]}}",
+        "{{\"kind\":\"deepseek.agents.service_doctor.v1\",\"service_kind\":\"{}\",\"binary\":\"{}\",\"workdir\":\"{}\",\"runtime_addr\":\"{}\",\"output_dir\":\"{}\",\"installed\":{},\"blockers\":{},\"warnings\":{},\"checks\":[{}]}}",
         service_kind_label(report.config.kind),
         json_escape(&report.config.bin),
         json_escape(&report.config.workdir),
         json_escape(&report.config.addr),
         json_escape(&out),
+        report.installed,
         report.blocker_count(),
         report.warning_count(),
         checks
@@ -3158,6 +5896,8 @@ fn service_doctor_status_label(status: ServiceDoctorStatus) -> &'static str {
 
 #[derive(Debug, Clone)]
 struct ServiceSmokeReport {
+    kind: AgentsServiceKind,
+    installed: bool,
     binary: String,
     workdir: PathBuf,
     requested_addr: String,
@@ -3192,11 +5932,14 @@ fn build_service_smoke_report(args: AgentsServiceSmokeArgs) -> ServiceSmokeRepor
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let requested_addr = args.addr;
-    let (resolved_addr, addr_error) = match resolve_service_smoke_addr(&requested_addr) {
-        Ok(addr) => (addr, None),
-        Err(error) => (requested_addr.clone(), Some(error.to_string())),
-    };
+    let (resolved_addr, addr_error) =
+        match resolve_service_smoke_addr_for_mode(&requested_addr, args.installed) {
+            Ok(addr) => (addr, None),
+            Err(error) => (requested_addr.clone(), Some(error.to_string())),
+        };
     ServiceSmokeReport {
+        kind: args.kind,
+        installed: args.installed,
         binary,
         workdir,
         requested_addr,
@@ -3212,8 +5955,14 @@ fn run_service_smoke_checks(report: &mut ServiceSmokeReport) {
     service_smoke_check_workdir(report);
     service_smoke_check_addr(report);
     if service_check_blocker_count(&report.checks) == 0 {
-        service_smoke_check_runtime(report);
-        service_smoke_check_shell_supervisor(report);
+        if report.installed {
+            service_smoke_check_installed_services(report);
+            service_smoke_check_installed_runtime(report);
+            service_smoke_check_installed_shell_supervisor(report);
+        } else {
+            service_smoke_check_runtime(report);
+            service_smoke_check_shell_supervisor(report);
+        }
     }
 }
 
@@ -3294,6 +6043,148 @@ fn service_smoke_check_addr(report: &mut ServiceSmokeReport) {
             ),
         );
     }
+}
+
+fn service_smoke_check_installed_services(report: &mut ServiceSmokeReport) {
+    let before = report.checks.len();
+    service_doctor_check_installed_services(report.kind, &mut report.checks);
+    if report.checks.len() == before {
+        push_service_doctor_check(
+            &mut report.checks,
+            ServiceDoctorStatus::Warn,
+            "installed_services",
+            "no installed service manager checks were selected",
+        );
+    }
+}
+
+fn service_smoke_check_installed_runtime(report: &mut ServiceSmokeReport) {
+    let timeout = Duration::from_millis(report.timeout_ms);
+    match probe_http_health(&report.resolved_addr, timeout) {
+        Ok(_) => push_service_doctor_check(
+            &mut report.checks,
+            ServiceDoctorStatus::Ok,
+            "installed_runtime",
+            format!(
+                "installed HTTP runtime /health responded at {}",
+                report.resolved_addr
+            ),
+        ),
+        Err(error) => push_service_doctor_check(
+            &mut report.checks,
+            ServiceDoctorStatus::Blocker,
+            "installed_runtime",
+            format!("installed HTTP runtime /health smoke failed: {error}"),
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn service_smoke_check_installed_shell_supervisor(report: &mut ServiceSmokeReport) {
+    let timeout = Duration::from_millis(report.timeout_ms);
+    let socket = service_smoke_shell_supervisor_socket_path(&report.workdir);
+    if let Some(path_bytes) = unix_socket_path_too_long(&socket) {
+        push_service_doctor_check(
+            &mut report.checks,
+            ServiceDoctorStatus::Blocker,
+            "installed_shell_supervisor",
+            format!(
+                "installed shell supervisor socket path is too long for Unix domain sockets: {} ({} bytes; limit is < {} bytes)",
+                socket.display(),
+                path_bytes,
+                SHELL_SUPERVISOR_UNIX_SOCKET_MAX_BYTES
+            ),
+        );
+        return;
+    }
+
+    let supervisor_healthy = match wait_for_installed_shell_supervisor_health(&socket, timeout) {
+        Ok(_) => {
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Ok,
+                "installed_shell_supervisor",
+                format!(
+                    "installed shell supervisor health responded at {}",
+                    socket.display()
+                ),
+            );
+            true
+        }
+        Err(error) => {
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "installed_shell_supervisor",
+                format!("installed shell supervisor health smoke failed: {error}"),
+            );
+            false
+        }
+    };
+
+    if supervisor_healthy {
+        match shell_supervisor_control_smoke(&socket, report.timeout_ms, None) {
+            Ok(summary) => push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Ok,
+                "installed_shell_supervisor_control",
+                summary,
+            ),
+            Err(error) => push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "installed_shell_supervisor_control",
+                format!("installed shell supervisor control smoke failed: {error}"),
+            ),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn service_smoke_check_installed_shell_supervisor(report: &mut ServiceSmokeReport) {
+    match wait_for_installed_shell_supervisor_tcp_health(
+        &report.workdir,
+        Duration::from_millis(report.timeout_ms),
+    ) {
+        Ok(endpoint) => {
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Ok,
+                "installed_shell_supervisor",
+                format!("installed shell supervisor health responded at tcp://{endpoint}"),
+            );
+            match shell_supervisor_windows_tcp_control_smoke(&endpoint, report.timeout_ms) {
+                Ok(summary) => push_service_doctor_check(
+                    &mut report.checks,
+                    ServiceDoctorStatus::Ok,
+                    "installed_shell_supervisor_control",
+                    summary,
+                ),
+                Err(error) => push_service_doctor_check(
+                    &mut report.checks,
+                    ServiceDoctorStatus::Blocker,
+                    "installed_shell_supervisor_control",
+                    format!("installed shell supervisor control smoke failed: {error}"),
+                ),
+            }
+        }
+        Err(error) => push_service_doctor_check(
+            &mut report.checks,
+            ServiceDoctorStatus::Blocker,
+            "installed_shell_supervisor",
+            format!("installed shell supervisor TCP health smoke failed: {error}"),
+        ),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn service_smoke_check_installed_shell_supervisor(report: &mut ServiceSmokeReport) {
+    push_service_doctor_check(
+        &mut report.checks,
+        ServiceDoctorStatus::Warn,
+        "installed_shell_supervisor",
+        "installed shell supervisor smoke is only available on Unix and Windows",
+    );
 }
 
 fn service_smoke_check_runtime(report: &mut ServiceSmokeReport) {
@@ -3443,7 +6334,11 @@ fn service_smoke_check_shell_supervisor(report: &mut ServiceSmokeReport) {
     };
 
     if supervisor_healthy {
-        match shell_supervisor_control_smoke(&socket, report.timeout_ms) {
+        match shell_supervisor_control_smoke(
+            &socket,
+            report.timeout_ms,
+            Some((&report.binary, report.workdir.as_path())),
+        ) {
             Ok(summary) => push_service_doctor_check(
                 &mut report.checks,
                 ServiceDoctorStatus::Ok,
@@ -3500,14 +6395,456 @@ fn service_smoke_check_shell_supervisor(report: &mut ServiceSmokeReport) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn service_smoke_check_shell_supervisor(report: &mut ServiceSmokeReport) {
+    let timeout = Duration::from_millis(report.timeout_ms);
+    let mut child = match Command::new(&report.binary)
+        .arg("agents")
+        .arg("shell-supervisor")
+        .arg("--json")
+        .current_dir(&report.workdir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "shell_supervisor",
+                format!("failed to start shell supervisor smoke child: {error}"),
+            );
+            return;
+        }
+    };
+
+    let endpoint = match wait_for_shell_supervisor_tcp_health(&report.workdir, timeout, &mut child)
+    {
+        Ok(endpoint) => {
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Ok,
+                "shell_supervisor",
+                format!("shell supervisor health responded at tcp://{endpoint}"),
+            );
+            Some(endpoint)
+        }
+        Err(error) => {
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "shell_supervisor",
+                format!("shell supervisor health smoke failed: {error}"),
+            );
+            None
+        }
+    };
+
+    if let Some(endpoint) = endpoint.as_deref() {
+        match shell_supervisor_windows_tcp_control_smoke(endpoint, report.timeout_ms) {
+            Ok(summary) => push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Ok,
+                "shell_supervisor_control",
+                summary,
+            ),
+            Err(error) => push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "shell_supervisor_control",
+                format!("shell supervisor control smoke failed: {error}"),
+            ),
+        }
+        match shell_supervisor_tcp_request(endpoint, "shutdown") {
+            Ok(_) => {}
+            Err(error) => push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Warn,
+                "shell_supervisor",
+                format!("shell supervisor shutdown request failed: {error}"),
+            ),
+        }
+    }
+
+    match wait_child_exit(&mut child, timeout) {
+        Ok(status) if status.success() => push_service_doctor_check(
+            &mut report.checks,
+            ServiceDoctorStatus::Ok,
+            "shell_supervisor",
+            format!("shell supervisor smoke child exited successfully: {status}"),
+        ),
+        Ok(status) => {
+            let stderr = read_child_stderr(&mut child);
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "shell_supervisor",
+                format!(
+                    "shell supervisor smoke child exited with failure: {status}{}",
+                    child_stderr_suffix(&stderr)
+                ),
+            );
+        }
+        Err(error) => {
+            terminate_child(&mut child);
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "shell_supervisor",
+                format!("shell supervisor smoke child did not exit cleanly: {error}"),
+            );
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn service_smoke_check_shell_supervisor(report: &mut ServiceSmokeReport) {
     push_service_doctor_check(
         &mut report.checks,
         ServiceDoctorStatus::Warn,
         "shell_supervisor",
-        "shell supervisor smoke is only available on Unix",
+        "shell supervisor smoke is only available on Unix and Windows",
     );
+}
+
+#[derive(Debug, Clone)]
+struct ShellFixtureSmokeReport {
+    binary: String,
+    workdir: PathBuf,
+    checks: Vec<ServiceDoctorCheck>,
+}
+
+fn run_shell_fixture_smoke(json: bool) -> AppResult<()> {
+    let mut report = build_shell_fixture_smoke_report();
+    run_shell_fixture_smoke_checks(&mut report);
+    if json {
+        println!("{}", render_shell_fixture_smoke_json(&report));
+    } else {
+        print!("{}", render_shell_fixture_smoke_text(&report));
+    }
+    if service_check_blocker_count(&report.checks) > 0 {
+        return Err(app_error(format!(
+            "shell fixture smoke found {} blocker(s)",
+            service_check_blocker_count(&report.checks)
+        )));
+    }
+    Ok(())
+}
+
+fn build_shell_fixture_smoke_report() -> ShellFixtureSmokeReport {
+    let binary = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "deepseek".to_string());
+    ShellFixtureSmokeReport {
+        binary,
+        workdir: temp_shell_fixture_smoke_root(),
+        checks: Vec::new(),
+    }
+}
+
+fn temp_shell_fixture_smoke_root() -> PathBuf {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        % 100_000;
+    std::env::temp_dir().join(format!("dsc-shell-fixture-{}-{suffix}", std::process::id()))
+}
+
+fn run_shell_fixture_smoke_checks(report: &mut ShellFixtureSmokeReport) {
+    match std::fs::create_dir_all(&report.workdir) {
+        Ok(_) => push_service_doctor_check(
+            &mut report.checks,
+            ServiceDoctorStatus::Ok,
+            "workdir",
+            format!("created fixture workspace: {}", report.workdir.display()),
+        ),
+        Err(error) => {
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "workdir",
+                format!(
+                    "failed to create fixture workspace {}: {error}",
+                    report.workdir.display()
+                ),
+            );
+            return;
+        }
+    }
+
+    #[cfg(unix)]
+    run_shell_fixture_smoke_unix(report);
+    #[cfg(windows)]
+    run_shell_fixture_smoke_windows(report);
+    #[cfg(not(any(unix, windows)))]
+    push_service_doctor_check(
+        &mut report.checks,
+        ServiceDoctorStatus::Blocker,
+        "platform",
+        "shell fixture smoke requires Unix or Windows shell-supervisor IPC",
+    );
+
+    let _ = std::fs::remove_dir_all(&report.workdir);
+}
+
+#[cfg(unix)]
+fn run_shell_fixture_smoke_unix(report: &mut ShellFixtureSmokeReport) {
+    let timeout = Duration::from_millis(5_000);
+    let socket = service_smoke_shell_supervisor_socket_path(&report.workdir);
+    if let Some(path_bytes) = unix_socket_path_too_long(&socket) {
+        push_service_doctor_check(
+            &mut report.checks,
+            ServiceDoctorStatus::Blocker,
+            "socket",
+            format!(
+                "shell fixture socket path is too long: {} ({} bytes; limit is < {} bytes)",
+                socket.display(),
+                path_bytes,
+                SHELL_SUPERVISOR_UNIX_SOCKET_MAX_BYTES
+            ),
+        );
+        return;
+    }
+
+    let mut child = match Command::new(&report.binary)
+        .arg("agents")
+        .arg("shell-supervisor")
+        .arg("--json")
+        .current_dir(&report.workdir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "shell_supervisor",
+                format!("failed to start shell supervisor fixture child: {error}"),
+            );
+            return;
+        }
+    };
+
+    let healthy = match wait_for_shell_supervisor_health(&socket, timeout, &mut child) {
+        Ok(_) => {
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Ok,
+                "health",
+                format!("shell supervisor health responded at {}", socket.display()),
+            );
+            true
+        }
+        Err(error) => {
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "health",
+                format!("shell supervisor fixture health failed: {error}"),
+            );
+            false
+        }
+    };
+
+    if healthy {
+        match shell_supervisor_control_smoke(
+            &socket,
+            5_000,
+            Some((&report.binary, report.workdir.as_path())),
+        ) {
+            Ok(summary) => push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Ok,
+                "shell_control",
+                summary,
+            ),
+            Err(error) => push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "shell_control",
+                format!("shell supervisor fixture control failed: {error}"),
+            ),
+        }
+    }
+
+    let _ = shell_supervisor_request(&socket, "shutdown");
+    match wait_child_exit(&mut child, timeout) {
+        Ok(status) if status.success() => push_service_doctor_check(
+            &mut report.checks,
+            ServiceDoctorStatus::Ok,
+            "shutdown",
+            format!("shell supervisor fixture child exited successfully: {status}"),
+        ),
+        Ok(status) => {
+            let stderr = read_child_stderr(&mut child);
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "shutdown",
+                format!(
+                    "shell supervisor fixture child exited with failure: {status}{}",
+                    child_stderr_suffix(&stderr)
+                ),
+            );
+        }
+        Err(error) => {
+            terminate_child(&mut child);
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "shutdown",
+                format!("shell supervisor fixture child did not exit cleanly: {error}"),
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+fn run_shell_fixture_smoke_windows(report: &mut ShellFixtureSmokeReport) {
+    let timeout = Duration::from_millis(5_000);
+    let mut child = match Command::new(&report.binary)
+        .arg("agents")
+        .arg("shell-supervisor")
+        .arg("--json")
+        .current_dir(&report.workdir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "shell_supervisor",
+                format!("failed to start shell supervisor fixture child: {error}"),
+            );
+            return;
+        }
+    };
+
+    let endpoint = match wait_for_shell_supervisor_tcp_health(&report.workdir, timeout, &mut child)
+    {
+        Ok(endpoint) => {
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Ok,
+                "health",
+                format!("shell supervisor health responded at tcp://{endpoint}"),
+            );
+            Some(endpoint)
+        }
+        Err(error) => {
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "health",
+                format!("shell supervisor fixture health failed: {error}"),
+            );
+            None
+        }
+    };
+
+    if let Some(endpoint) = endpoint.as_deref() {
+        match shell_supervisor_windows_tcp_control_smoke(endpoint, 5_000) {
+            Ok(summary) => push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Ok,
+                "shell_control",
+                summary,
+            ),
+            Err(error) => push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "shell_control",
+                format!("shell supervisor fixture control failed: {error}"),
+            ),
+        }
+        let _ = shell_supervisor_tcp_request(endpoint, "shutdown");
+    }
+
+    match wait_child_exit(&mut child, timeout) {
+        Ok(status) if status.success() => push_service_doctor_check(
+            &mut report.checks,
+            ServiceDoctorStatus::Ok,
+            "shutdown",
+            format!("shell supervisor fixture child exited successfully: {status}"),
+        ),
+        Ok(status) => {
+            let stderr = read_child_stderr(&mut child);
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "shutdown",
+                format!(
+                    "shell supervisor fixture child exited with failure: {status}{}",
+                    child_stderr_suffix(&stderr)
+                ),
+            );
+        }
+        Err(error) => {
+            terminate_child(&mut child);
+            push_service_doctor_check(
+                &mut report.checks,
+                ServiceDoctorStatus::Blocker,
+                "shutdown",
+                format!("shell supervisor fixture child did not exit cleanly: {error}"),
+            );
+        }
+    }
+}
+
+fn render_shell_fixture_smoke_text(report: &ShellFixtureSmokeReport) -> String {
+    let mut out = String::new();
+    out.push_str("DeepSeekCode shell fixture smoke\n");
+    out.push_str(&format!("  binary: {}\n", report.binary));
+    out.push_str(&format!("  workdir: {}\n\n", report.workdir.display()));
+    for check in &report.checks {
+        out.push_str(&format!(
+            "[{}] {}: {}\n",
+            service_doctor_status_label(check.status),
+            check.name,
+            check.message
+        ));
+    }
+    out.push_str(&format!(
+        "\nsummary: {} blocker(s), {} warning(s)\n",
+        service_check_blocker_count(&report.checks),
+        service_check_warning_count(&report.checks)
+    ));
+    out
+}
+
+fn render_shell_fixture_smoke_json(report: &ShellFixtureSmokeReport) -> String {
+    let checks = report
+        .checks
+        .iter()
+        .map(|check| {
+            format!(
+                "{{\"status\":\"{}\",\"name\":\"{}\",\"message\":\"{}\"}}",
+                service_doctor_status_label(check.status),
+                json_escape(&check.name),
+                json_escape(&check.message)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"kind\":\"deepseek.agents.shell_fixture_smoke.v1\",\"ok\":{},\"binary\":\"{}\",\"workdir\":\"{}\",\"blockers\":{},\"warnings\":{},\"checks\":[{}]}}",
+        service_check_blocker_count(&report.checks) == 0,
+        json_escape(&report.binary),
+        json_escape(&report.workdir.display().to_string()),
+        service_check_blocker_count(&report.checks),
+        service_check_warning_count(&report.checks),
+        checks
+    )
 }
 
 fn resolve_service_smoke_binary(bin: Option<String>) -> String {
@@ -3523,6 +6860,23 @@ fn resolve_service_smoke_binary(bin: Option<String>) -> String {
         }
     }
     bin
+}
+
+fn resolve_service_smoke_addr_for_mode(addr: &str, installed: bool) -> AppResult<String> {
+    if installed {
+        let socket = addr.parse::<std::net::SocketAddr>().map_err(|error| {
+            app_error(format!(
+                "invalid installed service-smoke address `{addr}`: {error}"
+            ))
+        })?;
+        if socket.port() == 0 {
+            return Err(app_error(
+                "installed service-smoke requires a concrete --addr port; 127.0.0.1:0 is only valid for non-installed smoke",
+            ));
+        }
+        return Ok(socket.to_string());
+    }
+    resolve_service_smoke_addr(addr)
 }
 
 fn resolve_service_smoke_addr(addr: &str) -> AppResult<String> {
@@ -3542,6 +6896,40 @@ fn resolve_service_smoke_addr(addr: &str) -> AppResult<String> {
     Ok(listener.local_addr()?.to_string())
 }
 
+fn probe_http_health(addr: &str, timeout: Duration) -> AppResult<String> {
+    use std::net::TcpStream;
+
+    let start = Instant::now();
+    loop {
+        match TcpStream::connect(addr) {
+            Ok(stream) => return read_http_health_response(addr, stream),
+            Err(error) if start.elapsed() < timeout => {
+                let _ = error;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(app_error(format!(
+                    "timed out waiting for HTTP runtime at {addr}: {error}"
+                )));
+            }
+        }
+    }
+}
+
+fn read_http_health_response(addr: &str, mut stream: std::net::TcpStream) -> AppResult<String> {
+    stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+    stream.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    if response.contains("200 OK") && response.contains("deepseek.runtime.health.v1") {
+        return Ok(response);
+    }
+    Err(app_error(format!(
+        "unexpected HTTP runtime /health response from {addr}"
+    )))
+}
+
 fn wait_for_http_health(addr: &str, timeout: Duration, child: &mut Child) -> AppResult<String> {
     use std::net::TcpStream;
 
@@ -3555,19 +6943,7 @@ fn wait_for_http_health(addr: &str, timeout: Duration, child: &mut Child) -> App
             )));
         }
         match TcpStream::connect(addr) {
-            Ok(mut stream) => {
-                stream.set_read_timeout(Some(Duration::from_millis(500)))?;
-                stream.set_write_timeout(Some(Duration::from_millis(500)))?;
-                stream.write_all(
-                    b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-                )?;
-                let mut response = String::new();
-                stream.read_to_string(&mut response)?;
-                if response.contains("200 OK") && response.contains("deepseek.runtime.health.v1") {
-                    return Ok(response);
-                }
-                return Err(app_error("unexpected HTTP runtime /health response"));
-            }
+            Ok(stream) => return read_http_health_response(addr, stream),
             Err(error) if start.elapsed() < timeout => {
                 let _ = error;
                 std::thread::sleep(Duration::from_millis(50));
@@ -3575,6 +6951,53 @@ fn wait_for_http_health(addr: &str, timeout: Duration, child: &mut Child) -> App
             Err(error) => {
                 return Err(app_error(format!(
                     "timed out waiting for HTTP runtime at {addr}: {error}"
+                )));
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_installed_shell_supervisor_health(
+    socket: &Path,
+    timeout: Duration,
+) -> AppResult<String> {
+    let start = Instant::now();
+    loop {
+        match shell_supervisor_request(socket, "health") {
+            Ok(response) => return Ok(response),
+            Err(error) if start.elapsed() < timeout => {
+                let _ = error;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(app_error(format!(
+                    "timed out waiting for installed shell supervisor at {}: {error}",
+                    socket.display()
+                )));
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn wait_for_installed_shell_supervisor_tcp_health(
+    workdir: &Path,
+    timeout: Duration,
+) -> AppResult<String> {
+    let start = Instant::now();
+    loop {
+        match read_shell_supervisor_tcp_endpoint(workdir).and_then(|endpoint| {
+            shell_supervisor_tcp_request(&endpoint, "health").map(|_| endpoint)
+        }) {
+            Ok(endpoint) => return Ok(endpoint),
+            Err(error) if start.elapsed() < timeout => {
+                let _ = error;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(app_error(format!(
+                    "timed out waiting for installed shell supervisor TCP endpoint: {error}"
                 )));
             }
         }
@@ -3606,6 +7029,38 @@ fn wait_for_shell_supervisor_health(
                 return Err(app_error(format!(
                     "timed out waiting for shell supervisor at {}: {error}",
                     socket.display()
+                )));
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn wait_for_shell_supervisor_tcp_health(
+    workdir: &Path,
+    timeout: Duration,
+    child: &mut Child,
+) -> AppResult<String> {
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let stderr = read_child_stderr(child);
+            return Err(app_error(format!(
+                "shell supervisor exited before TCP health responded: {status}{}",
+                child_stderr_suffix(&stderr)
+            )));
+        }
+        match read_shell_supervisor_tcp_endpoint(workdir).and_then(|endpoint| {
+            shell_supervisor_tcp_request(&endpoint, "health").map(|_| endpoint)
+        }) {
+            Ok(endpoint) => return Ok(endpoint),
+            Err(error) if start.elapsed() < timeout => {
+                let _ = error;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(app_error(format!(
+                    "timed out waiting for shell supervisor TCP endpoint: {error}"
                 )));
             }
         }
@@ -3656,8 +7111,51 @@ fn shell_supervisor_request_raw(socket: &Path, method: &str, request: &str) -> A
     use std::os::unix::net::UnixStream;
 
     let mut stream = UnixStream::connect(socket)?;
-    stream.set_read_timeout(Some(Duration::from_millis(500)))?;
-    stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+    stream.set_read_timeout(Some(Duration::from_millis(5_000)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(1_000)))?;
+    stream.write_all(request.as_bytes())?;
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+    reader.read_line(&mut response)?;
+    if response.contains("\"status\":\"ok\"")
+        && response.contains(&format!("\"method\":\"{method}\""))
+    {
+        Ok(response)
+    } else {
+        Err(app_error(format!(
+            "unexpected shell supervisor {method} response: {}",
+            response.trim()
+        )))
+    }
+}
+
+#[cfg(windows)]
+fn shell_supervisor_tcp_request(endpoint: &str, method: &str) -> AppResult<String> {
+    let request = format!("{{\"method\":\"{}\"}}\n", json_escape(method));
+    shell_supervisor_tcp_request_raw(endpoint, method, &request)
+}
+
+#[cfg(windows)]
+fn shell_supervisor_tcp_request_raw(
+    endpoint: &str,
+    method: &str,
+    request: &str,
+) -> AppResult<String> {
+    use std::net::{SocketAddr, TcpStream};
+
+    let address = endpoint.parse::<SocketAddr>().map_err(|error| {
+        app_error(format!(
+            "invalid shell supervisor TCP endpoint tcp://{endpoint}: {error}"
+        ))
+    })?;
+    if !address.ip().is_loopback() {
+        return Err(app_error(format!(
+            "shell supervisor TCP endpoint must be loopback: tcp://{endpoint}"
+        )));
+    }
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(5_000))?;
+    stream.set_read_timeout(Some(Duration::from_millis(5_000)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(1_000)))?;
     stream.write_all(request.as_bytes())?;
     let mut reader = BufReader::new(stream);
     let mut response = String::new();
@@ -3675,7 +7173,11 @@ fn shell_supervisor_request_raw(socket: &Path, method: &str, request: &str) -> A
 }
 
 #[cfg(unix)]
-fn shell_supervisor_control_smoke(socket: &Path, timeout_ms: u64) -> AppResult<String> {
+fn shell_supervisor_control_smoke(
+    socket: &Path,
+    timeout_ms: u64,
+    cli_smoke: Option<(&str, &Path)>,
+) -> AppResult<String> {
     let tty = cfg!(all(unix, target_os = "linux"));
     let wait_timeout = timeout_ms.min(5000);
     let start_request = format!(
@@ -3723,26 +7225,114 @@ fn shell_supervisor_control_smoke(socket: &Path, timeout_ms: u64) -> AppResult<S
         ));
     }
 
-    let pty_summary = if tty {
-        Some(shell_supervisor_pty_control_smoke(socket, wait_timeout)?)
-    } else {
-        None
-    };
-    if let Some(pty_summary) = pty_summary {
-        return Ok(format!(
-            "shell supervisor start/wait/attach/replay control smoke passed for task {task_id} (tty={tty}); {pty_summary}"
-        ));
+    let mut summaries = Vec::new();
+    if tty {
+        summaries.push(shell_supervisor_pty_control_smoke(socket, wait_timeout)?);
+        summaries.push(shell_supervisor_byte_stream_proxy_smoke(
+            socket,
+            wait_timeout,
+            cli_smoke,
+        )?);
     }
-    Ok(format!(
+
+    let mut summary = format!(
         "shell supervisor start/wait/attach/replay control smoke passed for task {task_id} (tty={tty})"
-    ))
+    );
+    if !summaries.is_empty() {
+        summary.push_str("; ");
+        summary.push_str(&summaries.join("; "));
+    }
+    Ok(summary)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn shell_supervisor_response_string(response: &str, key: &str) -> Option<String> {
     let value = parse_json_value(response.trim()).ok()?;
     let object = json_as_object(&value)?;
     json_as_string(object.get(key)?).map(str::to_string)
+}
+
+#[cfg(windows)]
+fn shell_supervisor_windows_tcp_control_smoke(
+    endpoint: &str,
+    timeout_ms: u64,
+) -> AppResult<String> {
+    let wait_timeout = timeout_ms.max(500).min(5000);
+    let start_request = format!(
+        "{{\"method\":\"start\",\"arguments\":{{\"command\":\"echo deepseek-windows-tcp-smoke\",\"tty\":true,\"tty_rows\":24,\"tty_cols\":80,\"timeout_ms\":{wait_timeout}}}}}\n"
+    );
+    let start_response = shell_supervisor_tcp_request_raw(endpoint, "start", &start_request)?;
+    let task_id = shell_supervisor_response_string(&start_response, "task_id")
+        .ok_or_else(|| app_error("shell supervisor Windows TCP start response missing task_id"))?;
+    if !start_response.contains(r#""job_pty_backend":"native-supervisor""#) {
+        return Err(app_error(
+            "shell supervisor Windows TCP smoke did not start a native-supervisor ConPTY job",
+        ));
+    }
+
+    let wait_request = format!(
+        "{{\"method\":\"wait\",\"arguments\":{{\"task_id\":\"{}\",\"timeout_ms\":{wait_timeout}}}}}\n",
+        json_escape(&task_id)
+    );
+    shell_supervisor_tcp_request_raw(endpoint, "wait", &wait_request)?;
+
+    let attach_request = format!(
+        "{{\"method\":\"attach\",\"arguments\":{{\"task_id\":\"{}\",\"tail\":true,\"limit_bytes\":4096}}}}\n",
+        json_escape(&task_id)
+    );
+    let attach_response = shell_supervisor_tcp_request_raw(endpoint, "attach", &attach_request)?;
+    if !attach_response.contains("deepseek-windows-tcp-smoke") {
+        return Err(app_error(
+            "shell supervisor Windows TCP attach smoke did not replay command output",
+        ));
+    }
+
+    let stream_request = format!(
+        "{{\"method\":\"attach_stream\",\"arguments\":{{\"task_id\":\"{}\",\"cursor\":0,\"limit_bytes\":4096,\"max_ms\":500,\"poll_ms\":25}}}}\n",
+        json_escape(&task_id)
+    );
+    let stream_response =
+        shell_supervisor_tcp_request_raw(endpoint, "attach_stream", &stream_request)?;
+    if !stream_response.contains("deepseek-windows-tcp-smoke")
+        || !stream_response.contains(r#""stream_method":"attach""#)
+    {
+        return Err(app_error(
+            "shell supervisor Windows TCP attach_stream smoke did not replay command output",
+        ));
+    }
+
+    let resize_start_request = format!(
+        "{{\"method\":\"start\",\"arguments\":{{\"command\":\"ping -n 6 127.0.0.1 >NUL\",\"tty\":true,\"tty_rows\":24,\"tty_cols\":80,\"timeout_ms\":{wait_timeout}}}}}\n"
+    );
+    let resize_start_response =
+        shell_supervisor_tcp_request_raw(endpoint, "start", &resize_start_request)?;
+    let resize_task_id = shell_supervisor_response_string(&resize_start_response, "task_id")
+        .ok_or_else(|| app_error("shell supervisor Windows TCP resize response missing task_id"))?;
+    if !resize_start_response.contains(r#""job_pty_backend":"native-supervisor""#) {
+        return Err(app_error(
+            "shell supervisor Windows TCP resize smoke did not start a native-supervisor ConPTY job",
+        ));
+    }
+    let resize_request = format!(
+        "{{\"method\":\"resize\",\"arguments\":{{\"task_id\":\"{}\",\"tty_rows\":31,\"tty_cols\":99}}}}\n",
+        json_escape(&resize_task_id)
+    );
+    let resize_response = shell_supervisor_tcp_request_raw(endpoint, "resize", &resize_request)?;
+    if !resize_response.contains("meta.live_resize=windows_conpty") {
+        return Err(app_error(format!(
+            "shell supervisor Windows TCP resize smoke did not use windows_conpty: {}",
+            resize_response.trim()
+        )));
+    }
+    let cancel_request = format!(
+        "{{\"method\":\"cancel\",\"arguments\":{{\"task_id\":\"{}\"}}}}\n",
+        json_escape(&resize_task_id)
+    );
+    shell_supervisor_tcp_request_raw(endpoint, "cancel", &cancel_request)?;
+
+    Ok(format!(
+        "Windows TCP shell supervisor start/wait/attach/attach_stream/resize smoke passed for tasks {task_id}/{resize_task_id}"
+    ))
 }
 
 #[cfg(unix)]
@@ -3840,6 +7430,675 @@ fn shell_supervisor_pty_control_smoke(socket: &Path, timeout_ms: u64) -> AppResu
 }
 
 #[cfg(unix)]
+fn shell_supervisor_byte_stream_proxy_smoke(
+    socket: &Path,
+    timeout_ms: u64,
+    cli_smoke: Option<(&str, &Path)>,
+) -> AppResult<String> {
+    let wait_timeout = timeout_ms.max(500).min(5000);
+    let duplex_task_id = shell_supervisor_start_native_pty_smoke(
+        socket,
+        "head -n 1",
+        wait_timeout,
+        "byte_stream duplex",
+    )?;
+    shell_supervisor_byte_stream_duplex_control_smoke(socket, &duplex_task_id, wait_timeout)?;
+    let raw_task_id = shell_supervisor_start_native_pty_smoke(
+        socket,
+        "head -n 1",
+        wait_timeout,
+        "byte_stream raw_proxy",
+    )?;
+    shell_supervisor_byte_stream_raw_proxy_control_smoke(socket, &raw_task_id, wait_timeout)?;
+    let mut task_ids = vec![duplex_task_id, raw_task_id];
+    let mut modes = "duplex/raw_proxy".to_string();
+    if let Some((binary, workdir)) = cli_smoke {
+        let fd_task_id = shell_supervisor_start_native_pty_smoke(
+            socket,
+            r#"echo fd-ready; IFS= read -r line; stty size; printf 'fd:%s\n' "$line""#,
+            wait_timeout,
+            "pty_fd handoff",
+        )?;
+        shell_supervisor_pty_fd_handoff_smoke(socket, &fd_task_id, wait_timeout)?;
+        task_ids.push(fd_task_id);
+        modes.push_str("/fd_handoff");
+        let human_task_id = shell_supervisor_start_native_pty_smoke(
+            socket,
+            r#"echo proxy-ready; IFS= read -r line; stty size; printf 'proxy:%s\n' "$line""#,
+            wait_timeout,
+            "human proxy",
+        )?;
+        shell_supervisor_human_proxy_cli_smoke(
+            socket,
+            binary,
+            workdir,
+            &human_task_id,
+            wait_timeout,
+        )?;
+        task_ids.push(human_task_id);
+        modes.push_str("/human_proxy");
+    }
+
+    Ok(format!(
+        "byte_stream {modes} smoke passed for tasks {}",
+        task_ids.join("/")
+    ))
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn shell_supervisor_pty_fd_handoff_smoke(
+    socket: &Path,
+    task_id: &str,
+    timeout_ms: u64,
+) -> AppResult<()> {
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket)?;
+    let timeout = Duration::from_millis(timeout_ms.max(500).min(5000));
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let request = format!(
+        "{{\"method\":\"pty_fd\",\"arguments\":{{\"task_id\":\"{}\",\"tty_rows\":37,\"tty_cols\":105,\"max_ms\":{}}}}}\n",
+        json_escape(task_id),
+        timeout_ms.max(500).min(5000)
+    );
+    stream.write_all(request.as_bytes())?;
+    stream.flush()?;
+    let response_line = read_shell_supervisor_request_line(&mut stream)?;
+    if !response_line.contains(r#""status":"ok""#)
+        || !response_line.contains(r#""stream_method":"pty_fd_handoff""#)
+        || !response_line.contains(r#""handoff":"scm_rights""#)
+    {
+        return Err(app_error(format!(
+            "shell supervisor pty_fd smoke returned unexpected handshake: {}",
+            response_line.trim()
+        )));
+    }
+    let mut pty = receive_shell_supervisor_fd(&stream)?;
+    shell_fd_proxy_set_nonblocking(&pty)?;
+    pty.write_all(b"fd-probe\n")?;
+    pty.flush()?;
+    let output = read_shell_fd_proxy_output_for(&mut pty, timeout);
+    let output = String::from_utf8_lossy(&output);
+    let _ = stream.shutdown(Shutdown::Both);
+    if !output.contains("fd:fd-probe") || !output.contains("37 105") {
+        return Err(app_error(format!(
+            "shell supervisor pty_fd smoke missed direct fd PTY output: {}",
+            output.trim()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn shell_supervisor_pty_fd_handoff_smoke(
+    _socket: &Path,
+    _task_id: &str,
+    _timeout_ms: u64,
+) -> AppResult<()> {
+    Err(app_error(
+        "shell supervisor pty_fd handoff smoke requires Linux SCM_RIGHTS",
+    ))
+}
+
+#[cfg(unix)]
+fn shell_supervisor_start_native_pty_smoke(
+    socket: &Path,
+    command: &str,
+    timeout_ms: u64,
+    label: &str,
+) -> AppResult<String> {
+    let start_request = format!(
+        "{{\"method\":\"start\",\"arguments\":{{\"command\":\"{}\",\"tty\":true,\"tty_rows\":24,\"tty_cols\":80,\"timeout_ms\":{}}}}}\n",
+        json_escape(command),
+        timeout_ms
+    );
+    let start_response = shell_supervisor_request_raw(socket, "start", &start_request)?;
+    let task_id =
+        shell_supervisor_response_string(&start_response, "task_id").ok_or_else(|| {
+            app_error(format!(
+                "shell supervisor {label} smoke response missing task_id"
+            ))
+        })?;
+    if !start_response.contains(r#""job_pty_backend":"native-supervisor""#) {
+        return Err(app_error(format!(
+            "shell supervisor {label} smoke did not start a native-supervisor PTY job"
+        )));
+    }
+    Ok(task_id)
+}
+
+#[cfg(unix)]
+fn shell_supervisor_byte_stream_duplex_control_smoke(
+    socket: &Path,
+    task_id: &str,
+    timeout_ms: u64,
+) -> AppResult<()> {
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket)?;
+    let timeout = Duration::from_millis(timeout_ms.max(500).min(5000));
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let request = format!(
+        "{{\"method\":\"byte_stream\",\"arguments\":{{\"task_id\":\"{}\",\"cursor\":0,\"limit_bytes\":4096,\"max_ms\":{},\"max_events\":12,\"poll_ms\":25}}}}\n",
+        json_escape(task_id),
+        timeout_ms.max(500).min(5000)
+    );
+    stream.write_all(request.as_bytes())?;
+    stream.write_all(br#"{"type":"resize","rows":36,"cols":104}"#)?;
+    stream.write_all(b"\n")?;
+    stream.write_all(br#"{"type":"stdin","input":"frame-probe\n"}"#)?;
+    stream.write_all(b"\n")?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+
+    let mut reader = BufReader::new(stream);
+    let mut body = String::new();
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            break;
+        }
+        body.push_str(&line);
+        if line.contains(r#""stream_done":true"#) {
+            break;
+        }
+    }
+    if !body.contains(r#""method":"byte_stream""#)
+        || !body.contains(r#""stream_method":"pty_byte_stream""#)
+    {
+        return Err(app_error(format!(
+            "shell supervisor byte_stream duplex smoke returned unexpected body: {}",
+            body.trim()
+        )));
+    }
+    if !body.contains(r#""control_frames""#)
+        || !body.contains(r#""byte_outputs""#)
+        || !body.contains(r#""bytes_base64""#)
+    {
+        return Err(app_error(format!(
+            "shell supervisor byte_stream duplex smoke missed control/raw byte evidence: {}",
+            body.trim()
+        )));
+    }
+    if !body.contains("meta.live_resize=native_tiocswinsz") || !body.contains("frame-probe") {
+        return Err(app_error(format!(
+            "shell supervisor byte_stream duplex smoke missed resize/stdin output: {}",
+            body.trim()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn shell_supervisor_byte_stream_raw_proxy_control_smoke(
+    socket: &Path,
+    task_id: &str,
+    timeout_ms: u64,
+) -> AppResult<()> {
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket)?;
+    let timeout = Duration::from_millis(timeout_ms.max(500).min(5000));
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let request = format!(
+        "{{\"method\":\"byte_stream\",\"arguments\":{{\"task_id\":\"{}\",\"cursor\":0,\"limit_bytes\":4096,\"max_ms\":{},\"poll_ms\":10,\"raw_proxy\":true}}}}\n",
+        json_escape(task_id),
+        timeout_ms.max(500).min(5000)
+    );
+    stream.write_all(request.as_bytes())?;
+    stream.write_all(b"raw-probe\n")?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+
+    let mut body = Vec::new();
+    stream.read_to_end(&mut body)?;
+    let body = String::from_utf8_lossy(&body);
+    if body.contains("byte_outputs") || body.contains("\"method\":\"byte_stream\"") {
+        return Err(app_error(format!(
+            "shell supervisor byte_stream raw_proxy smoke returned JSON instead of raw bytes: {}",
+            body.trim()
+        )));
+    }
+    if !body.contains("raw-probe") {
+        return Err(app_error(format!(
+            "shell supervisor byte_stream raw_proxy smoke missed raw PTY output: {}",
+            body.trim()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn shell_supervisor_human_proxy_cli_smoke(
+    socket: &Path,
+    binary: &str,
+    workdir: &Path,
+    task_id: &str,
+    timeout_ms: u64,
+) -> AppResult<()> {
+    use std::os::unix::process::CommandExt;
+
+    let (mut master, slave) = open_shell_fixture_proxy_pty(35, 103)?;
+    let stdin = slave.try_clone()?;
+    let stdout = slave.try_clone()?;
+    let stderr = slave;
+    let mut command = Command::new(binary);
+    unsafe {
+        command.pre_exec(|| {
+            if shell_fixture_proxy_setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if shell_fixture_proxy_ioctl(0, SHELL_FIXTURE_PROXY_TIOCSCTTY, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if shell_fixture_proxy_tcsetpgrp(0, shell_fixture_proxy_getpid()) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let max_ms = timeout_ms.max(500).min(5000).to_string();
+    let mut child = command
+        .args([
+            "agents",
+            "shell",
+            "proxy",
+            task_id,
+            "--max-ms",
+            &max_ms,
+            "--poll-ms",
+            "10",
+            "--limit-bytes",
+            "4096",
+        ])
+        .current_dir(workdir)
+        .env("TERM", "xterm-256color")
+        .stdin(Stdio::from(stdin))
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|error| app_error(format!("failed to spawn agents shell proxy smoke: {error}")))?;
+    std::thread::sleep(Duration::from_millis(100));
+    master.write_all(b"fixture-proxy\n")?;
+    master.flush()?;
+
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(1000).min(7000));
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            terminate_child(&mut child);
+            break child.wait()?;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let transcript = read_shell_fixture_proxy_pty_output(&mut master);
+    let transcript = String::from_utf8_lossy(&transcript);
+    if timed_out || !status.success() {
+        return Err(app_error(format!(
+            "agents shell proxy smoke failed with {status}; timed_out={timed_out}; transcript: {}",
+            transcript.trim()
+        )));
+    }
+    if !transcript.contains("proxied to") || !transcript.contains("fixture-proxy") {
+        return Err(app_error(format!(
+            "agents shell proxy smoke did not show proxy transcript: {}",
+            transcript.trim()
+        )));
+    }
+
+    let replay_response = shell_supervisor_poll_for_output(
+        socket,
+        "replay",
+        task_id,
+        "proxy:fixture-proxy",
+        timeout_ms,
+    )?;
+    if !replay_response.contains("35 103") {
+        return Err(app_error(format!(
+            "agents shell proxy smoke did not sync terminal size to child PTY: {}",
+            replay_response.trim()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn shell_supervisor_human_proxy_cli_smoke(
+    _socket: &Path,
+    _binary: &str,
+    _workdir: &Path,
+    _task_id: &str,
+    _timeout_ms: u64,
+) -> AppResult<()> {
+    Err(app_error(
+        "agents shell proxy fixture smoke currently requires Linux PTY helpers",
+    ))
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn send_shell_supervisor_fd(
+    stream: &std::os::unix::net::UnixStream,
+    fd: std::os::fd::RawFd,
+) -> AppResult<()> {
+    use std::os::fd::AsRawFd;
+
+    let mut byte = [b'F'];
+    let mut iov = ShellFdIovec {
+        iov_base: byte.as_mut_ptr().cast(),
+        iov_len: byte.len(),
+    };
+    let fd_bytes = fd.to_ne_bytes();
+    let control_len = shell_fd_cmsg_space(fd_bytes.len());
+    let mut control = vec![0u8; control_len];
+    let header = control.as_mut_ptr().cast::<ShellFdCmsghdr>();
+    unsafe {
+        (*header).cmsg_len = shell_fd_cmsg_len(fd_bytes.len());
+        (*header).cmsg_level = SHELL_FD_SOL_SOCKET;
+        (*header).cmsg_type = SHELL_FD_SCM_RIGHTS;
+        std::ptr::copy_nonoverlapping(
+            fd_bytes.as_ptr(),
+            control
+                .as_mut_ptr()
+                .add(shell_fd_cmsg_align(std::mem::size_of::<ShellFdCmsghdr>())),
+            fd_bytes.len(),
+        );
+    }
+    let msg = ShellFdMsghdr {
+        msg_name: std::ptr::null_mut(),
+        msg_namelen: 0,
+        msg_iov: &mut iov,
+        msg_iovlen: 1,
+        msg_control: control.as_mut_ptr().cast(),
+        msg_controllen: control.len(),
+        msg_flags: 0,
+    };
+    let sent = unsafe { shell_fd_sendmsg(stream.as_raw_fd(), &msg, 0) };
+    if sent < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn receive_shell_supervisor_fd(
+    stream: &std::os::unix::net::UnixStream,
+) -> AppResult<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let mut byte = [0u8; 1];
+    let mut iov = ShellFdIovec {
+        iov_base: byte.as_mut_ptr().cast(),
+        iov_len: byte.len(),
+    };
+    let mut control = vec![0u8; shell_fd_cmsg_space(std::mem::size_of::<std::os::fd::RawFd>())];
+    let mut msg = ShellFdMsghdr {
+        msg_name: std::ptr::null_mut(),
+        msg_namelen: 0,
+        msg_iov: &mut iov,
+        msg_iovlen: 1,
+        msg_control: control.as_mut_ptr().cast(),
+        msg_controllen: control.len(),
+        msg_flags: 0,
+    };
+    let received = unsafe { shell_fd_recvmsg(stream.as_raw_fd(), &mut msg, 0) };
+    if received < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if received == 0 {
+        return Err(app_error(
+            "shell supervisor pty_fd did not send a file descriptor",
+        ));
+    }
+    let header = control.as_ptr().cast::<ShellFdCmsghdr>();
+    let (level, kind, len) = unsafe {
+        (
+            (*header).cmsg_level,
+            (*header).cmsg_type,
+            (*header).cmsg_len,
+        )
+    };
+    if level != SHELL_FD_SOL_SOCKET
+        || kind != SHELL_FD_SCM_RIGHTS
+        || len < shell_fd_cmsg_len(std::mem::size_of::<std::os::fd::RawFd>())
+    {
+        return Err(app_error(
+            "shell supervisor pty_fd response did not include SCM_RIGHTS",
+        ));
+    }
+    let mut fd_bytes = [0u8; std::mem::size_of::<std::os::fd::RawFd>()];
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            control
+                .as_ptr()
+                .add(shell_fd_cmsg_align(std::mem::size_of::<ShellFdCmsghdr>())),
+            fd_bytes.as_mut_ptr(),
+            fd_bytes.len(),
+        );
+    }
+    let fd = std::os::fd::RawFd::from_ne_bytes(fd_bytes);
+    if fd < 0 {
+        return Err(app_error("shell supervisor pty_fd returned an invalid fd"));
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn shell_fd_cmsg_align(len: usize) -> usize {
+    let align = std::mem::size_of::<usize>();
+    (len + align - 1) & !(align - 1)
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn shell_fd_cmsg_len(data_len: usize) -> usize {
+    shell_fd_cmsg_align(std::mem::size_of::<ShellFdCmsghdr>()) + data_len
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn shell_fd_cmsg_space(data_len: usize) -> usize {
+    shell_fd_cmsg_align(std::mem::size_of::<ShellFdCmsghdr>()) + shell_fd_cmsg_align(data_len)
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn shell_fd_proxy_set_nonblocking(file: &std::fs::File) -> AppResult<()> {
+    use std::os::fd::AsRawFd;
+
+    let fd = file.as_raw_fd();
+    let flags = unsafe { shell_fixture_proxy_fcntl(fd, SHELL_FD_F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let result =
+        unsafe { shell_fixture_proxy_fcntl(fd, SHELL_FD_F_SETFL, flags | SHELL_FD_O_NONBLOCK) };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn shell_fd_proxy_set_winsize(fd: i32, rows: u16, cols: u16) -> AppResult<()> {
+    let size = ShellFixtureProxyWinsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let result = unsafe { shell_fixture_proxy_ioctl(fd, SHELL_FIXTURE_PROXY_TIOCSWINSZ, &size) };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+#[repr(C)]
+struct ShellFdIovec {
+    iov_base: *mut std::ffi::c_void,
+    iov_len: usize,
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+#[repr(C)]
+struct ShellFdMsghdr {
+    msg_name: *mut std::ffi::c_void,
+    msg_namelen: u32,
+    msg_iov: *mut ShellFdIovec,
+    msg_iovlen: usize,
+    msg_control: *mut std::ffi::c_void,
+    msg_controllen: usize,
+    msg_flags: i32,
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+#[repr(C)]
+struct ShellFdCmsghdr {
+    cmsg_len: usize,
+    cmsg_level: i32,
+    cmsg_type: i32,
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+const SHELL_FD_SOL_SOCKET: i32 = 1;
+#[cfg(all(unix, target_os = "linux"))]
+const SHELL_FD_SCM_RIGHTS: i32 = 1;
+#[cfg(all(unix, target_os = "linux"))]
+const SHELL_FD_F_GETFL: i32 = 3;
+#[cfg(all(unix, target_os = "linux"))]
+const SHELL_FD_F_SETFL: i32 = 4;
+#[cfg(all(unix, target_os = "linux"))]
+const SHELL_FD_O_NONBLOCK: i32 = 0o4000;
+
+#[cfg(all(unix, target_os = "linux"))]
+unsafe extern "C" {
+    #[link_name = "sendmsg"]
+    fn shell_fd_sendmsg(fd: i32, msg: *const ShellFdMsghdr, flags: i32) -> isize;
+    #[link_name = "recvmsg"]
+    fn shell_fd_recvmsg(fd: i32, msg: *mut ShellFdMsghdr, flags: i32) -> isize;
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+#[repr(C)]
+struct ShellFixtureProxyWinsize {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+unsafe extern "C" {
+    fn posix_openpt(flags: i32) -> i32;
+    fn grantpt(fd: i32) -> i32;
+    fn unlockpt(fd: i32) -> i32;
+    fn ptsname(fd: i32) -> *mut std::os::raw::c_char;
+    #[link_name = "setsid"]
+    fn shell_fixture_proxy_setsid() -> i32;
+    #[link_name = "getpid"]
+    fn shell_fixture_proxy_getpid() -> i32;
+    #[link_name = "tcsetpgrp"]
+    fn shell_fixture_proxy_tcsetpgrp(fd: i32, pgrp: i32) -> i32;
+    #[link_name = "ioctl"]
+    fn shell_fixture_proxy_ioctl(fd: i32, request: u64, ...) -> i32;
+    #[link_name = "fcntl"]
+    fn shell_fixture_proxy_fcntl(fd: i32, cmd: i32, ...) -> i32;
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+const SHELL_FIXTURE_PROXY_TIOCSCTTY: u64 = 0x540E;
+#[cfg(all(unix, target_os = "linux"))]
+const SHELL_FIXTURE_PROXY_TIOCSWINSZ: u64 = 0x5414;
+
+#[cfg(all(unix, target_os = "linux"))]
+fn open_shell_fixture_proxy_pty(rows: u16, cols: u16) -> AppResult<(std::fs::File, std::fs::File)> {
+    use std::ffi::CStr;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    const O_RDWR: i32 = 0x0002;
+    const O_NOCTTY: i32 = 0x0100;
+
+    let master_fd = unsafe { posix_openpt(O_RDWR | O_NOCTTY) };
+    if master_fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if unsafe { grantpt(master_fd) } < 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe {
+            let _ = std::fs::File::from_raw_fd(master_fd);
+        }
+        return Err(error.into());
+    }
+    if unsafe { unlockpt(master_fd) } < 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe {
+            let _ = std::fs::File::from_raw_fd(master_fd);
+        }
+        return Err(error.into());
+    }
+    let slave_name = unsafe { ptsname(master_fd) };
+    if slave_name.is_null() {
+        let error = std::io::Error::last_os_error();
+        unsafe {
+            let _ = std::fs::File::from_raw_fd(master_fd);
+        }
+        return Err(error.into());
+    }
+    let slave_path = unsafe { CStr::from_ptr(slave_name) }
+        .to_string_lossy()
+        .to_string();
+    let master = unsafe { std::fs::File::from_raw_fd(master_fd) };
+    let slave = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(slave_path)?;
+    let size = ShellFixtureProxyWinsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let result = unsafe {
+        shell_fixture_proxy_ioctl(slave.as_raw_fd(), SHELL_FIXTURE_PROXY_TIOCSWINSZ, &size)
+    };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok((master, slave))
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn read_shell_fixture_proxy_pty_output(master: &mut std::fs::File) -> Vec<u8> {
+    use std::os::fd::AsRawFd;
+
+    const F_GETFL: i32 = 3;
+    const F_SETFL: i32 = 4;
+    const O_NONBLOCK: i32 = 0x0800;
+
+    let flags = unsafe { shell_fixture_proxy_fcntl(master.as_raw_fd(), F_GETFL, 0) };
+    if flags >= 0 {
+        let _ =
+            unsafe { shell_fixture_proxy_fcntl(master.as_raw_fd(), F_SETFL, flags | O_NONBLOCK) };
+    }
+    let mut output = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        match master.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => output.extend_from_slice(&buffer[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(_) => break,
+        }
+    }
+    output
+}
+
+#[cfg(unix)]
 fn shell_supervisor_poll_for_output(
     socket: &Path,
     method: &str,
@@ -3927,6 +8186,8 @@ fn service_check_warning_count(checks: &[ServiceDoctorCheck]) -> usize {
 fn render_service_smoke_text(report: &ServiceSmokeReport) -> String {
     let mut out = String::new();
     out.push_str("DeepSeekCode service smoke\n");
+    out.push_str(&format!("  kind: {}\n", service_kind_label(report.kind)));
+    out.push_str(&format!("  installed: {}\n", report.installed));
     out.push_str(&format!("  binary: {}\n", report.binary));
     out.push_str(&format!("  workdir: {}\n", report.workdir.display()));
     out.push_str(&format!("  requested_addr: {}\n", report.requested_addr));
@@ -3963,7 +8224,9 @@ fn render_service_smoke_json(report: &ServiceSmokeReport) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"kind\":\"deepseek.agents.service_smoke.v1\",\"binary\":\"{}\",\"workdir\":\"{}\",\"requested_addr\":\"{}\",\"resolved_addr\":\"{}\",\"timeout_ms\":{},\"blockers\":{},\"warnings\":{},\"checks\":[{}]}}",
+        "{{\"kind\":\"deepseek.agents.service_smoke.v1\",\"service_kind\":\"{}\",\"installed\":{},\"binary\":\"{}\",\"workdir\":\"{}\",\"requested_addr\":\"{}\",\"resolved_addr\":\"{}\",\"timeout_ms\":{},\"blockers\":{},\"warnings\":{},\"checks\":[{}]}}",
+        service_kind_label(report.kind),
+        report.installed,
         json_escape(&report.binary),
         json_escape(&report.workdir.display().to_string()),
         json_escape(&report.requested_addr),
@@ -4965,6 +9228,62 @@ fn current_epoch_seconds() -> u64 {
         .unwrap_or(0)
 }
 
+fn run_subagent_fixture_smoke(json: bool) -> AppResult<()> {
+    let root = subagent_fixture_temp_root();
+    let report = crate::tools::dispatch_subagent::run_subagent_fixture_smoke_at(&root)?;
+    if json {
+        println!("{}", render_subagent_fixture_smoke_json(&report));
+    } else {
+        print_subagent_fixture_smoke_report(&report);
+    }
+    Ok(())
+}
+
+fn subagent_fixture_temp_root() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!(
+        "deepseek-subagent-fixture-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
+fn render_subagent_fixture_smoke_json(
+    report: &crate::tools::dispatch_subagent::SubagentFixtureSmokeReport,
+) -> String {
+    format!(
+        "{{\"kind\":\"deepseek.subagent_fixture_smoke.v1\",\"workdir\":\"{}\",\"parser_ok\":{},\"disjoint_write_scope_ok\":{},\"readback_required_ok\":{},\"blocker_summary_ok\":{},\"conflict_summary_ok\":{},\"artifact_ok\":{},\"child_count\":{}}}",
+        json_escape(&report.workdir.display().to_string()),
+        report.parser_ok,
+        report.disjoint_write_scope_ok,
+        report.readback_required_ok,
+        report.blocker_summary_ok,
+        report.conflict_summary_ok,
+        report.artifact_ok,
+        report.child_count
+    )
+}
+
+fn print_subagent_fixture_smoke_report(
+    report: &crate::tools::dispatch_subagent::SubagentFixtureSmokeReport,
+) {
+    println!("Subagent fixture smoke: ok");
+    println!("workdir: {}", report.workdir.display());
+    println!(
+        "parser={} disjoint_write_scope={} readback_required={}",
+        report.parser_ok, report.disjoint_write_scope_ok, report.readback_required_ok
+    );
+    println!(
+        "blocker_summary={} conflict_summary={} artifact={} child_count={}",
+        report.blocker_summary_ok,
+        report.conflict_summary_ok,
+        report.artifact_ok,
+        report.child_count
+    );
+}
+
 fn list_threads(config_dir: &str) -> AppResult<()> {
     let dir = agent_threads_dir(config_dir);
     let active = read_active_thread(config_dir).unwrap_or_default();
@@ -5161,12 +9480,14 @@ mod tests {
                 tail: false,
                 follow: true,
                 interactive: false,
+                raw: true,
                 poll_ms: Some(50),
                 max_ms: Some(1000),
             },
             json: false,
         };
         assert!(agents_shell_attach_follow_requested(&attach_follow));
+        assert!(agents_shell_attach_raw_requested(&attach_follow));
         let attach = agents_shell_request_json(&attach_follow);
         let attach = json_as_object(&attach).unwrap();
         assert_eq!(
@@ -5181,8 +9502,137 @@ mod tests {
         assert_eq!(attach.get("wait_ms").and_then(json_as_u64), Some(250));
         assert_eq!(attach.get("limit_bytes").and_then(json_as_u64), Some(4096));
         assert!(!attach.contains_key("follow"));
+        assert!(!attach.contains_key("raw"));
         assert!(!attach.contains_key("poll_ms"));
         assert!(!attach.contains_key("max_ms"));
+
+        let stream_request = shell_attach_stream_request_json(&ShellAttachStreamFollow {
+            cwd: Path::new("."),
+            task_id: "task-2",
+            cursor: Some(9),
+            wait_ms: Some(250),
+            limit_bytes: Some(4096),
+            tail: false,
+            raw: true,
+            poll_ms: Some(50),
+            max_ms: Some(1000),
+            json: false,
+        });
+        let stream_request = json_as_object(&stream_request).unwrap();
+        assert_eq!(
+            stream_request.get("method").and_then(json_as_string),
+            Some("attach_stream")
+        );
+        assert_eq!(
+            stream_request.get("task_id").and_then(json_as_string),
+            Some("task-2")
+        );
+        assert_eq!(
+            stream_request.get("poll_ms").and_then(json_as_u64),
+            Some(50)
+        );
+        assert_eq!(
+            stream_request.get("max_ms").and_then(json_as_u64),
+            Some(1000)
+        );
+
+        let byte_stream = agents_shell_request_json(&AgentsShellArgs {
+            action: AgentsShellAction::ByteStream {
+                task_id: "task-3".to_string(),
+                cursor: Some(11),
+                wait_ms: Some(125),
+                limit_bytes: Some(2048),
+                tail: true,
+                input: Some("probe\n".to_string()),
+                close_stdin: false,
+                tty_rows: Some(33),
+                tty_cols: Some(101),
+                poll_ms: Some(25),
+                max_ms: Some(500),
+                max_events: Some(4),
+                raw_proxy: true,
+                terminal_proxy: false,
+            },
+            json: true,
+        });
+        let byte_stream = json_as_object(&byte_stream).unwrap();
+        assert!(agents_shell_byte_stream_requested(&AgentsShellArgs {
+            action: AgentsShellAction::ByteStream {
+                task_id: "task-3".to_string(),
+                cursor: None,
+                wait_ms: None,
+                limit_bytes: None,
+                tail: false,
+                input: None,
+                close_stdin: false,
+                tty_rows: None,
+                tty_cols: None,
+                poll_ms: None,
+                max_ms: None,
+                max_events: None,
+                raw_proxy: false,
+                terminal_proxy: false,
+            },
+            json: false,
+        }));
+        assert_eq!(
+            byte_stream.get("method").and_then(json_as_string),
+            Some("byte_stream")
+        );
+        assert_eq!(
+            byte_stream.get("task_id").and_then(json_as_string),
+            Some("task-3")
+        );
+        assert_eq!(byte_stream.get("cursor").and_then(json_as_u64), Some(11));
+        assert_eq!(byte_stream.get("wait_ms").and_then(json_as_u64), Some(125));
+        assert_eq!(
+            byte_stream.get("limit_bytes").and_then(json_as_u64),
+            Some(2048)
+        );
+        assert_eq!(
+            byte_stream.get("input").and_then(json_as_string),
+            Some("probe\n")
+        );
+        assert_eq!(byte_stream.get("tty_rows").and_then(json_as_u64), Some(33));
+        assert_eq!(byte_stream.get("tty_cols").and_then(json_as_u64), Some(101));
+        assert_eq!(byte_stream.get("poll_ms").and_then(json_as_u64), Some(25));
+        assert_eq!(byte_stream.get("max_ms").and_then(json_as_u64), Some(500));
+        assert_eq!(byte_stream.get("max_events").and_then(json_as_u64), Some(4));
+        assert!(matches!(
+            byte_stream.get("raw_proxy"),
+            Some(JsonValue::Bool(true))
+        ));
+
+        let fd_proxy = agents_shell_request_json(&AgentsShellArgs {
+            action: AgentsShellAction::FdProxy {
+                task_id: "task-4".to_string(),
+                tty_rows: Some(36),
+                tty_cols: Some(104),
+                max_ms: Some(1500),
+            },
+            json: false,
+        });
+        let fd_proxy = json_as_object(&fd_proxy).unwrap();
+        assert!(agents_shell_fd_proxy_requested(&AgentsShellArgs {
+            action: AgentsShellAction::FdProxy {
+                task_id: "task-4".to_string(),
+                tty_rows: None,
+                tty_cols: None,
+                max_ms: None,
+            },
+            json: false,
+        }));
+        assert_eq!(
+            fd_proxy.get("method").and_then(json_as_string),
+            Some("pty_fd")
+        );
+        assert_eq!(
+            fd_proxy.get("task_id").and_then(json_as_string),
+            Some("task-4")
+        );
+        assert_eq!(fd_proxy.get("tty_rows").and_then(json_as_u64), Some(36));
+        assert_eq!(fd_proxy.get("tty_cols").and_then(json_as_u64), Some(104));
+        assert_eq!(fd_proxy.get("max_ms").and_then(json_as_u64), Some(1500));
     }
 
     #[test]
@@ -5211,6 +9661,50 @@ mod tests {
             Some("completed")
         );
 
+        let raw_summary = "task_id: task-raw\nstatus: running\nnext_cursor: 4\nevents: 1\nterminal_raw_base64:\n4 output G1szMW1oaQo=\nterminal:\n[4 output epoch] hi\n";
+        assert_eq!(
+            shell_summary_section_payload(raw_summary, "terminal_raw_base64"),
+            Some("4 output G1szMW1oaQo=")
+        );
+        assert_eq!(
+            shell_attach_summary_terminal_payload(raw_summary),
+            Some("[4 output epoch] hi")
+        );
+        let mut raw = Vec::new();
+        assert!(shell_attach_write_terminal_payload(raw_summary, &mut raw, true, false).unwrap());
+        assert_eq!(raw, b"\x1b[31mhi\n");
+        let raw_outputs_json = shell_attach_raw_outputs_json_from_summary(raw_summary).unwrap();
+        let raw_outputs = json_as_array(&raw_outputs_json).unwrap();
+        assert_eq!(raw_outputs.len(), 1);
+        let raw_output = json_as_object(&raw_outputs[0]).unwrap();
+        assert_eq!(raw_output.get("seq").and_then(json_as_u64), Some(4));
+        assert_eq!(
+            raw_output.get("raw_base64").and_then(json_as_string),
+            Some("G1szMW1oaQo=")
+        );
+        let event_preview_summary = "task_id: task-raw\nstatus: running\nmode: terminal_event_attach\nnext_cursor: 5\nevents: 1\nterminal:\n[5 output epoch] preview-only\n";
+        let structured_response =
+            BTreeMap::from([("terminal_raw_outputs".to_string(), raw_outputs_json.clone())]);
+        let mut structured_raw = Vec::new();
+        assert!(shell_attach_write_response_terminal_payload(
+            &structured_response,
+            event_preview_summary,
+            &mut structured_raw,
+            true,
+            true
+        )
+        .unwrap());
+        assert_eq!(structured_raw, b"\x1b[31mhi\n");
+        let mut preview_only = Vec::new();
+        assert!(!shell_attach_write_terminal_payload(
+            event_preview_summary,
+            &mut preview_only,
+            true,
+            true
+        )
+        .unwrap());
+        assert!(preview_only.is_empty());
+
         let replay_summary = "task_id: task-3\nstatus: running\nstream: stdout\noffset: 0\nnext_offset: 5\ndata:\nhello\n";
         assert_eq!(
             shell_summary_section_payload(replay_summary, "data"),
@@ -5220,6 +9714,10 @@ mod tests {
             shell_summary_value(replay_summary, "next_offset"),
             Some("5")
         );
+        assert_eq!(decode_shell_base64("").unwrap(), Vec::<u8>::new());
+        assert_eq!(decode_shell_base64("Zg==").unwrap(), b"f".to_vec());
+        assert_eq!(decode_shell_base64("Zm8=").unwrap(), b"fo".to_vec());
+        assert_eq!(decode_shell_base64("Zm9v").unwrap(), b"foo".to_vec());
     }
 
     #[test]
@@ -5234,6 +9732,7 @@ mod tests {
                     tail: false,
                     follow: false,
                     interactive: true,
+                    raw: false,
                     poll_ms: None,
                     max_ms: None,
                 },
@@ -5407,6 +9906,81 @@ mod tests {
     }
 
     #[test]
+    fn shell_supervisor_tcp_endpoint_parser_accepts_loopback_only() {
+        assert_eq!(
+            shell_supervisor_tcp_endpoint_from_label("tcp://127.0.0.1:43210").unwrap(),
+            "127.0.0.1:43210"
+        );
+        assert_eq!(
+            shell_supervisor_tcp_endpoint_from_label("127.0.0.1:43210").unwrap(),
+            "127.0.0.1:43210"
+        );
+        assert!(
+            shell_supervisor_tcp_endpoint_from_label("tcp://192.0.2.10:43210")
+                .unwrap_err()
+                .to_string()
+                .contains("loopback")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_supervisor_windows_tcp_daemon_client_smoke() {
+        let root = temp_root("shell-supervisor-windows-tcp");
+        std::fs::create_dir_all(&root).unwrap();
+        let daemon_root = root.clone();
+        let handle = std::thread::spawn(move || {
+            run_shell_supervisor_daemon(&daemon_root, false).map_err(|error| error.to_string())
+        });
+
+        let endpoint = {
+            let deadline = Instant::now() + Duration::from_millis(5_000);
+            loop {
+                match read_shell_supervisor_tcp_endpoint(&root).and_then(|endpoint| {
+                    shell_supervisor_tcp_request(&endpoint, "health").map(|_| endpoint)
+                }) {
+                    Ok(endpoint) => break endpoint,
+                    Err(error) if Instant::now() < deadline => {
+                        let _ = error;
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(error) => panic!("timed out waiting for Windows TCP supervisor: {error}"),
+                }
+            }
+        };
+
+        let smoke = shell_supervisor_windows_tcp_control_smoke(&endpoint, 5_000);
+        let mut installed_report = ServiceSmokeReport {
+            kind: AgentsServiceKind::All,
+            installed: true,
+            binary: "deepseek".to_string(),
+            workdir: root.clone(),
+            requested_addr: "127.0.0.1:8765".to_string(),
+            resolved_addr: "127.0.0.1:8765".to_string(),
+            addr_error: None,
+            timeout_ms: 5_000,
+            checks: Vec::new(),
+        };
+        service_smoke_check_installed_shell_supervisor(&mut installed_report);
+        let _ = shell_supervisor_tcp_request(&endpoint, "shutdown");
+        let daemon = handle
+            .join()
+            .expect("Windows TCP supervisor thread panicked");
+        assert!(daemon.is_ok(), "Windows TCP supervisor failed: {daemon:?}");
+        smoke.unwrap();
+        assert!(
+            installed_report
+                .checks
+                .iter()
+                .any(|check| check.status == ServiceDoctorStatus::Ok
+                    && check.name == "installed_shell_supervisor_control"),
+            "{:?}",
+            installed_report.checks
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn shell_supervisor_protocol_reports_unsupported_unknown_method() {
         let response = shell_supervisor_protocol_response(
             "native_pty",
@@ -5487,7 +10061,7 @@ mod tests {
         );
         assert!(
             supervisor_manifest
-                .contains(r#""methods":["health","status","show","start","wait","replay","attach","stdin","resize","cancel","shutdown"]"#),
+                .contains(r#""methods":["health","status","show","start","wait","replay","attach","attach_stream","byte_stream","pty_fd","stdin","resize","cancel","shutdown"]"#),
             "{supervisor_manifest}"
         );
         assert!(
@@ -5588,6 +10162,116 @@ mod tests {
             "{replay_summary}"
         );
 
+        let mut attach_summary = String::new();
+        let mut attach_raw_outputs = 0usize;
+        for _ in 0..20 {
+            let attach = parse_shell_supervisor_request(&format!(
+                r#"{{"method":"attach","arguments":{{"task_id":"{task_id}","cursor":0,"limit_bytes":4000}}}}"#
+            ))
+            .unwrap();
+            let response = shell_supervisor_protocol_response_for_request(
+                &attach,
+                &root,
+                &socket,
+                "epoch+attach",
+            );
+            let object = json_as_object(&response).unwrap();
+            attach_summary = json_as_string(object.get("attach_summary").unwrap())
+                .unwrap()
+                .to_string();
+            attach_raw_outputs = object
+                .get("terminal_raw_outputs")
+                .and_then(json_as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            if attach_summary.contains("native-pty-ready") && attach_raw_outputs > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            attach_summary.contains("terminal_raw_base64"),
+            "{attach_summary}"
+        );
+        assert!(
+            attach_summary.contains("native-pty-ready"),
+            "{attach_summary}"
+        );
+        assert!(
+            attach_raw_outputs > 0,
+            "attach response should expose structured terminal_raw_outputs: {attach_summary}"
+        );
+
+        #[cfg(unix)]
+        {
+            let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+            client
+                .write_all(
+                    format!(
+                        r#"{{"method":"attach_stream","arguments":{{"task_id":"{task_id}","cursor":0,"limit_bytes":4000,"max_ms":500,"max_events":3,"poll_ms":25}}}}"#
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+            client.write_all(b"\n").unwrap();
+            let shutdown =
+                handle_shell_supervisor_stream(server, &root, &socket, "epoch+attach-stream")
+                    .unwrap();
+            assert!(!shutdown);
+            let mut stream_body = String::new();
+            client.read_to_string(&mut stream_body).unwrap();
+            assert!(
+                stream_body.contains(r#""method":"attach_stream""#),
+                "{stream_body}"
+            );
+            assert!(
+                stream_body.contains(r#""stream_method":"attach""#),
+                "{stream_body}"
+            );
+            assert!(
+                stream_body.contains(r#""terminal_raw_outputs""#),
+                "{stream_body}"
+            );
+            assert!(stream_body.contains("native-pty-ready"), "{stream_body}");
+
+            let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+            client
+                .write_all(
+                    format!(
+                        r#"{{"method":"byte_stream","arguments":{{"task_id":"{task_id}","cursor":0,"limit_bytes":4000,"max_ms":500,"max_events":3,"poll_ms":25}}}}"#
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+            client.write_all(b"\n").unwrap();
+            let shutdown =
+                handle_shell_supervisor_stream(server, &root, &socket, "epoch+byte-stream")
+                    .unwrap();
+            assert!(!shutdown);
+            let mut byte_stream_body = String::new();
+            client.read_to_string(&mut byte_stream_body).unwrap();
+            assert!(
+                byte_stream_body.contains(r#""method":"byte_stream""#),
+                "{byte_stream_body}"
+            );
+            assert!(
+                byte_stream_body.contains(r#""stream_method":"pty_byte_stream""#),
+                "{byte_stream_body}"
+            );
+            assert!(
+                byte_stream_body.contains(r#""byte_outputs""#),
+                "{byte_stream_body}"
+            );
+            assert!(
+                byte_stream_body.contains(r#""bytes_base64""#),
+                "{byte_stream_body}"
+            );
+            assert!(
+                byte_stream_body.contains("native-pty-ready"),
+                "{byte_stream_body}"
+            );
+        }
+
         let _ = crate::tools::exec_shell::ExecShellCancelTool.execute(
             ToolInput::new()
                 .with_arg("cwd", root.display().to_string())
@@ -5605,9 +10289,15 @@ mod tests {
         let state_dir = root.join(".dscode/shell-supervisor");
         std::fs::create_dir_all(&state_dir).unwrap();
         let socket = state_dir.join("supervisor.sock");
-        let start = parse_shell_supervisor_request(
-            r#"{"method":"start","arguments":{"command":"tail -f /dev/null","tty":true,"tty_rows":24,"tty_cols":80}}"#,
-        )
+        let command = if cfg!(windows) {
+            "ping -n 6 127.0.0.1 >NUL"
+        } else {
+            "tail -f /dev/null"
+        };
+        let start = parse_shell_supervisor_request(&format!(
+            r#"{{"method":"start","arguments":{{"command":"{}","tty":true,"tty_rows":24,"tty_cols":80}}}}"#,
+            json_escape(command)
+        ))
         .unwrap();
         let response =
             shell_supervisor_protocol_response_for_request(&start, &root, &socket, "epoch+native");
@@ -5629,7 +10319,12 @@ mod tests {
             shell_supervisor_protocol_response_for_request(&resize, &root, &socket, "epoch+resize");
         let object = json_as_object(&response).unwrap();
         let resize_summary = json_as_string(object.get("resize_summary").unwrap()).unwrap();
-        assert!(resize_summary.contains("meta.live_resize=native_tiocswinsz"));
+        let expected_resize = if cfg!(windows) {
+            "meta.live_resize=windows_conpty"
+        } else {
+            "meta.live_resize=native_tiocswinsz"
+        };
+        assert!(resize_summary.contains(expected_resize));
         assert!(resize_summary.contains("pty_backend: native-supervisor"));
         assert!(resize_summary.contains("tty_rows: 32"));
         assert!(resize_summary.contains("tty_cols: 100"));
@@ -5971,7 +10666,7 @@ mod tests {
         std::fs::create_dir_all(&job_dir).unwrap();
         std::fs::write(
             state_dir.join("manifest.json"),
-            r#"{"kind":"deepseek.exec_shell.supervisor.v1","supervisor_pid":0,"supervisor_socket":"old.sock","supervisor_epoch":"epoch+old","protocol":"newline-json-v1","methods":["health","status","show","start","wait","replay","attach","stdin","resize","cancel","shutdown"],"unsupported_methods":[],"active_jobs":0,"started_at":"epoch+old","updated_at":"epoch+old","control_token_hash":"sha256:do-not-print"}"#,
+            r#"{"kind":"deepseek.exec_shell.supervisor.v1","supervisor_pid":0,"supervisor_socket":"old.sock","supervisor_epoch":"epoch+old","protocol":"newline-json-v1","methods":["health","status","show","start","wait","replay","attach","attach_stream","byte_stream","pty_fd","stdin","resize","cancel","shutdown"],"unsupported_methods":[],"active_jobs":0,"started_at":"epoch+old","updated_at":"epoch+old","control_token_hash":"sha256:do-not-print"}"#,
         )
         .unwrap();
         let manifest = JsonValue::Object(BTreeMap::from([
@@ -6042,7 +10737,7 @@ mod tests {
         let manifest = std::fs::read_to_string(state_dir.join("manifest.json")).unwrap();
         assert!(manifest.contains(r#""kind":"deepseek.exec_shell.supervisor.v1""#));
         assert!(manifest.contains(r#""protocol":"newline-json-v1""#));
-        assert!(manifest.contains(r#""methods":["health","status","show","start","wait","replay","attach","stdin","resize","cancel","shutdown"]"#));
+        assert!(manifest.contains(r#""methods":["health","status","show","start","wait","replay","attach","attach_stream","byte_stream","pty_fd","stdin","resize","cancel","shutdown"]"#));
         assert!(manifest.contains(r#""unsupported_methods":[]"#));
         assert!(manifest.contains(r#""control_token_hash":null"#));
         assert!(!manifest.contains("control_token\":\""));
@@ -6132,6 +10827,92 @@ mod tests {
         assert!(!templates[7]
             .body
             .contains("native PTY sessions are not implemented yet"));
+
+        let commands = templates
+            .iter()
+            .map(|template| {
+                (
+                    template.path,
+                    service_template_command_vector(template).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            commands[0].1.argv,
+            vec![
+                "/usr/local/bin/deepseek",
+                "serve",
+                "--http",
+                "--addr",
+                "127.0.0.1:9876"
+            ]
+        );
+        assert_eq!(
+            commands[1].1.argv,
+            vec![
+                "/usr/local/bin/deepseek",
+                "agents",
+                "daemon",
+                "--interval-ms",
+                "750",
+                "--budget",
+                "6",
+                "--json"
+            ]
+        );
+        assert_eq!(
+            commands[2].1.argv,
+            vec![
+                "/usr/local/bin/deepseek",
+                "diagnostics",
+                "--watch",
+                "--changed",
+                "--interval-ms",
+                "750",
+                "--json"
+            ]
+        );
+        assert_eq!(
+            commands[3].1.argv,
+            vec![
+                "/usr/local/bin/deepseek",
+                "agents",
+                "shell-supervisor",
+                "--json"
+            ]
+        );
+        assert_eq!(commands[4].1.argv, commands[0].1.argv);
+        assert_eq!(commands[5].1.argv, commands[1].1.argv);
+        assert_eq!(commands[6].1.argv, commands[2].1.argv);
+        assert_eq!(commands[7].1.argv, commands[3].1.argv);
+    }
+
+    #[test]
+    fn service_template_command_vectors_handle_quoted_paths() {
+        let config = ServiceTemplateConfig {
+            kind: AgentsServiceKind::All,
+            out: None,
+            bin: "/tmp/DeepSeek Bin/deepseek".to_string(),
+            workdir: "/tmp/DeepSeek Work/repo".to_string(),
+            addr: "127.0.0.1:9876".to_string(),
+            interval_ms: 750,
+            budget: None,
+        };
+
+        let templates = service_templates(&config);
+        for template in &templates {
+            let command = service_template_command_vector(template).unwrap();
+            assert_eq!(command.workdir, "/tmp/DeepSeek Work/repo");
+            assert_eq!(command.argv[0], "/tmp/DeepSeek Bin/deepseek");
+        }
+        let report = build_service_doctor_report(config);
+        assert!(
+            report.checks.iter().any(|check| {
+                check.name == "template_command_vectors" && check.status == ServiceDoctorStatus::Ok
+            }),
+            "{:?}",
+            report.checks
+        );
     }
 
     #[test]
@@ -6192,10 +10973,54 @@ mod tests {
             .iter()
             .any(|check| check.name == "shell_supervisor_service"
                 && check.status == ServiceDoctorStatus::Ok));
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "template_command_vectors"
+                && check.status == ServiceDoctorStatus::Ok));
         let json = render_service_doctor_json(&report);
         assert!(json.contains("\"kind\":\"deepseek.agents.service_doctor.v1\""));
         assert!(json.contains("\"service_kind\":\"systemd\""));
+        assert!(json.contains("\"installed\":false"));
         assert!(json.contains("\"blockers\":0"));
+    }
+
+    #[test]
+    fn service_doctor_parses_systemd_installed_status() {
+        let ready = parse_systemd_installed_service_status(
+            "deepseek-runtime.service",
+            "LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nFragmentPath=/home/me/.config/systemd/user/deepseek-runtime.service\n",
+        )
+        .unwrap();
+        assert!(ready.is_ready(), "{ready:?}");
+        assert!(ready.summary().contains("active_state=active"));
+
+        let missing = parse_systemd_installed_service_status(
+            "deepseek-runtime.service",
+            "LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\nFragmentPath=\n",
+        )
+        .unwrap();
+        assert!(!missing.is_ready(), "{missing:?}");
+        assert!(missing.summary().contains("load_state=not-found"));
+    }
+
+    #[test]
+    fn service_doctor_parses_launchd_installed_status() {
+        let ready = parse_launchd_installed_service_status(
+            "com.deepseek.runtime",
+            "state = running\npid = 123\nlast exit code = 0\npath = /Users/me/Library/LaunchAgents/com.deepseek.runtime.plist\n",
+        )
+        .unwrap();
+        assert!(ready.is_ready(), "{ready:?}");
+        assert!(ready.summary().contains("state=running"));
+
+        let failed = parse_launchd_installed_service_status(
+            "com.deepseek.runtime",
+            "state = waiting\npid = 0\nLastExitStatus = 1\npath = /Users/me/Library/LaunchAgents/com.deepseek.runtime.plist\n",
+        )
+        .unwrap();
+        assert!(!failed.is_ready(), "{failed:?}");
+        assert!(failed.summary().contains("last_exit_status=1"));
     }
 
     #[test]
@@ -6246,6 +11071,8 @@ mod tests {
     #[test]
     fn service_smoke_json_reports_blockers_and_warnings() {
         let mut report = ServiceSmokeReport {
+            kind: AgentsServiceKind::Systemd,
+            installed: false,
             binary: "/missing/deepseek".to_string(),
             workdir: PathBuf::from("/work/repo"),
             requested_addr: "127.0.0.1:0".to_string(),
@@ -6269,15 +11096,39 @@ mod tests {
 
         let json = render_service_smoke_json(&report);
         assert!(json.contains("\"kind\":\"deepseek.agents.service_smoke.v1\""));
+        assert!(json.contains("\"service_kind\":\"systemd\""));
+        assert!(json.contains("\"installed\":false"));
         assert!(json.contains("\"blockers\":1"));
         assert!(json.contains("\"warnings\":1"));
         assert!(json.contains("\"resolved_addr\":\"127.0.0.1:4567\""));
     }
 
+    #[test]
+    fn service_smoke_installed_requires_concrete_addr() {
+        let report = build_service_smoke_report(AgentsServiceSmokeArgs {
+            kind: AgentsServiceKind::Systemd,
+            bin: Some("/missing/deepseek".to_string()),
+            workdir: Some("/work/repo".to_string()),
+            addr: "127.0.0.1:0".to_string(),
+            timeout_ms: 2500,
+            installed: true,
+            json: true,
+        });
+
+        assert!(report.installed);
+        assert_eq!(report.resolved_addr, "127.0.0.1:0");
+        assert!(report
+            .addr_error
+            .as_deref()
+            .is_some_and(|error| error.contains("requires a concrete --addr port")));
+        let json = render_service_smoke_json(&report);
+        assert!(json.contains("\"installed\":true"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn service_smoke_shell_supervisor_control_smoke_runs_start_wait_attach() {
-        use std::io::{BufRead as _, Write as _};
+        use std::io::{BufRead as _, Read as _, Write as _};
 
         let root = std::env::temp_dir().join(format!(
             "dsc-smk-ctl-{}-{}",
@@ -6291,8 +11142,20 @@ mod tests {
         let tty = cfg!(all(unix, target_os = "linux"));
         let expected_methods: Vec<&'static str> = if tty {
             vec![
-                "start", "wait", "attach", "replay", "start", "stdin", "resize", "attach",
-                "replay", "cancel",
+                "start",
+                "wait",
+                "attach",
+                "replay",
+                "start",
+                "stdin",
+                "resize",
+                "attach",
+                "replay",
+                "cancel",
+                "start",
+                "byte_stream",
+                "start",
+                "byte_stream",
             ]
         } else {
             vec!["start", "wait", "attach", "replay"]
@@ -6397,13 +11260,56 @@ mod tests {
                             )
                             .unwrap();
                     }
+                    (10, "start") => {
+                        assert!(request.contains(r#""tty":true"#));
+                        assert!(request.contains("head -n 1"));
+                        stream
+                            .write_all(
+                                br#"{"status":"ok","method":"start","task_id":"task-byte","job_pty_backend":"native-supervisor"}"#,
+                            )
+                            .unwrap();
+                    }
+                    (11, "byte_stream") => {
+                        assert!(request.contains(r#""task_id":"task-byte""#));
+                        let mut resize_frame = String::new();
+                        reader.read_line(&mut resize_frame).unwrap();
+                        assert!(resize_frame.contains(r#""type":"resize""#));
+                        assert!(resize_frame.contains(r#""rows":36"#));
+                        assert!(resize_frame.contains(r#""cols":104"#));
+                        let mut stdin_frame = String::new();
+                        reader.read_line(&mut stdin_frame).unwrap();
+                        assert!(stdin_frame.contains(r#""type":"stdin""#));
+                        assert!(stdin_frame.contains("frame-probe"));
+                        stream
+                            .write_all(
+                                br#"{"status":"ok","method":"byte_stream","stream_method":"pty_byte_stream","stream_done":true,"control_frames":[{"type":"resize","resize_summary":"meta.live_resize=native_tiocswinsz"},{"type":"stdin","stdin_summary":"status: running"}],"byte_outputs":[{"bytes_base64":"ZnJhbWUtcHJvYmUK"}],"attach_summary":"frame-probe"}"#,
+                            )
+                            .unwrap();
+                    }
+                    (12, "start") => {
+                        assert!(request.contains(r#""tty":true"#));
+                        assert!(request.contains("head -n 1"));
+                        stream
+                            .write_all(
+                                br#"{"status":"ok","method":"start","task_id":"task-raw","job_pty_backend":"native-supervisor"}"#,
+                            )
+                            .unwrap();
+                    }
+                    (13, "byte_stream") => {
+                        assert!(request.contains(r#""task_id":"task-raw""#));
+                        assert!(request.contains(r#""raw_proxy":true"#));
+                        let mut raw_input = String::new();
+                        reader.read_to_string(&mut raw_input).unwrap();
+                        assert!(raw_input.contains("raw-probe"));
+                        stream.write_all(b"raw-probe\r\nraw-probe\r\n").unwrap();
+                    }
                     _ => unreachable!(),
                 }
                 stream.write_all(b"\n").unwrap();
             }
         });
 
-        let summary = shell_supervisor_control_smoke(&socket, 2500).unwrap();
+        let summary = shell_supervisor_control_smoke(&socket, 2500, None).unwrap();
         handle.join().unwrap();
 
         assert!(summary.contains("task-smoke"));
@@ -6423,6 +11329,8 @@ mod tests {
         let long_workdir =
             PathBuf::from(format!("/tmp/{}", "dsc-service-smoke-long-path-".repeat(5)));
         let mut report = ServiceSmokeReport {
+            kind: AgentsServiceKind::Systemd,
+            installed: false,
             binary: "/missing/deepseek".to_string(),
             workdir: long_workdir,
             requested_addr: "127.0.0.1:0".to_string(),
@@ -6467,6 +11375,8 @@ mod tests {
                 .unwrap();
         });
         let mut report = ServiceSmokeReport {
+            kind: AgentsServiceKind::Systemd,
+            installed: false,
             binary: "/missing/deepseek".to_string(),
             workdir: root,
             requested_addr: "127.0.0.1:0".to_string(),

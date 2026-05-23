@@ -87,7 +87,9 @@ workspace.user_instructions_file = "~/.config/dscode/AGENTS.md"
 hooks.enabled = false
 
 # Hook scripts live under <dir>/<event>/* and must be executable.
-# Supported events: user_prompt_submit, pre_tool_use, post_tool_use.
+# Supported events: session_start, session_stop, user_prompt_submit, pre_tool_use,
+# permission_request, post_tool_use, subagent_start, subagent_stop, pre_compact,
+# shell_env.
 hooks.project_dir = ".dscode/hooks"
 hooks.user_dir = "~/.config/dscode/hooks"
 hooks.timeout_ms = 5000

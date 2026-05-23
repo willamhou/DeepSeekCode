@@ -1183,6 +1183,21 @@ fn derive_recovery_hint_after_failure(
     primary_file: Option<&str>,
     observations: &[Observation],
 ) -> Option<String> {
+    if is_mcp_tool_name(tool_name)
+        && available_tools.iter().any(|tool| tool == "mcp_list_tools")
+        && observations
+            .last()
+            .is_some_and(|observation| mcp_failure_is_policy_denial(&observation.summary))
+    {
+        return format_recovery_hint(
+            tool_name,
+            "mcp_list_tools",
+            "MCP policy denied the remote tool call; list configured MCP tools before retrying or explain the policy blocker",
+            None,
+            None,
+        );
+    }
+
     match tool_name {
         "read_file" => format_recovery_hint(
             "read_file",
@@ -1207,6 +1222,18 @@ fn derive_recovery_hint_after_failure(
         ),
         _ => None,
     }
+}
+
+fn is_mcp_tool_name(tool_name: &str) -> bool {
+    tool_name == "mcp_call" || tool_name.starts_with(crate::tools::mcp::MCP_DYNAMIC_TOOL_PREFIX)
+}
+
+fn mcp_failure_is_policy_denial(summary: &str) -> bool {
+    let lower = summary.to_ascii_lowercase();
+    lower.contains("mcp tool call blocked by policy allowlist")
+        || lower.contains("policy allowlist")
+        || lower.contains("mcp tool call declined")
+        || lower.contains("permission denied for mcp")
 }
 
 struct RecoveryDirective {
@@ -3475,10 +3502,12 @@ shell_allowlist = []
         }
     }
 
+    #[cfg(unix)]
     struct HookBlockingClient {
         calls: RefCell<usize>,
     }
 
+    #[cfg(unix)]
     impl ModelClient for HookBlockingClient {
         fn respond(
             &self,
@@ -3507,10 +3536,12 @@ shell_allowlist = []
         }
     }
 
+    #[cfg(unix)]
     struct ShellEnvHookClient {
         calls: RefCell<usize>,
     }
 
+    #[cfg(unix)]
     impl ModelClient for ShellEnvHookClient {
         fn respond(
             &self,

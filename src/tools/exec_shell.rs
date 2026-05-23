@@ -9,15 +9,21 @@ use crate::util::json::{
 };
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::fs::{self, File, OpenOptions};
+#[cfg(all(unix, target_os = "linux"))]
+use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+#[cfg(all(unix, target_os = "linux"))]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(windows)]
+use portable_pty::{native_pty_system, CommandBuilder as PtyCommandBuilder, PtySize};
 #[cfg(all(unix, target_os = "linux"))]
 use std::ffi::CStr;
 #[cfg(all(unix, target_os = "linux"))]
@@ -33,10 +39,30 @@ const PTY_BACKEND_SCRIPT: &str = "script";
 const PTY_BACKEND_NONE: &str = "none";
 const PTY_BACKEND_NATIVE_SUPERVISOR: &str = "native-supervisor";
 pub const SHELL_SUPERVISOR_SUPPORTED_METHODS: &[&str] = &[
-    "health", "status", "show", "start", "wait", "replay", "attach", "stdin", "resize", "cancel",
+    "health",
+    "status",
+    "show",
+    "start",
+    "wait",
+    "replay",
+    "attach",
+    "attach_stream",
+    "byte_stream",
+    "pty_fd",
+    "stdin",
+    "resize",
+    "cancel",
     "shutdown",
 ];
+#[cfg(all(unix, target_os = "linux"))]
 pub const SHELL_SUPERVISOR_UNSUPPORTED_PTY_METHODS: &[&str] = &[];
+#[cfg(all(unix, not(target_os = "linux")))]
+pub const SHELL_SUPERVISOR_UNSUPPORTED_PTY_METHODS: &[&str] = &["pty_fd"];
+#[cfg(windows)]
+pub const SHELL_SUPERVISOR_UNSUPPORTED_PTY_METHODS: &[&str] = &["byte_stream", "pty_fd"];
+#[cfg(not(any(unix, windows)))]
+pub const SHELL_SUPERVISOR_UNSUPPORTED_PTY_METHODS: &[&str] =
+    &["attach_stream", "byte_stream", "pty_fd"];
 
 static JOB_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SHELL_JOBS: OnceLock<Mutex<BackgroundShellManager>> = OnceLock::new();
@@ -63,6 +89,7 @@ pub struct ShellTerminalEvent {
     pub kind: String,
     pub timestamp: Option<String>,
     pub preview: String,
+    pub raw_base64: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -318,7 +345,27 @@ impl Tool for ExecShellWaitTool {
                 });
             }
             manager.refresh(task_id)?;
-            if !wait || manager.is_finished(task_id)? || Instant::now() >= deadline {
+            if !wait || Instant::now() >= deadline {
+                return Ok(ToolOutput {
+                    summary: manager.render_delta(task_id)?,
+                });
+            }
+            if manager.is_finished(task_id)? {
+                let record_dir = manager
+                    .jobs
+                    .get(task_id)
+                    .map(|job| job.record_dir.clone())
+                    .ok_or_else(|| {
+                        app_error(format!("unknown background shell task: {task_id}"))
+                    })?;
+                drop(manager);
+                wait_for_shell_logs_to_settle(&record_dir, deadline);
+                let mut manager = shell_manager().lock().unwrap();
+                if !manager.contains(task_id) {
+                    return Ok(ToolOutput {
+                        summary: render_durable_snapshot(cwd, task_id)?,
+                    });
+                }
                 return Ok(ToolOutput {
                     summary: manager.render_delta(task_id)?,
                 });
@@ -458,11 +505,7 @@ impl Tool for ExecShellInteractTool {
     fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
         let task_id = required_task_id(&input)?;
         let cwd = input.get("cwd").unwrap_or(".");
-        let data = input
-            .get("input")
-            .or_else(|| input.get("stdin"))
-            .or_else(|| input.get("data"))
-            .unwrap_or("");
+        let data = exec_shell_interact_input_bytes(&input)?;
         let close_stdin = truthy(input.get("close_stdin"));
         let timeout_ms = input_u64(&input, "timeout_ms", 1_000).min(MAX_TIMEOUT_MS);
         {
@@ -473,13 +516,13 @@ impl Tool for ExecShellInteractTool {
                     summary: interact_detached_shell_job(
                         cwd,
                         task_id,
-                        data,
+                        &data,
                         close_stdin,
                         timeout_ms,
                     )?,
                 });
             }
-            manager.write_stdin(task_id, data, close_stdin)?;
+            manager.write_stdin(task_id, &data, close_stdin)?;
         }
         ExecShellWaitTool {
             tool_name: self.tool_name,
@@ -491,6 +534,22 @@ impl Tool for ExecShellInteractTool {
                 .with_arg("timeout_ms", timeout_ms.to_string()),
         )
     }
+}
+
+fn exec_shell_interact_input_bytes(input: &ToolInput) -> AppResult<Vec<u8>> {
+    if let Some(encoded) = input
+        .get("input_base64")
+        .or_else(|| input.get("bytes_base64"))
+    {
+        return decode_shell_base64_input(encoded);
+    }
+    Ok(input
+        .get("input")
+        .or_else(|| input.get("stdin"))
+        .or_else(|| input.get("data"))
+        .unwrap_or("")
+        .as_bytes()
+        .to_vec())
 }
 
 impl Tool for ExecShellCancelTool {
@@ -593,6 +652,8 @@ struct BackgroundShellJob {
     child_pid: u32,
     process_group: u32,
     child: Option<Child>,
+    #[cfg(windows)]
+    portable_child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     stdin: Option<ShellStdinControl>,
     stdout_cursor: usize,
     stderr_cursor: usize,
@@ -630,6 +691,7 @@ struct ShellTtySize {
 
 enum ShellStdinControl {
     Pipe(ChildStdin),
+    #[cfg(unix)]
     Fifo {
         path: PathBuf,
         keeper: Option<Child>,
@@ -640,7 +702,50 @@ enum ShellStdinControl {
         writer: File,
         event_log: PathBuf,
         seq: Arc<AtomicU64>,
+        reader_paused: Arc<AtomicBool>,
     },
+    #[cfg(windows)]
+    NativePty {
+        writer: Box<dyn Write + Send>,
+        master: Box<dyn portable_pty::MasterPty + Send>,
+        event_log: PathBuf,
+        seq: Arc<AtomicU64>,
+    },
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+pub struct NativePtyFdLease {
+    fd: RawFd,
+    reader_paused: Arc<AtomicBool>,
+    event_log: PathBuf,
+    seq: Arc<AtomicU64>,
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+impl NativePtyFdLease {
+    pub fn fd(&self) -> RawFd {
+        self.fd
+    }
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+impl Drop for NativePtyFdLease {
+    fn drop(&mut self) {
+        append_terminal_event(
+            &self.event_log,
+            &self.seq,
+            "fd_handoff",
+            "ended",
+            Some(BTreeMap::from([(
+                "status".to_string(),
+                JsonValue::String("ended".to_string()),
+            )])),
+        );
+        self.reader_paused.store(false, Ordering::Release);
+        unsafe {
+            let _ = File::from_raw_fd(self.fd);
+        }
+    }
 }
 
 struct PreparedBackgroundStdin {
@@ -745,7 +850,7 @@ impl BackgroundShellManager {
         let mut stdin = stdin_mode.into_control(&mut child)?;
         if let Some(data) = stdin_data {
             if let Some(control) = stdin.as_mut() {
-                write_background_stdin_control(control, data)?;
+                write_background_stdin_control(control, data.as_bytes())?;
             }
         }
 
@@ -765,6 +870,8 @@ impl BackgroundShellManager {
                 child_pid,
                 process_group,
                 child: Some(child),
+                #[cfg(windows)]
+                portable_child: None,
                 stdin,
                 stdout_cursor: 0,
                 stderr_cursor: 0,
@@ -809,21 +916,37 @@ impl BackgroundShellManager {
         if job.status != ShellJobStatus::Running {
             return Ok(());
         }
-        let Some(child) = job.child.as_mut() else {
+        if let Some(child) = job.child.as_mut() {
+            if let Some(status) = child.try_wait()? {
+                job.exit_code = status.code();
+                job.status = if status.success() {
+                    ShellJobStatus::Completed
+                } else {
+                    ShellJobStatus::Failed
+                };
+                append_job_terminal_status_event(job);
+                job.child = None;
+                close_background_stdin_control(job.stdin.take());
+                job.updated_at = epoch_label();
+                persist_job_snapshot(job)?;
+            }
             return Ok(());
-        };
-        if let Some(status) = child.try_wait()? {
-            job.exit_code = status.code();
-            job.status = if status.success() {
-                ShellJobStatus::Completed
-            } else {
-                ShellJobStatus::Failed
-            };
-            append_job_terminal_status_event(job);
-            job.child = None;
-            close_background_stdin_control(job.stdin.take());
-            job.updated_at = epoch_label();
-            persist_job_snapshot(job)?;
+        }
+        #[cfg(windows)]
+        if let Some(child) = job.portable_child.as_mut() {
+            if let Some(status) = child.try_wait()? {
+                job.exit_code = Some(portable_exit_code(status.exit_code()));
+                job.status = if status.success() {
+                    ShellJobStatus::Completed
+                } else {
+                    ShellJobStatus::Failed
+                };
+                append_job_terminal_status_event(job);
+                job.portable_child = None;
+                close_background_stdin_control(job.stdin.take());
+                job.updated_at = epoch_label();
+                persist_job_snapshot(job)?;
+            }
         }
         Ok(())
     }
@@ -1013,7 +1136,7 @@ impl BackgroundShellManager {
         Ok(out.trim_end().to_string())
     }
 
-    fn write_stdin(&mut self, task_id: &str, data: &str, close_stdin: bool) -> AppResult<()> {
+    fn write_stdin(&mut self, task_id: &str, data: &[u8], close_stdin: bool) -> AppResult<()> {
         self.refresh(task_id)?;
         let job = self
             .jobs
@@ -1058,12 +1181,12 @@ impl BackgroundShellManager {
                 live_control = if job.pty_backend == ShellPtyBackend::NativeSupervisor {
                     if let Some(control) = job.stdin.as_mut() {
                         resize_native_pty_stdin_control(control, size, job.process_group)?;
-                        "native_tiocswinsz"
+                        native_pty_resize_control_label()
                     } else {
                         "metadata_only_no_pty_master"
                     }
                 } else if let Some(control) = job.stdin.as_mut() {
-                    write_background_stdin_control(control, &resize_stty_command(size))?;
+                    write_background_stdin_control(control, resize_stty_command(size).as_bytes())?;
                     "stdin_stty"
                 } else {
                     "metadata_only_no_stdin"
@@ -1090,7 +1213,16 @@ impl BackgroundShellManager {
             kill_child_process_group(child);
             let _ = child.wait();
         }
+        #[cfg(windows)]
+        if let Some(child) = job.portable_child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         job.child = None;
+        #[cfg(windows)]
+        {
+            job.portable_child = None;
+        }
         close_background_stdin_control(job.stdin.take());
         job.status = ShellJobStatus::Killed;
         job.updated_at = epoch_label();
@@ -1151,6 +1283,21 @@ fn shell_manager() -> &'static Mutex<BackgroundShellManager> {
     SHELL_JOBS.get_or_init(|| Mutex::new(BackgroundShellManager::default()))
 }
 
+fn native_pty_resize_control_label() -> &'static str {
+    #[cfg(all(unix, target_os = "linux"))]
+    {
+        "native_tiocswinsz"
+    }
+    #[cfg(windows)]
+    {
+        "windows_conpty"
+    }
+    #[cfg(not(any(all(unix, target_os = "linux"), windows)))]
+    {
+        "native_resize"
+    }
+}
+
 impl ShellTtyOptions {
     fn requested(self) -> bool {
         self.enabled || self.size.is_some()
@@ -1193,7 +1340,7 @@ fn parse_supervisor_pty_context(
     }
     if !native_supervisor_pty_supported() {
         return Err(app_error(
-            "native-supervisor PTY backend is supported only on Unix/Linux in this build",
+            "native-supervisor PTY backend is supported only on Linux and Windows in this build",
         ));
     }
     Ok(Some(ShellSupervisorJobContext {
@@ -1220,7 +1367,7 @@ fn resolve_background_pty_backend(
             return Ok(ShellPtyBackend::NativeSupervisor);
         }
         return Err(app_error(
-            "native-supervisor PTY backend is supported only on Unix/Linux in this build",
+            "native-supervisor PTY backend is supported only on Linux and Windows in this build",
         ));
     }
     Ok(ShellPtyBackend::Script)
@@ -1365,13 +1512,18 @@ fn script_pty_backend_available() -> bool {
 }
 
 pub(crate) fn native_supervisor_pty_supported() -> bool {
-    cfg!(all(unix, target_os = "linux"))
+    cfg!(any(all(unix, target_os = "linux"), windows))
 }
 
 fn job_terminal_event_seq(job: &BackgroundShellJob) -> Option<u64> {
     job.terminal_event_seq
         .as_ref()
         .map(|seq| seq.load(Ordering::Relaxed))
+}
+
+#[cfg(windows)]
+fn portable_exit_code(code: u32) -> i32 {
+    i32::try_from(code).unwrap_or(i32::MAX)
 }
 
 #[cfg(all(unix, target_os = "linux"))]
@@ -1389,10 +1541,12 @@ unsafe extern "C" {
     fn posix_openpt(flags: i32) -> i32;
     fn grantpt(fd: i32) -> i32;
     fn unlockpt(fd: i32) -> i32;
-    fn ptsname(fd: i32) -> *mut i8;
+    fn ptsname(fd: i32) -> *mut std::os::raw::c_char;
     fn setsid() -> i32;
     fn ioctl(fd: i32, request: u64, ...) -> i32;
     fn kill(pid: i32, sig: i32) -> i32;
+    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    fn poll(fds: *mut NativePollFd, nfds: usize, timeout: i32) -> i32;
 }
 
 #[cfg(all(unix, target_os = "linux"))]
@@ -1405,6 +1559,24 @@ const NATIVE_TIOCSCTTY: u64 = 0x540E;
 const NATIVE_TIOCSWINSZ: u64 = 0x5414;
 #[cfg(all(unix, target_os = "linux"))]
 const NATIVE_SIGWINCH: i32 = 28;
+#[cfg(all(unix, target_os = "linux"))]
+const NATIVE_F_DUPFD_CLOEXEC: i32 = 1030;
+#[cfg(all(unix, target_os = "linux"))]
+const NATIVE_POLLIN: i16 = 0x0001;
+#[cfg(all(unix, target_os = "linux"))]
+const NATIVE_POLLERR: i16 = 0x0008;
+#[cfg(all(unix, target_os = "linux"))]
+const NATIVE_POLLHUP: i16 = 0x0010;
+#[cfg(all(unix, target_os = "linux"))]
+const NATIVE_PTY_READER_POLL_MS: u64 = 25;
+
+#[cfg(all(unix, target_os = "linux"))]
+#[repr(C)]
+struct NativePollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
 
 fn spawn_native_supervisor_pty_background_job(
     id: String,
@@ -1428,7 +1600,7 @@ fn spawn_native_supervisor_pty_background_job(
     )
 }
 
-#[cfg(not(all(unix, target_os = "linux")))]
+#[cfg(not(any(all(unix, target_os = "linux"), windows)))]
 fn spawn_native_supervisor_pty_background_job_impl(
     _id: String,
     _command: &str,
@@ -1440,8 +1612,97 @@ fn spawn_native_supervisor_pty_background_job_impl(
     _record_dir: PathBuf,
 ) -> AppResult<BackgroundShellJob> {
     Err(app_error(
-        "native-supervisor PTY backend is supported only on Unix/Linux in this build",
+        "native-supervisor PTY backend is supported only on Linux and Windows in this build",
     ))
+}
+
+#[cfg(windows)]
+fn spawn_native_supervisor_pty_background_job_impl(
+    id: String,
+    command: &str,
+    cwd: &str,
+    stdin_data: Option<&str>,
+    tty_options: ShellTtyOptions,
+    env: &BTreeMap<String, String>,
+    supervisor: Option<ShellSupervisorJobContext>,
+    record_dir: PathBuf,
+) -> AppResult<BackgroundShellJob> {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(portable_pty_size(tty_options.size))
+        .map_err(|error| app_error(format!("failed to create Windows ConPTY: {error}")))?;
+    let mut process = PtyCommandBuilder::new("cmd.exe");
+    process.args(["/D", "/S", "/C", command]);
+    process.cwd(cwd);
+    process.env("TERM", "xterm-256color");
+    for (key, value) in env {
+        process.env(key, value);
+    }
+    if let Some(size) = tty_options.size {
+        process.env("LINES", size.rows.to_string());
+        process.env("COLUMNS", size.cols.to_string());
+    }
+    let child = pair.slave.spawn_command(process).map_err(|error| {
+        app_error(format!(
+            "failed to spawn command in Windows ConPTY: {error}"
+        ))
+    })?;
+    let child_pid = child.process_id().unwrap_or(0);
+    let owner_pid = std::process::id();
+    let process_group = child_pid;
+    let event_log_name = "terminal-events.jsonl".to_string();
+    let event_log = record_dir.join(&event_log_name);
+    let seq = Arc::new(AtomicU64::new(0));
+    append_terminal_event(&event_log, &seq, "started", "spawned", None);
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|error| app_error(format!("failed to clone Windows ConPTY reader: {error}")))?;
+    start_windows_conpty_reader_thread(
+        reader,
+        record_dir.join("stdout.log"),
+        event_log.clone(),
+        seq.clone(),
+    );
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|error| app_error(format!("failed to open Windows ConPTY writer: {error}")))?;
+    let mut stdin = Some(ShellStdinControl::NativePty {
+        writer,
+        master: pair.master,
+        event_log,
+        seq: seq.clone(),
+    });
+    if let Some(data) = stdin_data {
+        if let Some(control) = stdin.as_mut() {
+            write_background_stdin_control(control, data.as_bytes())?;
+        }
+    }
+    let now = epoch_label();
+    Ok(BackgroundShellJob {
+        id,
+        command: command.to_string(),
+        cwd: cwd.to_string(),
+        tty_options,
+        pty_backend: ShellPtyBackend::NativeSupervisor,
+        supervisor,
+        terminal_event_log: Some(event_log_name),
+        terminal_event_seq: Some(seq),
+        owner_pid,
+        child_pid,
+        process_group,
+        child: None,
+        portable_child: Some(child),
+        stdin,
+        stdout_cursor: 0,
+        stderr_cursor: 0,
+        status: ShellJobStatus::Running,
+        exit_code: None,
+        started_at: now.clone(),
+        updated_at: now,
+        record_dir,
+    })
 }
 
 #[cfg(all(unix, target_os = "linux"))]
@@ -1491,20 +1752,23 @@ fn spawn_native_supervisor_pty_background_job_impl(
     let seq = Arc::new(AtomicU64::new(0));
     append_terminal_event(&event_log, &seq, "started", "spawned", None);
     let reader = master.try_clone()?;
+    let reader_paused = Arc::new(AtomicBool::new(false));
     start_native_pty_reader_thread(
         reader,
         record_dir.join("stdout.log"),
         event_log.clone(),
         seq.clone(),
+        reader_paused.clone(),
     );
     let mut stdin = Some(ShellStdinControl::NativePty {
         writer: master,
         event_log,
         seq: seq.clone(),
+        reader_paused,
     });
     if let Some(data) = stdin_data {
         if let Some(control) = stdin.as_mut() {
-            write_background_stdin_control(control, data)?;
+            write_background_stdin_control(control, data.as_bytes())?;
         }
     }
     let now = epoch_label();
@@ -1571,6 +1835,17 @@ fn open_native_pty(size: Option<ShellTtySize>) -> AppResult<(File, File)> {
     Ok((master, slave))
 }
 
+#[cfg(windows)]
+fn portable_pty_size(size: Option<ShellTtySize>) -> PtySize {
+    let size = size.unwrap_or(ShellTtySize { rows: 24, cols: 80 });
+    PtySize {
+        rows: size.rows,
+        cols: size.cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    }
+}
+
 #[cfg(all(unix, target_os = "linux"))]
 fn set_native_pty_size(fd: RawFd, size: ShellTtySize) -> AppResult<()> {
     let winsize = NativeWinsize {
@@ -1592,6 +1867,70 @@ fn start_native_pty_reader_thread(
     stdout_log: PathBuf,
     event_log: PathBuf,
     seq: Arc<AtomicU64>,
+    reader_paused: Arc<AtomicBool>,
+) {
+    thread::spawn(move || {
+        let mut stdout = match OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(stdout_log)
+        {
+            Ok(file) => file,
+            Err(_) => return,
+        };
+        let mut buffer = [0u8; 4096];
+        loop {
+            if reader_paused.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            let mut poll_fd = NativePollFd {
+                fd: reader.as_raw_fd(),
+                events: NATIVE_POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { poll(&mut poll_fd, 1, NATIVE_PTY_READER_POLL_MS as i32) };
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break;
+            }
+            if ready == 0 {
+                continue;
+            }
+            if poll_fd.revents & (NATIVE_POLLIN | NATIVE_POLLERR | NATIVE_POLLHUP) == 0 {
+                continue;
+            }
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    let bytes = &buffer[..count];
+                    let _ = stdout.write_all(bytes);
+                    let _ = stdout.flush();
+                    append_terminal_event_raw(
+                        &event_log,
+                        &seq,
+                        "output",
+                        &String::from_utf8_lossy(bytes),
+                        Some(bytes),
+                        None,
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+#[cfg(windows)]
+fn start_windows_conpty_reader_thread(
+    mut reader: Box<dyn Read + Send>,
+    stdout_log: PathBuf,
+    event_log: PathBuf,
+    seq: Arc<AtomicU64>,
 ) {
     thread::spawn(move || {
         let mut stdout = match OpenOptions::new()
@@ -1610,11 +1949,12 @@ fn start_native_pty_reader_thread(
                     let bytes = &buffer[..count];
                     let _ = stdout.write_all(bytes);
                     let _ = stdout.flush();
-                    append_terminal_event(
+                    append_terminal_event_raw(
                         &event_log,
                         &seq,
                         "output",
                         &String::from_utf8_lossy(bytes),
+                        Some(bytes),
                         None,
                     );
                 }
@@ -1632,6 +1972,17 @@ fn append_terminal_event(
     preview: &str,
     fields: Option<BTreeMap<String, JsonValue>>,
 ) {
+    append_terminal_event_raw(event_log, seq, kind, preview, None, fields);
+}
+
+fn append_terminal_event_raw(
+    event_log: &Path,
+    seq: &Arc<AtomicU64>,
+    kind: &str,
+    preview: &str,
+    raw_bytes: Option<&[u8]>,
+    fields: Option<BTreeMap<String, JsonValue>>,
+) {
     let next = seq.fetch_add(1, Ordering::Relaxed) + 1;
     let mut root = BTreeMap::from([
         ("seq".to_string(), JsonValue::Number(next.to_string())),
@@ -1642,6 +1993,12 @@ fn append_terminal_event(
             JsonValue::String(terminal_event_safe_preview(preview)),
         ),
     ]);
+    if let Some(raw_bytes) = raw_bytes {
+        root.insert(
+            "raw_base64".to_string(),
+            JsonValue::String(encode_shell_base64(raw_bytes)),
+        );
+    }
     if let Some(fields) = fields {
         root.extend(fields);
     }
@@ -1655,6 +2012,89 @@ fn terminal_event_safe_preview(value: &str) -> String {
     let mut preview = value.chars().take(MAX_PREVIEW_CHARS).collect::<String>();
     preview = preview.replace('\0', "\\0");
     preview
+}
+
+fn encode_shell_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn decode_shell_base64_input(value: &str) -> AppResult<Vec<u8>> {
+    let encoded = value.trim();
+    if encoded.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !encoded.len().is_multiple_of(4) {
+        return Err(app_error(
+            "exec_shell_interact input_base64 has invalid length",
+        ));
+    }
+    let mut out = Vec::with_capacity(encoded.len() / 4 * 3);
+    for (index, chunk) in encoded.as_bytes().chunks(4).enumerate() {
+        let a = shell_base64_input_value(chunk[0])?;
+        let b = shell_base64_input_value(chunk[1])?;
+        let c_pad = chunk[2] == b'=';
+        let d_pad = chunk[3] == b'=';
+        if c_pad && !d_pad {
+            return Err(app_error(
+                "exec_shell_interact input_base64 has invalid padding",
+            ));
+        }
+        if (c_pad || d_pad) && index + 1 != encoded.len() / 4 {
+            return Err(app_error(
+                "exec_shell_interact input_base64 has invalid padding",
+            ));
+        }
+        let c = if c_pad {
+            0
+        } else {
+            shell_base64_input_value(chunk[2])?
+        };
+        let d = if d_pad {
+            0
+        } else {
+            shell_base64_input_value(chunk[3])?
+        };
+        out.push((a << 2) | (b >> 4));
+        if !c_pad {
+            out.push(((b & 0b0000_1111) << 4) | (c >> 2));
+        }
+        if !d_pad {
+            out.push(((c & 0b0000_0011) << 6) | d);
+        }
+    }
+    Ok(out)
+}
+
+fn shell_base64_input_value(byte: u8) -> AppResult<u8> {
+    match byte {
+        b'A'..=b'Z' => Ok(byte - b'A'),
+        b'a'..=b'z' => Ok(byte - b'a' + 26),
+        b'0'..=b'9' => Ok(byte - b'0' + 52),
+        b'+' => Ok(62),
+        b'/' => Ok(63),
+        _ => Err(app_error(
+            "exec_shell_interact input_base64 contains invalid byte",
+        )),
+    }
 }
 
 fn append_job_terminal_status_event(job: &BackgroundShellJob) {
@@ -1734,12 +2174,13 @@ impl PreparedBackgroundStdinMode {
     }
 }
 
-fn write_background_stdin_control(control: &mut ShellStdinControl, data: &str) -> AppResult<()> {
+fn write_background_stdin_control(control: &mut ShellStdinControl, data: &[u8]) -> AppResult<()> {
     match control {
         ShellStdinControl::Pipe(stdin) => {
-            stdin.write_all(data.as_bytes())?;
+            stdin.write_all(data)?;
             stdin.flush()?;
         }
+        #[cfg(unix)]
         ShellStdinControl::Fifo { path, closed, .. } => {
             if *closed {
                 return Err(app_error("stdin is closed for background shell task"));
@@ -1751,10 +2192,24 @@ fn write_background_stdin_control(control: &mut ShellStdinControl, data: &str) -
             writer,
             event_log,
             seq,
+            reader_paused: _,
         } => {
-            writer.write_all(data.as_bytes())?;
+            writer.write_all(data)?;
             writer.flush()?;
-            append_terminal_event(event_log, seq, "input", data, None);
+            let preview = String::from_utf8_lossy(data).into_owned();
+            append_terminal_event_raw(event_log, seq, "input", &preview, Some(data), None);
+        }
+        #[cfg(windows)]
+        ShellStdinControl::NativePty {
+            writer,
+            master: _,
+            event_log,
+            seq,
+        } => {
+            writer.write_all(data)?;
+            writer.flush()?;
+            let preview = String::from_utf8_lossy(data).into_owned();
+            append_terminal_event_raw(event_log, seq, "input", &preview, Some(data), None);
         }
     }
     Ok(())
@@ -1768,14 +2223,14 @@ fn resize_native_pty_stdin_control(
     resize_native_pty_stdin_control_impl(control, size, process_group)
 }
 
-#[cfg(not(all(unix, target_os = "linux")))]
+#[cfg(not(any(all(unix, target_os = "linux"), windows)))]
 fn resize_native_pty_stdin_control_impl(
     _control: &mut ShellStdinControl,
     _size: ShellTtySize,
     _process_group: u32,
 ) -> AppResult<()> {
     Err(app_error(
-        "native-supervisor PTY resize is supported only on Unix/Linux in this build",
+        "native-supervisor PTY resize is supported only on Linux and Windows in this build",
     ))
 }
 
@@ -1789,6 +2244,7 @@ fn resize_native_pty_stdin_control_impl(
         writer,
         event_log,
         seq,
+        reader_paused: _,
     } = control
     else {
         return Err(app_error(
@@ -1818,12 +2274,109 @@ fn resize_native_pty_stdin_control_impl(
     Ok(())
 }
 
+#[cfg(windows)]
+fn resize_native_pty_stdin_control_impl(
+    control: &mut ShellStdinControl,
+    size: ShellTtySize,
+    process_group: u32,
+) -> AppResult<()> {
+    let ShellStdinControl::NativePty {
+        writer: _,
+        master,
+        event_log,
+        seq,
+    } = control
+    else {
+        return Err(app_error(
+            "native-supervisor PTY resize requires a native PTY master",
+        ));
+    };
+    master
+        .resize(portable_pty_size(Some(size)))
+        .map_err(|error| app_error(format!("failed to resize Windows ConPTY: {error}")))?;
+    let mut fields = BTreeMap::from([
+        ("rows".to_string(), JsonValue::Number(size.rows.to_string())),
+        ("cols".to_string(), JsonValue::Number(size.cols.to_string())),
+    ]);
+    fields.insert(
+        "process_group".to_string(),
+        JsonValue::Number(process_group.to_string()),
+    );
+    append_terminal_event(
+        event_log,
+        seq,
+        "resize",
+        &format!("rows={} cols={}", size.rows, size.cols),
+        Some(fields),
+    );
+    Ok(())
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+pub fn lease_native_supervisor_pty_master_fd(task_id: &str) -> AppResult<NativePtyFdLease> {
+    let mut manager = shell_manager().lock().unwrap();
+    manager.refresh(task_id)?;
+    let job = manager
+        .jobs
+        .get_mut(task_id)
+        .ok_or_else(|| app_error(format!("unknown background shell task: {task_id}")))?;
+    if job.status != ShellJobStatus::Running {
+        return Err(app_error(format!(
+            "background shell task {task_id} is {}",
+            job.status.as_str()
+        )));
+    }
+    if job.pty_backend != ShellPtyBackend::NativeSupervisor {
+        return Err(app_error(format!(
+            "background shell task {task_id} is not a native-supervisor PTY job"
+        )));
+    }
+    let Some(ShellStdinControl::NativePty {
+        writer,
+        event_log,
+        seq,
+        reader_paused,
+    }) = job.stdin.as_ref()
+    else {
+        return Err(app_error(format!(
+            "background shell task {task_id} has no live native PTY master"
+        )));
+    };
+
+    reader_paused.store(true, Ordering::Release);
+    // Let a poll cycle that started before the pause flag finish before the fd
+    // is handed to the client, avoiding a replay-reader race on first output.
+    thread::sleep(Duration::from_millis(NATIVE_PTY_READER_POLL_MS + 5));
+    let fd = unsafe { fcntl(writer.as_raw_fd(), NATIVE_F_DUPFD_CLOEXEC, 3) };
+    if fd < 0 {
+        reader_paused.store(false, Ordering::Release);
+        return Err(std::io::Error::last_os_error().into());
+    }
+    append_terminal_event(
+        event_log,
+        seq,
+        "fd_handoff",
+        "started",
+        Some(BTreeMap::from([(
+            "status".to_string(),
+            JsonValue::String("started".to_string()),
+        )])),
+    );
+    Ok(NativePtyFdLease {
+        fd,
+        reader_paused: Arc::clone(reader_paused),
+        event_log: event_log.clone(),
+        seq: Arc::clone(seq),
+    })
+}
+
 fn close_background_stdin_control(control: Option<ShellStdinControl>) {
     let Some(control) = control else {
         return;
     };
     match control {
         ShellStdinControl::Pipe(_) => {}
+        #[cfg(unix)]
         ShellStdinControl::Fifo {
             keeper: Some(mut keeper),
             ..
@@ -1831,8 +2384,11 @@ fn close_background_stdin_control(control: Option<ShellStdinControl>) {
             let _ = keeper.kill();
             let _ = keeper.wait();
         }
+        #[cfg(unix)]
         ShellStdinControl::Fifo { keeper: None, .. } => {}
         #[cfg(all(unix, target_os = "linux"))]
+        ShellStdinControl::NativePty { .. } => {}
+        #[cfg(windows)]
         ShellStdinControl::NativePty { .. } => {}
     }
 }
@@ -1840,6 +2396,7 @@ fn close_background_stdin_control(control: Option<ShellStdinControl>) {
 fn shell_stdin_manifest_fields(control: &ShellStdinControl) -> (JsonValue, JsonValue, JsonValue) {
     match control {
         ShellStdinControl::Pipe(_) => (JsonValue::Null, JsonValue::Null, JsonValue::Bool(false)),
+        #[cfg(unix)]
         ShellStdinControl::Fifo {
             path,
             keeper,
@@ -1853,6 +2410,10 @@ fn shell_stdin_manifest_fields(control: &ShellStdinControl) -> (JsonValue, JsonV
             JsonValue::Bool(*closed),
         ),
         #[cfg(all(unix, target_os = "linux"))]
+        ShellStdinControl::NativePty { .. } => {
+            (JsonValue::Null, JsonValue::Null, JsonValue::Bool(false))
+        }
+        #[cfg(windows)]
         ShellStdinControl::NativePty { .. } => {
             (JsonValue::Null, JsonValue::Null, JsonValue::Bool(false))
         }
@@ -2013,7 +2574,7 @@ fn detached_or_unknown_shell_task_error(cwd: &str, task_id: &str, action: &str) 
 fn interact_detached_shell_job(
     cwd: &str,
     task_id: &str,
-    data: &str,
+    data: &[u8],
     close_stdin: bool,
     timeout_ms: u64,
 ) -> AppResult<String> {
@@ -2038,7 +2599,10 @@ fn interact_detached_shell_job(
                 JsonValue::String(task_id.to_string()),
             ),
             ("cwd".to_string(), JsonValue::String(cwd.to_string())),
-            ("input".to_string(), JsonValue::String(data.to_string())),
+            (
+                "input_base64".to_string(),
+                JsonValue::String(encode_shell_base64(data)),
+            ),
             ("close_stdin".to_string(), JsonValue::Bool(close_stdin)),
             (
                 "timeout_ms".to_string(),
@@ -2046,7 +2610,7 @@ fn interact_detached_shell_job(
             ),
         ]);
         if data.is_empty() {
-            args.remove("input");
+            args.remove("input_base64");
         }
         return forward_native_supervisor_shell_control(
             cwd,
@@ -2135,7 +2699,7 @@ fn resize_detached_shell_job(cwd: &str, task_id: &str, size: ShellTtySize) -> Ap
             if record.stdin_closed {
                 "metadata_only_stdin_closed"
             } else {
-                write_fifo_stdin(Path::new(stdin_path), &resize_stty_command(size))?;
+                write_fifo_stdin(Path::new(stdin_path), resize_stty_command(size).as_bytes())?;
                 "detached_fifo_stty"
             }
         } else {
@@ -2605,23 +3169,24 @@ fn render_shell_supervisor_status(cwd: &str) -> AppResult<String> {
         .map(PathBuf::from)
         .unwrap_or(default_socket);
     let socket_kind = shell_supervisor_socket_kind(&socket_path);
-    let protocol_health = shell_supervisor_protocol_health(&socket_path, socket_kind == "socket");
+    let protocol_ready = shell_supervisor_protocol_ready(socket_kind);
+    let protocol_health = shell_supervisor_protocol_health(&socket_path, protocol_ready);
     let (protocol_status, protocol_status_active_jobs) =
-        shell_supervisor_protocol_status(&socket_path, socket_kind == "socket", &protocol_health);
+        shell_supervisor_protocol_status(&socket_path, protocol_ready, &protocol_health);
     let (protocol_show, protocol_job_inventory) =
-        shell_supervisor_protocol_show(&socket_path, socket_kind == "socket", &protocol_health);
+        shell_supervisor_protocol_show(&socket_path, protocol_ready, &protocol_health);
     let supervisor_alive = manifest
         .as_ref()
         .and_then(|manifest| manifest.supervisor_pid)
         .map(process_is_alive);
     let status = shell_supervisor_status_label(
         manifest.is_some(),
-        socket_kind == "socket",
+        protocol_ready,
         supervisor_alive,
         &protocol_health,
     );
     Ok(format!(
-        "kind: deepseek.exec_shell.supervisor_status.v1\nstatus: {status}\nplatform: {}\ncwd: {}\nstate_dir: {}\nmanifest: {}\nmanifest_exists: {}\nmanifest_kind: {}\nsocket: {}\nsocket_kind: {socket_kind}\nprotocol_health: {protocol_health}\nprotocol_status: {protocol_status}\nprotocol_status_active_jobs: {}\nprotocol_show: {protocol_show}\nsupervisor_pid: {}\nsupervisor_alive: {}\nsupervisor_epoch: {}\nprotocol: {}\nmethods: {}\nunsupported_methods: {}\nactive_jobs: {}\nstarted_at: {}\nupdated_at: {}\nprotocol_job_inventory:\n{}\nnote: the workspace shell supervisor protocol supports health/status/show/start/wait/replay/attach/stdin/resize/cancel/shutdown. On supported Unix/Linux builds, supervisor start tty=true creates native-supervisor PTY jobs owned by the running supervisor process; attach output is durable terminal/log replay rather than a full interactive terminal takeover, and broader platform proof remains open.\n",
+        "kind: deepseek.exec_shell.supervisor_status.v1\nstatus: {status}\nplatform: {}\ncwd: {}\nstate_dir: {}\nmanifest: {}\nmanifest_exists: {}\nmanifest_kind: {}\nsocket: {}\nsocket_kind: {socket_kind}\nprotocol_health: {protocol_health}\nprotocol_status: {protocol_status}\nprotocol_status_active_jobs: {}\nprotocol_show: {protocol_show}\nsupervisor_pid: {}\nsupervisor_alive: {}\nsupervisor_epoch: {}\nprotocol: {}\nmethods: {}\nunsupported_methods: {}\nactive_jobs: {}\nstarted_at: {}\nupdated_at: {}\nprotocol_job_inventory:\n{}\nnote: the workspace shell supervisor protocol supports health/status/show/start/wait/replay/attach/attach_stream/byte_stream/pty_fd/stdin/resize/cancel/shutdown. On supported Linux builds, supervisor start tty=true creates native-supervisor PTY jobs owned by the running supervisor process; attach output is durable terminal/log replay, attach_stream follows frames on one socket, byte_stream combines in-stream stdin/resize control frames or raw_proxy socket bytes with raw-output byte frames, and pty_fd can temporarily pause supervisor replay to hand the PTY master fd to a local Unix client with SCM_RIGHTS. Broader platform proof remains open.\n",
         shell_supervisor_platform_label(),
         cwd,
         state_dir.display(),
@@ -2692,6 +3257,10 @@ fn shell_supervisor_status_label(
     }
 }
 
+fn shell_supervisor_protocol_ready(socket_kind: &str) -> bool {
+    matches!(socket_kind, "socket" | "tcp")
+}
+
 fn shell_supervisor_protocol_health(socket_path: &Path, socket_ready: bool) -> String {
     if !socket_ready {
         return "not_checked".to_string();
@@ -2703,7 +3272,14 @@ fn shell_supervisor_protocol_health(socket_path: &Path, socket_ready: bool) -> S
             Err(error) => format!("error: {}", shell_compact_error_label(&error.to_string())),
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        match shell_supervisor_protocol_health_tcp(socket_path) {
+            Ok(label) => label,
+            Err(error) => format!("error: {}", shell_compact_error_label(&error.to_string())),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = socket_path;
         "unsupported".to_string()
@@ -2713,6 +3289,21 @@ fn shell_supervisor_protocol_health(socket_path: &Path, socket_ready: bool) -> S
 #[cfg(unix)]
 fn shell_supervisor_protocol_health_unix(socket_path: &Path) -> AppResult<String> {
     let root = shell_supervisor_protocol_request_unix(socket_path, "health")?;
+    if root.get("method").and_then(json_as_string) == Some("health")
+        && root.get("status").and_then(json_as_string) == Some("ok")
+    {
+        Ok("ok".to_string())
+    } else {
+        Ok(format!(
+            "unexpected_response: {}",
+            shell_compact_error_label(&json_value_to_string(&JsonValue::Object(root)))
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn shell_supervisor_protocol_health_tcp(socket_path: &Path) -> AppResult<String> {
+    let root = shell_supervisor_protocol_request_tcp(socket_path, "health")?;
     if root.get("method").and_then(json_as_string) == Some("health")
         && root.get("status").and_then(json_as_string) == Some("ok")
     {
@@ -2746,7 +3337,17 @@ fn shell_supervisor_protocol_status(
             ),
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        match shell_supervisor_protocol_status_tcp(socket_path) {
+            Ok((label, active_jobs)) => (label, active_jobs),
+            Err(error) => (
+                format!("error: {}", shell_compact_error_label(&error.to_string())),
+                None,
+            ),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = socket_path;
         ("unsupported".to_string(), None)
@@ -2758,6 +3359,27 @@ fn shell_supervisor_protocol_status_unix(
     socket_path: &Path,
 ) -> AppResult<(String, Option<String>)> {
     let root = shell_supervisor_protocol_request_unix(socket_path, "status")?;
+    if root.get("method").and_then(json_as_string) == Some("status")
+        && root.get("status").and_then(json_as_string) == Some("ok")
+    {
+        let active_jobs = root
+            .get("active_jobs")
+            .and_then(json_as_u64)
+            .map(|count| count.to_string());
+        return Ok(("ok".to_string(), active_jobs));
+    }
+    Ok((
+        format!(
+            "unexpected_response: {}",
+            shell_compact_error_label(&json_value_to_string(&JsonValue::Object(root)))
+        ),
+        None,
+    ))
+}
+
+#[cfg(windows)]
+fn shell_supervisor_protocol_status_tcp(socket_path: &Path) -> AppResult<(String, Option<String>)> {
+    let root = shell_supervisor_protocol_request_tcp(socket_path, "status")?;
     if root.get("method").and_then(json_as_string) == Some("status")
         && root.get("status").and_then(json_as_string) == Some("ok")
     {
@@ -2797,7 +3419,17 @@ fn shell_supervisor_protocol_show(
             ),
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        match shell_supervisor_protocol_show_tcp(socket_path) {
+            Ok((label, inventory)) => (label, inventory),
+            Err(error) => (
+                format!("error: {}", shell_compact_error_label(&error.to_string())),
+                None,
+            ),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = socket_path;
         ("unsupported".to_string(), None)
@@ -2831,12 +3463,47 @@ fn shell_supervisor_protocol_show_unix(socket_path: &Path) -> AppResult<(String,
     ))
 }
 
+#[cfg(windows)]
+fn shell_supervisor_protocol_show_tcp(socket_path: &Path) -> AppResult<(String, Option<String>)> {
+    let root = shell_supervisor_protocol_request_tcp(socket_path, "show")?;
+    if root.get("method").and_then(json_as_string) == Some("show")
+        && root.get("status").and_then(json_as_string) == Some("ok")
+    {
+        let inventory = root
+            .get("job_inventory")
+            .and_then(json_as_string)
+            .map(str::to_string);
+        if let Some(error) = root.get("job_inventory_error").and_then(json_as_string) {
+            return Ok((
+                format!("inventory_error: {}", shell_compact_error_label(error)),
+                inventory,
+            ));
+        }
+        return Ok(("ok".to_string(), inventory));
+    }
+    Ok((
+        format!(
+            "unexpected_response: {}",
+            shell_compact_error_label(&json_value_to_string(&JsonValue::Object(root)))
+        ),
+        None,
+    ))
+}
+
 #[cfg(unix)]
 fn shell_supervisor_protocol_request_unix(
     socket_path: &Path,
     method: &str,
 ) -> AppResult<BTreeMap<String, JsonValue>> {
     shell_supervisor_protocol_request_with_args_unix(socket_path, method, BTreeMap::new())
+}
+
+#[cfg(windows)]
+fn shell_supervisor_protocol_request_tcp(
+    socket_path: &Path,
+    method: &str,
+) -> AppResult<BTreeMap<String, JsonValue>> {
+    shell_supervisor_protocol_request_with_args_tcp(socket_path, method, BTreeMap::new())
 }
 
 fn shell_supervisor_protocol_request_with_args(
@@ -2848,11 +3515,15 @@ fn shell_supervisor_protocol_request_with_args(
     {
         shell_supervisor_protocol_request_with_args_unix(socket_path, method, args)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        shell_supervisor_protocol_request_with_args_tcp(socket_path, method, args)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (socket_path, method, args);
         Err(app_error(
-            "shell supervisor protocol requests are currently supported only on Unix",
+            "shell supervisor protocol requests are currently supported only on Unix and Windows",
         ))
     }
 }
@@ -2903,6 +3574,67 @@ fn shell_supervisor_protocol_request_with_args_unix(
     })
 }
 
+#[cfg(windows)]
+fn shell_supervisor_protocol_request_with_args_tcp(
+    socket_path: &Path,
+    method: &str,
+    args: BTreeMap<String, JsonValue>,
+) -> AppResult<BTreeMap<String, JsonValue>> {
+    use std::io::{BufRead, BufReader, ErrorKind};
+    use std::net::TcpStream;
+
+    let endpoint = shell_supervisor_tcp_endpoint_from_path(socket_path)?;
+    let mut stream = TcpStream::connect(&endpoint)
+        .map_err(|error| app_error(format!("{method} connect failed: {error}")))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .map_err(|error| app_error(format!("{method} read timeout setup failed: {error}")))?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(250)))
+        .map_err(|error| app_error(format!("{method} write timeout setup failed: {error}")))?;
+    let mut request =
+        BTreeMap::from([("method".to_string(), JsonValue::String(method.to_string()))]);
+    if !args.is_empty() {
+        request.insert("arguments".to_string(), JsonValue::Object(args));
+    }
+    stream
+        .write_all(format!("{}\n", json_value_to_string(&JsonValue::Object(request))).as_bytes())
+        .map_err(|error| app_error(format!("{method} request write failed: {error}")))?;
+
+    let mut response = String::new();
+    let mut reader = BufReader::new(stream);
+    match reader.read_line(&mut response) {
+        Ok(0) => return Err(app_error(format!("{method} response was empty"))),
+        Ok(_) => {}
+        Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+            return Err(app_error(format!("{method} response timed out")));
+        }
+        Err(error) => return Err(app_error(format!("{method} response read failed: {error}"))),
+    }
+
+    parse_root_object(response.trim()).map_err(|error| {
+        app_error(format!(
+            "{method} response was not valid JSON: {}; response={}",
+            error,
+            shell_compact_error_label(response.trim())
+        ))
+    })
+}
+
+#[cfg(windows)]
+fn shell_supervisor_tcp_endpoint_from_path(path: &Path) -> AppResult<String> {
+    let value = path.to_string_lossy();
+    value
+        .strip_prefix("tcp://")
+        .map(str::to_string)
+        .ok_or_else(|| {
+            app_error(format!(
+                "shell supervisor tcp endpoint must start with tcp://: {}",
+                path.display()
+            ))
+        })
+}
+
 fn shell_compact_error_label(value: &str) -> String {
     let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
     let clipped = compact.chars().take(160).collect::<String>();
@@ -2925,7 +3657,11 @@ fn shell_supervisor_platform_label() -> &'static str {
     {
         "unix"
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        "windows"
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         "unsupported"
     }
@@ -3215,6 +3951,7 @@ pub fn shell_terminal_events_snapshot(
                 kind: event.kind,
                 timestamp: event.timestamp,
                 preview: event.preview,
+                raw_base64: event.raw_base64,
             })
             .collect(),
         truncated,
@@ -3273,6 +4010,7 @@ struct TerminalEventRecord {
     kind: String,
     timestamp: Option<String>,
     preview: String,
+    raw_base64: Option<String>,
 }
 
 fn render_terminal_event_replay(
@@ -3292,6 +4030,12 @@ fn render_terminal_event_replay(
         events.len()
     );
     if !events.is_empty() {
+        let raw_base64 = render_terminal_event_output_raw_base64_lines(&events);
+        if !raw_base64.is_empty() {
+            out.push_str("terminal_raw_base64:\n");
+            out.push_str(&raw_base64);
+            out.push('\n');
+        }
         out.push_str("data:\n");
         out.push_str(&render_terminal_event_lines(&events));
         out.push('\n');
@@ -3330,8 +4074,14 @@ fn render_terminal_event_attach_snapshot(
         events.len()
     );
     if !events.is_empty() {
+        let raw_base64 = render_terminal_event_output_raw_base64_lines(events);
+        if !raw_base64.is_empty() {
+            out.push_str("terminal_raw_base64:\n");
+            out.push_str(&raw_base64);
+            out.push('\n');
+        }
         out.push_str("terminal:\n");
-        out.push_str(&render_terminal_event_lines(&events));
+        out.push_str(&render_terminal_event_lines(events));
         out.push('\n');
     }
     out.trim_end().to_string()
@@ -3448,11 +4198,13 @@ fn parse_terminal_event_line(
         .and_then(json_as_string)
         .map(str::to_string);
     let preview = terminal_event_preview(root);
+    let raw_base64 = terminal_event_raw_base64(root);
     Ok(TerminalEventRecord {
         seq,
         kind,
         timestamp,
         preview,
+        raw_base64,
     })
 }
 
@@ -3481,6 +4233,14 @@ fn terminal_event_preview(root: &BTreeMap<String, JsonValue>) -> String {
         .unwrap_or_default()
 }
 
+fn terminal_event_raw_base64(root: &BTreeMap<String, JsonValue>) -> Option<String> {
+    root.get("raw_base64")
+        .or_else(|| root.get("data_base64"))
+        .and_then(json_as_string)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn render_terminal_event_lines(events: &[TerminalEventRecord]) -> String {
     events
         .iter()
@@ -3501,6 +4261,20 @@ fn render_terminal_event_lines(events: &[TerminalEventRecord]) -> String {
                     event.preview.trim_end()
                 )
             }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_terminal_event_output_raw_base64_lines(events: &[TerminalEventRecord]) -> String {
+    events
+        .iter()
+        .filter(|event| event.kind == "output")
+        .filter_map(|event| {
+            event
+                .raw_base64
+                .as_deref()
+                .map(|raw_base64| format!("{} output {}", event.seq, raw_base64))
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -3665,6 +4439,31 @@ fn durable_log_bytes(record_dir: &Path, name: &str, fallback: usize) -> usize {
         .unwrap_or(fallback)
 }
 
+fn wait_for_shell_logs_to_settle(record_dir: &Path, deadline: Instant) {
+    let mut previous = shell_log_totals(record_dir);
+    let mut stable_polls = 0;
+    while Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+        let current = shell_log_totals(record_dir);
+        if current == previous {
+            stable_polls += 1;
+            if stable_polls >= 2 {
+                break;
+            }
+        } else {
+            stable_polls = 0;
+            previous = current;
+        }
+    }
+}
+
+fn shell_log_totals(record_dir: &Path) -> (usize, usize) {
+    (
+        durable_log_bytes(record_dir, "stdout.log", 0),
+        durable_log_bytes(record_dir, "stderr.log", 0),
+    )
+}
+
 fn read_log_delta(record_dir: &Path, name: &str, cursor: &mut usize) -> String {
     let bytes = fs::read(record_dir.join(name)).unwrap_or_default();
     let start = (*cursor).min(bytes.len());
@@ -3680,6 +4479,9 @@ fn read_durable_log(record_dir: &Path, name: &str) -> String {
 }
 
 fn shell_supervisor_socket_kind(path: &Path) -> &'static str {
+    if path.to_string_lossy().starts_with("tcp://") {
+        return "tcp";
+    }
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return "missing";
     };
@@ -3702,9 +4504,9 @@ fn shell_supervisor_socket_kind(path: &Path) -> &'static str {
     }
 }
 
-fn write_fifo_stdin(path: &Path, data: &str) -> AppResult<()> {
+fn write_fifo_stdin(path: &Path, data: &[u8]) -> AppResult<()> {
     let mut writer = OpenOptions::new().write(true).open(path)?;
-    writer.write_all(data.as_bytes())?;
+    writer.write_all(data)?;
     writer.flush()?;
     Ok(())
 }
@@ -4729,7 +5531,7 @@ mod tests {
         fs::write(
             record_dir.join("terminal-events.jsonl"),
             r#"{"seq":1,"kind":"started","timestamp":"epoch+1","preview":"spawned"}
-{"seq":2,"kind":"output","timestamp":"epoch+2","preview":"alpha"}
+{"seq":2,"kind":"output","timestamp":"epoch+2","preview":"alpha","raw_base64":"YWxwaGEK"}
 {"seq":3,"kind":"resize","rows":40,"cols":120}
 "#,
         )
@@ -4792,6 +5594,13 @@ mod tests {
             replayed.summary
         );
         assert!(
+            replayed
+                .summary
+                .contains("terminal_raw_base64:\n2 output YWxwaGEK\ndata:"),
+            "{}",
+            replayed.summary
+        );
+        assert!(
             replayed.summary.contains("[3 resize] rows=40 cols=120"),
             "{}",
             replayed.summary
@@ -4800,6 +5609,22 @@ mod tests {
             !replayed.summary.contains("[1 started"),
             "{}",
             replayed.summary
+        );
+
+        let attached_all = ExecShellAttachTool
+            .execute(
+                ToolInput::new()
+                    .with_arg("task_id", task_id.clone())
+                    .with_arg("cwd", cwd.clone())
+                    .with_arg("cursor", "0"),
+            )
+            .unwrap();
+        assert!(
+            attached_all
+                .summary
+                .contains("terminal_raw_base64:\n2 output YWxwaGEK\nterminal:"),
+            "{}",
+            attached_all.summary
         );
 
         let attached = ExecShellAttachTool
@@ -4821,6 +5646,11 @@ mod tests {
             attached.summary
         );
         assert!(
+            !attached.summary.contains("terminal_raw_base64"),
+            "{}",
+            attached.summary
+        );
+        assert!(
             attached.summary.contains("[3 resize] rows=40 cols=120"),
             "{}",
             attached.summary
@@ -4830,6 +5660,41 @@ mod tests {
             "{}",
             attached.summary
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn terminal_event_log_records_raw_base64_for_byte_replay() {
+        let root = temp_root("terminal-event-raw-base64");
+        fs::create_dir_all(&root).unwrap();
+        let event_log = root.join("terminal-events.jsonl");
+        let seq = Arc::new(AtomicU64::new(0));
+
+        append_terminal_event_raw(
+            &event_log,
+            &seq,
+            "output",
+            "\x1b[31mhi\n",
+            Some(b"\x1b[31mhi\n"),
+            None,
+        );
+
+        let content = fs::read_to_string(&event_log).unwrap();
+        assert!(content.contains(r#""seq":1"#), "{content}");
+        assert!(content.contains(r#""kind":"output""#), "{content}");
+        assert!(
+            content.contains(r#""raw_base64":"G1szMW1oaQo=""#),
+            "{content}"
+        );
+        assert!(
+            content.contains(r#""preview":"\u001b[31mhi\n""#),
+            "{content}"
+        );
+        assert_eq!(encode_shell_base64(b""), "");
+        assert_eq!(encode_shell_base64(b"f"), "Zg==");
+        assert_eq!(encode_shell_base64(b"fo"), "Zm8=");
+        assert_eq!(encode_shell_base64(b"foo"), "Zm9v");
 
         let _ = fs::remove_dir_all(root);
     }
@@ -4855,7 +5720,7 @@ mod tests {
             absent.summary
         );
         assert!(absent.summary.contains(
-            "methods: health,status,show,start,wait,replay,attach,stdin,resize,cancel,shutdown"
+            "methods: health,status,show,start,wait,replay,attach,attach_stream,byte_stream,pty_fd,stdin,resize,cancel,shutdown"
         ));
         assert!(absent.summary.contains("unsupported_methods: "));
         assert!(absent
@@ -4870,7 +5735,7 @@ mod tests {
         fs::write(
             state_dir.join("manifest.json"),
             format!(
-                "{{\"kind\":\"deepseek.exec_shell.supervisor.v1\",\"supervisor_pid\":{},\"supervisor_socket\":\"{}\",\"supervisor_epoch\":\"epoch+77\",\"protocol\":\"newline-json-v1\",\"methods\":[\"health\",\"status\",\"show\",\"start\",\"wait\",\"replay\",\"attach\",\"stdin\",\"resize\",\"cancel\",\"shutdown\"],\"unsupported_methods\":[],\"active_jobs\":2,\"started_at\":\"epoch+70\",\"updated_at\":\"epoch+76\",\"control_token_hash\":\"sha256:do-not-print\"}}",
+                "{{\"kind\":\"deepseek.exec_shell.supervisor.v1\",\"supervisor_pid\":{},\"supervisor_socket\":\"{}\",\"supervisor_epoch\":\"epoch+77\",\"protocol\":\"newline-json-v1\",\"methods\":[\"health\",\"status\",\"show\",\"start\",\"wait\",\"replay\",\"attach\",\"attach_stream\",\"byte_stream\",\"pty_fd\",\"stdin\",\"resize\",\"cancel\",\"shutdown\"],\"unsupported_methods\":[],\"active_jobs\":2,\"started_at\":\"epoch+70\",\"updated_at\":\"epoch+76\",\"control_token_hash\":\"sha256:do-not-print\"}}",
                 std::process::id(),
                 state_dir.join("supervisor.sock").display()
             ),
@@ -4902,7 +5767,7 @@ mod tests {
         );
         assert!(
             status.summary.contains(
-                "methods: health,status,show,start,wait,replay,attach,stdin,resize,cancel,shutdown"
+                "methods: health,status,show,start,wait,replay,attach,attach_stream,byte_stream,pty_fd,stdin,resize,cancel,shutdown"
             ),
             "{}",
             status.summary
@@ -4914,7 +5779,7 @@ mod tests {
         );
         assert!(
             status.summary.contains(
-                "supports health/status/show/start/wait/replay/attach/stdin/resize/cancel/shutdown"
+                "supports health/status/show/start/wait/replay/attach/attach_stream/byte_stream/pty_fd/stdin/resize/cancel/shutdown"
             ),
             "{}",
             status.summary
@@ -4922,7 +5787,7 @@ mod tests {
         assert!(
             status
                 .summary
-                .contains("attach output is durable terminal/log replay"),
+                .contains("pty_fd can temporarily pause supervisor replay"),
             "{}",
             status.summary
         );
@@ -4942,6 +5807,15 @@ mod tests {
         assert!(!status.summary.contains("do-not-print"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exec_shell_supervisor_status_treats_tcp_endpoint_as_ready() {
+        let endpoint = Path::new("tcp://127.0.0.1:43210");
+
+        assert_eq!(shell_supervisor_socket_kind(endpoint), "tcp");
+        assert!(shell_supervisor_protocol_ready("tcp"));
+        assert!(!shell_supervisor_protocol_ready("file"));
     }
 
     #[cfg(unix)]
@@ -4967,7 +5841,7 @@ mod tests {
         fs::write(
             state_dir.join("manifest.json"),
             format!(
-                "{{\"kind\":\"deepseek.exec_shell.supervisor.v1\",\"supervisor_pid\":{},\"supervisor_socket\":\"{}\",\"supervisor_epoch\":\"epoch+health\",\"protocol\":\"newline-json-v1\",\"methods\":[\"health\",\"status\",\"show\",\"start\",\"wait\",\"replay\",\"attach\",\"stdin\",\"resize\",\"cancel\",\"shutdown\"],\"unsupported_methods\":[],\"active_jobs\":0,\"started_at\":\"epoch+70\",\"updated_at\":\"epoch+76\"}}",
+                "{{\"kind\":\"deepseek.exec_shell.supervisor.v1\",\"supervisor_pid\":{},\"supervisor_socket\":\"{}\",\"supervisor_epoch\":\"epoch+health\",\"protocol\":\"newline-json-v1\",\"methods\":[\"health\",\"status\",\"show\",\"start\",\"wait\",\"replay\",\"attach\",\"attach_stream\",\"byte_stream\",\"pty_fd\",\"stdin\",\"resize\",\"cancel\",\"shutdown\"],\"unsupported_methods\":[],\"active_jobs\":0,\"started_at\":\"epoch+70\",\"updated_at\":\"epoch+76\"}}",
                 std::process::id(),
                 socket.display()
             ),

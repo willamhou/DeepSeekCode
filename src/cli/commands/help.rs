@@ -13,6 +13,12 @@ fn render_help(topics: &[String]) -> String {
         Some("tui") => tui_help().to_string(),
         Some("run") => run_help().to_string(),
         Some("exec") => exec_help().to_string(),
+        Some("benchmark") => benchmark_help().to_string(),
+        Some("mcp") => mcp_help().to_string(),
+        Some("hooks") => hooks_help().to_string(),
+        Some("skills") => skills_help().to_string(),
+        Some("task") | Some("tasks") => task_help().to_string(),
+        Some("github") => github_help().to_string(),
         Some("help") => global_help().to_string(),
         Some(other) => format!(
             "{}\n\nUnknown help topic `{}`. Use `deepseek --help` for the command list.",
@@ -32,6 +38,8 @@ fn global_help() -> &'static str {
         "  deepseek tui                     Explicitly start the terminal workbench\n",
         "  deepseek run \"<task>\"             Run one coding task and exit\n",
         "  deepseek exec run \"<task>\"        Run a durable one-shot agent task\n",
+        "  deepseek task start \"<task>\"       Start an isolated background worktree task\n",
+        "  deepseek benchmark                Run deterministic benchmark gates\n",
         "  deepseek dogfood <action>        Run self-verification and release evidence commands\n",
         "  deepseek help [topic]            Show command help\n",
         "  deepseek --version               Show version\n",
@@ -42,9 +50,14 @@ fn global_help() -> &'static str {
         "  run                              One-shot coding task\n",
         "  exec                             Durable exec/resume task runner\n",
         "  agents                           Durable runtime, service, and shell supervisor tools\n",
+        "  task                             Local background worktree task runner\n",
         "  mcp                              MCP client/server configuration tools\n",
+        "  hooks                            Local hook fixture and verification tools\n",
+        "  skills                           Skill discovery and metadata validation\n",
         "  pr                               GitHub PR review/fix/patch helpers\n",
+        "  github                           GitHub Action event bridge\n",
         "  dogfood                          Project self-test and release evidence workflow\n",
+        "  benchmark                        Deterministic offline regression manifest runner\n",
         "\n",
         "Examples:\n",
         "  deepseek\n",
@@ -57,6 +70,12 @@ fn global_help() -> &'static str {
         "More help:\n",
         "  deepseek help tui\n",
         "  deepseek help run\n",
+        "  deepseek help benchmark\n",
+        "  deepseek help mcp\n",
+        "  deepseek help hooks\n",
+        "  deepseek help skills\n",
+        "  deepseek help task\n",
+        "  deepseek help github\n",
         "  deepseek help dogfood\n",
         "  deepseek help dogfood replay-benchmark"
     )
@@ -103,6 +122,108 @@ fn exec_help() -> &'static str {
     )
 }
 
+fn benchmark_help() -> &'static str {
+    concat!(
+        "DeepSeekCode benchmark\n",
+        "\n",
+        "Usage:\n",
+        "  deepseek benchmark [--manifest <path>] [--out <path>] [--category <name>] [--case <name>]... [--accept-live-baseline]\n",
+        "\n",
+        "Runs benchmark cases from the manifest. `--category` and `--case` select a\n",
+        "targeted slice for local evidence; filtered runs write a report but do not\n",
+        "advance benchmark history or enforce full trend/live gates."
+    )
+}
+
+fn github_help() -> &'static str {
+    concat!(
+        "DeepSeekCode GitHub Action bridge\n",
+        "\n",
+        "Usage:\n",
+        "  deepseek github action [--event <path>] [--event-name <name>] [--mode auto|review|fix|patch] [--trigger <text>] [--post]\n",
+        "  deepseek github action --background-task [--task-id <id>] [--task-no-run]\n",
+        "  deepseek github action --dry-run [--github-output] [--require-mode <mode[,mode]>]\n",
+        "  deepseek github pr-head <reference> [--repo-owner <owner>] [--github-output]\n",
+        "  deepseek github fixture-smoke [--mode all|review|write] [--json] [--keep-workdir]\n",
+        "\n",
+        "Reads GitHub Actions event payloads, resolves a PR target, and delegates to\n",
+        "`deepseek pr review|fix|patch`. Use --dry-run for parse-only workflow checks.\n",
+        "`--background-task` delegates the resolved request into `deepseek task start`.\n",
+        "`--github-output` appends target fields to $GITHUB_OUTPUT, and\n",
+        "`--require-mode` fails early if auto mode resolves to an unexpected workflow.\n",
+        "`pr-head` resolves the PR head branch and can refuse fork-owned branches\n",
+        "before a write-capable checkout. `fixture-smoke` runs a local no-network\n",
+        "review/write workflow simulation in a temporary Git repository."
+    )
+}
+
+fn mcp_help() -> &'static str {
+    concat!(
+        "DeepSeekCode MCP\n",
+        "\n",
+        "Usage:\n",
+        "  deepseek mcp list\n",
+        "  deepseek mcp tools [server]\n",
+        "  deepseek mcp call <server> <tool> [json-args]\n",
+        "  deepseek mcp fixture-smoke [--json]\n",
+        "\n",
+        "Manages MCP servers and exposes stdio, HTTP, and SSE MCP tools to the agent.\n",
+        "`fixture-smoke` runs a local no-network smoke across stdio, HTTP, and SSE\n",
+        "discovery, tool calls, dynamic mcp__server__tool exposure, and schema cache."
+    )
+}
+
+fn hooks_help() -> &'static str {
+    concat!(
+        "DeepSeekCode hooks\n",
+        "\n",
+        "Usage:\n",
+        "  deepseek hooks fixture-smoke [--json]\n",
+        "\n",
+        "Runs a local no-network hook smoke through the agent loop. The fixture verifies\n",
+        "session_start, user_prompt_submit, pre_tool_use, post_tool_use, and\n",
+        "session_stop against a real tool call and structured allow/add_context output."
+    )
+}
+
+fn skills_help() -> &'static str {
+    concat!(
+        "DeepSeekCode skills\n",
+        "\n",
+        "Usage:\n",
+        "  deepseek skills list [--json] [--dir <path>]...\n",
+        "  deepseek skills validate [--json] [--strict] [--dir <path>]...\n",
+        "\n",
+        "Lists bundled and user skills, then validates TOML metadata with the same\n",
+        "directory precedence used by the runtime. `--strict` turns metadata warnings\n",
+        "into a non-zero exit for CI or release gates."
+    )
+}
+
+fn task_help() -> &'static str {
+    concat!(
+        "DeepSeekCode task\n",
+        "\n",
+        "Usage:\n",
+        "  deepseek task start [--cwd <repo>] [--base <ref>] [--id <id>] [--branch <name>] [--skill <name>] [--budget <1..200>] [--no-run] [--json] \"<task>\"\n",
+        "  deepseek task list [--cwd <repo>] [--json]\n",
+        "  deepseek task show <id> [--cwd <repo>] [--tail <lines>] [--json]\n",
+        "  deepseek task stop <id> [--cwd <repo>] [--json]\n",
+        "  deepseek task diff <id> [--cwd <repo>] [--stat] [--json]\n",
+        "  deepseek task merge <id> [--cwd <repo>] [--check] [--allow-dirty] [--json]\n",
+        "  deepseek task reject <id> [--cwd <repo>] [--keep-worktree] [--json]\n",
+        "  deepseek task fixture-smoke [--json] [--keep-workdir]\n",
+        "\n",
+        "`task start` creates an isolated git worktree under `.dscode/task-runner/`,\n",
+        "records metadata and logs, then launches `deepseek exec --json` in the\n",
+        "worktree. Use `--no-run` to create only the worktree and record for local\n",
+        "release smoke checks without spending model calls. `merge` applies the task\n",
+        "worktree diff back to the original repo only after a clean-worktree check;\n",
+        "`reject` marks the record rejected and removes the managed task worktree by\n",
+        "default."
+    )
+}
+
 fn dogfood_help(topic: Option<&str>) -> &'static str {
     match topic {
         Some("run") => dogfood_run_help(),
@@ -112,6 +233,7 @@ fn dogfood_help(topic: Option<&str>) -> &'static str {
         Some("replay-benchmark") | Some("replay-bench") => dogfood_replay_help(),
         Some("live-plan") | Some("plan-live") => dogfood_live_plan_help(),
         Some("live-run") | Some("run-live") => dogfood_live_run_help(),
+        Some("live-evidence") | Some("verify-live-evidence") => dogfood_live_evidence_help(),
         Some("report") => dogfood_report_help(),
         Some("export-benchmark") | Some("export-bench") => dogfood_export_help(),
         Some("promote-benchmark") | Some("promote-bench") => dogfood_promote_help(),
@@ -125,6 +247,7 @@ fn dogfood_help(topic: Option<&str>) -> &'static str {
             "  deepseek dogfood replay-benchmark [--manifest <path>] [--category <name>] [--limit <n>]\n",
             "  deepseek dogfood live-plan [--limit <n>] [--json]\n",
             "  deepseek dogfood live-run [--limit <n>] [--category <name>] [--execute]\n",
+            "  deepseek dogfood live-evidence --file <path> [--json]\n",
             "  deepseek dogfood report [requirements]\n",
             "  deepseek dogfood export-benchmark [--out <path>]\n",
             "  deepseek dogfood promote-benchmark [--dry-run]\n",
@@ -136,6 +259,7 @@ fn dogfood_help(topic: Option<&str>) -> &'static str {
             "  deepseek help dogfood replay-benchmark\n",
             "  deepseek help dogfood live-plan\n",
             "  deepseek help dogfood live-run\n",
+            "  deepseek help dogfood live-evidence\n",
             "  deepseek help dogfood report"
         ),
     }
@@ -158,9 +282,13 @@ fn dogfood_external_fixture_help() -> &'static str {
         "DeepSeekCode dogfood external-fixture\n",
         "\n",
         "Usage:\n",
-        "  deepseek dogfood external-fixture --workdir <path> [--budget <1..200>] [--benchmark-gate] [--dry-run] [--notes <text>] \"<task>\"\n",
+        "  deepseek dogfood external-fixture --workdir <path> [--budget <1..200>] [--benchmark-gate] [--evidence-out <path>] [--dry-run] [--allow-offline] [--notes <text>] \"<task>\"\n",
         "\n",
-        "Runs an isolated write fixture from an external repository workdir."
+        "Runs an isolated write fixture from an external repository workdir. Real\n",
+        "external fixture evidence requires online model-backed transport by default;\n",
+        "`--allow-offline` is only for rehearsal runs that will not satisfy release gates.\n",
+        "`--evidence-out` writes a JSON summary with appended external-fixture rows and\n",
+        "the dogfood ledger fingerprint for release evidence upload."
     )
 }
 
@@ -192,10 +320,26 @@ fn dogfood_live_run_help() -> &'static str {
         "DeepSeekCode dogfood live-run\n",
         "\n",
         "Usage:\n",
-        "  deepseek dogfood live-run [--manifest <path>] [--category <name>] [--target-live-runs <n>] [--target-live-success-rate <percent>] [--target-category <category>:<min-runs>:<min-success-percent>] [--limit <n>] [--execute] [--benchmark-gate]\n",
+        "  deepseek dogfood live-run [--manifest <path>] [--api-key-file <path>] [--evidence-out <path>] [--category <name>] [--target-live-runs <n>] [--target-live-success-rate <percent>] [--target-category <category>:<min-runs>:<min-success-percent>] [--limit <n>] [--json] [--execute] [--benchmark-gate]\n",
         "\n",
         "Selects the next cases from the live dogfood plan. The default is a dry run;\n",
-        "add --execute to run online model-backed benchmark replays."
+        "`--json` emits a machine-readable dry-run plan. Add --execute, without\n",
+        "--json, to run online model-backed benchmark replays. Add --evidence-out\n",
+        "with --execute to write a machine-readable batch evidence summary."
+    )
+}
+
+fn dogfood_live_evidence_help() -> &'static str {
+    concat!(
+        "DeepSeekCode dogfood live-evidence\n",
+        "\n",
+        "Usage:\n",
+        "  deepseek dogfood live-evidence --file <path> [--out <path>] [--require-appended-model-backed <n>] [--require-benchmark-gate] [--require-report-gate] [--allow-incomplete] [--allow-offline] [--json]\n",
+        "\n",
+        "Verifies a `deepseek.dogfood.live_run_evidence.v1` batch summary. Defaults\n",
+        "fail closed: completed, online, and at least one appended model-backed row.\n",
+        "`--require-report-gate` validates evidence_gate, ledger fingerprint, and row matches.\n",
+        "`--out` writes the verification JSON as a release evidence artifact."
     )
 }
 
@@ -251,5 +395,56 @@ mod tests {
         let help = render_help(&topics);
         assert!(help.contains("dogfood replay-benchmark"));
         assert!(help.contains("real\nmodel calls") || help.contains("real model calls"));
+    }
+
+    #[test]
+    fn benchmark_help_documents_targeted_filters() {
+        let topics = vec!["benchmark".to_string()];
+        let help = render_help(&topics);
+        assert!(help.contains("deepseek benchmark"));
+        assert!(help.contains("--category <name>"));
+        assert!(help.contains("--case <name>"));
+        assert!(
+            help.contains("do not\nadvance benchmark history")
+                || help.contains("do not advance benchmark history")
+        );
+    }
+
+    #[test]
+    fn github_help_documents_action_outputs() {
+        let topics = vec!["github".to_string()];
+        let help = render_help(&topics);
+        assert!(help.contains("github action"));
+        assert!(help.contains("github pr-head"));
+        assert!(help.contains("github fixture-smoke"));
+        assert!(help.contains("--github-output"));
+        assert!(help.contains("--require-mode"));
+    }
+
+    #[test]
+    fn mcp_help_documents_fixture_smoke() {
+        let topics = vec!["mcp".to_string()];
+        let help = render_help(&topics);
+        assert!(help.contains("mcp fixture-smoke"));
+        assert!(help.contains("stdio, HTTP, and SSE"));
+        assert!(help.contains("mcp__server__tool"));
+    }
+
+    #[test]
+    fn hooks_help_documents_fixture_smoke() {
+        let topics = vec!["hooks".to_string()];
+        let help = render_help(&topics);
+        assert!(help.contains("hooks fixture-smoke"));
+        assert!(help.contains("session_start"));
+        assert!(help.contains("post_tool_use"));
+    }
+
+    #[test]
+    fn skills_help_documents_validation_gate() {
+        let topics = vec!["skills".to_string()];
+        let help = render_help(&topics);
+        assert!(help.contains("skills validate"));
+        assert!(help.contains("--strict"));
+        assert!(help.contains("--dir"));
     }
 }

@@ -12901,7 +12901,7 @@ shell_allowlist = ["git diff"]
         .unwrap();
         let output = render_once(&app, 160, 48).unwrap();
         assert!(output.contains("shell stdin closed"));
-        assert!(output.contains("shell-stdin"));
+        assert!(output.contains("shell-stdin"), "{output}");
 
         let cancellable = ExecShellTool
             .execute(

@@ -1,9 +1,14 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
+use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
-use std::time::{Duration, Instant};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cli::app::{McpAction, McpConfigScope};
 use crate::config::load::load_or_default;
@@ -23,6 +28,7 @@ pub fn run(action: McpAction) -> AppResult<()> {
     match action {
         McpAction::List => list_servers(&config),
         McpAction::Doctor => doctor(&config),
+        McpAction::FixtureSmoke { json } => fixture_smoke(&config, json),
         McpAction::Tools { server } => list_remote_tools(&config, server.as_deref()),
         McpAction::Prompts { server } => list_remote_prompts(&config, server.as_deref()),
         McpAction::Resources { server } => list_remote_resources(&config, server.as_deref()),
@@ -235,6 +241,831 @@ fn doctor(config: &AppConfig) -> AppResult<()> {
         enabled
     );
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct McpFixtureSmokeReport {
+    workdir: PathBuf,
+    stdio_tools: usize,
+    http_tools: usize,
+    sse_tools: usize,
+    stdio_call_ok: bool,
+    http_call_ok: bool,
+    sse_call_ok: bool,
+    stdio_prompts: usize,
+    http_prompts: usize,
+    sse_prompts: usize,
+    stdio_prompt_ok: bool,
+    http_prompt_ok: bool,
+    sse_prompt_ok: bool,
+    stdio_resources: usize,
+    http_resources: usize,
+    sse_resources: usize,
+    stdio_resource_ok: bool,
+    http_resource_ok: bool,
+    sse_resource_ok: bool,
+    stdio_templates: usize,
+    http_templates: usize,
+    sse_templates: usize,
+    dynamic_tools: Vec<String>,
+    schemas_cached: usize,
+    bad_server_isolated: bool,
+    mcp_call_permission_ok: bool,
+    dynamic_permission_ok: bool,
+    mcp_call_allow_ok: bool,
+    mcp_call_allowlist_deny_ok: bool,
+    dynamic_allow_ok: bool,
+    dynamic_allowlist_deny_ok: bool,
+}
+
+fn fixture_smoke(config: &AppConfig, json: bool) -> AppResult<()> {
+    let root = mcp_fixture_temp_root()?;
+    fs::create_dir_all(&root)?;
+    let result = run_mcp_fixture_smoke_at(config, &root);
+    if result.is_ok() {
+        fs::remove_dir_all(&root).map_err(|error| {
+            app_error(format!(
+                "MCP fixture smoke passed, but failed to remove {}: {error}",
+                root.display()
+            ))
+        })?;
+    }
+    let report = result?;
+    if json {
+        println!("{}", render_mcp_fixture_smoke_json(&report));
+    } else {
+        print_mcp_fixture_smoke_report(&report);
+    }
+    Ok(())
+}
+
+fn run_mcp_fixture_smoke_at(
+    base_config: &AppConfig,
+    root: &Path,
+) -> AppResult<McpFixtureSmokeReport> {
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace)?;
+    fs::write(
+        workspace.join("README.md"),
+        "DeepSeekCode MCP fixture workspace\n",
+    )?;
+
+    let (http_url, http_handle) = start_fixture_http_mcp_server(8)?;
+    let (sse_url, sse_handle) = start_fixture_sse_mcp_server(8)?;
+    let mut config = base_config.clone();
+    config.mcp.enabled = true;
+    config.mcp.expose_remote_tools = true;
+    config.mcp.project_file = root.join("mcp.json").display().to_string();
+    config.mcp.user_file = root.join("missing-user-mcp.json").display().to_string();
+    write_mcp_fixture_config(&config, &workspace, &http_url, &sse_url)?;
+
+    let inventory = load_inventory(&config)?;
+    let stdio = inventory
+        .servers
+        .iter()
+        .find(|server| server.name == "stdio-self")
+        .ok_or_else(|| app_error("MCP fixture missing stdio-self server"))?;
+    let http = inventory
+        .servers
+        .iter()
+        .find(|server| server.name == "http-fixture")
+        .ok_or_else(|| app_error("MCP fixture missing http-fixture server"))?;
+    let sse = inventory
+        .servers
+        .iter()
+        .find(|server| server.name == "sse-fixture")
+        .ok_or_else(|| app_error("MCP fixture missing sse-fixture server"))?;
+    let broken = inventory
+        .servers
+        .iter()
+        .find(|server| server.name == "broken-stdio")
+        .ok_or_else(|| app_error("MCP fixture missing broken-stdio server"))?;
+
+    let registry = crate::tools::registry::default_registry_with_context(
+        config.clone(),
+        0,
+        Rc::new(RefCell::new(crate::core::todos::TodoList::default())),
+    );
+    let policy = crate::tools::registry::ExecutionPolicy::new(&config.approval, None)
+        .with_auto_approved_permission("mcp");
+    let dynamic_tools = registry
+        .names_for_policy(&policy)
+        .into_iter()
+        .filter(|name| name.starts_with(crate::tools::mcp::MCP_DYNAMIC_TOOL_PREFIX))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let required_dynamic = [
+        crate::tools::mcp::remote_tool_registry_name("stdio-self", "read_file"),
+        crate::tools::mcp::remote_tool_registry_name("http-fixture", "echo"),
+        crate::tools::mcp::remote_tool_registry_name("sse-fixture", "echo"),
+    ];
+    for required in &required_dynamic {
+        if !dynamic_tools.iter().any(|name| name == required) {
+            return Err(app_error(format!(
+                "MCP fixture smoke did not expose dynamic tool `{required}`"
+            )));
+        }
+    }
+    let schemas_cached = required_dynamic
+        .iter()
+        .filter(|name| crate::tools::mcp::dynamic_tool_schema(name).is_some())
+        .count();
+    if schemas_cached != required_dynamic.len() {
+        return Err(app_error(format!(
+            "MCP fixture smoke cached {schemas_cached}/{} dynamic schemas",
+            required_dynamic.len()
+        )));
+    }
+    let bad_server_isolated = list_tools_for_server(broken).is_err()
+        && required_dynamic
+            .iter()
+            .all(|required| dynamic_tools.iter().any(|name| name == required));
+
+    let stdio_tools = list_tools_for_server(stdio)?;
+    let stdio_call = call_stdio_tool(
+        stdio,
+        "read_file",
+        &parse_call_arguments(Some(r#"{"path":"README.md","max_lines":5}"#))?,
+    )?;
+    let stdio_call_ok = !stdio_call.is_error
+        && stdio_call
+            .content
+            .iter()
+            .any(|content| content.contains("DeepSeekCode MCP fixture workspace"));
+
+    let http_tools = list_tools_for_server(http)?;
+    let http_call = call_http_tool(
+        http,
+        "echo",
+        &parse_call_arguments(Some(r#"{"message":"hello-http"}"#))?,
+    )?;
+    let http_call_ok = !http_call.is_error
+        && http_call
+            .content
+            .iter()
+            .any(|content| content.contains("hello-http"));
+
+    let sse_tools = list_tools_for_server(sse)?;
+    let sse_call = call_sse_tool(
+        sse,
+        "echo",
+        &parse_call_arguments(Some(r#"{"message":"hello-sse"}"#))?,
+    )?;
+    let sse_call_ok = !sse_call.is_error
+        && sse_call
+            .content
+            .iter()
+            .any(|content| content.contains("hello-sse"));
+
+    let stdio_prompts = list_prompts_for_server(stdio)?;
+    let stdio_prompt = get_stdio_prompt(
+        stdio,
+        "plan_task",
+        &parse_prompt_arguments(Some(r#"{"task":"Improve MCP coverage"}"#))?,
+    )?;
+    let stdio_prompt_ok = stdio_prompts
+        .iter()
+        .any(|prompt| prompt.name == "plan_task")
+        && stdio_prompt
+            .messages
+            .iter()
+            .any(|message| message.contains("Improve MCP coverage"));
+
+    let http_prompts = list_prompts_for_server(http)?;
+    let http_prompt = get_http_prompt(
+        http,
+        "fixture_prompt",
+        &parse_prompt_arguments(Some(r#"{"topic":"hello-http"}"#))?,
+    )?;
+    let http_prompt_ok = http_prompts
+        .iter()
+        .any(|prompt| prompt.name == "fixture_prompt")
+        && http_prompt
+            .messages
+            .iter()
+            .any(|message| message.contains("hello-http"));
+
+    let sse_prompts = list_prompts_for_server(sse)?;
+    let sse_prompt = get_sse_prompt(
+        sse,
+        "fixture_prompt",
+        &parse_prompt_arguments(Some(r#"{"topic":"hello-sse"}"#))?,
+    )?;
+    let sse_prompt_ok = sse_prompts
+        .iter()
+        .any(|prompt| prompt.name == "fixture_prompt")
+        && sse_prompt
+            .messages
+            .iter()
+            .any(|message| message.contains("hello-sse"));
+
+    let stdio_resources = list_resources_for_server(stdio)?;
+    let stdio_resource_uri = stdio_resources
+        .iter()
+        .find(|resource| resource.name.as_deref() == Some("workspace"))
+        .map(|resource| resource.uri.as_str())
+        .ok_or_else(|| app_error("MCP fixture stdio workspace resource missing"))?;
+    let stdio_resource = read_stdio_resource(stdio, stdio_resource_uri)?;
+    let stdio_resource_ok = stdio_resource.contents.iter().any(|content| {
+        content
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("workspace"))
+    });
+
+    let http_resources = list_resources_for_server(http)?;
+    let http_resource_uri = "fixture://http/readme";
+    let http_resource = read_http_resource(http, http_resource_uri)?;
+    let http_resource_ok = http_resources
+        .iter()
+        .any(|resource| resource.uri == http_resource_uri)
+        && http_resource.contents.iter().any(|content| {
+            content
+                .text
+                .as_deref()
+                .is_some_and(|text| text.contains("hello-http-resource"))
+        });
+
+    let sse_resources = list_resources_for_server(sse)?;
+    let sse_resource_uri = "fixture://sse/readme";
+    let sse_resource = read_sse_resource(sse, sse_resource_uri)?;
+    let sse_resource_ok = sse_resources
+        .iter()
+        .any(|resource| resource.uri == sse_resource_uri)
+        && sse_resource.contents.iter().any(|content| {
+            content
+                .text
+                .as_deref()
+                .is_some_and(|text| text.contains("hello-sse-resource"))
+        });
+
+    let stdio_templates = list_resource_templates_for_server(stdio)?;
+    let http_templates = list_resource_templates_for_server(http)?;
+    let sse_templates = list_resource_templates_for_server(sse)?;
+
+    let policy_checks = run_mcp_fixture_policy_checks(&config, &registry, &required_dynamic[0])?;
+
+    join_fixture_server("http", http_handle)?;
+    join_fixture_server("sse", sse_handle)?;
+
+    if !stdio_call_ok || !http_call_ok || !sse_call_ok {
+        return Err(app_error(format!(
+            "MCP fixture smoke tool call verification failed: stdio={stdio_call_ok}, http={http_call_ok}, sse={sse_call_ok}"
+        )));
+    }
+    if !stdio_prompt_ok || !http_prompt_ok || !sse_prompt_ok {
+        return Err(app_error(format!(
+            "MCP fixture smoke prompt verification failed: stdio={stdio_prompt_ok}, http={http_prompt_ok}, sse={sse_prompt_ok}"
+        )));
+    }
+    if !stdio_resource_ok || !http_resource_ok || !sse_resource_ok {
+        return Err(app_error(format!(
+            "MCP fixture smoke resource verification failed: stdio={stdio_resource_ok}, http={http_resource_ok}, sse={sse_resource_ok}"
+        )));
+    }
+    if stdio_templates.is_empty() || http_templates.is_empty() || sse_templates.is_empty() {
+        return Err(app_error(format!(
+            "MCP fixture smoke template verification failed: stdio={}, http={}, sse={}",
+            stdio_templates.len(),
+            http_templates.len(),
+            sse_templates.len()
+        )));
+    }
+
+    Ok(McpFixtureSmokeReport {
+        workdir: root.to_path_buf(),
+        stdio_tools: stdio_tools.len(),
+        http_tools: http_tools.len(),
+        sse_tools: sse_tools.len(),
+        stdio_call_ok,
+        http_call_ok,
+        sse_call_ok,
+        stdio_prompts: stdio_prompts.len(),
+        http_prompts: http_prompts.len(),
+        sse_prompts: sse_prompts.len(),
+        stdio_prompt_ok,
+        http_prompt_ok,
+        sse_prompt_ok,
+        stdio_resources: stdio_resources.len(),
+        http_resources: http_resources.len(),
+        sse_resources: sse_resources.len(),
+        stdio_resource_ok,
+        http_resource_ok,
+        sse_resource_ok,
+        stdio_templates: stdio_templates.len(),
+        http_templates: http_templates.len(),
+        sse_templates: sse_templates.len(),
+        dynamic_tools,
+        schemas_cached,
+        bad_server_isolated,
+        mcp_call_permission_ok: policy_checks.mcp_call_permission_ok,
+        dynamic_permission_ok: policy_checks.dynamic_permission_ok,
+        mcp_call_allow_ok: policy_checks.mcp_call_allow_ok,
+        mcp_call_allowlist_deny_ok: policy_checks.mcp_call_allowlist_deny_ok,
+        dynamic_allow_ok: policy_checks.dynamic_allow_ok,
+        dynamic_allowlist_deny_ok: policy_checks.dynamic_allowlist_deny_ok,
+    })
+}
+
+fn write_mcp_fixture_config(
+    config: &AppConfig,
+    workspace: &Path,
+    http_url: &str,
+    sse_url: &str,
+) -> AppResult<()> {
+    let exe = std::env::current_exe()
+        .map_err(|error| app_error(format!("failed to resolve current executable: {error}")))?;
+    let content = format!(
+        r#"{{
+  "mcpServers": {{
+    "broken-stdio": {{
+      "transport": "stdio",
+      "command": "{}",
+      "args": ["__deepseek_mcp_fixture_broken_command__"]
+    }},
+    "stdio-self": {{
+      "transport": "stdio",
+      "command": "{}",
+      "args": ["serve", "--mcp", "--workspace", "{}"]
+    }},
+    "http-fixture": {{
+      "transport": "http",
+      "url": "{}"
+    }},
+    "sse-fixture": {{
+      "transport": "sse",
+      "url": "{}"
+    }}
+  }}
+}}
+"#,
+        crate::util::json::json_escape(&exe.display().to_string()),
+        crate::util::json::json_escape(&exe.display().to_string()),
+        crate::util::json::json_escape(&workspace.display().to_string()),
+        crate::util::json::json_escape(http_url),
+        crate::util::json::json_escape(sse_url)
+    );
+    if let Some(parent) = config.mcp.project_file_path().parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(config.mcp.project_file_path(), content)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct McpFixturePolicyChecks {
+    mcp_call_permission_ok: bool,
+    dynamic_permission_ok: bool,
+    mcp_call_allow_ok: bool,
+    mcp_call_allowlist_deny_ok: bool,
+    dynamic_allow_ok: bool,
+    dynamic_allowlist_deny_ok: bool,
+}
+
+fn run_mcp_fixture_policy_checks(
+    config: &AppConfig,
+    registry: &crate::tools::registry::ToolRegistry,
+    dynamic_read_file_tool: &str,
+) -> AppResult<McpFixturePolicyChecks> {
+    let mcp_call_input = crate::tools::types::ToolInput::new()
+        .with_arg("server", "stdio-self")
+        .with_arg("tool", "read_file")
+        .with_arg("arguments", r#"{"path":"README.md","max_lines":5}"#);
+    let dynamic_input = crate::tools::types::ToolInput::new()
+        .with_arg("arguments", r#"{"path":"README.md","max_lines":5}"#);
+
+    let approval_policy = mcp_fixture_policy(config, true, &[]);
+    let mcp_call_permission_ok = registry
+        .permission_request_for("mcp_call", &mcp_call_input, &approval_policy)
+        .is_some_and(|request| request.kind == "mcp" && request.target == "stdio-self/read_file");
+    let dynamic_permission_ok = registry
+        .permission_request_for(dynamic_read_file_tool, &dynamic_input, &approval_policy)
+        .is_some_and(|request| request.kind == "mcp" && request.target == "stdio-self/read_file");
+
+    let allow_policy = mcp_fixture_policy(config, false, &["stdio-self/read_file"]);
+    let mcp_call_allow =
+        registry.execute_with_policy("mcp_call", mcp_call_input.clone(), &allow_policy)?;
+    let mcp_call_allow_ok = mcp_call_allow
+        .summary
+        .contains("DeepSeekCode MCP fixture workspace");
+    let dynamic_allow = registry.execute_with_policy(
+        dynamic_read_file_tool,
+        dynamic_input.clone(),
+        &allow_policy,
+    )?;
+    let dynamic_allow_ok = dynamic_allow
+        .summary
+        .contains("DeepSeekCode MCP fixture workspace");
+
+    let deny_policy = mcp_fixture_policy(config, false, &["http-fixture/*"]);
+    let mcp_call_allowlist_deny_ok = registry
+        .execute_with_policy("mcp_call", mcp_call_input, &deny_policy)
+        .unwrap_err()
+        .to_string()
+        .contains("policy allowlist");
+    let dynamic_allowlist_deny_ok = registry
+        .execute_with_policy(dynamic_read_file_tool, dynamic_input, &deny_policy)
+        .unwrap_err()
+        .to_string()
+        .contains("policy allowlist");
+
+    let checks = McpFixturePolicyChecks {
+        mcp_call_permission_ok,
+        dynamic_permission_ok,
+        mcp_call_allow_ok,
+        mcp_call_allowlist_deny_ok,
+        dynamic_allow_ok,
+        dynamic_allowlist_deny_ok,
+    };
+    if !checks.mcp_call_permission_ok
+        || !checks.dynamic_permission_ok
+        || !checks.mcp_call_allow_ok
+        || !checks.mcp_call_allowlist_deny_ok
+        || !checks.dynamic_allow_ok
+        || !checks.dynamic_allowlist_deny_ok
+    {
+        return Err(app_error(format!(
+            "MCP fixture policy checks failed: {:?}",
+            checks
+        )));
+    }
+
+    Ok(checks)
+}
+
+fn mcp_fixture_policy(
+    config: &AppConfig,
+    require_confirmation: bool,
+    allowlist: &[&str],
+) -> crate::tools::registry::ExecutionPolicy {
+    let mut approval = config.approval.clone();
+    approval.require_mcp_confirmation = require_confirmation;
+    approval.mcp_call_allowlist = allowlist.iter().map(|entry| (*entry).to_string()).collect();
+    crate::tools::registry::ExecutionPolicy::new(&approval, None)
+}
+
+fn start_fixture_http_mcp_server(
+    sessions: usize,
+) -> AppResult<(String, JoinHandle<Result<(), String>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|error| app_error(format!("failed to bind HTTP MCP fixture: {error}")))?;
+    let url = format!("http://{}/mcp", listener.local_addr()?);
+    let handle = std::thread::spawn(move || -> Result<(), String> {
+        for _ in 0..sessions {
+            handle_fixture_http_session(&listener).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    });
+    Ok((url, handle))
+}
+
+fn handle_fixture_http_session(listener: &TcpListener) -> AppResult<()> {
+    for step in 0..4 {
+        let (mut stream, _) = listener.accept()?;
+        let request = read_fixture_http_request(&mut stream)?;
+        match step {
+            0 => {
+                if !request.starts_with("GET /mcp ") {
+                    return Err(app_error("HTTP MCP fixture expected GET /mcp preflight"));
+                }
+                write_fixture_http_response(
+                    &mut stream,
+                    200,
+                    &[("Mcp-Session-Id", "fixture")],
+                    "",
+                )?;
+            }
+            1 => {
+                ensure_fixture_method(&request, "initialize")?;
+                write_fixture_http_response(
+                    &mut stream,
+                    200,
+                    &[("Mcp-Session-Id", "fixture")],
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{},"prompts":{},"resources":{}},"serverInfo":{"name":"http-fixture","version":"1"}}}"#,
+                )?;
+            }
+            2 => {
+                ensure_fixture_method(&request, "notifications/initialized")?;
+                write_fixture_http_response(&mut stream, 202, &[], "")?;
+            }
+            _ => {
+                let body = fixture_json_rpc_response_for_request(&request, "http")?;
+                write_fixture_http_response(&mut stream, 200, &[], &body)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn start_fixture_sse_mcp_server(
+    sessions: usize,
+) -> AppResult<(String, JoinHandle<Result<(), String>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|error| app_error(format!("failed to bind SSE MCP fixture: {error}")))?;
+    let url = format!("http://{}/sse", listener.local_addr()?);
+    let handle = std::thread::spawn(move || -> Result<(), String> {
+        for _ in 0..sessions {
+            handle_fixture_sse_session(&listener).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    });
+    Ok((url, handle))
+}
+
+fn handle_fixture_sse_session(listener: &TcpListener) -> AppResult<()> {
+    let (mut sse_stream, _) = listener.accept()?;
+    let request = read_fixture_http_request(&mut sse_stream)?;
+    if !request.starts_with("GET /sse ") {
+        return Err(app_error("SSE MCP fixture expected GET /sse stream"));
+    }
+    write_fixture_sse_response_start(&mut sse_stream)?;
+    write_fixture_sse_event(&mut sse_stream, Some("endpoint"), "/messages")?;
+
+    for step in 0..3 {
+        let (mut stream, _) = listener.accept()?;
+        let request = read_fixture_http_request(&mut stream)?;
+        match step {
+            0 => {
+                ensure_fixture_method(&request, "initialize")?;
+                write_fixture_http_response(&mut stream, 202, &[], "")?;
+                write_fixture_sse_event(
+                    &mut sse_stream,
+                    None,
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{},"prompts":{},"resources":{}},"serverInfo":{"name":"sse-fixture","version":"1"}}}"#,
+                )?;
+            }
+            1 => {
+                ensure_fixture_method(&request, "notifications/initialized")?;
+                write_fixture_http_response(&mut stream, 202, &[], "")?;
+            }
+            _ => {
+                let body = fixture_json_rpc_response_for_request(&request, "sse")?;
+                write_fixture_http_response(&mut stream, 202, &[], "")?;
+                write_fixture_sse_event(&mut sse_stream, None, &body)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fixture_json_rpc_response_for_request(request: &str, transport: &str) -> AppResult<String> {
+    if request.contains(r#""method":"tools/list""#) {
+        return Ok(format!(
+            r#"{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"echo","description":"Echo through the {transport} MCP fixture","inputSchema":{{"type":"object","properties":{{"message":{{"type":"string"}}}},"required":["message"]}}}}]}}}}"#
+        ));
+    }
+    if request.contains(r#""method":"tools/call""#) {
+        let message = fixture_request_message_argument(request).unwrap_or("missing-message");
+        return Ok(format!(
+            r#"{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"{transport}:{message}"}}],"structuredContent":{{"transport":"{transport}","message":"{message}"}}}}}}"#,
+            message = crate::util::json::json_escape(message)
+        ));
+    }
+    if request.contains(r#""method":"prompts/list""#) {
+        return Ok(format!(
+            r#"{{"jsonrpc":"2.0","id":2,"result":{{"prompts":[{{"name":"fixture_prompt","description":"Prompt from the {transport} MCP fixture","arguments":[{{"name":"topic","description":"Prompt topic","required":true}}]}}]}}}}"#
+        ));
+    }
+    if request.contains(r#""method":"prompts/get""#) {
+        let topic = fixture_request_string_argument(request, "topic").unwrap_or("missing-topic");
+        return Ok(format!(
+            r#"{{"jsonrpc":"2.0","id":2,"result":{{"description":"Prompt from the {transport} MCP fixture","messages":[{{"role":"user","content":{{"type":"text","text":"{transport} prompt: {topic}"}}}}]}}}}"#,
+            topic = crate::util::json::json_escape(topic)
+        ));
+    }
+    if request.contains(r#""method":"resources/list""#) {
+        return Ok(format!(
+            r#"{{"jsonrpc":"2.0","id":2,"result":{{"resources":[{{"uri":"fixture://{transport}/readme","name":"{transport}-readme","description":"Resource from the {transport} MCP fixture","mimeType":"text/plain"}}]}}}}"#
+        ));
+    }
+    if request.contains(r#""method":"resources/read""#) {
+        return Ok(format!(
+            r#"{{"jsonrpc":"2.0","id":2,"result":{{"contents":[{{"uri":"fixture://{transport}/readme","mimeType":"text/plain","text":"hello-{transport}-resource"}}]}}}}"#
+        ));
+    }
+    if request.contains(r#""method":"resources/templates/list""#) {
+        return Ok(format!(
+            r#"{{"jsonrpc":"2.0","id":2,"result":{{"resourceTemplates":[{{"uriTemplate":"fixture://{transport}/{{name}}","name":"{transport}-template","description":"Template from the {transport} MCP fixture","mimeType":"text/plain"}}]}}}}"#
+        ));
+    }
+    Err(app_error(format!(
+        "MCP fixture received unsupported JSON-RPC request: {}",
+        compact_inline(request, 160)
+    )))
+}
+
+fn fixture_request_message_argument(request: &str) -> Option<&str> {
+    fixture_request_string_argument(request, "message")
+}
+
+fn fixture_request_string_argument<'a>(request: &'a str, key: &str) -> Option<&'a str> {
+    let marker = format!("\"{key}\":\"");
+    let start = request.find(&marker)? + marker.len();
+    let rest = request.get(start..)?;
+    let end = rest.find('"')?;
+    rest.get(..end)
+}
+
+fn ensure_fixture_method(request: &str, method: &str) -> AppResult<()> {
+    if request.contains(&format!(r#""method":"{method}""#)) {
+        return Ok(());
+    }
+    Err(app_error(format!(
+        "MCP fixture expected method `{method}`, got {}",
+        compact_inline(request, 160)
+    )))
+}
+
+fn read_fixture_http_request(stream: &mut TcpStream) -> AppResult<String> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            return Err(app_error("connection closed before HTTP request completed"));
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(header_end) = find_fixture_header_end(&buffer) {
+            let headers = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.trim()
+                        .eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if buffer.len() >= header_end + 4 + content_length {
+                return Ok(String::from_utf8_lossy(&buffer).into_owned());
+            }
+        }
+    }
+}
+
+fn find_fixture_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn write_fixture_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> AppResult<()> {
+    let reason = match status {
+        200 => "OK",
+        202 => "Accepted",
+        _ => "Error",
+    };
+    let mut response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    for (key, value) in headers {
+        response.push_str(&format!("{key}: {value}\r\n"));
+    }
+    response.push_str("\r\n");
+    response.push_str(body);
+    stream.write_all(response.as_bytes())?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn write_fixture_sse_response_start(stream: &mut TcpStream) -> AppResult<()> {
+    stream.write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n",
+    )?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn write_fixture_sse_event(
+    stream: &mut TcpStream,
+    event: Option<&str>,
+    data: &str,
+) -> AppResult<()> {
+    if let Some(event) = event {
+        writeln!(stream, "event: {event}")?;
+    }
+    for line in data.lines() {
+        writeln!(stream, "data: {line}")?;
+    }
+    writeln!(stream)?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn join_fixture_server(name: &str, handle: JoinHandle<Result<(), String>>) -> AppResult<()> {
+    handle
+        .join()
+        .map_err(|_| app_error(format!("{name} MCP fixture server thread panicked")))?
+        .map_err(|error| app_error(format!("{name} MCP fixture server failed: {error}")))
+}
+
+fn mcp_fixture_temp_root() -> AppResult<PathBuf> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| app_error(format!("system clock error: {error}")))?
+        .as_nanos();
+    Ok(std::env::temp_dir().join(format!(
+        "deepseek-mcp-fixture-{}-{nanos}",
+        std::process::id()
+    )))
+}
+
+fn render_mcp_fixture_smoke_json(report: &McpFixtureSmokeReport) -> String {
+    let dynamic_tools = report
+        .dynamic_tools
+        .iter()
+        .map(|name| format!("\"{}\"", crate::util::json::json_escape(name)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"kind\":\"deepseek.mcp_fixture_smoke.v1\",\"workdir\":\"{}\",\"stdio_tools\":{},\"http_tools\":{},\"sse_tools\":{},\"stdio_call_ok\":{},\"http_call_ok\":{},\"sse_call_ok\":{},\"stdio_prompts\":{},\"http_prompts\":{},\"sse_prompts\":{},\"stdio_prompt_ok\":{},\"http_prompt_ok\":{},\"sse_prompt_ok\":{},\"stdio_resources\":{},\"http_resources\":{},\"sse_resources\":{},\"stdio_resource_ok\":{},\"http_resource_ok\":{},\"sse_resource_ok\":{},\"stdio_templates\":{},\"http_templates\":{},\"sse_templates\":{},\"schemas_cached\":{},\"bad_server_isolated\":{},\"mcp_call_permission_ok\":{},\"dynamic_permission_ok\":{},\"mcp_call_allow_ok\":{},\"mcp_call_allowlist_deny_ok\":{},\"dynamic_allow_ok\":{},\"dynamic_allowlist_deny_ok\":{},\"dynamic_tools\":[{}]}}",
+        crate::util::json::json_escape(&report.workdir.display().to_string()),
+        report.stdio_tools,
+        report.http_tools,
+        report.sse_tools,
+        report.stdio_call_ok,
+        report.http_call_ok,
+        report.sse_call_ok,
+        report.stdio_prompts,
+        report.http_prompts,
+        report.sse_prompts,
+        report.stdio_prompt_ok,
+        report.http_prompt_ok,
+        report.sse_prompt_ok,
+        report.stdio_resources,
+        report.http_resources,
+        report.sse_resources,
+        report.stdio_resource_ok,
+        report.http_resource_ok,
+        report.sse_resource_ok,
+        report.stdio_templates,
+        report.http_templates,
+        report.sse_templates,
+        report.schemas_cached,
+        report.bad_server_isolated,
+        report.mcp_call_permission_ok,
+        report.dynamic_permission_ok,
+        report.mcp_call_allow_ok,
+        report.mcp_call_allowlist_deny_ok,
+        report.dynamic_allow_ok,
+        report.dynamic_allowlist_deny_ok,
+        dynamic_tools
+    )
+}
+
+fn print_mcp_fixture_smoke_report(report: &McpFixtureSmokeReport) {
+    println!("DeepSeekCode MCP fixture smoke");
+    println!("workdir: {}", report.workdir.display());
+    println!(
+        "transports: stdio tools={} call_ok={}; http tools={} call_ok={}; sse tools={} call_ok={}",
+        report.stdio_tools,
+        report.stdio_call_ok,
+        report.http_tools,
+        report.http_call_ok,
+        report.sse_tools,
+        report.sse_call_ok
+    );
+    println!(
+        "prompts: stdio count={} ok={}; http count={} ok={}; sse count={} ok={}",
+        report.stdio_prompts,
+        report.stdio_prompt_ok,
+        report.http_prompts,
+        report.http_prompt_ok,
+        report.sse_prompts,
+        report.sse_prompt_ok
+    );
+    println!(
+        "resources: stdio count={} ok={} templates={}; http count={} ok={} templates={}; sse count={} ok={} templates={}",
+        report.stdio_resources,
+        report.stdio_resource_ok,
+        report.stdio_templates,
+        report.http_resources,
+        report.http_resource_ok,
+        report.http_templates,
+        report.sse_resources,
+        report.sse_resource_ok,
+        report.sse_templates
+    );
+    println!(
+        "dynamic tools: {} (schemas cached: {})",
+        report.dynamic_tools.join(", "),
+        report.schemas_cached
+    );
+    println!(
+        "policy: bad_server_isolated={}; mcp_call permission={} allow={} deny={}; dynamic permission={} allow={} deny={}",
+        report.bad_server_isolated,
+        report.mcp_call_permission_ok,
+        report.mcp_call_allow_ok,
+        report.mcp_call_allowlist_deny_ok,
+        report.dynamic_permission_ok,
+        report.dynamic_allow_ok,
+        report.dynamic_allowlist_deny_ok
+    );
 }
 
 fn get_server(config: &AppConfig, name: &str) -> AppResult<()> {
@@ -4033,6 +4864,73 @@ mod tests {
             servers[0].env.get("TOKEN").map(String::as_str),
             Some("value")
         );
+    }
+
+    #[test]
+    fn fixture_message_argument_reads_json_rpc_call_body() {
+        let request = r#"POST /mcp HTTP/1.1
+
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"message":"hello-http"}}}"#;
+
+        assert_eq!(
+            fixture_request_message_argument(request),
+            Some("hello-http")
+        );
+    }
+
+    #[test]
+    fn fixture_smoke_json_reports_transports_and_dynamic_tools() {
+        let report = McpFixtureSmokeReport {
+            workdir: PathBuf::from("/tmp/deepseek-mcp-fixture"),
+            stdio_tools: 57,
+            http_tools: 1,
+            sse_tools: 1,
+            stdio_call_ok: true,
+            http_call_ok: true,
+            sse_call_ok: true,
+            stdio_prompts: 3,
+            http_prompts: 1,
+            sse_prompts: 1,
+            stdio_prompt_ok: true,
+            http_prompt_ok: true,
+            sse_prompt_ok: true,
+            stdio_resources: 1,
+            http_resources: 1,
+            sse_resources: 1,
+            stdio_resource_ok: true,
+            http_resource_ok: true,
+            sse_resource_ok: true,
+            stdio_templates: 3,
+            http_templates: 1,
+            sse_templates: 1,
+            dynamic_tools: vec![
+                "mcp__stdio-self__read_file".to_string(),
+                "mcp__http-fixture__echo".to_string(),
+                "mcp__sse-fixture__echo".to_string(),
+            ],
+            schemas_cached: 3,
+            bad_server_isolated: true,
+            mcp_call_permission_ok: true,
+            dynamic_permission_ok: true,
+            mcp_call_allow_ok: true,
+            mcp_call_allowlist_deny_ok: true,
+            dynamic_allow_ok: true,
+            dynamic_allowlist_deny_ok: true,
+        };
+
+        let rendered = render_mcp_fixture_smoke_json(&report);
+        assert!(rendered.contains("\"kind\":\"deepseek.mcp_fixture_smoke.v1\""));
+        assert!(rendered.contains("\"stdio_call_ok\":true"));
+        assert!(rendered.contains("\"http_call_ok\":true"));
+        assert!(rendered.contains("\"sse_call_ok\":true"));
+        assert!(rendered.contains("\"stdio_prompt_ok\":true"));
+        assert!(rendered.contains("\"http_resource_ok\":true"));
+        assert!(rendered.contains("\"sse_templates\":1"));
+        assert!(rendered.contains("\"schemas_cached\":3"));
+        assert!(rendered.contains("\"bad_server_isolated\":true"));
+        assert!(rendered.contains("\"mcp_call_allowlist_deny_ok\":true"));
+        assert!(rendered.contains("\"dynamic_allowlist_deny_ok\":true"));
+        assert!(rendered.contains("mcp__http-fixture__echo"));
     }
 
     #[test]

@@ -711,9 +711,11 @@ fn sanitize_meta(value: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[cfg(unix)]
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()

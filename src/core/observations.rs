@@ -37,6 +37,9 @@ pub fn compact_observations(observations: &[Observation]) -> Vec<Observation> {
             if observation.is_failure() {
                 return observation.clone();
             }
+            if preserves_structured_state(observation) {
+                return observation.clone();
+            }
             if latest_for_kind[kind_index(observation.kind)] != Some(index) {
                 let mut stub = observation.clone();
                 stub.summary = supersede_stub(&observation.summary, observation.kind);
@@ -45,6 +48,13 @@ pub fn compact_observations(observations: &[Observation]) -> Vec<Observation> {
             observation.clone()
         })
         .collect()
+}
+
+fn preserves_structured_state(observation: &Observation) -> bool {
+    matches!(
+        observation.tool_name.as_str(),
+        "github_pr_context" | "review" | "pr_review_comment_plan"
+    )
 }
 
 fn supersede_stub(summary: &str, kind: ObservationKind) -> String {
@@ -382,6 +392,25 @@ mod tests {
         assert!(compacted[0].summary.starts_with("(superseded"));
         assert_eq!(compacted[1].summary, "read error");
         assert_eq!(compacted[2].summary, "second read");
+    }
+
+    #[test]
+    fn compact_observations_preserves_pr_review_state_tools() {
+        let observations = vec![
+            Observation::ok(
+                "github_pr_context",
+                "meta.kind=pr\nmeta.number=42\njson:\n{\"headRefOid\":\"abc123\"}",
+            ),
+            Observation::ok("review", "{\"issues\":[]}"),
+            Observation::ok("pr_review_comment_plan", "{\"github_comment_input\":{}}"),
+            Observation::ok("fetch_url", "newer other-ish output"),
+        ];
+
+        let compacted = compact_observations(&observations);
+        assert!(compacted[0].summary.contains("headRefOid"));
+        assert_eq!(compacted[1].summary, "{\"issues\":[]}");
+        assert!(compacted[2].summary.contains("github_comment_input"));
+        assert_eq!(compacted[3].summary, "newer other-ish output");
     }
 
     #[test]

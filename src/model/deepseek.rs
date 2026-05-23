@@ -435,6 +435,7 @@ impl DeepSeekClient {
         if input.planning_mode
             && input.todos.is_empty()
             && tool_available("todo_write")
+            && !task_requests_mcp_tool(&task_lower)
             && !(task_looks_like_pr_workflow(&task_lower)
                 && observations_include_pr_review_signal(&input.observations))
         {
@@ -469,6 +470,39 @@ impl DeepSeekClient {
             return replan_response;
         }
 
+        if let Some(comment_error) = last_failed_pr_comment_write {
+            if task_requests_remote_pr_comment_post(&task_lower)
+                && tool_available("pr_review_comment_plan")
+                && pr_review_comment_plan_call_count < 2
+                && !successful_pr_review_comment_plan_after_failed_comment(&input.observations)
+            {
+                if let Some(review_output) = latest_review_output {
+                    let mut tool_input = ToolInput::new()
+                        .with_arg("review_output", review_output.to_string())
+                        .with_arg("comment_error", comment_error.to_string());
+                    if let Some(context) = latest_github_pr_context {
+                        tool_input = tool_input.with_arg("pr_context", context.to_string());
+                    }
+                    if let Some(pr_request) = github_pr_context_request.as_ref() {
+                        tool_input = tool_input.with_arg("number", pr_request.number.clone());
+                        if let Some(repo) = pr_request.repo.as_ref() {
+                            tool_input = tool_input.with_arg("repo", repo.clone());
+                        }
+                    }
+                    return ModelResponse {
+                        message: format!(
+                            "{} planner is rebuilding the PR review comment plan after the guarded GitHub comment attempt failed.",
+                            model_name
+                        ),
+                        action: ModelAction::CallTool {
+                            tool_name: "pr_review_comment_plan".to_string(),
+                            input: tool_input,
+                        },
+                    };
+                }
+            }
+        }
+
         if let Some(recovery_response) = build_recovery_response(
             model_name,
             &input,
@@ -483,6 +517,14 @@ impl DeepSeekClient {
             build_git_history_response(model_name, &input, &used_tools, &task_lower)
         {
             return git_response;
+        }
+
+        if edit_request.is_none() {
+            if let Some(mcp_response) =
+                build_mcp_tool_response(model_name, &input, &used_tools, &task_lower)
+            {
+                return mcp_response;
+            }
         }
 
         if task_requests_failure_repro(&task_lower)
@@ -540,6 +582,8 @@ impl DeepSeekClient {
             if let Some(pr_request) = github_pr_context_request.as_ref() {
                 if tool_available("github_pr_context")
                     && !used_tools.contains("github_pr_context")
+                    && child_file_path.is_none()
+                    && !pr_workflow_child_followup_complete(&task_lower, &input.observations)
                     && !observations_include_pr_review_signal(&input.observations)
                 {
                     let mut tool_input = ToolInput::new()
@@ -658,6 +702,7 @@ impl DeepSeekClient {
                 if task_requests_remote_pr_comment_post(&task_lower)
                     && tool_available("pr_review_comment_plan")
                     && pr_review_comment_plan_call_count < 2
+                    && !successful_pr_review_comment_plan_after_failed_comment(&input.observations)
                 {
                     if let Some(review_output) = latest_review_output {
                         let mut tool_input = ToolInput::new()
@@ -749,6 +794,8 @@ impl DeepSeekClient {
             if let Some(query) = search_query.as_deref() {
                 if !used_tools.contains("search_text")
                     && tool_available("search_text")
+                    && !(child_file_path.is_some()
+                        && task_allows_child_file_followup(&task_lower, &input.observations))
                     && !(task_looks_like_pr_workflow(&task_lower)
                         && used_tools.contains("read_file"))
                     && (!task_looks_like_pr_workflow(&task_lower)
@@ -1964,9 +2011,51 @@ fn build_recovery_response(
                 input: ToolInput::new()
                     .with_arg("root", ".")
                     .with_arg("max_depth", "3")
-                    .with_arg("limit", "30"),
+                .with_arg("limit", "30"),
             },
         }),
+        "mcp_list_tools" if tool_available("mcp_list_tools") && !used_tools.contains("mcp_list_tools") => {
+            Some(ModelResponse {
+                message: format!(
+                    "{model_name} planner is recovering after {}: listing configured MCP tools. {}",
+                    hint.after, hint.reason
+                ),
+                action: ModelAction::CallTool {
+                    tool_name: "mcp_list_tools".to_string(),
+                    input: ToolInput::new(),
+                },
+            })
+        }
+        "pr_review_comment_plan"
+            if tool_available("pr_review_comment_plan")
+                && tool_call_count(&input.observations, "pr_review_comment_plan") < 2 =>
+        {
+            let comment_error = last_failed_tool_summary(&input.observations, "github_comment")
+                .or_else(|| last_failed_tool_summary(&input.observations, "github_pr_review_comment"))?;
+            let review_output = latest_successful_tool_summary(&input.observations, "review")?;
+            let mut tool_input = ToolInput::new()
+                .with_arg("review_output", review_output.to_string())
+                .with_arg("comment_error", comment_error.to_string());
+            if let Some(context) = latest_successful_tool_summary(&input.observations, "github_pr_context") {
+                tool_input = tool_input.with_arg("pr_context", context.to_string());
+            }
+            if let Some(pr_request) = derive_github_pr_context_request(&input.task) {
+                tool_input = tool_input.with_arg("number", pr_request.number);
+                if let Some(repo) = pr_request.repo {
+                    tool_input = tool_input.with_arg("repo", repo);
+                }
+            }
+            Some(ModelResponse {
+                message: format!(
+                    "{model_name} planner is recovering after {}: rebuilding the PR review comment plan with the previous GitHub write error.",
+                    hint.after
+                ),
+                action: ModelAction::CallTool {
+                    tool_name: "pr_review_comment_plan".to_string(),
+                    input: tool_input,
+                },
+            })
+        }
         _ => {
             if hint.next == "git_diff"
                 && !tool_available("git_diff")
@@ -1983,6 +2072,105 @@ fn build_recovery_response(
             None
         }
     }
+}
+
+fn build_mcp_tool_response(
+    model_name: &str,
+    input: &ModelRequest,
+    used_tools: &std::collections::BTreeSet<&str>,
+    task_lower: &str,
+) -> Option<ModelResponse> {
+    if !task_requests_mcp_tool(task_lower) {
+        return None;
+    }
+
+    let tool_available = |name: &str| input.available_tools.iter().any(|tool| tool == name);
+    if successful_mcp_tool_observed(&input.observations) {
+        return Some(ModelResponse {
+            message: format!("{model_name} offline planner completed the requested MCP tool call."),
+            action: ModelAction::Finish,
+        });
+    }
+    if mcp_policy_denial_observed(&input.observations)
+        && tool_available("mcp_list_tools")
+        && !used_tools.contains("mcp_list_tools")
+    {
+        return Some(ModelResponse {
+            message: format!(
+                "{model_name} planner is listing configured MCP tools after the policy denial."
+            ),
+            action: ModelAction::CallTool {
+                tool_name: "mcp_list_tools".to_string(),
+                input: ToolInput::new(),
+            },
+        });
+    }
+    if mcp_policy_denial_observed(&input.observations) && used_tools.contains("mcp_list_tools") {
+        return Some(ModelResponse {
+            message: format!(
+                "{model_name} offline planner listed MCP tools after the policy denial and is stopping with the blocker captured."
+            ),
+            action: ModelAction::Finish,
+        });
+    }
+
+    let path = preferred_mcp_read_path(input, task_lower);
+    if task_requests_generic_mcp_call(task_lower)
+        && tool_available("mcp_call")
+        && !used_tools.contains("mcp_call")
+    {
+        return Some(ModelResponse {
+            message: format!(
+                "{model_name} planner is calling the stdio-self/read_file MCP tool through mcp_call."
+            ),
+            action: ModelAction::CallTool {
+                tool_name: "mcp_call".to_string(),
+                input: ToolInput::new()
+                    .with_arg("server", "stdio-self")
+                    .with_arg("tool", "read_file")
+                    .with_arg(
+                        "arguments",
+                        format!(r#"{{"path":"{}","max_lines":20}}"#, json_escape(&path)),
+                    ),
+            },
+        });
+    }
+
+    if let Some(tool_name) = preferred_dynamic_mcp_read_tool(&input.available_tools) {
+        if !used_tools.contains(tool_name) {
+            return Some(ModelResponse {
+                message: format!(
+                    "{model_name} planner is calling the dynamic MCP read_file tool directly."
+                ),
+                action: ModelAction::CallTool {
+                    tool_name: tool_name.to_string(),
+                    input: ToolInput::new()
+                        .with_arg("path", path.clone())
+                        .with_arg("max_lines", "20"),
+                },
+            });
+        }
+    }
+
+    if tool_available("mcp_call") && !used_tools.contains("mcp_call") {
+        return Some(ModelResponse {
+            message: format!(
+                "{model_name} planner is calling the stdio-self/read_file MCP tool through mcp_call."
+            ),
+            action: ModelAction::CallTool {
+                tool_name: "mcp_call".to_string(),
+                input: ToolInput::new()
+                    .with_arg("server", "stdio-self")
+                    .with_arg("tool", "read_file")
+                    .with_arg(
+                        "arguments",
+                        format!(r#"{{"path":"{}","max_lines":20}}"#, json_escape(&path)),
+                    ),
+            },
+        });
+    }
+
+    None
 }
 
 fn build_git_history_response(
@@ -2051,6 +2239,66 @@ fn build_git_history_response(
     }
 
     None
+}
+
+fn task_requests_mcp_tool(task_lower: &str) -> bool {
+    task_lower.contains("mcp")
+        || task_lower.contains("remote tool")
+        || task_lower.contains("configured tool")
+}
+
+fn task_requests_generic_mcp_call(task_lower: &str) -> bool {
+    task_lower.contains("mcp_call") || task_lower.contains("generic mcp")
+}
+
+fn preferred_dynamic_mcp_read_tool(available_tools: &[String]) -> Option<&str> {
+    available_tools
+        .iter()
+        .map(String::as_str)
+        .find(|tool| {
+            tool.starts_with(crate::tools::mcp::MCP_DYNAMIC_TOOL_PREFIX)
+                && tool.ends_with("__read_file")
+        })
+        .or_else(|| {
+            available_tools
+                .iter()
+                .map(String::as_str)
+                .find(|tool| tool.starts_with(crate::tools::mcp::MCP_DYNAMIC_TOOL_PREFIX))
+        })
+}
+
+fn preferred_mcp_read_path(input: &ModelRequest, task_lower: &str) -> String {
+    if task_lower.contains("readme") {
+        return "README.md".to_string();
+    }
+    input
+        .primary_file
+        .clone()
+        .unwrap_or_else(|| "README.md".to_string())
+}
+
+fn successful_mcp_tool_observed(observations: &[crate::model::protocol::Observation]) -> bool {
+    observations.iter().any(|observation| {
+        !observation.is_failure()
+            && (observation.tool_name == "mcp_call"
+                || observation
+                    .tool_name
+                    .starts_with(crate::tools::mcp::MCP_DYNAMIC_TOOL_PREFIX))
+    })
+}
+
+fn mcp_policy_denial_observed(observations: &[crate::model::protocol::Observation]) -> bool {
+    observations.iter().any(|observation| {
+        observation.is_failure()
+            && (observation.tool_name == "mcp_call"
+                || observation
+                    .tool_name
+                    .starts_with(crate::tools::mcp::MCP_DYNAMIC_TOOL_PREFIX))
+            && observation
+                .summary
+                .to_ascii_lowercase()
+                .contains("policy allowlist")
+    })
 }
 
 fn latest_recovery_hint(
@@ -2174,7 +2422,7 @@ fn observations_include_repo_signal(observations: &[crate::model::protocol::Obse
         .iter()
         .any(|observation| match observation.tool_name.as_str() {
             "search_text" | "list_files" => !observation.is_failure(),
-            "dispatch_subagent" => {
+            "dispatch_subagent" | "dispatch_subagents" => {
                 !observation.is_failure()
                     && next_child_file_path(std::slice::from_ref(observation)).is_some()
             }
@@ -2209,9 +2457,30 @@ fn last_failed_tool_summary<'a>(
     tool_name: &str,
 ) -> Option<&'a str> {
     observations
-        .last()
-        .filter(|observation| observation.tool_name == tool_name && observation.is_failure())
+        .iter()
+        .rev()
+        .find(|observation| observation.tool_name == tool_name && observation.is_failure())
         .map(|observation| observation.summary.as_str())
+}
+
+fn successful_pr_review_comment_plan_after_failed_comment(
+    observations: &[crate::model::protocol::Observation],
+) -> bool {
+    let Some(failed_comment_index) = observations.iter().rposition(|observation| {
+        observation.is_failure()
+            && matches!(
+                observation.tool_name.as_str(),
+                "github_comment" | "github_pr_review_comment"
+            )
+    }) else {
+        return false;
+    };
+
+    observations[failed_comment_index + 1..]
+        .iter()
+        .any(|observation| {
+            observation.tool_name == "pr_review_comment_plan" && !observation.is_failure()
+        })
 }
 
 fn observations_include_pr_or_ci_signal(
@@ -2450,14 +2719,11 @@ fn split_arithmetic_expression(expression: &str) -> Option<(&str, char, &str)> {
 }
 
 fn next_child_file_path(observations: &[crate::model::protocol::Observation]) -> Option<String> {
-    let (dispatch_index, dispatch_observation) =
-        observations
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, observation)| {
-                observation.tool_name == "dispatch_subagent" && !observation.is_failure()
-            })?;
+    let (dispatch_index, dispatch_observation) = observations
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, observation)| is_subagent_dispatch_observation(observation))?;
     let child_files = child_files_from_summary(&dispatch_observation.summary);
     if child_files.is_empty() {
         return None;
@@ -2472,24 +2738,31 @@ fn next_child_file_path(observations: &[crate::model::protocol::Observation]) ->
 
 fn child_files_from_summary(summary: &str) -> Vec<String> {
     let mut explicit = Vec::new();
-    if let Some(path) = child_next_action_read_file(summary) {
+    for path in child_next_action_read_files(summary) {
         explicit.push(path);
     }
-    explicit.extend(
-        summary
-            .lines()
-            .find_map(|line| line.strip_prefix("meta.child_files="))
-            .map(|value| {
-                value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|path| !path.is_empty() && *path != "none")
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default(),
-    );
-    explicit.dedup();
+    for line in summary.lines() {
+        let value = line
+            .strip_prefix("meta.child_files=")
+            .or_else(|| line.strip_prefix("meta.parallel_child_files="))
+            .or_else(|| {
+                line.split_once("_files=").and_then(|(prefix, value)| {
+                    prefix.starts_with("meta.parallel_child_").then_some(value)
+                })
+            });
+        let Some(value) = value else {
+            continue;
+        };
+        explicit.extend(
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|path| !path.is_empty() && *path != "none")
+                .map(str::to_string),
+        );
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    explicit.retain(|path| seen.insert(path.clone()));
     if !explicit.is_empty() {
         return explicit;
     }
@@ -2503,17 +2776,13 @@ fn child_followup_query(observations: &[crate::model::protocol::Observation]) ->
     observations
         .iter()
         .rev()
-        .find(|observation| {
-            observation.tool_name == "dispatch_subagent" && !observation.is_failure()
-        })
+        .find(|observation| is_subagent_dispatch_observation(observation))
         .and_then(|observation| child_next_action_search_query(&observation.summary))
         .or_else(|| {
             observations
                 .iter()
                 .rev()
-                .find(|observation| {
-                    observation.tool_name == "dispatch_subagent" && !observation.is_failure()
-                })
+                .find(|observation| is_subagent_dispatch_observation(observation))
                 .and_then(|observation| child_final_message_from_summary(&observation.summary))
                 .as_deref()
                 .and_then(first_quoted_segment)
@@ -2522,28 +2791,50 @@ fn child_followup_query(observations: &[crate::model::protocol::Observation]) ->
             observations
                 .iter()
                 .rev()
-                .find(|observation| {
-                    observation.tool_name == "dispatch_subagent" && !observation.is_failure()
-                })
+                .find(|observation| is_subagent_dispatch_observation(observation))
                 .and_then(|observation| child_final_message_from_summary(&observation.summary))
                 .as_deref()
                 .and_then(identifier_like_token)
         })
 }
 
-fn child_next_action_read_file(summary: &str) -> Option<String> {
+fn is_subagent_dispatch_observation(observation: &crate::model::protocol::Observation) -> bool {
+    (observation.tool_name == "dispatch_subagent" || observation.tool_name == "dispatch_subagents")
+        && !observation.is_failure()
+}
+
+fn child_next_action_read_files(summary: &str) -> Vec<String> {
     summary
         .lines()
-        .find_map(|line| line.strip_prefix("meta.child_next_action=read_file:"))
+        .filter_map(|line| {
+            line.strip_prefix("meta.child_next_action=read_file:")
+                .or_else(|| line.strip_prefix("meta.parallel_next_action=read_file:"))
+                .or_else(|| {
+                    line.split_once("_next_action=read_file:")
+                        .and_then(|(prefix, value)| {
+                            prefix.starts_with("meta.parallel_child_").then_some(value)
+                        })
+                })
+        })
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+        .collect()
 }
 
 fn child_next_action_search_query(summary: &str) -> Option<String> {
     summary
         .lines()
-        .find_map(|line| line.strip_prefix("meta.child_next_action=search_text:"))
+        .find_map(|line| {
+            line.strip_prefix("meta.child_next_action=search_text:")
+                .or_else(|| line.strip_prefix("meta.parallel_next_action=search_text:"))
+                .or_else(|| {
+                    line.split_once("_next_action=search_text:")
+                        .and_then(|(prefix, value)| {
+                            prefix.starts_with("meta.parallel_child_").then_some(value)
+                        })
+                })
+        })
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
@@ -2919,9 +3210,9 @@ fn task_allows_child_file_followup(
 ) -> bool {
     task_requests_subagent_followup(task_lower)
         || (task_looks_like_pr_workflow(task_lower)
-            && observations.iter().any(|observation| {
-                observation.tool_name == "dispatch_subagent" && !observation.is_failure()
-            }))
+            && observations
+                .iter()
+                .any(|observation| is_subagent_dispatch_observation(observation)))
 }
 
 fn pr_workflow_child_followup_complete(
@@ -3626,13 +3917,13 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
     StaticToolSpec {
         name: "dispatch_subagent",
         description: "Delegate an independent subtask to a child agent with its own budget and todo list.",
-        properties_json: r#"{"task":{"type":"string","description":"Concrete self-contained subtask for the child agent."},"agent":{"type":"string","description":"Optional custom subagent name from `.dscode/agents` or `~/.config/dscode/agents`."},"skill":{"type":"string","description":"Optional skill name for the child agent."},"steps":{"type":"string","description":"Optional step budget for the child agent, as a positive integer up to 12."}}"#,
+        properties_json: r#"{"task":{"type":"string","description":"Concrete self-contained subtask for the child agent."},"agent":{"type":"string","description":"Optional custom subagent name from `.dscode/agents` or `~/.config/dscode/agents`."},"skill":{"type":"string","description":"Optional skill name for the child agent."},"write_scope":{"type":"string","description":"Optional file or directory write scope assigned to this child. Use this when the child may edit files so the parent can keep parallel work disjoint."},"steps":{"type":"string","description":"Optional step budget for the child agent, as a positive integer up to 12."}}"#,
         required_json: r#"["task"]"#,
     },
     StaticToolSpec {
         name: "dispatch_subagents",
         description: "Delegate multiple independent subtasks to child agents in parallel and return consolidated thread summaries.",
-        properties_json: r#"{"tasks":{"type":"string","description":"JSON array of child task objects. Each object requires task and may include agent, skill, and steps, for example [{\"task\":\"review src/api.rs\",\"agent\":\"reviewer\",\"steps\":\"4\"}]. Maximum 4 child tasks."}}"#,
+        properties_json: r#"{"tasks":{"type":"string","description":"JSON array of child task objects. Each object requires task and may include agent, skill, write_scope, and steps, for example [{\"task\":\"review src/api.rs\",\"agent\":\"reviewer\",\"write_scope\":\"src/api.rs\",\"steps\":\"4\"}]. Maximum 4 child tasks. Assign disjoint write_scope values when children may edit files."}}"#,
         required_json: r#"["tasks"]"#,
     },
     StaticToolSpec {
@@ -6301,6 +6592,89 @@ mod tests {
     }
 
     #[test]
+    fn offline_planner_routes_dynamic_mcp_read_file() {
+        let mut request = empty_request_with_todos(Vec::new());
+        request.task =
+            "Use the dynamic MCP read_file tool from stdio-self to read README.md".to_string();
+        request.available_tools = vec![
+            "mcp_list_tools".to_string(),
+            "mcp_call".to_string(),
+            "mcp__stdio-self__read_file".to_string(),
+            "list_files".to_string(),
+        ];
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "mcp__stdio-self__read_file");
+                assert_eq!(input.get("path"), Some("README.md"));
+                assert_eq!(input.get("max_lines"), Some("20"));
+            }
+            _ => panic!("expected dynamic MCP tool call"),
+        }
+    }
+
+    #[test]
+    fn offline_planner_routes_generic_mcp_call() {
+        let mut request = empty_request_with_todos(Vec::new());
+        request.task = "Use generic mcp_call on stdio-self/read_file to read README.md".to_string();
+        request.available_tools = vec![
+            "mcp_list_tools".to_string(),
+            "mcp_call".to_string(),
+            "mcp__stdio-self__read_file".to_string(),
+            "list_files".to_string(),
+        ];
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "mcp_call");
+                assert_eq!(input.get("server"), Some("stdio-self"));
+                assert_eq!(input.get("tool"), Some("read_file"));
+                assert!(input
+                    .get("arguments")
+                    .is_some_and(|value| value.contains("README.md")));
+            }
+            _ => panic!("expected generic mcp_call"),
+        }
+    }
+
+    #[test]
+    fn offline_planner_lists_mcp_tools_after_policy_deny_hint() {
+        let mut request = empty_request_with_todos(Vec::new());
+        request.task = "Use generic mcp_call on stdio-self/read_file to read README.md".to_string();
+        request.available_tools = vec!["mcp_list_tools".to_string(), "mcp_call".to_string()];
+        request.observations = vec![
+            Observation::failed(
+                "mcp_call",
+                "mcp tool call blocked by policy allowlist: stdio-self/read_file",
+            ),
+            Observation::ok(
+                "recovery_hint",
+                "after=mcp_call; next=mcp_list_tools; reason=MCP policy denied the remote tool call",
+            ),
+        ];
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "mcp_list_tools");
+                assert!(input.args.is_empty());
+            }
+            _ => panic!("expected mcp_list_tools recovery call"),
+        }
+    }
+
+    #[test]
     fn offline_planner_emits_patch_mode_when_possible() {
         let dir = unique_planner_dir();
         fs::create_dir_all(&dir).unwrap();
@@ -6862,6 +7236,57 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
     }
 
     #[test]
+    fn offline_planner_enables_semantic_review_for_seeded_benchmark_context() {
+        let context = "meta.kind=pr\n\
+meta.number=42\n\
+meta.state=OPEN\n\
+PR #42: Route benchmark command\n\
+json:\n\
+{\"number\":42,\"title\":\"Route benchmark command\",\"reviewDecision\":\"CHANGES_REQUESTED\",\"statusCheckRollup\":[{\"name\":\"unit-tests\",\"conclusion\":\"SUCCESS\"}]}\n\
+diff:\n\
+diff --git a/src/cli/app.rs b/src/cli/app.rs\n\
+--- a/src/cli/app.rs\n\
++++ b/src/cli/app.rs\n\
+@@ -1,2 +1,4 @@\n\
++pub fn route_benchmark_subcommand() {}\n";
+        let request = ModelRequest {
+            system_prompt: String::new(),
+            task:
+                "Run a semantic review of pull request #42 on owner/repo for real behavioral bugs."
+                    .to_string(),
+            image_inputs: Vec::new(),
+            profile_name: "rust".to_string(),
+            profile_hints: Vec::new(),
+            primary_file: None,
+            suggested_test_command: None,
+            available_tools: vec![
+                "github_pr_context".to_string(),
+                "review".to_string(),
+                "read_file".to_string(),
+                "list_files".to_string(),
+            ],
+            observations: vec![Observation::ok("github_pr_context", context)],
+            todos: Vec::new(),
+            planning_mode: false,
+            recent_steps: Vec::new(),
+        };
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "review");
+                assert_eq!(input.get("target"), Some("github_pr_context"));
+                assert_eq!(input.get("github_context"), Some(context));
+                assert_eq!(input.get("semantic"), Some("true"));
+            }
+            _ => panic!("expected semantic review tool call"),
+        }
+    }
+
+    #[test]
     fn offline_planner_finishes_after_remote_pr_review_tool() {
         let request = ModelRequest {
             system_prompt: String::new(),
@@ -7178,6 +7603,57 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 );
                 assert_eq!(input.get("number"), Some("42"));
                 assert_eq!(input.get("repo"), Some("owner/repo"));
+            }
+            _ => panic!("expected comment-plan retry after failed post"),
+        }
+    }
+
+    #[test]
+    fn offline_planner_replans_after_failed_pr_comment_even_with_later_recovery_hint() {
+        let context = "meta.kind=pr\nmeta.number=42\n";
+        let review_output = "{\"issues\":[],\"source\":{\"kind\":\"github_pr_diff\",\"target\":\"github_pr_context\",\"truncated\":false}}";
+        let comment_plan = r###"{"comment_body":"draft","evidence":{"tool":"review"},"github_comment_input":{"target":"pr","number":"42","body":"draft","evidence":"{\"tool\":\"review\"}","dry_run":"true","repo":"owner/repo"}}"###;
+        let request = ModelRequest {
+            system_prompt: String::new(),
+            task: "Review pull request #42 on owner/repo and post a PR comment with the findings."
+                .to_string(),
+            image_inputs: Vec::new(),
+            profile_name: "rust".to_string(),
+            profile_hints: Vec::new(),
+            primary_file: None,
+            suggested_test_command: None,
+            available_tools: vec![
+                "github_pr_context".to_string(),
+                "review".to_string(),
+                "pr_review_comment_plan".to_string(),
+                "github_comment".to_string(),
+            ],
+            observations: vec![
+                Observation::ok("github_pr_context", context),
+                Observation::ok("review", review_output),
+                Observation::ok("pr_review_comment_plan", comment_plan),
+                Observation::failed("github_comment", "policy denied by reviewer"),
+                Observation::ok(
+                    "recovery_hint",
+                    "after=github_comment; next=pr_review_comment_plan",
+                ),
+            ],
+            todos: Vec::new(),
+            planning_mode: false,
+            recent_steps: Vec::new(),
+        };
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "pr_review_comment_plan");
+                assert_eq!(
+                    input.get("comment_error"),
+                    Some("policy denied by reviewer")
+                );
             }
             _ => panic!("expected comment-plan retry after failed post"),
         }
@@ -7629,6 +8105,44 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
     }
 
     #[test]
+    fn offline_planner_reads_child_file_after_parallel_subagent_summary() {
+        let request = ModelRequest {
+            system_prompt: String::new(),
+            task: "inspect the repository layout and continue from the subagent findings"
+                .to_string(),
+            image_inputs: Vec::new(),
+            profile_name: "generic".to_string(),
+            profile_hints: Vec::new(),
+            primary_file: Some("Cargo.toml".to_string()),
+            suggested_test_command: None,
+            available_tools: vec![
+                "read_file".to_string(),
+                "list_files".to_string(),
+                "search_text".to_string(),
+            ],
+            observations: vec![Observation::ok(
+                "dispatch_subagents",
+                "meta.parallel_children=2\nmeta.parallel_readback_required=true\nmeta.parallel_next_action=read_file:src/cli/app.rs\nmeta.parallel_child_1_files=src/cli/app.rs\nmeta.parallel_child_2_files=src/main.rs\nparallel subagents completed",
+            )],
+            todos: Vec::new(),
+            planning_mode: false,
+            recent_steps: Vec::new(),
+        };
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "read_file");
+                assert_eq!(input.get("path"), Some("src/cli/app.rs"));
+            }
+            _ => panic!("expected read_file tool call"),
+        }
+    }
+
+    #[test]
     fn offline_planner_reads_next_child_file_after_first_child_file_was_read() {
         let request = ModelRequest {
             system_prompt: String::new(),
@@ -7703,6 +8217,45 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
             ModelAction::CallTool { tool_name, input } => {
                 assert_eq!(tool_name, "read_file");
                 assert_eq!(input.get("path"), Some("src/main.rs"));
+            }
+            _ => panic!("expected read_file tool call"),
+        }
+    }
+
+    #[test]
+    fn offline_planner_prefers_seeded_child_file_over_remote_pr_fetch() {
+        let request = ModelRequest {
+            system_prompt: String::new(),
+            task: "Review pull request #42 'Route benchmark command'. Inspect the touched files before summarizing risks.".to_string(),
+            image_inputs: Vec::new(),
+            profile_name: "rust".to_string(),
+            profile_hints: Vec::new(),
+            primary_file: None,
+            suggested_test_command: None,
+            available_tools: vec![
+                "github_pr_context".to_string(),
+                "review".to_string(),
+                "read_file".to_string(),
+                "list_files".to_string(),
+                "search_text".to_string(),
+            ],
+            observations: vec![Observation::ok(
+                "dispatch_subagent",
+                "meta.child_outcome=ok\nmeta.child_files=src/cli/app.rs,src/main.rs\nmeta.child_final_message=read the CLI routing files",
+            )],
+            todos: Vec::new(),
+            planning_mode: false,
+            recent_steps: Vec::new(),
+        };
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "read_file");
+                assert_eq!(input.get("path"), Some("src/cli/app.rs"));
             }
             _ => panic!("expected read_file tool call"),
         }
@@ -8007,6 +8560,21 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
                 "src/tools/dispatch_subagent.rs".to_string(),
                 "src/main.rs".to_string(),
                 "src/lib.rs".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn child_file_paths_include_parallel_child_metadata() {
+        let files = child_files_from_summary(
+            "meta.parallel_next_action=read_file:src/a.rs\nmeta.parallel_child_1_files=src/a.rs\nmeta.parallel_child_2_next_action=read_file:src/b.rs\nmeta.parallel_child_2_files=src/b.rs,src/c.rs",
+        );
+        assert_eq!(
+            files,
+            vec![
+                "src/a.rs".to_string(),
+                "src/b.rs".to_string(),
+                "src/c.rs".to_string()
             ]
         );
     }

@@ -189,7 +189,7 @@ max_failed_tools = 0
 max_tool_calls = 1
 
 name = "fixture-pr-context-semantic-review"
-task = "Run a semantic review of pull request #42 'Route benchmark command' on owner/repo for real behavioral bugs."
+task = "Run a semantic review of pull request #42 on owner/repo for real behavioral bugs."
 category = "pr_workflow"
 workdir = "fixtures/rust-cli-mini"
 notes = "Seeded github_pr_context should route explicit semantic remote PR review through review semantic=true"
@@ -219,13 +219,14 @@ task = "Review pull request #42 'Route benchmark command' on owner/repo and post
 category = "pr_workflow"
 workdir = "fixtures/rust-cli-mini"
 notes = "Seeded failed GitHub comment attempt should rebuild a comment plan with the failure reason instead of reposting"
-seed_observations = "github_pr_context:ok:meta.kind=pr\nmeta.number=42\nmeta.state=OPEN\nPR #42: Route benchmark command\njson:\n{\"number\":42,\"title\":\"Route benchmark command\",\"url\":\"https://github.com/owner/repo/pull/42\"}\ndiff:\ndiff --git a/src/cli/app.rs b/src/cli/app.rs\n || review:ok:{\"summary\":\"Reviewed github_pr_diff target `github_pr_context` with 1 deterministic issue(s).\",\"issues\":[{\"severity\":\"warning\",\"title\":\"GitHub PR status checks failing\",\"description\":\"1 status check(s) are failing or cancelled: unit-tests\",\"path\":null,\"line\":null}],\"suggestions\":[],\"source\":{\"kind\":\"github_pr_diff\",\"target\":\"github_pr_context\",\"path\":null,\"truncated\":false}} || pr_review_comment_plan:ok:{\"comment_body\":\"draft\",\"evidence\":{\"tool\":\"review\"},\"github_comment_input\":{\"target\":\"pr\",\"number\":\"42\",\"body\":\"draft\",\"evidence\":\"{\\\"tool\\\":\\\"review\\\"}\",\"dry_run\":\"true\",\"repo\":\"owner/repo\"}} || github_comment:failed:policy denied by reviewer"
+seed_observations = "github_pr_context:ok:meta.kind=pr\nmeta.number=42\nmeta.state=OPEN\nPR #42: Route benchmark command\njson:\n{\"number\":42,\"title\":\"Route benchmark command\",\"url\":\"https://github.com/owner/repo/pull/42\"}\ndiff:\ndiff --git a/src/cli/app.rs b/src/cli/app.rs\n || review:ok:{\"summary\":\"Reviewed github_pr_diff target `github_pr_context` with 1 deterministic issue(s).\",\"issues\":[{\"severity\":\"warning\",\"title\":\"GitHub PR status checks failing\",\"description\":\"1 status check(s) are failing or cancelled: unit-tests\",\"path\":null,\"line\":null}],\"suggestions\":[],\"source\":{\"kind\":\"github_pr_diff\",\"target\":\"github_pr_context\",\"path\":null,\"truncated\":false}} || github_comment:failed:policy denied by reviewer"
 budget = 2
 expect_tool = "pr_review_comment_plan"
 expect_tool_sequence = ["pr_review_comment_plan"]
-expect_tool_output_contains = "pr_review_comment_plan:previous_comment_error"
-max_failed_tools = 0
-max_tool_calls = 1
+expect_tool_input_contains = "pr_review_comment_plan:comment_error=policy denied by reviewer"
+expect_tool_output_contains = "pr_review_comment_plan:github_comment_input"
+max_failed_tools = 1
+max_tool_calls = 2
 
 name = "fixture-pr-context-inline-review-comment-plan"
 task = "Review pull request #42 'Route benchmark command' on owner/repo and prepare inline review comments with the findings."
@@ -236,7 +237,8 @@ seed_observations = "github_pr_context:ok:meta.kind=pr\nmeta.number=42\nmeta.sta
 budget = 2
 expect_tool = "pr_review_comment_plan"
 expect_tool_sequence = ["pr_review_comment_plan"]
-expect_tool_output_contains = "pr_review_comment_plan:github_pr_review_comment_input"
+expect_tool_input_contains = "pr_review_comment_plan:pr_context=headRefOid"
+expect_tool_output_contains = "pr_review_comment_plan:github_comment_input"
 max_failed_tools = 0
 max_tool_calls = 1
 
@@ -245,14 +247,45 @@ task = "Review pull request #42 'Route benchmark command' on owner/repo and post
 category = "pr_workflow"
 workdir = "fixtures/rust-cli-mini"
 notes = "Seeded failed inline GitHub review comment attempt should rebuild a comment plan with the failure reason instead of reposting"
-seed_observations = "github_pr_context:ok:meta.kind=pr\nmeta.number=42\nmeta.state=OPEN\nPR #42: Route benchmark command\njson:\n{\"number\":42,\"title\":\"Route benchmark command\",\"url\":\"https://github.com/owner/repo/pull/42\",\"headRefOid\":\"abc123\"}\ndiff:\ndiff --git a/src/cli/app.rs b/src/cli/app.rs\n || review:ok:{\"summary\":\"Reviewed github_pr_diff target `github_pr_context` with 1 deterministic issue(s).\",\"issues\":[{\"severity\":\"info\",\"title\":\"public API change\",\"description\":\"Public declarations changed; verify compatibility.\",\"path\":\"src/cli/app.rs\",\"line\":12}],\"suggestions\":[],\"source\":{\"kind\":\"github_pr_diff\",\"target\":\"github_pr_context\",\"path\":null,\"truncated\":false}} || pr_review_comment_plan:ok:{\"evidence\":{\"tool\":\"review\",\"issue_count\":1},\"github_pr_review_comment_input\":{\"number\":\"42\",\"commit_id\":\"abc123\",\"comments\":[{\"path\":\"src/cli/app.rs\",\"line\":12,\"body\":\"warning: check this\"}],\"evidence\":\"{\\\"tool\\\":\\\"review\\\",\\\"issue_count\\\":1}\",\"dry_run\":\"true\",\"repo\":\"owner/repo\"}} || github_pr_review_comment:failed:line is not part of the diff"
+seed_observations = "github_pr_context:ok:meta.kind=pr\nmeta.number=42\nmeta.state=OPEN\nPR #42: Route benchmark command\njson:\n{\"number\":42,\"title\":\"Route benchmark command\",\"url\":\"https://github.com/owner/repo/pull/42\",\"headRefOid\":\"abc123\"}\ndiff:\ndiff --git a/src/cli/app.rs b/src/cli/app.rs\n || review:ok:{\"summary\":\"Reviewed github_pr_diff target `github_pr_context` with 1 deterministic issue(s).\",\"issues\":[{\"severity\":\"info\",\"title\":\"public API change\",\"description\":\"Public declarations changed; verify compatibility.\",\"path\":\"src/cli/app.rs\",\"line\":12}],\"suggestions\":[],\"source\":{\"kind\":\"github_pr_diff\",\"target\":\"github_pr_context\",\"path\":null,\"truncated\":false}} || github_pr_review_comment:failed:line is not part of the diff"
 budget = 2
 expect_tool = "pr_review_comment_plan"
 expect_tool_sequence = ["pr_review_comment_plan"]
 expect_tool_input_contains = "pr_review_comment_plan:comment_error=line is not part of the diff"
-expect_tool_output_contains = "pr_review_comment_plan:previous_comment_error"
+expect_tool_output_contains = "pr_review_comment_plan:github_comment_input"
+max_failed_tools = 1
+max_tool_calls = 2
+
+name = "fixture-github-action-review-comment-plan"
+task = "GitHub Action review workflow triggered for pull request #42 on owner/repo: review the pull request and draft a PR comment with the findings."
+category = "pr_workflow"
+workdir = "fixtures/rust-cli-mini"
+notes = "GitHub Action bridge review-mode benchmark should preserve remote PR review comment planning before any guarded GitHub write"
+seed_observations = "github_pr_context:ok:meta.kind=pr\nmeta.number=42\nmeta.state=OPEN\nPR #42: Route benchmark command\njson:\n{\"number\":42,\"title\":\"Route benchmark command\",\"url\":\"https://github.com/owner/repo/pull/42\",\"reviewDecision\":\"CHANGES_REQUESTED\",\"statusCheckRollup\":[{\"name\":\"unit-tests\",\"conclusion\":\"FAILURE\"}]}\ndiff:\ndiff --git a/src/cli/app.rs b/src/cli/app.rs\n--- a/src/cli/app.rs\n+++ b/src/cli/app.rs\n@@ -1,2 +1,4 @@\n+pub fn route_benchmark_subcommand() {}\n || review:ok:{\"summary\":\"Reviewed github_pr_diff target `github_pr_context` with 2 deterministic issue(s).\",\"issues\":[{\"severity\":\"warning\",\"title\":\"GitHub PR status checks failing\",\"description\":\"1 status check(s) are failing or cancelled: unit-tests\",\"path\":null,\"line\":null},{\"severity\":\"info\",\"title\":\"public API change\",\"description\":\"Public declarations changed; verify compatibility, documentation, and caller/test coverage.\",\"path\":\"src/cli/app.rs\",\"line\":1}],\"suggestions\":[{\"path\":null,\"line\":null,\"suggestion\":\"Review each reported marker and add or update tests for changed behavior.\"}],\"source\":{\"kind\":\"github_pr_diff\",\"target\":\"github_pr_context\",\"path\":null,\"truncated\":false}}"
+budget = 2
+expect_tool = "pr_review_comment_plan"
+expect_tool_sequence = ["pr_review_comment_plan"]
+expect_tool_output_contains = "pr_review_comment_plan:github_comment_input"
 max_failed_tools = 0
 max_tool_calls = 1
+
+name = "fixture-github-action-fix-trigger-js-cli-failing-mini"
+task = "GitHub Action issue_comment trigger `@deepseek fix` on PR #43: CI job `test-js` failed. Replace `run bench` with `run benchmark` in src/index.js and rerun npm test."
+category = "pr_workflow"
+assertion_bundle = "write_validate_ok"
+workdir = "fixtures/js-cli-failing-mini"
+isolate_workdir = true
+notes = "GitHub Action bridge fix-mode benchmark over a naturally failing JavaScript PR fixture"
+budget = 6
+
+name = "fixture-github-action-patch-trigger-rust-mini"
+task = "GitHub Action issue_comment trigger `@deepseek patch` on PR #44: replace `a - b` with `a + b` in src/lib.rs and validate with cargo test."
+category = "pr_workflow"
+assertion_bundle = "write_validate_ok"
+workdir = "fixtures/rust-write-mini"
+isolate_workdir = true
+notes = "GitHub Action bridge patch-mode benchmark over an isolated Rust fixture"
+budget = 6
 
 name = "fixture-pr-fix-rust-cli-mini"
 task = "CI job `test-rust` (run #555) on PR #42 failed at step `cargo test`. Reproduce locally, fix the root cause, and rerun the failing test. Failed log tail follows."
@@ -550,7 +583,7 @@ task = "continue from the subagent findings and inspect the tool registry"
 category = "subagent"
 expect_tool = "read_file"
 expect_tool_sequence = ["read_file"]
-expect_tool_output_contains = "read_file:ToolRegistry"
+expect_tool_output_contains = "read_file:ApplyPatchTool"
 max_tool_calls = 2
 max_failed_tools = 0
 notes = "Seeded subagent summary should route parent readback to tool registry"
@@ -562,7 +595,7 @@ task = "continue from the subagent findings and inspect the doctor command"
 category = "subagent"
 expect_tool = "read_file"
 expect_tool_sequence = ["read_file"]
-expect_tool_output_contains = "read_file:DeepseekCode doctor"
+expect_tool_output_contains = "read_file:DeepSeekCode doctor"
 max_tool_calls = 2
 max_failed_tools = 0
 notes = "Seeded subagent summary should route parent readback to doctor capability reporting"
@@ -634,7 +667,7 @@ task = "continue from the subagent findings and inspect the update command"
 category = "subagent"
 expect_tool = "read_file"
 expect_tool_sequence = ["read_file"]
-expect_tool_output_contains = "read_file:DeepseekCode update"
+expect_tool_output_contains = "read_file:DeepSeekCode update"
 max_tool_calls = 2
 max_failed_tools = 0
 notes = "Seeded subagent summary should route parent readback to update command"
@@ -774,3 +807,50 @@ notes = "Product readiness requests should trigger a product-gap audit plan befo
 budget = 1
 max_tool_calls = 1
 max_failed_tools = 0
+
+name = "fixture-mcp-dynamic-readme"
+task = "Use the dynamic MCP read_file tool from stdio-self to read README.md and summarize it."
+category = "mcp"
+workdir = "fixtures/rust-cli-mini"
+isolate_workdir = true
+mcp_fixture = true
+mcp_expose_remote_tools = true
+mcp_call_allowlist = ["stdio-self/*"]
+expect_tool = "mcp__stdio-self__read_file"
+expect_tool_sequence = ["mcp__stdio-self__read_file"]
+expect_tool_input_contains = "mcp__stdio-self__read_file:path=README.md"
+expect_tool_output_contains = "mcp__stdio-self__read_file:Small Rust CLI fixture"
+max_tool_calls = 1
+max_failed_tools = 0
+budget = 2
+
+name = "fixture-mcp-generic-call-readme"
+task = "Use generic mcp_call on stdio-self/read_file to read README.md and summarize it."
+category = "mcp"
+workdir = "fixtures/rust-cli-mini"
+isolate_workdir = true
+mcp_fixture = true
+mcp_expose_remote_tools = false
+mcp_call_allowlist = ["stdio-self/read_file"]
+expect_tool = "mcp_call"
+expect_tool_sequence = ["mcp_call"]
+expect_tool_input_contains = "mcp_call:server=stdio-self"
+expect_tool_output_contains = "mcp_call:Small Rust CLI fixture"
+max_tool_calls = 1
+max_failed_tools = 0
+budget = 2
+
+name = "fixture-mcp-allowlist-deny-recovery"
+task = "Use generic mcp_call on stdio-self/read_file to read README.md; if MCP policy denies the call, inspect configured MCP tools and report the blocker."
+category = "mcp"
+workdir = "fixtures/rust-cli-mini"
+isolate_workdir = true
+mcp_fixture = true
+mcp_expose_remote_tools = false
+mcp_call_allowlist = ["other/*"]
+expect_tool = "mcp_list_tools"
+expect_tool_sequence = ["mcp_call", "mcp_list_tools"]
+expect_tool_output_contains = "mcp_list_tools:stdio-self"
+max_tool_calls = 2
+max_failed_tools = 1
+budget = 3

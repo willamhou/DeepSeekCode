@@ -898,6 +898,7 @@ fn capture_untracked_directory_metadata(
     Ok(Vec::new())
 }
 
+#[cfg(unix)]
 fn collect_parent_directory_candidates(
     path: &str,
     candidates: &mut std::collections::BTreeSet<String>,
@@ -917,6 +918,7 @@ fn collect_parent_directory_candidates(
     Ok(())
 }
 
+#[cfg(unix)]
 fn collect_directory_and_parent_candidates(
     path: &str,
     candidates: &mut std::collections::BTreeSet<String>,
@@ -1196,6 +1198,7 @@ fn is_git_ignored_path(git_root: &Path, path: &str) -> AppResult<bool> {
     }
 }
 
+#[cfg(unix)]
 fn is_git_tracked_path(git_root: &Path, path: &str) -> AppResult<bool> {
     let output = Command::new("git")
         .args(["ls-files", "--error-unmatch", "--", path])
@@ -1212,6 +1215,7 @@ fn is_git_tracked_path(git_root: &Path, path: &str) -> AppResult<bool> {
     }
 }
 
+#[cfg(unix)]
 fn directory_has_tracked_descendants(git_root: &Path, path: &str) -> AppResult<bool> {
     let output = Command::new("git")
         .args(["ls-files", "-z", "--", path])

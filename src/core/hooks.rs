@@ -753,6 +753,7 @@ fn truncate_output(value: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn temp_root(name: &str) -> PathBuf {
         let suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -2552,6 +2552,23 @@ fn mcp_shell_terminal_progress_notifications(
         .iter()
         .enumerate()
         .map(|(index, event)| {
+            let mut deepseek = object([
+                (
+                    "kind",
+                    JsonValue::String("deepseek.mcp.shell_terminal_event.v1".to_string()),
+                ),
+                ("taskId", JsonValue::String(snapshot.task_id.clone())),
+                ("status", JsonValue::String(snapshot.status.clone())),
+                ("seq", JsonValue::Number(event.seq.to_string())),
+                ("eventKind", JsonValue::String(event.kind.clone())),
+            ]);
+            if let (JsonValue::Object(root), Some(raw_base64)) = (&mut deepseek, &event.raw_base64)
+            {
+                root.insert(
+                    "rawBase64".to_string(),
+                    JsonValue::String(raw_base64.clone()),
+                );
+            }
             mcp_progress_notification(
                 progress_token,
                 index + 1,
@@ -2561,19 +2578,7 @@ fn mcp_shell_terminal_progress_notifications(
                     snapshot.task_id,
                     mcp_shell_terminal_event_line(event)
                 ),
-                Some(object([(
-                    "deepseek",
-                    object([
-                        (
-                            "kind",
-                            JsonValue::String("deepseek.mcp.shell_terminal_event.v1".to_string()),
-                        ),
-                        ("taskId", JsonValue::String(snapshot.task_id.clone())),
-                        ("status", JsonValue::String(snapshot.status.clone())),
-                        ("seq", JsonValue::Number(event.seq.to_string())),
-                        ("eventKind", JsonValue::String(event.kind.clone())),
-                    ]),
-                )])),
+                Some(object([("deepseek", deepseek)])),
             )
         })
         .collect()
@@ -6749,7 +6754,7 @@ fn acp_shell_terminal_raw_output(
     snapshot: &ShellTerminalEventSnapshot,
     event: &ShellTerminalEvent,
 ) -> JsonValue {
-    object([
+    let mut value = object([
         (
             "schema",
             JsonValue::String("deepseek.exec_shell.terminal_event.v1".to_string()),
@@ -6774,7 +6779,14 @@ fn acp_shell_terminal_raw_output(
         ("preview", JsonValue::String(event.preview.clone())),
         ("truncated", JsonValue::Bool(snapshot.truncated)),
         ("running", JsonValue::Bool(snapshot.running)),
-    ])
+    ]);
+    if let (JsonValue::Object(root), Some(raw_base64)) = (&mut value, &event.raw_base64) {
+        root.insert(
+            "rawBase64".to_string(),
+            JsonValue::String(raw_base64.clone()),
+        );
+    }
+    value
 }
 
 fn acp_shell_terminal_event_meta(
@@ -8945,7 +8957,7 @@ fn shell_terminal_event_json(
     snapshot: &ShellTerminalEventSnapshot,
     event: &ShellTerminalEvent,
 ) -> JsonValue {
-    json_object([
+    let mut value = json_object([
         (
             "schema",
             JsonValue::String("deepseek.exec_shell.terminal_event.v1".to_string()),
@@ -8970,7 +8982,14 @@ fn shell_terminal_event_json(
         ("preview", JsonValue::String(event.preview.clone())),
         ("truncated", JsonValue::Bool(snapshot.truncated)),
         ("running", JsonValue::Bool(snapshot.running)),
-    ])
+    ]);
+    if let (JsonValue::Object(root), Some(raw_base64)) = (&mut value, &event.raw_base64) {
+        root.insert(
+            "raw_base64".to_string(),
+            JsonValue::String(raw_base64.clone()),
+        );
+    }
+    value
 }
 
 fn shell_terminal_sse_event_name(kind: &str) -> String {
@@ -9644,7 +9663,7 @@ mod tests {
         fs::create_dir_all(&job_dir).unwrap();
         fs::write(
             job_dir.join("terminal-events.jsonl"),
-            "{\"seq\":1,\"kind\":\"output\",\"timestamp\":\"epoch+1\",\"preview\":\"hello from pty\"}\n{\"seq\":2,\"kind\":\"resize\",\"timestamp\":\"epoch+2\",\"rows\":33,\"cols\":101}\n",
+            "{\"seq\":1,\"kind\":\"output\",\"timestamp\":\"epoch+1\",\"preview\":\"hello from pty\",\"raw_base64\":\"aGVsbG8gZnJvbSBwdHk=\"}\n{\"seq\":2,\"kind\":\"resize\",\"timestamp\":\"epoch+2\",\"rows\":33,\"cols\":101}\n",
         )
         .unwrap();
         let manifest = json_object([
@@ -10590,6 +10609,7 @@ shell_allowlist = ["cargo test"]
         assert!(first_progress.contains(r#""total":2"#));
         assert!(first_progress.contains("deepseek.mcp.shell_terminal_event.v1"));
         assert!(first_progress.contains("hello from pty"));
+        assert!(first_progress.contains("aGVsbG8gZnJvbSBwdHk="));
         let second_progress = json_value_to_string(&responses[1]);
         assert!(second_progress.contains(r#""progress":2"#));
         assert!(second_progress.contains(r#""eventKind":"resize""#));
@@ -11824,6 +11844,7 @@ shell_allowlist = ["cargo test"]
         assert!(output_update.contains(r#""toolCallId":"shell_shell-sse-1""#));
         assert!(output_update.contains("deepseek.acp.shell_terminal_event.v1"));
         assert!(output_update.contains("hello from pty"));
+        assert!(output_update.contains(r#""rawBase64":"aGVsbG8gZnJvbSBwdHk=""#));
         let resize_update = json_value_to_string(&responses[1]);
         assert!(resize_update.contains(r#""kind":"resize""#));
         assert!(resize_update.contains("rows=33 cols=101"));
@@ -13537,7 +13558,7 @@ shell_allowlist = ["cargo test"]
         fs::create_dir_all(&job_dir).unwrap();
         fs::write(
             job_dir.join("terminal-events.jsonl"),
-            "{\"seq\":1,\"kind\":\"output\",\"timestamp\":\"epoch+1\",\"preview\":\"hello from pty\"}\n{\"seq\":2,\"kind\":\"resize\",\"timestamp\":\"epoch+2\",\"rows\":33,\"cols\":101}\n",
+            "{\"seq\":1,\"kind\":\"output\",\"timestamp\":\"epoch+1\",\"preview\":\"hello from pty\",\"raw_base64\":\"aGVsbG8gZnJvbSBwdHk=\"}\n{\"seq\":2,\"kind\":\"resize\",\"timestamp\":\"epoch+2\",\"rows\":33,\"cols\":101}\n",
         )
         .unwrap();
         let manifest = json_object([
@@ -13599,6 +13620,9 @@ shell_allowlist = ["cargo test"]
         assert!(stream.body.contains("event: terminal_resize\n"));
         assert!(stream.body.contains("\"task_id\":\"shell-sse-1\""));
         assert!(stream.body.contains("\"preview\":\"hello from pty\""));
+        assert!(stream
+            .body
+            .contains("\"raw_base64\":\"aGVsbG8gZnJvbSBwdHk=\""));
         assert!(stream.body.contains("\"preview\":\"rows=33 cols=101\""));
 
         let replay = response_for_request(

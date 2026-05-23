@@ -23,7 +23,11 @@ pub fn run(cli: app::Cli) -> AppResult<()> {
         app::Command::Update(args) => commands::update::run(args),
         app::Command::Smoke(args) => commands::smoke::run(args),
         app::Command::Pr(action) => commands::pr::run(action),
+        app::Command::Github(action) => commands::github::run(action),
         app::Command::Mcp(action) => commands::mcp::run(action),
+        app::Command::Hooks(action) => commands::hooks::run(action),
+        app::Command::Skills(action) => commands::skills::run(action),
+        app::Command::Task(action) => commands::task::run(action),
         app::Command::Help(args) => commands::help::run(args),
         app::Command::Version => commands::version::run(),
     }

@@ -50,6 +50,7 @@ fn dogfood_words() -> &'static [&'static str] {
         "replay-benchmark",
         "live-plan",
         "live-run",
+        "live-evidence",
         "report",
         "export-benchmark",
         "promote-benchmark",
@@ -93,7 +94,15 @@ fn agents_words() -> &'static [&'static str] {
 }
 
 fn update_words() -> &'static [&'static str] {
-    &["package", "verify-install", "install-package", "rollback"]
+    &[
+        "package",
+        "verify-install",
+        "install-package",
+        "rollback",
+        "homebrew-formula",
+        "publish-status",
+        "download-plan",
+    ]
 }
 
 fn restore_words() -> &'static [&'static str] {
@@ -323,6 +332,8 @@ mod tests {
         assert!(script.contains("tui"));
         assert!(script.contains("update"));
         assert!(script.contains("verify-install"));
+        assert!(script.contains("publish-status"));
+        assert!(script.contains("live-evidence"));
         assert!(script.contains("completion"));
         assert!(script.contains("mcp"));
         assert!(script.contains("tools"));
@@ -340,6 +351,8 @@ mod tests {
         assert!(script.contains("threads"));
         assert!(script.contains("completion"));
         assert!(script.contains("install-package"));
+        assert!(script.contains("download-plan"));
+        assert!(script.contains("live-evidence"));
         assert!(script.contains("restore"));
         assert!(script.contains("snapshot"));
         assert!(script.contains("tools"));
@@ -357,6 +370,8 @@ mod tests {
         assert!(script.contains("validate"));
         assert!(script.contains("show-thread"));
         assert!(script.contains("rollback"));
+        assert!(script.contains("publish-status"));
+        assert!(script.contains("live-evidence"));
         assert!(script.contains("revert-turn"));
         assert!(script.contains("tools"));
         assert!(script.contains("prompts"));
