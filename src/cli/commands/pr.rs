@@ -37,13 +37,27 @@ fn run_model_backed_action(config: AppConfig, action: PrAction) -> AppResult<()>
         PrAction::Fix {
             reference,
             job,
+            request,
             benchmark_gate,
-        } => run_fix(config, &reference, job.as_deref(), benchmark_gate),
+        } => run_fix(
+            config,
+            &reference,
+            job.as_deref(),
+            request.as_deref(),
+            benchmark_gate,
+        ),
         PrAction::Patch {
             reference,
+            request,
             commit,
             benchmark_gate,
-        } => run_patch(config, &reference, commit, benchmark_gate),
+        } => run_patch(
+            config,
+            &reference,
+            request.as_deref(),
+            commit,
+            benchmark_gate,
+        ),
         PrAction::LiveStatus { .. } => unreachable!("handled before loading model config"),
     }
 }
@@ -350,6 +364,7 @@ fn run_fix(
     config: AppConfig,
     reference: &str,
     job_filter: Option<&str>,
+    request: Option<&str>,
     benchmark_gate: bool,
 ) -> AppResult<()> {
     ensure_gh_auth()?;
@@ -365,7 +380,7 @@ fn run_fix(
         }
     };
 
-    let task = build_fix_task_text(&pr, &failure);
+    let task = build_fix_task_text(&pr, &failure, request);
     let context = TaskContext::new(task, None);
     let observations = vec![Observation::ok("run_shell", failure.log_tail.clone())];
 
@@ -389,23 +404,26 @@ fn run_fix(
     Ok(())
 }
 
-fn build_fix_task_text(pr: &PrContext, failure: &CiFailure) -> String {
+fn build_fix_task_text(pr: &PrContext, failure: &CiFailure, request: Option<&str>) -> String {
     let step_clause = failure
         .failed_step
         .as_ref()
         .map(|step| format!(" at step `{step}`"))
         .unwrap_or_default();
-    format!(
+    let mut text = format!(
         "CI job `{job}` (run #{run_id}) on PR #{number} failed{step_clause}. Reproduce locally, fix the root cause, and rerun the failing test. Failed log tail follows.",
         job = failure.job_name,
         run_id = failure.run_id,
         number = pr.number,
-    )
+    );
+    append_requested_action(&mut text, request);
+    text
 }
 
 fn run_patch(
     config: AppConfig,
     reference: &str,
+    request: Option<&str>,
     commit: bool,
     benchmark_gate: bool,
 ) -> AppResult<()> {
@@ -419,7 +437,7 @@ fn run_patch(
         ));
     }
 
-    let task = build_patch_task_text(&pr);
+    let task = build_patch_task_text(&pr, request);
     let context = TaskContext::new(task, None);
     let observations = vec![Observation::ok("git_diff", pr.diff.clone())];
 
@@ -447,11 +465,20 @@ fn run_patch(
     Ok(())
 }
 
-fn build_patch_task_text(pr: &PrContext) -> String {
-    format!(
+fn build_patch_task_text(pr: &PrContext, request: Option<&str>) -> String {
+    let mut text = format!(
         "Address review feedback or apply the requested change in PR #{} '{}' in repository {} on branch {}. Use the provided PR diff observation and the current checkout first; when the requested change is clear, edit files directly, then run focused validation.",
         pr.number, pr.title, pr.repo, pr.branch
-    )
+    );
+    append_requested_action(&mut text, request);
+    text
+}
+
+fn append_requested_action(text: &mut String, request: Option<&str>) {
+    if let Some(request) = request.map(str::trim).filter(|request| !request.is_empty()) {
+        text.push_str("\n\nRequested action from GitHub comment: ");
+        text.push_str(request);
+    }
 }
 
 fn run_git(args: &[&str]) -> AppResult<()> {
@@ -517,7 +544,7 @@ mod tests {
 
     #[test]
     fn fix_task_text_includes_run_id_and_step() {
-        let text = build_fix_task_text(&fixture_pr(12, "Some PR"), &fixture_failure());
+        let text = build_fix_task_text(&fixture_pr(12, "Some PR"), &fixture_failure(), None);
         assert!(text.contains("run #555"));
         assert!(text.contains("test-rust"));
         assert!(text.contains("cargo test"));
@@ -526,9 +553,20 @@ mod tests {
 
     #[test]
     fn patch_task_text_mentions_pr_number_and_title() {
-        let text = build_patch_task_text(&fixture_pr(9, "Tighten retry loop"));
+        let text = build_patch_task_text(&fixture_pr(9, "Tighten retry loop"), None);
         assert!(text.contains("#9"));
         assert!(text.contains("Tighten retry loop"));
+    }
+
+    #[test]
+    fn patch_task_text_includes_github_comment_request() {
+        let text = build_patch_task_text(
+            &fixture_pr(9, "Tighten retry loop"),
+            Some("change docs/hosted-workflow-fixture.md to after"),
+        );
+
+        assert!(text.contains("Requested action from GitHub comment"));
+        assert!(text.contains("change docs/hosted-workflow-fixture.md to after"));
     }
 
     #[test]
