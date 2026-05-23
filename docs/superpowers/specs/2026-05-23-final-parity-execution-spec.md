@@ -40,6 +40,24 @@ The repo already has strong local evidence for the CLI/TUI/runtime loop,
 MCP/hooks/skills/subagents, background worktree runner, GitHub Action parser
 fixture smoke, release packaging metadata, and deterministic README demo assets.
 
+Live execution update from this pass:
+
+- `dogfood live-run --api-key-file <outside-repo-key> --category write_validate
+  --limit 1 --execute`: online, success.
+- `dogfood live-run --api-key-file <outside-repo-key> --category recovery
+  --limit 1 --execute`: online, success.
+- First `pr_workflow` live run exposed a real stuck case: the model repeatedly
+  called `project_map` instead of applying an explicit `replace X with Y in
+  path` instruction after reading the target file.
+- The runtime now adds a remote-mode direct-edit guardrail: once the target
+  content has been read, it applies the explicit patch, runs the suggested test,
+  and finishes after passing validation.
+- Re-running the same `pr_workflow` case succeeded with `apply_patch` followed
+  by `npm test`.
+- Current local live ledger is `4` online runs, `3` successes, and `1`
+  historical stuck run. This is useful smoke evidence but does not satisfy the
+  release gate below.
+
 ## Residual Gap Table
 
 | Area | Current state | Gap to close | Gate |

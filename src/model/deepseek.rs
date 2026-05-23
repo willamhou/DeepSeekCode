@@ -48,6 +48,10 @@ impl ModelClient for DeepSeekClient {
             .filter(|key| !key.trim().is_empty());
 
         if let Some(api_key) = api_key {
+            if let Some(response) = required_action_response(&input) {
+                emit_response_events(events, &response);
+                return Ok((response, None));
+            }
             // Remote stream attempted: surface success or error directly.
             // Stream errors propagate so partial text isn't double-rendered
             // by the offline fallback (per StreamEvents "exactly once" contract).
@@ -57,21 +61,28 @@ impl ModelClient for DeepSeekClient {
         poll_model_cancel(&mut cancel_check)?;
         // No API key configured → run offline planner and drive events.
         let response = self.respond_offline(input);
-        events.on_text_delta(&response.message);
-        events.on_assistant_done(&response.message);
-        match &response.action {
-            ModelAction::CallTool { tool_name, input } => {
-                events.on_tool_call(tool_name, &input.args);
-            }
-            ModelAction::CallTools(calls) => {
-                for call in calls {
-                    events.on_tool_call(&call.tool_name, &call.input.args);
-                }
-            }
-            ModelAction::Finish => {}
-        }
+        emit_response_events(events, &response);
         poll_model_cancel(&mut cancel_check)?;
         Ok((response, None))
+    }
+}
+
+fn emit_response_events(
+    events: &mut dyn crate::ui::stream::StreamEvents,
+    response: &ModelResponse,
+) {
+    events.on_text_delta(&response.message);
+    events.on_assistant_done(&response.message);
+    match &response.action {
+        ModelAction::CallTool { tool_name, input } => {
+            events.on_tool_call(tool_name, &input.args);
+        }
+        ModelAction::CallTools(calls) => {
+            for call in calls {
+                events.on_tool_call(&call.tool_name, &call.input.args);
+            }
+        }
+        ModelAction::Finish => {}
     }
 }
 
@@ -1607,6 +1618,78 @@ fn next_required_action_for_prompt(input: &ModelRequest) -> Option<String> {
         None => Some(format!(
             "call run_shell with command `{command}` now; do not call read_file or git_diff before validation"
         )),
+    }
+}
+
+fn required_action_response(input: &ModelRequest) -> Option<ModelResponse> {
+    if let Some(edit_request) = derive_edit_request(&input.task) {
+        let has_patch_tool = input
+            .available_tools
+            .iter()
+            .any(|tool| tool == "apply_patch");
+        let patch_already_succeeded = input
+            .observations
+            .iter()
+            .any(|observation| observation.tool_name == "apply_patch" && !observation.is_failure());
+        let read_confirmed_target = input.observations.iter().any(|observation| {
+            observation.tool_name == "read_file"
+                && !observation.is_failure()
+                && observation.summary.contains(&edit_request.find)
+        });
+
+        if has_patch_tool && !patch_already_succeeded && read_confirmed_target {
+            return Some(ModelResponse {
+                message: format!(
+                    "DeepSeekCode guardrail is applying the explicit edit request in {} before further exploration.",
+                    edit_request.path
+                ),
+                action: ModelAction::CallTool {
+                    tool_name: "apply_patch".to_string(),
+                    input: ToolInput::new()
+                        .with_arg("path", edit_request.path)
+                        .with_arg("find", edit_request.find)
+                        .with_arg("replace", edit_request.replace),
+                },
+            });
+        }
+    }
+
+    let command = input.suggested_test_command.as_deref()?;
+    if !input.available_tools.iter().any(|tool| tool == "run_shell") {
+        return None;
+    }
+
+    let last_patch_index = input.observations.iter().rposition(|observation| {
+        observation.tool_name == "apply_patch" && !observation.is_failure()
+    })?;
+    let shell_after_patch = input.observations[last_patch_index + 1..]
+        .iter()
+        .find(|observation| observation.tool_name == "run_shell");
+
+    match shell_after_patch {
+        Some(observation)
+            if observation.summary.contains("meta.command_kind=test")
+                && observation.summary.contains("meta.result=ok") =>
+        {
+            Some(ModelResponse {
+                message:
+                    "DeepSeekCode guardrail observed passing validation and is finishing cleanly."
+                        .to_string(),
+                action: ModelAction::Finish,
+            })
+        }
+        Some(_) => None,
+        None => Some(ModelResponse {
+            message: format!(
+                "DeepSeekCode guardrail is running the required validation command `{command}`."
+            ),
+            action: ModelAction::CallTool {
+                tool_name: "run_shell".to_string(),
+                input: ToolInput::new()
+                    .with_arg("cwd", ".")
+                    .with_arg("command", command),
+            },
+        }),
     }
 }
 
@@ -5120,8 +5203,9 @@ mod tests {
         child_files_from_summary, derive_edit_request, derive_github_pr_context_request,
         derive_search_query, last_patched_file_path, openai_tool_fields, parse_anthropic_messages,
         parse_anthropic_translation_response, parse_anthropic_usage, parse_openai_chat_completion,
-        parse_openai_translation_response, parse_openai_usage, translation_system_prompt,
-        ApiFlavor, DeepSeekClient, GithubPrContextRequest, ReasoningTier,
+        parse_openai_translation_response, parse_openai_usage, required_action_response,
+        translation_system_prompt, ApiFlavor, DeepSeekClient, GithubPrContextRequest,
+        ReasoningTier,
     };
     use crate::config::types::ModelConfig;
     use crate::model::client::ModelClient;
@@ -6197,6 +6281,74 @@ mod tests {
         assert!(prompt.contains(
             "Next required action: validation already passed; finish with a concise summary"
         ));
+    }
+
+    #[test]
+    fn required_action_response_applies_explicit_edit_after_target_read() {
+        let mut req = empty_request_with_todos(Vec::new());
+        req.task = "GitHub Action issue_comment trigger `@deepseek fix` on PR #43: CI job `test-js` failed. Replace `run bench` with `run benchmark` in src/index.js and rerun npm test.".to_string();
+        req.suggested_test_command = Some("npm test".to_string());
+        req.available_tools = vec![
+            "apply_patch".to_string(),
+            "run_shell".to_string(),
+            "project_map".to_string(),
+        ];
+        req.observations = vec![Observation::ok(
+            "read_file",
+            "1 export function routeBenchmarkCommand(name) {\n2   return \"run bench\";",
+        )];
+
+        let response = required_action_response(&req).expect("expected guardrail response");
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "apply_patch");
+                assert_eq!(input.get("path"), Some("src/index.js"));
+                assert_eq!(input.get("find"), Some("run bench"));
+                assert_eq!(input.get("replace"), Some("run benchmark"));
+            }
+            _ => panic!("expected apply_patch tool call"),
+        }
+    }
+
+    #[test]
+    fn required_action_response_runs_validation_after_patch() {
+        let mut req = empty_request_with_todos(Vec::new());
+        req.suggested_test_command = Some("npm test".to_string());
+        req.available_tools = vec!["run_shell".to_string()];
+        req.observations = vec![Observation::ok(
+            "apply_patch",
+            "Updated src/index.js using single replacement mode.",
+        )];
+
+        let response = required_action_response(&req).expect("expected guardrail response");
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "run_shell");
+                assert_eq!(input.get("cwd"), Some("."));
+                assert_eq!(input.get("command"), Some("npm test"));
+            }
+            _ => panic!("expected run_shell tool call"),
+        }
+    }
+
+    #[test]
+    fn required_action_response_finishes_after_passing_validation() {
+        let mut req = empty_request_with_todos(Vec::new());
+        req.suggested_test_command = Some("npm test".to_string());
+        req.available_tools = vec!["run_shell".to_string()];
+        req.observations = vec![
+            Observation::ok(
+                "apply_patch",
+                "Updated src/index.js using single replacement mode.",
+            ),
+            Observation::ok(
+                "run_shell",
+                "meta.command_kind=test\nmeta.exit_code=0\nmeta.result=ok\nexit_code: 0",
+            ),
+        ];
+
+        let response = required_action_response(&req).expect("expected guardrail response");
+        assert!(matches!(response.action, ModelAction::Finish));
     }
 
     #[test]
