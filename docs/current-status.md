@@ -59,15 +59,22 @@ review、resume 和本地 runtime/shell-supervisor 工作流，就可以认为�
 - 本轮新增：MCP 模型规划 benchmark 第一片。benchmark runner 现在支持 per-case 自举 `stdio-self` MCP fixture，可在 isolated workdir 写入 `.dscode/mcp.json`、按 case 开关动态 MCP 工具暴露，并设置 case-local `mcp_call_allowlist`。默认 manifest 新增 `fixture-mcp-dynamic-readme`、`fixture-mcp-generic-call-readme`、`fixture-mcp-allowlist-deny-recovery` 三条 MCP cases，分别覆盖动态 `mcp__stdio-self__read_file`、generic `mcp_call`、allowlist deny 后通过 `mcp_list_tools` 恢复。本轮 targeted MCP manifest 从 `/tmp` 运行实测 `3/3`，报告在 `/tmp/deepseek-mcp-benchmark.md`；完整默认 manifest 已扩到 `82` cases，并已刷新通过 `82/82`，最新完整报告在 `.dscode/benchmarks/latest.md`。
 - 本轮新增：benchmark PR planner hardening。离线 planner 现在会保留 `github_pr_context` / `review` / `pr_review_comment_plan` 这类结构化观察，不会因为同属 `Other` kind 被后续工具压缩成 superseded stub；PR comment 失败恢复在成功重建 plan 后不再重复重建第二次；skill auto-select 也会避免把远程 PR review/comment 任务降级到隐藏 `github_pr_context` / `review` / `pr_review_comment_plan` 的 debug skill。`run_shell` 现在会把 `pytest` / `python -m pytest` 缺失以及 profile 生成的 `uv run pytest` 安全标准化到 `uv --with pytest` fallback，并会自动发现 `~/.local/toolchains/go/*/bin` / `~/sdk/go*/bin` 这类用户级 Go toolchain。当前完整离线 benchmark 历史实测 `82/82`；本轮新增 hosted exact patch request targeted benchmark 通过，`26` 条 `pr_workflow` 中 planner/action/comment-plan/exact-request 项均有覆盖，新增 `mcp` category `3/3`；当前 trend gate 处于 comparable warmup，`found 2`，live gate 基于本机 dogfood ledger 从 `runs=5` 到 `runs=20` 通过。
 - 本轮新增：offline dogfood replay 覆盖补强。`cargo run --quiet -- dogfood replay-benchmark --category pr_workflow --limit 12 --benchmark-gate` 新增了 12 条 `pr_workflow` replay，覆盖 GitHub Action `@deepseek fix` / `@deepseek patch`、JS/Rust/Python/Go PR CI repair、PR retry validate、second-round feedback 和 Go patch validate，全部成功；该批次把 ledger 推到 `17` runs 后暴露 live coverage gate 还缺 `recovery` slice。随后 `cargo run --quiet -- dogfood replay-benchmark --category recovery --limit 3 --benchmark-gate` 新增 3 条 recovery replay，`recovery` 为 `3/3`，最终 `.dscode/dogfood/latest.md` 为 `20` runs、`19/20` success、`1` historical failed、`0` stuck、`0` manual；post-replay default benchmark 为 `82/82`，live gate `pass against previous dogfood snapshot (runs 5 -> 20)`。这些仍是 `offline` transport，不能替代后续真实 model-backed dogfood。
-- 本轮新增：`deepseek dogfood live-plan` 的推荐命令改为 `deepseek dogfood live-run ...`，文本和 JSON 都同时输出 dry-run 与 `--execute` 命令，避免 release operator 为 model-backed 证据误走 offline-friendly `replay-benchmark` 路径。`deepseek dogfood live-plan` 和 `deepseek dogfood live-run --json` 现在还输出 `post_run_report_command` / `evidence_gate`，直接给出 `dogfood report --require-live-runs ... --require-live-category ...` 的后置验收命令，让真实 online 执行后的 model-backed 证据可以 fail closed。`deepseek dogfood live-run --json` 保持机器可读 dry-run plan，包含 selected cases、online readiness、execute blocker 和 follow-up `--execute` command；它故意不和 `--execute` 混用，避免在线执行日志污染 JSON。`dogfood live-run` 还支持 `--api-key-file`/`--key-file` 指向仓库外 key 文件，只把 key 注入当前进程的 `model.api_key_env` 并在返回时恢复，JSON 只记录 `credential_source` 和文件路径，不输出 key 值。`dogfood live-run --execute --evidence-out <path>` 现在会在批次结束或首个失败后写出 `deepseek.dogfood.live_run_evidence.v1` JSON，记录 before/after ledger live counts、每个 case 追加的 model-backed ledger 行、benchmark gate 结果、同一条 post-run report gate，以及当前 ledger 文件的 `fnv1a64` fingerprint，仍不写入 API key 值。`deepseek dogfood live-evidence --file <path>` 现在可验证该 evidence 文件，默认要求 completed、online、至少 1 条 appended model-backed row；`--require-benchmark-gate` 可把 benchmark gate 也纳入 release fail-closed 检查，`--require-report-gate` 会读取 evidence 的 structured `evidence_gate` 和 ledger path，用 `dogfood report` 同一套 live requirement 逻辑验证 full live gate，重新计算 ledger fingerprint 并逐条核对 evidence 中 appended case 的 timestamp/outcome/model_transport/category 能在 ledger 中找到匹配记录，而不是执行 JSON 里的 shell command；`--json` 输出 `deepseek.dogfood.live_evidence_verification.v1`，`--out <path>` 可把 verification JSON 落盘作为 release evidence artifact。`dogfood external-fixture` 真实执行现在也默认要求 `model_transport=online`，离线只能 dry-run 或显式 `--allow-offline` 做 rehearsal，避免把 offline disposable repo 样本误计为 release evidence；`--evidence-out` 会写出 `deepseek.dogfood.external_fixture_evidence.v1`，包含 appended external fixture row、release-evidence readiness 和 ledger fingerprint，便于上传发布证据。
+- 本轮新增：`deepseek dogfood live-plan` 的推荐命令改为 `deepseek dogfood live-run ...`，文本和 JSON 都同时输出 dry-run 与 `--execute` 命令，避免 release operator 为 model-backed 证据误走 offline-friendly `replay-benchmark` 路径。`deepseek dogfood live-plan` 和 `deepseek dogfood live-run --json` 现在还输出 `post_run_report_command` / `evidence_gate`，直接给出 `dogfood report --require-live-runs ... --require-live-category ...` 的后置验收命令，让真实 online 执行后的 model-backed 证据可以 fail closed。`deepseek dogfood live-run --json` 保持机器可读 dry-run plan，包含 selected cases、online readiness、execute blocker 和 follow-up `--execute` command；它故意不和 `--execute` 混用，避免在线执行日志污染 JSON。`dogfood live-run` 还支持 `--api-key-file`/`--key-file` 指向仓库外 key 文件，只把 key 注入当前进程的 `model.api_key_env` 并在返回时恢复，JSON 只记录 `credential_source` 和文件路径，不输出 key 值。`dogfood live-run --execute --evidence-out <path>` 现在会在批次结束或首个失败后写出 `deepseek.dogfood.live_run_evidence.v1` JSON，记录 before/after ledger live counts、每个 case 追加的 model-backed ledger 行、benchmark gate 结果、同一条 post-run report gate，以及当前 ledger 文件的 `fnv1a64` fingerprint，仍不写入 API key 值。`deepseek dogfood live-evidence --file <path>` 现在可验证该 evidence 文件，默认要求 completed、online、至少 1 条 appended model-backed row；`--require-benchmark-gate` 可把 benchmark gate 也纳入 release fail-closed 检查，`--require-report-gate` 会读取 evidence 的 structured `evidence_gate` 和 ledger path，用 `dogfood report` 同一套 live requirement 逻辑验证 full live gate，重新计算 ledger fingerprint 并逐条核对 evidence 中 appended case 的 timestamp/outcome/model_transport/category 能在 ledger 中找到匹配记录，而不是执行 JSON 里的 shell command；`--json` 输出 `deepseek.dogfood.live_evidence_verification.v1`，`--out <path>` 可把 verification JSON 落盘作为 release evidence artifact。`dogfood external-fixture` 真实执行现在也默认要求 `model_transport=online`，离线只能 dry-run 或显式 `--allow-offline` 做 rehearsal，避免把 offline disposable repo 样本误计为 release evidence；`--evidence-out` 会写出 `deepseek.dogfood.external_fixture_evidence.v1`，包含 appended external fixture row、CLI 后置 validation command/pass 状态、release-evidence readiness 和 ledger fingerprint，便于上传发布证据。
 - 本轮新增：在线 DeepSeek dogfood 从 smoke 推进到完整 release gate。使用当前进程注入的 DeepSeek key 执行 `dogfood live-run --execute --evidence-out ...`，最终 `deepseek dogfood report --limit 100 --require-live-runs 100 --require-live-success-rate 90 --require-live-category write_validate:25:90 --require-live-category recovery:25:90 --require-live-category pr_workflow:25:90` 通过；外部 fixture 跑完后 `live-plan` 显示 `105` 条 online run、`99` 条 success，分类为 `write_validate 29/30`、`recovery 23/25`、`pr_workflow 47/50`。执行过程中又修掉两类真实模型卡点：Python pytest retry readback 现在能识别 `def test_` / `assert ` 测试文件，并从错误的 `a * b` 回退到 `a + b`；空搜索恢复任务在看到 no matches 后完成 repository layout inspection 会 clean finish，不再重复列目录。release evidence verification 落在 `.dscode/dogfood/live-evidence-final-total-pr-4-release-verification.json`，`report_gate_passed=true`。
 - 本轮新增：外部 disposable repo write-fixture 证据第一批。已在 `/tmp/deepseek-external-fixtures/` 下构造 Rust、Python、JavaScript 三个独立 git repo，初始测试均失败，然后用真实 online DeepSeek 跑 `dogfood external-fixture --workdir ... --evidence-out ...`，三条都完成 `read_file -> apply_patch -> validation -> finish`，并分别通过 `dogfood external-evidence --require-successful-external-fixtures 1`：`.dscode/dogfood/external-fixture-rust-add-v3-verification.json`、`.dscode/dogfood/external-fixture-python-add-verification.json`、`.dscode/dogfood/external-fixture-js-add-verification.json`。本轮还修复了 external fixture evidence record 缺少 `model_backed` 字段导致 verifier 无法和 ledger online row 对齐的问题。
 - 本轮新增：multi-file external fixture scaffold。`scripts/create-multifile-external-fixture.sh`
-  会在 checkout 之外创建 disposable Python invoice repo，初始 `python -m unittest discover -s tests`
+  会在 checkout 之外创建 disposable Python invoice repo，初始 `python3 -m unittest discover -s tests`
   按预期失败，并输出 dry-run/evidence 两条 `deepseek dogfood external-fixture` 命令；任务要求同时修改
   `src/invoice_math/pricing.py` 和 `src/invoice_math/summary.py`。CI/Release Matrix 在 Linux/macOS
-  上会执行该脚手架，先保证更真实的 multi-file 样本可重复构造；真实 online evidence 仍由带 key 的
-  `dogfood external-fixture --evidence-out ...` 产生。
+  上会执行该脚手架，先保证更真实的 multi-file 样本可重复构造；当前已经用 online DeepSeek
+  跑通该样本，`dogfood external-evidence --require-successful-external-fixtures 1` 通过，
+  verification 为 `.dscode/dogfood/external-fixture-python-invoice-multifile-verification.json`，
+  且 `post_validation_passed=true`、`release_evidence_ready=true`。
+- 本轮新增：external fixture release evidence fail-closed 加固。`dogfood external-fixture`
+  会从任务里的 `validate with ...` 抽出验证命令，在 isolated workdir 清理前由 CLI 后置执行；
+  evidence/verifier 现在要求 `post_validation_command` 和 `post_validation_passed=true`。同时
+  explicit edit guardrail 支持同一任务里的多个 `replace ... with ... in ...` 片段，本轮 Python
+  invoice 样本实测会依次 patch `pricing.py` 和 `summary.py`。
 - 本轮新增：README 真实 model-backed demo SVG。`docs/demo/record-model-backed-demo.sh` 使用当前 DeepSeek key 录制了 disposable Rust crate 的 failure -> `deepseek exec` -> patch -> passing `cargo test` -> diff transcript，`docs/demo/verify-model-backed-demo.js` 验证通过后由 `docs/demo/render-model-backed-demo-svg.js` 渲染为 `docs/demo/deepseek-code-model-demo.svg`。本轮还修复了 explicit edit parser 对 `in src/lib.rs, validate ...` 的路径截断问题，以及 renderer 把 `test result: ok ... 0 failed` 误标红的问题；README 英文、中文、日文都已引用该真实模型 SVG。
 - 本轮新增：`deepseek update publish-status` 现在支持 `--live-evidence-verification <path>`（别名 `--live-evidence`），会读取 `dogfood live-evidence --out` 生成的 `deepseek.dogfood.live_evidence_verification.v1`，要求 `ok=true`、completed、online、appended model-backed row、report gate required/passed、ledger fingerprint/current ledger fingerprint 都成立。`--strict` 因此会把缺失或无效的 online dogfood verification artifact 计入 not-ready，`public_install` 对 GitHub Release、npm、Homebrew 和 GHCR 的 `ready_to_publish` 也不再只看包材料，还要求 release evidence 已验证。
 - 本轮新增：Windows target warning cleanup。Unix-only shell byte-stream/PTY helpers、hook fixture helpers、rollback Unix metadata helpers 和相关测试 fixture 现在只在对应 Unix cfg 下编译；`cargo check --target x86_64-pc-windows-gnu --all-targets` 当前已无 warnings 通过。这让 Windows ConPTY/TCP runtime proof 的编译面更接近 release-quality，而不是只做到“能编过但带一串条件编译噪音”。
@@ -91,10 +98,10 @@ deepseek agents shell-fixture-smoke --json
 
 当前距离 Claude Code CLI / Codex CLI / DeepSeek-TUI 的成熟产品形态，主要差在以下几类：
 
-如果只看 Linux/macOS 本地 CLI milestone，核心交互能力已经成立；剩下主要是
-Homebrew 发布凭据、下一次 release matrix 的 release-binary smoke 证据、更多 online
-multi-file external fixture 样本和文档压缩。Windows/IDE/hosted 发布证据继续保留在更大
-产品目标里，但不是这个 milestone 的 blocker。
+如果只看 Linux/macOS 本地 CLI milestone，核心交互能力和要求的 evidence gate 已经成立；
+剩下主要是 Homebrew 发布凭据、下一次 release matrix 的 release-binary smoke 证据、
+更多外部样本和文档压缩。Windows/IDE/hosted 发布证据继续保留在更大产品目标里，但不是
+这个 milestone 的 blocker。
 
 1. Shell/PTY 深水区
    - 已有 bounded interactive attach、duplex `byte_stream` raw-output proxy slice、human `agents shell proxy` raw-mode wrapper、Windows `native-supervisor` ConPTY backend compile gate，以及 Linux 本地 `pty_fd` / SCM_RIGHTS PTY master fd handoff slice。
@@ -104,7 +111,7 @@ multi-file external fixture 样本和文档压缩。Windows/IDE/hosted 发布证
 
 2. 真实模型 dogfood 证据
    - 已有 recorder、verifier、redaction self-test、release evidence verifier 和 `100` 条 online run release gate 证据。
-   - 已有 `3` 个真实 disposable repo 外部 write-fixture 样本，覆盖 Rust/Python/JavaScript 的 failure -> edit -> test 链路；还可以继续扩到 5 个样本并补一个更接近真实项目的 multi-file fixture。
+   - 已有 `4` 个真实 disposable repo 外部 write-fixture 样本，覆盖 Rust/Python/JavaScript 和 Python invoice multi-file 的 failure -> edit -> test 链路；后续可以继续扩到 5 个以上样本。
    - README 现在已有真实 model-backed SVG；后续可选补更精致的 GIF/MP4 或 TUI 录屏版。
 
 3. 发布渠道
@@ -139,9 +146,9 @@ multi-file external fixture 样本和文档压缩。Windows/IDE/hosted 发布证
 2. 补外部 model-backed 证据和真实 demo
    - 先轮换任何已经泄漏到聊天记录里的 key。
    - 保留 `.dscode/dogfood/live-evidence-final-total-pr-4-release-verification.json` 作为当前 online dogfood release 证据。
-   - 已完成 3 个 disposable repo/write-fixture 样本；下一步用
-     `scripts/create-multifile-external-fixture.sh` 生成 Python invoice multi-file 样本并跑一次
-     online `dogfood external-fixture --evidence-out ...`。
+   - 已完成 4 个 disposable repo/write-fixture 样本，其中 Python invoice multi-file 样本已通过
+     online `dogfood external-fixture --evidence-out ...` 和
+     `dogfood external-evidence --require-successful-external-fixtures 1`。
 
 3. 补 README 真实录屏
    - 已完成 CLI 版真实模型 SVG：失败测试、模型修改、通过测试和 diff。
@@ -164,9 +171,9 @@ DeepSeekCode 现在已经是一个可以实际使用的 code agent CLI，尤其�
 
 如果目标限定为 Linux/macOS 本地 code agent CLI，则当前判断更强：Linux 本机已经通过
 TUI entrypoint、shell fixture、service smoke 和在线 dogfood release gate；PR #14 / CI
-run #35 已在 hosted macOS 上通过 shell/runtime smoke 和 multi-file scaffold gate。
-Windows 不再影响这个限定目标。
+run #35 已在 hosted macOS 上通过 shell/runtime smoke 和 multi-file scaffold gate；online
+multi-file external fixture evidence 也已经记录并验证通过。Windows 不再影响这个限定目标。
 
 最准确的公开表述是：
 
-> DeepSeekCode is usable today for Linux/macOS dogfooding and repository work, with a full-screen TUI, REPL, durable runtime, permissioned tools, hosted Linux/macOS shell-supervisor smoke gates, release binaries, a 100-run online dogfood release gate, initial external disposable-repo write-fixture evidence, real hosted GitHub workflow evidence, and a committed real model-backed README demo SVG. The remaining Linux/macOS CLI work is Homebrew publishing, richer online multi-file fixture evidence, next-release binary smoke evidence, and documentation polish; hosted IDE, Windows/service proof, npm publishing, and optional richer demo media remain broader product-hardening work.
+> DeepSeekCode is usable today for Linux/macOS dogfooding and repository work, with a full-screen TUI, REPL, durable runtime, permissioned tools, hosted Linux/macOS shell-supervisor smoke gates, release binaries, a 100-run online dogfood release gate, verified online multi-file external fixture evidence, real hosted GitHub workflow evidence, and a committed real model-backed README demo SVG. The remaining Linux/macOS CLI work is Homebrew publishing, next-release binary smoke evidence, broader external sample depth, and documentation polish; hosted IDE, Windows/service proof, npm publishing, and optional richer demo media remain broader product-hardening work.

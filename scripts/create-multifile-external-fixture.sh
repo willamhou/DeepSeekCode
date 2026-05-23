@@ -111,7 +111,7 @@ if [[ "$test_status" -eq 0 ]]; then
   exit 1
 fi
 
-task='replace `return amount - discount` with `return max(amount - discount, 0.0)` in src/invoice_math/pricing.py and replace `Invoice total` with `Final total` in src/invoice_math/summary.py, validate with python -m unittest discover -s tests'
+task="replace \`return amount - discount\` with \`return max(amount - discount, 0.0)\` in src/invoice_math/pricing.py and replace \`Invoice total\` with \`Final total\` in src/invoice_math/summary.py, validate with $python_bin -m unittest discover -s tests"
 
 cat <<EOF
 created: $root

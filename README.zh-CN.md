@@ -120,8 +120,8 @@ Codex CLI 的产品成熟度。如果只看 Linux/macOS 本地 coding-agent CLI�
 
 - macOS shell/runtime 的 hosted CI 证据已经在 PR #14 / CI run #35 通过；
   release binary 证据等待下一次 release matrix 产出；
-- 更丰富的 multi-file external fixture 样本；仓库已提供 disposable Python invoice
-  fixture 脚手架；
+- disposable Python invoice fixture 已有 online multi-file external evidence；
+  继续增加外部样本属于可选加固；
 - Homebrew 发布仍缺 tap 凭据；
 - 已提交 model-backed SVG 之外，可选的更精致 GIF/MP4 录屏素材。
 

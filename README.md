@@ -125,8 +125,8 @@ the remaining gaps are mostly evidence depth and distribution polish:
 - macOS shell/runtime CI evidence beyond the entrypoint smoke is now recorded
   in PR #14 / CI run #35; release-binary evidence will come from the next
   release matrix run;
-- richer multi-file external fixture samples, with a scaffold script for a
-  disposable Python invoice fixture;
+- online multi-file external fixture evidence is now recorded for the
+  disposable Python invoice fixture; additional external samples are optional;
 - Homebrew publishing, still blocked on tap credentials;
 - optional polished GIF/MP4 capture beyond the committed model-backed SVG.
 
