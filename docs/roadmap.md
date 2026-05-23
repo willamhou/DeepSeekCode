@@ -11,6 +11,8 @@ for audit trails, but they are not the source of truth for current status.
 DeepSeekCode is now usable for Linux/macOS dogfooding and repository work:
 
 - bare `deepseek` opens the full-screen TUI in a real terminal;
+- `deepseek quickstart` provides a side-effect-free first-run readiness check
+  with text and JSON output;
 - `deepseek chat` remains available as the line-oriented REPL;
 - model-backed tasks can read files, apply patches, run shell checks, inspect
   diffs, and resume from durable runtime state;
@@ -61,7 +63,8 @@ it is the most natural install path for macOS users.
 
 ### 4. Documentation Compression
 
-- Keep README focused on install, first run, current gap, demo, and validation.
+- Keep README focused on install, `deepseek quickstart`, current gap, demo, and
+  validation.
 - Keep `docs/current-status.md` focused on current facts and near-term work.
 - Keep `docs/release.md` as the operator checklist.
 - Treat `docs/superpowers/` as historical execution logs, not user-facing
@@ -86,6 +89,7 @@ these are true:
 - at least one verified online multi-file external fixture remains tracked;
 - Homebrew public install is either published and verified, or explicitly marked
   blocked on tap credentials;
-- README and install docs show an accurate first-run path.
+- README and install docs show `deepseek quickstart` as the accurate first-run
+  path.
 
 Everything else belongs to the broader product-hardening backlog.

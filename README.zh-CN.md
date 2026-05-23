@@ -57,6 +57,7 @@ TUI/runtime workbench。它面向真实写代码循环：阅读仓库、修改�
 ```bash
 cargo install --git https://github.com/willamhou/DeepSeekCode.git --locked
 deepseek version
+deepseek quickstart
 deepseek doctor --json
 ```
 
@@ -83,6 +84,7 @@ docker run --rm ghcr.io/willamhou/deepseekcode:0.1.1 version
 
 ```bash
 cargo install --path .
+deepseek quickstart
 deepseek config init
 printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
 deepseek doctor --json

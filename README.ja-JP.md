@@ -61,6 +61,7 @@ DeepSeekCode は DeepSeek-first のターミナル向けコーディングエー
 ```bash
 cargo install --git https://github.com/willamhou/DeepSeekCode.git --locked
 deepseek version
+deepseek quickstart
 deepseek doctor --json
 ```
 
@@ -87,6 +88,7 @@ docker run --rm ghcr.io/willamhou/deepseekcode:0.1.1 version
 
 ```bash
 cargo install --path .
+deepseek quickstart
 deepseek config init
 printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
 deepseek doctor --json

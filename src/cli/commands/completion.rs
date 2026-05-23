@@ -32,6 +32,7 @@ fn command_words() -> &'static [&'static str] {
         "interactive",
         "mcp",
         "pr",
+        "quickstart",
         "repl",
         "resume",
         "restore",

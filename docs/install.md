@@ -1,6 +1,6 @@
 # 安装
 
-`deepseek` 是默认命令名。推荐先安装，再用 `deepseek version` 和 `deepseek doctor` 做最小验证。
+`deepseek` 是默认命令名。推荐先安装，再用 `deepseek version` 和 `deepseek quickstart` 做最小验证。
 
 ## 从源码安装
 
@@ -9,6 +9,7 @@
 ```bash
 cargo install --git https://github.com/willamhou/DeepSeekCode.git --locked
 deepseek version
+deepseek quickstart
 deepseek doctor --json
 ```
 
@@ -17,6 +18,7 @@ deepseek doctor --json
 ```bash
 cargo install --path .
 deepseek version
+deepseek quickstart
 deepseek doctor
 deepseek doctor --json
 deepseek update --check
@@ -337,9 +339,13 @@ deepseek version
 ## 首次配置
 
 ```bash
+deepseek quickstart
 deepseek config init
 deepseek doctor
 ```
+
+`deepseek quickstart` 是只读首跑检查：它会显示当前 workspace config、API key env、TTY 状态、下一步命令和几个入门任务。
+它不会发起模型请求，也不会回显密钥值；自动化环境可以使用 `deepseek quickstart --json` 读取稳定 JSON。
 
 `deepseek config init` 会创建项目级 `.dscode/config.toml`、session 目录、custom command 目录、custom agent 目录和 hooks 事件目录。
 如果确实要覆盖已有配置，可以显式运行 `deepseek config init --force`。

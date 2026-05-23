@@ -59,6 +59,7 @@ Install from source:
 ```bash
 cargo install --git https://github.com/willamhou/DeepSeekCode.git --locked
 deepseek version
+deepseek quickstart
 deepseek doctor --json
 ```
 
@@ -85,6 +86,7 @@ Or use a local checkout:
 
 ```bash
 cargo install --path .
+deepseek quickstart
 deepseek config init
 printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
 deepseek doctor --json

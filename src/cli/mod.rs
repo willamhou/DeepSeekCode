@@ -18,6 +18,7 @@ pub fn run(cli: app::Cli) -> AppResult<()> {
         app::Command::Restore(action) => commands::restore::run(action),
         app::Command::Config(args) => commands::config::run(args),
         app::Command::Doctor(args) => commands::doctor::run(args),
+        app::Command::Quickstart(args) => commands::quickstart::run(args),
         app::Command::Serve(args) => commands::serve::run(args),
         app::Command::Tui(args) => commands::tui::run(args),
         app::Command::Update(args) => commands::update::run(args),
