@@ -24,12 +24,25 @@ Local checks run during this execution pass:
 - `git diff --check`: passed.
 - `cargo run --quiet -- benchmark --category mcp --out /tmp/deepseek-goal-mcp-benchmark.md`:
   `3/3` passed, filtered history/trend/live gates skipped as expected.
-- `cargo run --quiet -- dogfood live-plan --limit 5 --json`: model transport is
-  `offline`; model-backed live runs are `0`.
-- `cargo run --quiet -- dogfood report --limit 20 --require-live-runs 1
-  --require-live-category pr_workflow:1:90 --require-live-category recovery:1:90
-  --require-live-category write_validate:1:90`: failed closed because all three
-  required model-backed categories have `0` live runs.
+- `cargo run --quiet -- dogfood live-run --api-key-file <outside-repo-key>
+  --category pr_workflow --limit 5 --execute --evidence-out
+  .dscode/dogfood/live-evidence-pr-workflow-5-rerun.json`: online, `5/5`
+  succeeded after the explicit-edit guardrail fix.
+- `cargo run --quiet -- dogfood live-evidence --file
+  .dscode/dogfood/live-evidence-pr-workflow-5-rerun.json --out
+  .dscode/dogfood/live-evidence-pr-workflow-5-rerun-verification.json --json`:
+  passed evidence validation for the 5 appended online rows.
+- `cargo run --quiet -- dogfood report --limit 100 --require-live-runs 30
+  --require-live-success-rate 85 --require-live-category write_validate:5:90
+  --require-live-category recovery:10:90 --require-live-category
+  pr_workflow:15:80`: passed as the current smoke gate.
+- `cargo run --quiet -- dogfood report --limit 100 --require-live-runs 100
+  --require-live-success-rate 90 --require-live-category write_validate:25:90
+  --require-live-category recovery:25:90 --require-live-category
+  pr_workflow:25:90`: failed closed because model-backed runs are `30/100`,
+  model-backed success rate is `26/30` (`86.7%`), `write_validate` is `5/25`,
+  `recovery` is `10/25`, and `pr_workflow` is `12/15` (`80.0%`) with only
+  `15/25` required samples.
 - `cargo run --quiet -- update publish-status --strict --json`: failed closed
   with 5 not-ready/skipped checks: npm token, release assets, npm artifacts, live
   evidence verification, and Homebrew tap credentials.
@@ -46,7 +59,7 @@ Live execution update from this pass:
   --limit 1 --execute`: online, success.
 - `dogfood live-run --api-key-file <outside-repo-key> --category recovery
   --limit 1 --execute`: online, success.
-- First `pr_workflow` live run exposed a real stuck case: the model repeatedly
+- The first `pr_workflow` live run exposed a real stuck case: the model repeatedly
   called `project_map` instead of applying an explicit `replace X with Y in
   path` instruction after reading the target file.
 - The runtime now adds a remote-mode direct-edit guardrail: once the target
@@ -58,10 +71,18 @@ Live execution update from this pass:
   not be counted as release live success samples; live-plan now skips those
   cases. The retry case now succeeds by applying `a * b`, reading back the failed
   validation state, retrying with `a + b`, and passing `cargo test`.
-- Current local live ledger is `20` online runs, `18` successes, and `2`
-  historical stuck runs. The latest small gate passed at `live-runs=20`,
-  overall success `90%`, `write_validate:5:90`, `recovery:10:90`, and
-  `pr_workflow:5:80`. This is useful smoke evidence but does not satisfy the
+- A later 5-case `pr_workflow` live batch exposed two more reproduce-and-fix
+  stuck cases: the model gathered repo context but did not patch within budget.
+  The guardrail now treats explicit direct-edit tasks as patchable once any
+  successful repo-context observation exists (`read_file`, `list_files`,
+  `list_dir`, `project_map`, or `search_text`), not only after reading the exact
+  target content.
+- Re-running that same 5-case `pr_workflow` batch succeeded `5/5`, including
+  the previously stuck Python and Rust reproduce-and-fix cases.
+- Current local live ledger is `30` online runs, `26` successes, and `4`
+  historical stuck runs. The latest small gate passed at `live-runs=30`,
+  overall success `85%`, `write_validate:5:90`, `recovery:10:90`, and
+  `pr_workflow:15:80`. This is useful smoke evidence but does not satisfy the
   release gate below.
 
 ## Residual Gap Table
@@ -93,8 +114,9 @@ Live execution update from this pass:
      three categories meet 25 runs at >=90%.
    - Verify each batch with `deepseek dogfood live-evidence --file <path>
      --require-report-gate --out <verification-path>`.
-   - This is blocked in this workspace until a valid DeepSeek key file is
-     available outside the repo.
+   - This is no longer blocked on local key availability for this workspace, but
+     the key must stay outside the repository and should be rotated if it was
+     exposed in chat or terminal output.
 
 3. Capture real demo and external fixture evidence.
    - Run `docs/demo/record-model-backed-demo.sh` with a repo-external key file.

@@ -1637,8 +1637,18 @@ fn required_action_response(input: &ModelRequest) -> Option<ModelResponse> {
                 && !observation.is_failure()
                 && observation.summary.contains(&edit_request.find)
         });
+        let explicit_edit_has_repo_context = input.observations.iter().any(|observation| {
+            !observation.is_failure()
+                && matches!(
+                    observation.tool_name.as_str(),
+                    "read_file" | "list_files" | "list_dir" | "project_map" | "search_text"
+                )
+        });
 
-        if has_patch_tool && !patch_already_succeeded && read_confirmed_target {
+        if has_patch_tool
+            && !patch_already_succeeded
+            && (read_confirmed_target || explicit_edit_has_repo_context)
+        {
             return Some(ModelResponse {
                 message: format!(
                     "DeepSeekCode guardrail is applying the explicit edit request in {} before further exploration.",
@@ -6373,6 +6383,33 @@ mod tests {
     }
 
     #[test]
+    fn required_action_response_applies_explicit_edit_after_repo_context() {
+        let mut req = empty_request_with_todos(Vec::new());
+        req.task = "CI job `test-python` failed. Reproduce locally, replace `run bench` with `run benchmark` in src/app.py, and rerun pytest.".to_string();
+        req.suggested_test_command = Some("pytest".to_string());
+        req.available_tools = vec![
+            "apply_patch".to_string(),
+            "run_shell".to_string(),
+            "project_map".to_string(),
+        ];
+        req.observations = vec![Observation::ok(
+            "project_map",
+            "tree:\n./\n  pyproject.toml\n  src/\n    src/app.py",
+        )];
+
+        let response = required_action_response(&req).expect("expected guardrail response");
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "apply_patch");
+                assert_eq!(input.get("path"), Some("src/app.py"));
+                assert_eq!(input.get("find"), Some("run bench"));
+                assert_eq!(input.get("replace"), Some("run benchmark"));
+            }
+            _ => panic!("expected apply_patch tool call"),
+        }
+    }
+
+    #[test]
     fn required_action_response_runs_validation_after_patch() {
         let mut req = empty_request_with_todos(Vec::new());
         req.suggested_test_command = Some("npm test".to_string());
@@ -7231,6 +7268,17 @@ mod tests {
         )
         .expect("expected edit request");
         assert_eq!(request.path, "src/index.js");
+        assert_eq!(request.find, "run bench");
+        assert_eq!(request.replace, "run benchmark");
+    }
+
+    #[test]
+    fn derive_edit_request_ignores_comma_before_trailing_rerun_clause() {
+        let request = derive_edit_request(
+            "CI job `test-python` failed. Reproduce locally, replace `run bench` with `run benchmark` in src/app.py, and rerun pytest.",
+        )
+        .expect("expected edit request");
+        assert_eq!(request.path, "src/app.py");
         assert_eq!(request.find, "run bench");
         assert_eq!(request.replace, "run benchmark");
     }
