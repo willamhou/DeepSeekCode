@@ -9,10 +9,15 @@ TUI/runtime workbench。它面向真实写代码循环：阅读仓库、修改�
 > 当前状态：已经可以用于 dogfood 和仓库内编码任务。`v0.1.1` 已有 GitHub
 > Release 二进制包和实测可用的 GHCR 镜像；裸 `deepseek` TUI 入口已经在
 > Linux、macOS、Windows CI 里做真实 smoke。npm 与 Homebrew 发布还需要
-> registry/tap 凭据，更厚的 model-backed 证据仍在推进中。
+> registry/tap 凭据，hosted IDE/GitHub 证据仍在推进中。
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
+</p>
+
+<p align="center">
+  <strong>真实 model-backed 编辑与测试闭环</strong><br>
+  <img src="./docs/demo/deepseek-code-model-demo.svg" alt="DeepSeekCode 真实 model-backed demo：修复失败 Rust 测试并完成验证" width="100%">
 </p>
 
 ## 现在能做什么
@@ -115,9 +120,9 @@ Codex CLI 的产品成熟度。最大差距集中在：
 - 新增 compile-checked backend、当前 Linux PTY fd handoff、bounded interactive
   attach 和 CI 已验证默认 TUI 入口之外，Windows shell-supervisor ConPTY/TCP
   daemon 运行证明；
-- 真实 disposable 外部仓库上更厚的 live write-fixture 样本证据；
+- hosted GitHub/VS Code workflow 证据，以及更丰富的 multi-file external fixture 样本；
 - npm registry 发布和 Homebrew tap，这两项还缺少对应凭据；
-- 超出确定性 TUI snapshot、已 review 并提交的真实 model-backed README 媒体素材。
+- 已提交 model-backed SVG 之外，可选的更精致 GIF/MP4 录屏素材。
 
 当前状态、下一步路线和最终目标见 [docs/current-status.md](./docs/current-status.md)。
 
@@ -130,9 +135,10 @@ recorder 重新生成 animated 和 static 两个 SVG 素材：
 docs/demo/record-readme-demo.sh
 ```
 
-`docs/demo/deepseek-code-tui.svg` 保留为静态 snapshot。正式发布前建议再录一段
-真实模型循环的短 GIF/MP4：打开 TUI、提交代码请求、应用修改、运行测试、查看
-diff。生成素材统一放在 `docs/demo/`。
+`docs/demo/deepseek-code-tui.svg` 保留为静态 snapshot。已提交的
+`docs/demo/deepseek-code-model-demo.svg` 来自通过 verifier 的真实 transcript，
+内容包括失败的 Rust 测试、模型修改、通过的 `cargo test` 和最终 diff。后续发布页
+仍可再补更精致的 GIF/MP4。生成素材统一放在 `docs/demo/`。
 
 真实 model-backed demo 的源证据可以用 disposable fixture recorder 捕获：
 

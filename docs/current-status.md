@@ -48,6 +48,7 @@ DeepSeekCode 的目标是成为一个 DeepSeek-first 的 code agent CLI：用户
 - 本轮新增：`deepseek dogfood live-plan` 的推荐命令改为 `deepseek dogfood live-run ...`，文本和 JSON 都同时输出 dry-run 与 `--execute` 命令，避免 release operator 为 model-backed 证据误走 offline-friendly `replay-benchmark` 路径。`deepseek dogfood live-plan` 和 `deepseek dogfood live-run --json` 现在还输出 `post_run_report_command` / `evidence_gate`，直接给出 `dogfood report --require-live-runs ... --require-live-category ...` 的后置验收命令，让真实 online 执行后的 model-backed 证据可以 fail closed。`deepseek dogfood live-run --json` 保持机器可读 dry-run plan，包含 selected cases、online readiness、execute blocker 和 follow-up `--execute` command；它故意不和 `--execute` 混用，避免在线执行日志污染 JSON。`dogfood live-run` 还支持 `--api-key-file`/`--key-file` 指向仓库外 key 文件，只把 key 注入当前进程的 `model.api_key_env` 并在返回时恢复，JSON 只记录 `credential_source` 和文件路径，不输出 key 值。`dogfood live-run --execute --evidence-out <path>` 现在会在批次结束或首个失败后写出 `deepseek.dogfood.live_run_evidence.v1` JSON，记录 before/after ledger live counts、每个 case 追加的 model-backed ledger 行、benchmark gate 结果、同一条 post-run report gate，以及当前 ledger 文件的 `fnv1a64` fingerprint，仍不写入 API key 值。`deepseek dogfood live-evidence --file <path>` 现在可验证该 evidence 文件，默认要求 completed、online、至少 1 条 appended model-backed row；`--require-benchmark-gate` 可把 benchmark gate 也纳入 release fail-closed 检查，`--require-report-gate` 会读取 evidence 的 structured `evidence_gate` 和 ledger path，用 `dogfood report` 同一套 live requirement 逻辑验证 full live gate，重新计算 ledger fingerprint 并逐条核对 evidence 中 appended case 的 timestamp/outcome/model_transport/category 能在 ledger 中找到匹配记录，而不是执行 JSON 里的 shell command；`--json` 输出 `deepseek.dogfood.live_evidence_verification.v1`，`--out <path>` 可把 verification JSON 落盘作为 release evidence artifact。`dogfood external-fixture` 真实执行现在也默认要求 `model_transport=online`，离线只能 dry-run 或显式 `--allow-offline` 做 rehearsal，避免把 offline disposable repo 样本误计为 release evidence；`--evidence-out` 会写出 `deepseek.dogfood.external_fixture_evidence.v1`，包含 appended external fixture row、release-evidence readiness 和 ledger fingerprint，便于上传发布证据。
 - 本轮新增：在线 DeepSeek dogfood 从 smoke 推进到完整 release gate。使用当前进程注入的 DeepSeek key 执行 `dogfood live-run --execute --evidence-out ...`，最终 `deepseek dogfood report --limit 100 --require-live-runs 100 --require-live-success-rate 90 --require-live-category write_validate:25:90 --require-live-category recovery:25:90 --require-live-category pr_workflow:25:90` 通过；外部 fixture 跑完后 `live-plan` 显示 `105` 条 online run、`99` 条 success，分类为 `write_validate 29/30`、`recovery 23/25`、`pr_workflow 47/50`。执行过程中又修掉两类真实模型卡点：Python pytest retry readback 现在能识别 `def test_` / `assert ` 测试文件，并从错误的 `a * b` 回退到 `a + b`；空搜索恢复任务在看到 no matches 后完成 repository layout inspection 会 clean finish，不再重复列目录。release evidence verification 落在 `.dscode/dogfood/live-evidence-final-total-pr-4-release-verification.json`，`report_gate_passed=true`。
 - 本轮新增：外部 disposable repo write-fixture 证据第一批。已在 `/tmp/deepseek-external-fixtures/` 下构造 Rust、Python、JavaScript 三个独立 git repo，初始测试均失败，然后用真实 online DeepSeek 跑 `dogfood external-fixture --workdir ... --evidence-out ...`，三条都完成 `read_file -> apply_patch -> validation -> finish`，并分别通过 `dogfood external-evidence --require-successful-external-fixtures 1`：`.dscode/dogfood/external-fixture-rust-add-v3-verification.json`、`.dscode/dogfood/external-fixture-python-add-verification.json`、`.dscode/dogfood/external-fixture-js-add-verification.json`。本轮还修复了 external fixture evidence record 缺少 `model_backed` 字段导致 verifier 无法和 ledger online row 对齐的问题。
+- 本轮新增：README 真实 model-backed demo SVG。`docs/demo/record-model-backed-demo.sh` 使用当前 DeepSeek key 录制了 disposable Rust crate 的 failure -> `deepseek exec` -> patch -> passing `cargo test` -> diff transcript，`docs/demo/verify-model-backed-demo.js` 验证通过后由 `docs/demo/render-model-backed-demo-svg.js` 渲染为 `docs/demo/deepseek-code-model-demo.svg`。本轮还修复了 explicit edit parser 对 `in src/lib.rs, validate ...` 的路径截断问题，以及 renderer 把 `test result: ok ... 0 failed` 误标红的问题；README 英文、中文、日文都已引用该真实模型 SVG。
 - 本轮新增：`deepseek update publish-status` 现在支持 `--live-evidence-verification <path>`（别名 `--live-evidence`），会读取 `dogfood live-evidence --out` 生成的 `deepseek.dogfood.live_evidence_verification.v1`，要求 `ok=true`、completed、online、appended model-backed row、report gate required/passed、ledger fingerprint/current ledger fingerprint 都成立。`--strict` 因此会把缺失或无效的 online dogfood verification artifact 计入 not-ready，`public_install` 对 GitHub Release、npm、Homebrew 和 GHCR 的 `ready_to_publish` 也不再只看包材料，还要求 release evidence 已验证。
 - 本轮新增：Windows target warning cleanup。Unix-only shell byte-stream/PTY helpers、hook fixture helpers、rollback Unix metadata helpers 和相关测试 fixture 现在只在对应 Unix cfg 下编译；`cargo check --target x86_64-pc-windows-gnu --all-targets` 当前已无 warnings 通过。这让 Windows ConPTY/TCP runtime proof 的编译面更接近 release-quality，而不是只做到“能编过但带一串条件编译噪音”。
 - 发布面：`v0.1.1` GitHub Release binaries、GHCR image、npm/Homebrew packaging metadata、release matrix、download-plan、publish-status、README 多语言、README TUI demo recorder。
@@ -79,7 +80,7 @@ deepseek agents shell-fixture-smoke --json
 2. 真实模型 dogfood 证据
    - 已有 recorder、verifier、redaction self-test、release evidence verifier 和 `100` 条 online run release gate 证据。
    - 已有 `3` 个真实 disposable repo 外部 write-fixture 样本，覆盖 Rust/Python/JavaScript 的 failure -> edit -> test 链路；还可以继续扩到 5 个样本并补一个更接近真实项目的 multi-file fixture。
-   - README 目前的主 demo 是确定性 TUI SVG，还缺 review 后提交的真实 model-backed 短录屏/GIF/SVG。
+   - README 现在已有真实 model-backed SVG；后续可选补更精致的 GIF/MP4 或 TUI 录屏版。
 
 3. 发布渠道
    - GitHub Release 和 GHCR 已通。
@@ -112,9 +113,8 @@ deepseek agents shell-fixture-smoke --json
    - 已完成 3 个 disposable repo/write-fixture 样本；下一步可以扩到 5 个，并补一个 multi-file 或 dependency-backed 的真实项目样本。
 
 3. 补 README 真实录屏
-   - 录制真实模型循环：打开 TUI、提交编码任务、应用修改、运行测试、查看 diff。
-   - 用 verifier 拦截离线 rehearsal 和 secret 泄漏。
-   - 产物放在 `docs/demo/`，README 引用 review 后的 media。
+   - 已完成 CLI 版真实模型 SVG：失败测试、模型修改、通过测试和 diff。
+   - 后续如果要更强视觉冲击，可以补 TUI/GUI 风格 GIF/MP4，但不是当前 minimum evidence gap。
 
 4. 完成发布渠道
    - 配置 npm token 并发布 npm wrapper。
@@ -133,4 +133,4 @@ DeepSeekCode 现在已经是一个可以实际使用的 code agent CLI，尤其�
 
 最准确的公开表述是：
 
-> DeepSeekCode is usable today for dogfooding and repository work, with a full-screen TUI, durable runtime, permissioned tools, release binaries, cross-platform entrypoint smoke, a 100-run online dogfood release gate, and initial external disposable-repo write-fixture evidence. The remaining work is hosted IDE/GitHub evidence, Windows/service proof, richer demo evidence, and public package-channel publishing.
+> DeepSeekCode is usable today for dogfooding and repository work, with a full-screen TUI, durable runtime, permissioned tools, release binaries, cross-platform entrypoint smoke, a 100-run online dogfood release gate, initial external disposable-repo write-fixture evidence, and a committed real model-backed README demo SVG. The remaining work is hosted IDE/GitHub evidence, Windows/service proof, optional richer demo media, and public package-channel publishing.

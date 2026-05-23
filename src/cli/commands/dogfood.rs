@@ -5287,7 +5287,7 @@ mod tests {
         let selected = select_live_run_cases(&plan, &requested, 1);
         let api_key_file = "/tmp/deepseek dogfood.key";
         let evidence_out = "/tmp/deepseek live evidence.json";
-        let secret = "sk-dogfood-secret-value";
+        let secret = "dogfood-secret-placeholder";
         let json = render_live_run_plan_json(
             &plan,
             &requested,
@@ -5350,7 +5350,7 @@ mod tests {
         }];
         let api_key_file = "/tmp/deepseek dogfood.key";
         let evidence_out = "/tmp/deepseek-live-evidence.json";
-        let secret = "sk-dogfood-secret-value";
+        let secret = "dogfood-secret-placeholder";
         let case_evidence = vec![live_run_case_evidence_json(
             &selected[0],
             &[appended_record],

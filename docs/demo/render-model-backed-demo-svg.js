@@ -120,11 +120,11 @@ function classify(line) {
   if (/^\+\s/.test(line)) {
     return "add";
   }
-  if (/FAILED|test failed/i.test(line)) {
-    return "fail";
-  }
   if (/\bok\b|validated|Fixed|edited/i.test(line)) {
     return "pass";
+  }
+  if (/FAILED|test failed/i.test(line)) {
+    return "fail";
   }
   return "text";
 }
@@ -211,6 +211,9 @@ test result: ok. 1 passed; 0 failed
     const svg = fs.readFileSync(svgPath, "utf8");
     if (!svg.includes("<svg") || !svg.includes("deepseek exec") || !svg.includes("a + b")) {
       fail("self-test SVG did not include expected demo content");
+    }
+    if (!svg.includes('class="pass">test result: ok. 1 passed; 0 failed')) {
+      fail("self-test SVG did not classify passing test result as pass");
     }
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });

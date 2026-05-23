@@ -11,10 +11,15 @@ DeepSeekCode は DeepSeek-first のターミナル向けコーディングエー
 > GitHub Release のバイナリと検証済み GHCR イメージを公開済みです。bare
 > `deepseek` TUI entrypoint は Linux、macOS、Windows CI で smoke 済みです。
 > npm と Homebrew の公開には registry/tap の資格情報がまだ必要で、より厚い
-> model-backed evidence は継続中です。
+> hosted IDE/GitHub evidence は継続中です。
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
+</p>
+
+<p align="center">
+  <strong>Real model-backed edit and test loop</strong><br>
+  <img src="./docs/demo/deepseek-code-model-demo.svg" alt="DeepSeekCode real model-backed demo: failing Rust test fixed and validated" width="100%">
 </p>
 
 ## 現在できること
@@ -120,9 +125,9 @@ DeepSeekCode は自身の開発に使える段階ですが、Claude Code CLI / C
 - compile-check 済み backend、現行 Linux PTY fd handoff、bounded interactive
   attach、CI-smoked default TUI entrypoint を超える Windows shell-supervisor
   ConPTY/TCP daemon runtime proof。
-- disposable な実外部リポジトリでの live external write-fixture サンプル厚み。
+- hosted GitHub/VS Code workflow evidence と、よりリッチな multi-file external fixture サンプル。
 - npm registry 公開と Homebrew tap。どちらも資格情報が未設定です。
-- 決定的な TUI snapshot を超えた、レビュー済みでコミットされた model-backed README メディア。
+- コミット済み model-backed SVG を超える、任意の polish 済み GIF/MP4 キャプチャ。
 
 現在の状態、次の作業、最終目標は
 [docs/current-status.md](./docs/current-status.md) にまとめています。
@@ -136,10 +141,11 @@ repo-native recorder で animated / static の両方を再生成します。
 docs/demo/record-readme-demo.sh
 ```
 
-`docs/demo/deepseek-code-tui.svg` は静的 snapshot として残しています。公開品質の
-リリースでは、実モデルを使ったループも短い GIF/MP4 として追加します: TUI を開く、
-コーディングリクエストを送る、編集を適用する、テストを走らせる、diff を確認する、
-という流れです。生成したメディアは `docs/demo/` に置きます。
+`docs/demo/deepseek-code-tui.svg` は静的 snapshot として残しています。コミット済みの
+`docs/demo/deepseek-code-model-demo.svg` は verifier を通した実 transcript から生成され、
+失敗する Rust テスト、モデルによる編集、通過する `cargo test`、最終 diff を含みます。
+公開ページ向けには、後から polish 済み GIF/MP4 を追加できます。生成したメディアは
+`docs/demo/` に置きます。
 
 実モデル demo の元証拠は disposable fixture recorder で取得できます。
 

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="540" viewBox="0 0 1180 540" role="img" aria-label="DeepSeekCode model-backed coding demo">
+  <style>
+    .bg { fill: #111820; }
+    .bar { fill: #1d2633; }
+    .title { fill: #d7dde8; font: 600 16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    text { font: 15px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .text { fill: #d7dde8; }
+    .muted { fill: #718096; }
+    .command { fill: #7dd3fc; }
+    .remove { fill: #fca5a5; }
+    .add { fill: #86efac; }
+    .fail { fill: #fb7185; }
+    .pass { fill: #86efac; }
+  </style>
+  <rect class="bg" width="1180" height="540" rx="8"/>
+  <rect class="bar" width="1180" height="44" rx="8"/>
+  <circle cx="24" cy="22" r="6" fill="#ff5f58"/>
+  <circle cx="44" cy="22" r="6" fill="#ffbd2e"/>
+  <circle cx="64" cy="22" r="6" fill="#18c132"/>
+  <text x="92" y="28" class="title">DeepSeekCode model-backed coding demo</text>
+<text x="36" y="66" class="text">DeepSeekCode model-backed coding demo</text>
+<text x="36" y="88" class="muted"></text>
+<text x="36" y="110" class="command">$ cargo test</text>
+<text x="36" y="132" class="fail">test tests::add_returns_sum ... FAILED</text>
+<text x="36" y="154" class="fail">test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s</text>
+<text x="36" y="176" class="muted"></text>
+<text x="36" y="198" class="command">$ deepseek exec --budget 8 &quot;&lt;prompt&gt;&quot;</text>
+<text x="36" y="220" class="text">DeepSeekCode bootstrap</text>
+<text x="36" y="242" class="text">Task: Replace `a - b` with `a + b` in src/lib.rs, validate with cargo test, and summarize the diff.</text>
+<text x="36" y="264" class="text">Profile: rust</text>
+<text x="36" y="286" class="text">Profile hints:</text>
+<text x="36" y="308" class="muted"></text>
+<text x="36" y="330" class="command">$ git diff -- src/lib.rs</text>
+<text x="36" y="352" class="remove">-    a - b</text>
+<text x="36" y="374" class="add">+    a + b</text>
+<text x="36" y="396" class="muted"></text>
+<text x="36" y="418" class="command">$ cargo test</text>
+<text x="36" y="440" class="pass">test tests::add_returns_sum ... ok</text>
+<text x="36" y="462" class="pass">test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s</text>
+<text x="36" y="484" class="pass">test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s</text>
+</svg>

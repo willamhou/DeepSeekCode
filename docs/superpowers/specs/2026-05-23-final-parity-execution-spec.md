@@ -87,7 +87,7 @@ Live execution update from this pass:
 | Core CLI/TUI coding loop | Usable; full tests and 82-case benchmark baseline are green in existing reports | Mostly evidence depth, not missing local primitives | Full test + default benchmark + recent no-stuck dogfood |
 | Model-backed dogfood | Release live gate passed; current live plan reports `105` online runs and `99` successes, with categories `write_validate 29/30`, `recovery 23/25`, `pr_workflow 47/50` | Preserve verified evidence and keep the gate fail-closed in release status | `dogfood report --require-live-runs 100 --require-live-success-rate 90 --require-live-category write_validate:25:90 --require-live-category recovery:25:90 --require-live-category pr_workflow:25:90` |
 | External write fixtures | `3` disposable real repo online write-fixture samples verified for Rust, Python, and JavaScript | Optionally expand to 5 samples and add a multi-file/dependency-backed fixture | `dogfood external-fixture ... --evidence-out` plus `dogfood external-evidence --require-successful-external-fixtures 1` |
-| README real demo | Deterministic SVG exists; recorder/verifier exist | Need reviewed model-backed media artifact, not offline rehearsal | `record-model-backed-demo.sh`, verifier, rendered media committed |
+| README real demo | Committed model-backed SVG exists at `docs/demo/deepseek-code-model-demo.svg`, generated from a verified online transcript | Optional polish: TUI/GIF/MP4 capture for launch pages | `record-model-backed-demo.sh`, verifier, rendered media committed |
 | Windows Shell/PTY proof | Linux PTY fd/proxy path is strong; Windows ConPTY/TCP compile and workflow wiring exist | Need actual Windows runner evidence for ConPTY/TCP shell supervisor and fixture smoke | Windows CI/release job logs and artifact summary |
 | Installed service proof | service-doctor/service-smoke local gates exist | Need clean-machine installed systemd/launchd smoke evidence | `agents service-smoke --installed ... --json` on real install |
 | VS Code workbench | Native panel and headless fixture exist | Need extension-host run with real VS Code CLI and manual GUI fixture evidence | `VSCODE_BIN=... npm --prefix editors/vscode run test:extension-host` plus manual checklist |
@@ -111,8 +111,14 @@ Live execution update from this pass:
      was exposed in chat or terminal output.
 
 3. Capture real demo and external fixture evidence.
-   - Run `docs/demo/record-model-backed-demo.sh` with a repo-external key file.
-   - Verify the transcript and render the media.
+   - Done in this pass: `docs/demo/record-model-backed-demo.sh` captured a real
+     online disposable Rust crate loop: failing `cargo test`, `deepseek exec`,
+     one-line patch, passing `cargo test`, and final diff.
+   - Done in this pass: `docs/demo/verify-model-backed-demo.js` accepted the
+     transcript and `docs/demo/render-model-backed-demo-svg.js` rendered
+     `docs/demo/deepseek-code-model-demo.svg`.
+   - Done in this pass: README English, Chinese, and Japanese pages now embed
+     the model-backed SVG below the deterministic TUI demo.
    - Done in this pass: Rust, Python, and JavaScript disposable repos under
      `/tmp/deepseek-external-fixtures/` each produced online external fixture
      evidence and passed verifier output:
@@ -163,7 +169,7 @@ Do not claim the 5% target while any of these remaining conditions are true:
 ## Next Local Action
 
 The next unblocked local action is to keep the repo green and preserve the
-fail-closed gates while collecting the remaining external evidence: a reviewed
-model-backed README demo, hosted GitHub workflow runs, VS Code CLI evidence,
-Windows ConPTY/TCP CI evidence, optional richer external fixtures, and
-release-channel publish artifacts.
+fail-closed gates while collecting the remaining external evidence: hosted
+GitHub workflow runs, VS Code CLI evidence, Windows ConPTY/TCP CI evidence,
+optional richer external fixtures/demo media, and release-channel publish
+artifacts.

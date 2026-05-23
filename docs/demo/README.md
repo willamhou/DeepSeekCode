@@ -12,9 +12,10 @@ The recorder defaults to `target/debug/deepseek`, then PATH `deepseek`, then
 builds the debug binary. It requires `svg-term` and fails if the animated SVG is
 missing keyframes.
 
-For a launch-quality README, add a short GIF or MP4 that shows the real coding
-loop: open the TUI, submit a request, apply an edit, run tests, and inspect the
-diff.
+The committed `deepseek-code-model-demo.svg` is generated from a verified real
+model-backed transcript. It shows the source-evidence loop: failing `cargo test`,
+`deepseek exec`, a one-line Rust patch, and passing `cargo test`. A polished GIF
+or MP4 can still be added later for launch pages.
 
 ## Model-Backed Demo Capture
 

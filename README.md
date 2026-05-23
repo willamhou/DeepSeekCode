@@ -10,11 +10,16 @@ iterating from the same terminal.
 > Status: usable for dogfooding and repository work. `v0.1.1` has GitHub
 > Release binaries and a verified GHCR image; the bare `deepseek` TUI entrypoint
 > is CI-smoked on Linux, macOS, and Windows. npm and Homebrew publishing still
-> need registry/tap credentials, and deeper model-backed evidence remains in
+> need registry/tap credentials, and hosted IDE/GitHub evidence remains in
 > progress.
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
+</p>
+
+<p align="center">
+  <strong>Real model-backed edit and test loop</strong><br>
+  <img src="./docs/demo/deepseek-code-model-demo.svg" alt="DeepSeekCode real model-backed demo: failing Rust test fixed and validated" width="100%">
 </p>
 
 ## What Works Today
@@ -119,11 +124,10 @@ Claude Code CLI / Codex CLI polish. The largest remaining gaps are:
 - Windows shell-supervisor ConPTY/TCP daemon runtime proof beyond the new
   compile-checked backend, current Linux PTY fd handoff, bounded interactive
   attach, and CI-smoked default TUI entrypoint;
-- deeper model-backed live dogfood and external write-fixture sample evidence
-  across disposable real repositories;
+- hosted GitHub/VS Code workflow evidence and richer multi-file external
+  fixture samples;
 - npm registry publishing and a Homebrew tap, both blocked on credentials;
-- a committed reviewed model-backed README media asset beyond deterministic TUI
-  snapshots.
+- optional polished GIF/MP4 capture beyond the committed model-backed SVG.
 
 See [docs/current-status.md](./docs/current-status.md) for the current Chinese
 status, roadmap, and final target.
@@ -137,9 +141,10 @@ snapshot. Regenerate both README SVG assets with the repo-native recorder:
 docs/demo/record-readme-demo.sh
 ```
 
-`docs/demo/deepseek-code-tui.svg` remains as a static snapshot. For a
-launch-quality release, add a short GIF/MP4 of the real model-backed loop:
-open TUI, submit a coding request, apply an edit, run tests, inspect the diff.
+`docs/demo/deepseek-code-tui.svg` remains as a static snapshot. The committed
+model-backed SVG, `docs/demo/deepseek-code-model-demo.svg`, is generated from a
+verified transcript of a failing Rust test, model edit, passing `cargo test`,
+and final diff. A polished GIF/MP4 can still be added later for launch pages.
 Keep generated media under `docs/demo/`.
 
 To capture source evidence for that model-backed demo, run the disposable

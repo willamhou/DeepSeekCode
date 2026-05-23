@@ -5253,6 +5253,7 @@ fn trim_edit_path_suffix(raw: &str) -> &str {
     for marker in [
         " and validate ",
         " then validate ",
+        ", validate ",
         " and rerun ",
         " then rerun ",
         " and run ",
@@ -7359,6 +7360,17 @@ mod tests {
     fn derive_edit_request_supports_backtick_quoted_segments() {
         let request = derive_edit_request(
             "replace `a - b` with `a + b` in src/lib.rs and validate with cargo test",
+        )
+        .expect("expected edit request");
+        assert_eq!(request.path, "src/lib.rs");
+        assert_eq!(request.find, "a - b");
+        assert_eq!(request.replace, "a + b");
+    }
+
+    #[test]
+    fn derive_edit_request_ignores_comma_before_trailing_validation_clause() {
+        let request = derive_edit_request(
+            "Replace `a - b` with `a + b` in src/lib.rs, validate with cargo test, and summarize the diff.",
         )
         .expect("expected edit request");
         assert_eq!(request.path, "src/lib.rs");
