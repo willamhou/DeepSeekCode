@@ -938,6 +938,7 @@ impl Cli {
             "restore" => Command::Restore(parse_restore_subcommand(args)?),
             "config" => Command::Config(parse_config_args(args)?),
             "doctor" => Command::Doctor(parse_doctor_args(args)?),
+            "quickstart" | "onboarding" => Command::Quickstart(parse_quickstart_args(args)?),
             "serve" => Command::Serve(parse_serve_args(args)?),
             "tui" => Command::Tui(parse_tui_args(args)?),
             "update" => Command::Update(parse_update_args(args)?),
@@ -979,6 +980,7 @@ pub enum Command {
     Restore(RestoreAction),
     Config(ConfigArgs),
     Doctor(DoctorArgs),
+    Quickstart(QuickstartArgs),
     Serve(ServeArgs),
     Tui(TuiArgs),
     Update(UpdateArgs),
@@ -1349,6 +1351,11 @@ pub struct ConfigArgs {
 
 #[derive(Debug, Default)]
 pub struct DoctorArgs {
+    pub json: bool,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct QuickstartArgs {
     pub json: bool,
 }
 
@@ -2472,6 +2479,21 @@ fn parse_doctor_args(args: Vec<String>) -> Result<DoctorArgs, String> {
             other => {
                 return Err(format!(
                     "unknown doctor argument `{other}`; expected --json"
+                ));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_quickstart_args(args: Vec<String>) -> Result<QuickstartArgs, String> {
+    let mut parsed = QuickstartArgs::default();
+    for arg in args {
+        match arg.as_str() {
+            "--json" => parsed.json = true,
+            other => {
+                return Err(format!(
+                    "unknown quickstart argument `{other}`; expected --json"
                 ));
             }
         }
@@ -8194,6 +8216,35 @@ mod tests {
             .expect_err("parse should fail");
 
         assert!(error.contains("unknown doctor argument"));
+    }
+
+    #[test]
+    fn cli_from_argv_routes_quickstart() {
+        let cli = Cli::from_argv(vec!["quickstart".to_string()]).expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Quickstart(args)) => assert!(!args.json),
+            other => panic!("expected Command::Quickstart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_quickstart_json() {
+        let cli = Cli::from_argv(vec!["quickstart".to_string(), "--json".to_string()])
+            .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Quickstart(args)) => assert!(args.json),
+            other => panic!("expected Command::Quickstart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_rejects_unknown_quickstart_arg() {
+        let error = Cli::from_argv(vec!["quickstart".to_string(), "--verbose".to_string()])
+            .expect_err("parse should fail");
+
+        assert!(error.contains("unknown quickstart argument"));
     }
 
     #[test]

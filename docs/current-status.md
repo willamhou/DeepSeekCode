@@ -53,6 +53,8 @@ dogfood 证据。
 - 入口：`deepseek`、`deepseek chat`、`deepseek run`、`deepseek tui`、`deepseek exec`。
 - TUI：Plan / Agent / YOLO 模式、approval modal、command palette、session/thread 视图、
   MCP 管理、setup/onboarding、provider/model picker。
+- 首跑：`deepseek quickstart` 以只读方式展示 workspace config、API key env、TTY 状态、
+  下一步命令和 starter tasks；`--json` 可用于安装验证和自动化排障。
 - REPL：raw-mode line editor、history、session list/load completion、SIGINT cancel、
   `/save`、`/load`、`/sessions`、custom slash commands。
 - Runtime：`.dscode/runtime/` 下持久化 sessions、threads、turns、items、events、
@@ -76,7 +78,8 @@ dogfood 证据。
 1. 等下一次 release matrix 产出 release-binary 级别的 Linux/macOS shell/runtime smoke 证据。
 2. 配置 Homebrew tap 凭据，完成 tap 发布和公开安装验证。
 3. 可选再增加 1-2 个真实外部 repo fixture，扩大 multi-file/多语言样本厚度。
-4. 继续压缩 README、install、release、current-status，让新用户能快速安装、配置、试用、排障。
+4. 继续压缩 README、install、release、current-status；当前推荐首跑入口是
+   `deepseek quickstart`，后续文档只保留必要的安装、配置、试用、排障路径。
 
 ### 更大产品目标
 

@@ -13,6 +13,7 @@ pub mod help;
 pub mod hooks;
 pub mod mcp;
 pub mod pr;
+pub mod quickstart;
 pub mod restore;
 pub mod resume;
 pub mod run;

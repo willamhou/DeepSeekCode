@@ -11,6 +11,7 @@ fn render_help(topics: &[String]) -> String {
         None => global_help().to_string(),
         Some("dogfood") => dogfood_help(topics.get(1).map(String::as_str)).to_string(),
         Some("tui") => tui_help().to_string(),
+        Some("quickstart") | Some("onboarding") => quickstart_help().to_string(),
         Some("run") => run_help().to_string(),
         Some("exec") => exec_help().to_string(),
         Some("benchmark") => benchmark_help().to_string(),
@@ -36,6 +37,7 @@ fn global_help() -> &'static str {
         "  deepseek                         Start the full-screen terminal workbench in a TTY\n",
         "  deepseek chat                    Start the line-oriented coding agent REPL\n",
         "  deepseek tui                     Explicitly start the terminal workbench\n",
+        "  deepseek quickstart              Show first-run readiness and next commands\n",
         "  deepseek run \"<task>\"             Run one coding task and exit\n",
         "  deepseek exec run \"<task>\"        Run a durable one-shot agent task\n",
         "  deepseek task start \"<task>\"       Start an isolated background worktree task\n",
@@ -51,6 +53,7 @@ fn global_help() -> &'static str {
         "  exec                             Durable exec/resume task runner\n",
         "  agents                           Durable runtime, service, and shell supervisor tools\n",
         "  task                             Local background worktree task runner\n",
+        "  quickstart                       First-run readiness, next commands, and starter tasks\n",
         "  mcp                              MCP client/server configuration tools\n",
         "  hooks                            Local hook fixture and verification tools\n",
         "  skills                           Skill discovery and metadata validation\n",
@@ -63,6 +66,7 @@ fn global_help() -> &'static str {
         "  deepseek\n",
         "  deepseek chat\n",
         "  deepseek tui\n",
+        "  deepseek quickstart\n",
         "  deepseek run \"fix the failing tests and summarize the diff\"\n",
         "  deepseek dogfood live-plan --limit 10\n",
         "  deepseek dogfood live-run --limit 3\n",
@@ -70,6 +74,7 @@ fn global_help() -> &'static str {
         "More help:\n",
         "  deepseek help tui\n",
         "  deepseek help run\n",
+        "  deepseek help quickstart\n",
         "  deepseek help benchmark\n",
         "  deepseek help mcp\n",
         "  deepseek help hooks\n",
@@ -78,6 +83,19 @@ fn global_help() -> &'static str {
         "  deepseek help github\n",
         "  deepseek help dogfood\n",
         "  deepseek help dogfood replay-benchmark"
+    )
+}
+
+fn quickstart_help() -> &'static str {
+    concat!(
+        "DeepSeekCode quickstart\n",
+        "\n",
+        "Usage:\n",
+        "  deepseek quickstart [--json]\n",
+        "\n",
+        "Prints a side-effect-free first-run checklist: workspace config state, API key\n",
+        "env readiness, terminal mode, next commands, and starter coding tasks. Secret\n",
+        "values are never printed."
     )
 }
 
