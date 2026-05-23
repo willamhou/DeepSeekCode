@@ -35,5 +35,5 @@ service surface look behind the actual protocol.
 ## Remaining
 
 This closes the public template accuracy gap. It does not add new PTY behavior
-or broaden platform proof beyond the existing Unix/Linux native-supervisor
-coverage.
+or provide Windows runtime proof beyond the existing Linux native-supervisor
+coverage and the later compile-checked ConPTY backend.

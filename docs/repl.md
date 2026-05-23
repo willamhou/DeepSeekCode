@@ -34,6 +34,7 @@ Explicit aliases are also supported:
 | `/revert_turn <id\|last> [--apply]` | Dry-run or apply a rollback snapshot by snapshot id, bound runtime turn id, or `last`; dry-run is the default |
 | `/save <name>` | Save the session to `.dscode/sessions/<name>.json` |
 | `/load <name>` | Restore a saved session (replaces current state) |
+| `/sessions [prefix]` | List saved session names, optionally filtered by prefix |
 | `/todos` | Show the current todo list (read-only inspection) |
 | `/cost` | Show prompt / completion / total token counters |
 | `/mcp/<server>/<prompt> [json]` | Load an MCP prompt and submit it as the next user turn |
@@ -52,6 +53,12 @@ Custom commands are prompt-backed markdown files for repeated workflows. Store p
 override project commands with the same name.
 The local TUI uses the same command files from both the composer and command
 palette.
+Skill discovery and validation use the companion CLI:
+
+```text
+deepseek skills list
+deepseek skills validate --strict
+```
 
 Examples:
 
@@ -84,6 +91,21 @@ DeepseekCode can load those prompts directly from the REPL:
 
 The prompt result is wrapped with source metadata and submitted as the next user turn. JSON
 arguments are optional, but when present they must be a JSON object.
+
+## Line Editing
+
+In a real TTY, the REPL uses a small built-in raw-mode line editor:
+
+- Up / Down browse submitted prompt and slash-command history.
+- Down restores the draft that was present before history browsing.
+- Left / Right, Home / End, Backspace, Delete, Ctrl+A, Ctrl+E, Ctrl+U,
+  Ctrl+K, and Ctrl+W handle local line editing.
+- Tab completes built-in slash commands and saved session names after `/load `.
+  Ambiguous matches are printed above the prompt without submitting the line.
+- Ctrl+D on an empty line and Ctrl+C at the prompt exit the REPL.
+
+The non-interactive test path still uses a plain buffered reader, so scripted
+tests and fixtures can feed `/help\n/quit\n` without requiring a real terminal.
 
 ## Workspace Instructions
 
@@ -144,6 +166,8 @@ added back as advisory hook observations.
 `shell_env` runs immediately before `run_shell`, `exec_shell`, and `task_shell_start` tool
 execution. Its stdout is parsed as `KEY=VALUE` or `export KEY=VALUE` lines and injected into that
 one shell process; only applied key names are reported back to the model, not values.
+Use `deepseek hooks fixture-smoke --json` to run a local no-network verification of the
+session/prompt/pre-tool/post-tool lifecycle against a real `list_files` call.
 
 ## Cross-turn context
 
@@ -205,10 +229,9 @@ The runtime integration contract is tracked separately in
 
 ## Current limitations
 
-- No up/down arrow history. Use `rlwrap deepseek` for a quick
-  workaround.
-- Ctrl+C does not interrupt an in-flight LLM call; let the curl call
-  finish or `Ctrl+\` to force-kill.
+- Ctrl+C cancels a running turn cooperatively while the model stream or tool
+  path polls the agent cancellation flag. Non-cooperative blocking tools can
+  still require `Ctrl+\` to force-kill the process.
 - `/save` overwrites without confirmation.
 - `saved_at` uses an epoch-second placeholder rather than RFC3339
   (no chrono dependency in v1).

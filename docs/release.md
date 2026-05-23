@@ -60,6 +60,7 @@ docs/demo/render-model-backed-demo-svg.js --self-test
 The live gate blocks release when new dogfood failures, stuck runs, or manual interventions appear after the previous benchmark snapshot.
 Failed benchmark gates do not advance the saved benchmark history baseline. After triaging known live failures, use
 `deepseek benchmark --accept-live-baseline` only to intentionally accept the current dogfood snapshot; do not use it for normal release checks.
+`deepseek benchmark --category <name>` and repeatable `--case <name>` are for targeted evidence reports only; filtered runs skip history writes and full trend/live enforcement, so they do not replace the release benchmark.
 
 ## Dogfood Replay
 
@@ -75,19 +76,46 @@ If a replay exposes a new failure, fix the root cause before publishing. Do not 
 
 For external write-fixture evidence, use a disposable git repository outside
 this checkout. Always dry-run first; the real run copies the repository to an
-isolated workdir and records an `external-write-fixture` dogfood row:
+isolated workdir and records an `external-write-fixture` dogfood row. Real
+external fixture evidence now fails closed unless the configured model transport
+is online/model-backed. `--allow-offline` exists only for rehearsal and does not
+satisfy release gates:
 
 ```bash
 deepseek dogfood external-fixture --workdir /tmp/disposable-repo --dry-run \
   'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
 deepseek dogfood external-fixture --workdir /tmp/disposable-repo --benchmark-gate \
+  --evidence-out .dscode/dogfood/external-fixture-evidence.json \
   'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
 deepseek dogfood report --limit 10
 deepseek dogfood live-plan --limit 10
-deepseek dogfood live-run --limit 3
+deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 3 --json
+deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 3
 # Add --execute only when you intend to spend online model calls:
-deepseek dogfood live-run --limit 3 --execute
+deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 3 \
+  --evidence-out .dscode/dogfood/live-evidence.json --execute
+deepseek dogfood live-evidence --file .dscode/dogfood/live-evidence.json \
+  --out .dscode/dogfood/live-evidence-verification.json \
+  --require-benchmark-gate --require-report-gate
 ```
+
+The `live-plan` and `live-run --json` output include `post_run_report_command`;
+run that command after the online batch to verify the model-backed rows and
+category thresholds. With `--evidence-out`, the online batch also writes a
+`deepseek.dogfood.live_run_evidence.v1` JSON summary covering before/after live
+counts, appended model-backed rows, per-case outcomes, and benchmark gate result
+without storing the API key value. The summary also binds the evidence to the
+ledger file with an `fnv1a64` fingerprint. `dogfood live-evidence` verifies that
+summary as a fail-closed release step; `--require-report-gate` validates the
+structured `evidence_gate` thresholds against the current ledger instead of
+executing a shell command from the JSON file, rechecks the ledger fingerprint,
+and verifies that each appended case evidence row can be matched back to the
+ledger by timestamp, outcome, transport, and category.
+Use `--out` to persist the verification JSON for release evidence upload.
+For external fixtures, `--evidence-out` writes
+`deepseek.dogfood.external_fixture_evidence.v1` with the source workdir, appended
+external-fixture ledger row(s), release-evidence readiness boolean, and the same
+ledger fingerprint binding used by live-run evidence.
 
 For a release-readiness evidence gate, make the report fail closed when the
 ledger does not have enough live proof:
@@ -123,6 +151,9 @@ cargo build --release
 ./target/release/deepseek agents service-doctor --kind all --out target/service-smoke --bin ./target/release/deepseek --workdir "$PWD" --json
 mkdir -p /tmp/dsc-smk
 ./target/release/deepseek agents service-smoke --bin ./target/release/deepseek --workdir /tmp/dsc-smk --json
+./target/release/deepseek agents shell-fixture-smoke --json
+./target/release/deepseek task fixture-smoke --json
+./target/release/deepseek github fixture-smoke --json
 ./target/release/deepseek tui --entrypoint-smoke --smoke-bin ./target/release/deepseek
 test -f target/service-smoke/SERVICES.md
 ./target/release/deepseek agents rlm-status --json
@@ -250,12 +281,14 @@ the strict gate:
 deepseek update publish-status \
   --dist dist-assets \
   --npm-dist npm-dist \
+  --live-evidence-verification .dscode/dogfood/live-evidence-verification.json \
   --strict
 ```
 
 `--strict` fails when `NPM_TOKEN`/`NODE_AUTH_TOKEN`,
 `HOMEBREW_TAP_REPOSITORY`, `HOMEBREW_TAP_TOKEN`, platform release archives,
-non-placeholder `.sha256` files, or platform npm package tarballs are missing.
+non-placeholder `.sha256` files, platform npm package tarballs, or verified
+online dogfood live evidence are missing.
 The text and JSON output also include a `public_install` audit for source
 checkout, GitHub Release, npm, Homebrew, GHCR, and Cargo registry policy. Treat
 `ready_to_publish` as local readiness only: do not advertise npm, Homebrew,
@@ -346,11 +379,27 @@ Release notes should include:
 - `release.json` from `deepseek update package`
 - `SERVICES.md`, generated service-template smoke output including
   `target/service-smoke/SERVICES.md`, `deepseek agents service-doctor --json`
-  output showing zero blockers for rendered templates, `deepseek agents
-  service-smoke --json` output showing runtime startup plus shell-supervisor
-  start/wait/attach/replay proof plus Linux PTY stdin/resize/cancel proof, and
+  output showing zero blockers for rendered templates and a passing
+  `template_command_vectors` check proving generated systemd `ExecStart` plus
+  launchd `ProgramArguments` parse to the expected argv/workdir,
+  `deepseek agents service-doctor --installed --json` output from any clean
+  machine where the generated user services were actually installed, showing
+  the four systemd units or four launchd labels are loaded/running,
+  `deepseek agents service-smoke --installed --json` output from that same
+  clean machine showing the installed runtime `/health` and shell-supervisor
+  control plane respond without stopping service-manager-owned processes,
+  `deepseek agents service-smoke --json` output showing runtime startup plus
+  shell-supervisor start/wait/attach/replay proof plus Linux PTY
+  stdin/resize/cancel proof, and
   `deepseek agents rlm-status --json` output showing the live RLM service
   lifecycle surface
+- `deepseek task fixture-smoke --json` output showing the background worktree
+  runner can create an isolated task worktree, list the durable record, dry-run
+  merge, apply tracked/untracked changes back to the original repo, reject a
+  task, and clean up the temporary repo
+- `deepseek github fixture-smoke --json` output showing GitHub Action event
+  routing, write-mode/fork guard behavior, fixture branch push verification,
+  and background-task worktree/record creation
 - `npm test` output from `npm/`
 - root and platform npm package tarball names
 - Docker image tag and `docker run ... version` output

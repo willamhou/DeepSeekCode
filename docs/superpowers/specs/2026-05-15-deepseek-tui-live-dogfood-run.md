@@ -30,12 +30,25 @@ Claude/Codex/DeepSeek-TUI gap.
   - `--target-live-runs <n>`;
   - `--target-live-success-rate <percent>`;
   - repeated `--target-category <category>:<min-runs>:<min-success-percent>`.
+- Executed batches can use `--evidence-out <path>` to write
+  `deepseek.dogfood.live_run_evidence.v1` JSON with before/after ledger live
+  counts, appended model-backed rows, per-case outcomes, benchmark gate status,
+  the post-run report gate command, and a ledger file `fnv1a64` fingerprint.
+- `dogfood live-evidence --file <path>` verifies that evidence file and defaults
+  to completed, online, and at least one appended model-backed ledger row.
+- `dogfood live-evidence --require-report-gate` also verifies the evidence file's
+  structured live gate against the current ledger, rechecks the ledger
+  fingerprint, and matches appended case rows back to ledger records.
+- `dogfood live-evidence --out <path>` persists the verification JSON for
+  release evidence upload.
 
 ## Verification
 
 - Parser coverage for `dogfood live-run`.
 - Unit coverage for category filtering, balanced selection, and total run
   limiting.
+- Unit coverage for the batch evidence summary JSON and file writer.
+- Parser/unit coverage for the batch evidence verifier.
 - Command smoke:
   - `deepseek dogfood live-run --limit 3`
   - `deepseek dogfood live-run --limit 2 --category recovery`

@@ -20,8 +20,16 @@ commands.
 - Validate the selected binary and workspace without starting services.
 - Validate that the generated template set includes runtime, agents,
   diagnostics, and shell-supervisor services for the selected service manager.
+- Parse generated systemd `ExecStart`/`WorkingDirectory` and launchd
+  `ProgramArguments`/`WorkingDirectory` back into exact argv/workdir vectors
+  and compare them to the expected runtime, agents daemon, diagnostics watch,
+  and shell-supervisor commands.
 - When `--out` is supplied, verify that the on-disk service files and
   `SERVICES.md` exist and match the current render output.
+- Add `--installed` as a read-only installed service gate: systemd checks the
+  four user units with `systemctl --user show`; launchd checks the four labels
+  with `launchctl print gui/<uid>/<label>`. Missing, inactive, failed, or
+  disabled installed services are blockers.
 - Report blockers and warnings separately. Missing platform service managers
   are warnings; stale or missing explicit `--out` files are blockers.
 - Update service and release docs plus the parity plan.
@@ -31,6 +39,9 @@ commands.
 - `cli_from_argv_routes_agents_service_doctor`
 - `service_doctor_reports_generated_service_health`
 - `service_doctor_detects_stale_generated_template`
+- `service_template_command_vectors_handle_quoted_paths`
+- `service_doctor_parses_systemd_installed_status`
+- `service_doctor_parses_launchd_installed_status`
 - `cargo test service_doctor --lib`
 - `cargo fmt --check`
 - `cargo check`

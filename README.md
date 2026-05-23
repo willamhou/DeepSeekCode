@@ -116,8 +116,9 @@ git.
 DeepSeekCode is close enough to use as its own coding CLI, but it is not yet at
 Claude Code CLI / Codex CLI polish. The largest remaining gaps are:
 
-- byte-level PTY proxying and Windows shell-supervisor ConPTY proof beyond the
-  current bounded interactive attach and CI-smoked default TUI entrypoint;
+- Windows shell-supervisor ConPTY/TCP daemon runtime proof beyond the new
+  compile-checked backend, current Linux PTY fd handoff, bounded interactive
+  attach, and CI-smoked default TUI entrypoint;
 - deeper model-backed live dogfood and external write-fixture sample evidence
   across disposable real repositories;
 - npm registry publishing and a Homebrew tap, both blocked on credentials;
@@ -178,7 +179,9 @@ For release readiness:
 
 ```bash
 deepseek update publish-status
-deepseek update publish-status --dist dist-assets --npm-dist npm-dist --strict
+deepseek update publish-status --dist dist-assets --npm-dist npm-dist \
+  --live-evidence-verification .dscode/dogfood/live-evidence-verification.json \
+  --strict
 deepseek update publish-status --json
 deepseek agents service-doctor --kind all --workdir "$PWD" --bin "$(command -v deepseek)" --json
 mkdir -p /tmp/dsc-smk
@@ -206,7 +209,11 @@ deepseek dogfood external-fixture --workdir /tmp/disposable-repo --benchmark-gat
 deepseek dogfood report --limit 10
 deepseek dogfood live-plan --limit 10
 deepseek dogfood live-run --limit 3
-deepseek dogfood live-run --limit 3 --execute
+deepseek dogfood live-run --limit 3 --json
+deepseek dogfood live-run --limit 3 --evidence-out .dscode/dogfood/live-evidence.json --execute
+deepseek dogfood live-evidence --file .dscode/dogfood/live-evidence.json \
+  --out .dscode/dogfood/live-evidence-verification.json \
+  --require-benchmark-gate --require-report-gate
 deepseek dogfood report --limit 20 \
   --require-min-runs 100 \
   --require-success-rate 90 \
@@ -221,6 +228,10 @@ deepseek dogfood report --limit 20 \
   --require-live-category recovery:25:90 \
   --require-live-category pr_workflow:25:90
 ```
+
+`live-evidence --require-report-gate` verifies the structured gate, rechecks the
+ledger fingerprint from the evidence file, and matches appended case evidence
+back to current ledger rows.
 
 ## Documentation
 

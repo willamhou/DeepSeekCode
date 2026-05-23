@@ -2,7 +2,7 @@
 
 Date: 2026-05-14
 
-Status: completed first Linux slice
+Status: completed first Linux slice; Windows backend and TCP daemon smoke wiring landed
 
 ## Context
 
@@ -39,6 +39,15 @@ instead of the short-lived command caller.
 - The owner-exit integration test now resizes a live native PTY, sends stdin
   from a fresh tool client, and asserts the child process observes `33 101` via
   `stty size`.
+- Windows shell-supervisor now has a first daemon/client IPC slice: the daemon
+  binds a loopback TCP listener, writes `tcp://127.0.0.1:<port>` to
+  `.dscode/shell-supervisor/supervisor.tcp`, stores that endpoint in the
+  supervisor manifest, and reuses the newline JSON protocol for CLI control and
+  `attach_stream`. Windows `byte_stream/raw_proxy` and Linux-only `pty_fd`
+  remain unsupported.
+- CI now wires a Windows TCP daemon/client unit smoke, real binary
+  `agents shell-fixture-smoke --json`, and targeted Windows ConPTY start/resize
+  smoke. The actual Windows runner result is still required evidence.
 
 ## Verification
 
@@ -49,6 +58,13 @@ instead of the short-lived command caller.
 - `cargo test exec_shell_replay_reads_terminal_event_log_by_cursor --lib`
 - `cargo test exec_shell_resize_updates_running_tty_geometry --lib`
 - `cargo test --test shell_supervisor_owner_exit`
+- `cargo test exec_shell_supervisor_status_treats_tcp_endpoint_as_ready --lib`
+- `cargo test shell_supervisor_tcp_endpoint_parser_accepts_loopback_only --lib`
+- Windows runner:
+  `cargo test shell_supervisor_windows_tcp_daemon_client_smoke --lib -- --nocapture`
+- Windows runner:
+  `deepseek agents shell-fixture-smoke --json`
+- `cargo check --target x86_64-pc-windows-gnu --all-targets`
 - `cargo fmt --check`
 - `cargo check`
 - `git diff --check`
@@ -61,4 +77,5 @@ This is not the final PTY parity endpoint. Still open:
   restarted controller CLIs;
 - deeper native PTY takeover polish beyond the covered HTTP SSE, ACP
   subscribe, and MCP progress/replay terminal event surfaces;
-- Windows ConPTY.
+- Windows CI runtime result for the wired ConPTY backend and loopback TCP
+  daemon/client smoke gates.

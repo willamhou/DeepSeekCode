@@ -10,7 +10,7 @@
 
 Anthropic 的 `claude` CLI 是持久化 REPL：进入后保持运行，多轮对话共享上下文，每条用户消息触发完整推理 + 工具调用流，slash 命令处理本地操作（save/load/clear/cost）。
 
-本 spec 描述把 `dscode chat` 升级为 REPL 模式 — 是 Claude Code-like 体验的第一阶段，不含流式 token 和上下箭头（v2 候选）。
+本 spec 描述把 `dscode chat` 升级为 REPL 模式 — 是 Claude Code-like 体验的第一阶段。2026-05-23 已补上内置上下箭头历史、Tab 补全、`/sessions` 列表和 cooperative Ctrl+C turn cancellation；流式 token 仍属于后续切片。
 
 ## 目标
 
@@ -24,9 +24,9 @@ Anthropic 的 `claude` CLI 是持久化 REPL：进入后保持运行，多轮对
 ## 非目标 (v1)
 
 - 流式 token 输出（v2，需 SSE 解析）
-- 上下箭头历史 / readline（v2，需 rustyline 或 raw mode 自实现）
-- Ctrl+C 优雅中断（v2，需 signal handler + curl 超时联动）
-- `/sessions` 列表 / `/load` 命令补全
+- 上下箭头历史 / readline（2026-05-23 已通过内置 raw-mode line editor 实现）
+- Ctrl+C 优雅中断（2026-05-23 已接入 REPL SIGINT -> AgentLoop cancel_check；长阻塞工具仍需各自轮询）
+- `/sessions` 列表 / `/load` 命令补全（2026-05-23 已通过 `/sessions [prefix]` 与 raw-mode Tab completion 实现）
 - session 自动保存
 - 流式 LLM 工具调用展示（每个 step 的输出在 step 完成后才打）
 
@@ -324,8 +324,8 @@ prompt: 12345, completion: 6789, total: 19134
 | 风险 | 缓解 |
 |---|---|
 | 流式 token 输出不在 v1 → 单次 chat 体验仍是"卡住等" | 文档明示是非流式；后续 phase 加 SSE |
-| 上下箭头历史无 → 不像 Claude Code | 文档明示 v2 候选；`rlwrap dscode chat` 可临时凑合 |
-| Ctrl+C 中断 → 当前会让 LLM 调用阻塞到 curl 超时 | 已知 v1 限制；用户可 Ctrl+\ 强 kill |
+| 上下箭头历史无 → 不像 Claude Code | 2026-05-23 已通过内置 raw-mode line editor 补齐 Up/Down history、draft restore 和基础光标编辑 |
+| Ctrl+C 中断 → 当前会让 LLM 调用阻塞到 curl 超时 | 2026-05-23 已接入 REPL SIGINT -> `AgentLoopOptions.cancel_check`；模型 stream 和 cancel-aware tools 可协作退出，非协作阻塞工具仍可 Ctrl+\ 强 kill |
 | `/save` 直接覆盖既有文件 | v1 接受；v2 加 `--no-clobber` |
 | Transcript 渲染 token 爆炸 | 复用 `summarize_for_kind` 的 per-kind 裁剪 |
 | 非 TTY stdin（CI 调用 `dscode chat`） | 启动时 `IsTerminal` 检查，非 TTY → reject |
@@ -343,9 +343,7 @@ prompt: 12345, completion: 6789, total: 19134
 ## 后续 (v2 候选)
 
 - 流式 token 输出 (SSE 解析 DeepSeek 响应)
-- 上下箭头历史（rustyline 或自写 raw mode）
-- Ctrl+C 优雅中断（signal-hook + curl --max-time 联动）
-- `/sessions` 列表 + `/load` 自动补全
+- Ctrl+C 长阻塞工具补齐（REPL turn cancel 已接入；后续只针对不轮询 cancel_check 的工具补局部取消）
 - session 自动保存（每 N 轮 / 退出前）
 - `/replay <name>` 把 session 当参考材料但不接管状态
 - 跨命令共享 history（`dscode run` 后 `dscode chat` 拾起）

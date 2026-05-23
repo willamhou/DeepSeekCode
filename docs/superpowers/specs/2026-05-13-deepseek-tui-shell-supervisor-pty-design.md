@@ -9,9 +9,10 @@ Status: designed
 DeepSeekCode now supports DeepSeek-TUI-compatible shell names, durable shell
 manifests/logs, detached status refresh, detached cancel, Unix FIFO stdin,
 `tty=true` execution through `script`, initial PTY geometry, durable log replay,
-and owner/process-group metadata. The remaining shell gap is not another
-manifest field. It is a real supervisor that owns PTY file descriptors after the
-starting CLI process exits.
+owner/process-group metadata, Linux native-supervisor PTY ownership, and a local
+SCM_RIGHTS `pty_fd` handoff slice. The remaining shell gap is no longer another
+manifest field. It is hardening that supervisor path across lifecycle edges and
+proving equivalent behavior on other platforms.
 
 The current `script` backend is useful for commands that require a TTY, but it
 does not expose the PTY master fd to DeepSeekCode. That means DeepSeekCode
@@ -91,9 +92,17 @@ Initial methods:
 - `cancel`
 - `shutdown`
 
-Windows support should be a later ConPTY-specific slice. Until then, Windows
-must keep the existing non-supervised fallback behavior and return explicit
-unsupported diagnostics for supervised PTY requests.
+Windows native PTY support is now a ConPTY-specific backend slice using
+`portable-pty` for supervisor-started `native-supervisor` jobs. The current
+Windows implementation covers start, output event logging, stdin, wait,
+terminal replay/attach, and resize through the same in-process protocol helpers.
+The long-running daemon/client IPC now has a Windows first slice: the supervisor
+binds a loopback TCP listener, writes `tcp://127.0.0.1:<port>` to
+`.dscode/shell-supervisor/supervisor.tcp`, stores the same endpoint in the
+manifest, and reuses the newline-delimited JSON protocol. Windows
+`attach_stream` can use that stream path. `byte_stream`/`raw_proxy` and
+Linux-only `pty_fd` remain unsupported on Windows; named pipe IPC remains a
+future option if loopback TCP is not sufficient for installed service use.
 
 ### Terminal Event Log
 
@@ -108,9 +117,10 @@ PTY sessions. Each event has a monotonic `seq`, timestamp, and kind:
 - `exit`
 - `cancelled`
 
-`output` payloads should store raw PTY bytes as base64 plus a display-safe
-preview. `exec_shell_replay` can keep its current stdout/stderr byte mode for
-old jobs and add `stream=terminal` for supervisor jobs.
+Native-supervisor `output` and `input` payloads now store optional raw PTY bytes
+as `raw_base64` plus a display-safe preview. `exec_shell_replay` can keep its
+current stdout/stderr byte mode for old jobs and add `stream=terminal` for
+supervisor jobs.
 
 ### Attach Contract
 
@@ -152,8 +162,39 @@ Attach is an API-level terminal stream, not a full UI widget:
 3. Replay and attach:
    - `stream=terminal`
    - event cursor support
+   - native-supervisor output/input event records persist `raw_base64`
+   - supervisor `attach` JSON responses include structured
+     `terminal_raw_outputs` for output-event bytes
+   - supervisor `attach_stream` emits newline-JSON attach frames on one Unix
+     socket connection for follow clients
+   - supervisor `byte_stream` emits newline-JSON raw-output byte frames on one
+     Unix socket connection, with optional initial stdin/resize control and
+     later in-stream stdin/resize/close/detach control frames
+   - supervisor `byte_stream raw_proxy=true` switches the same socket to raw
+     bytes after the initial JSON request, forwarding socket bytes to PTY stdin
+     and writing decoded PTY output bytes back without JSON framing
+   - supervisor `pty_fd` on Linux sends a duplicated native-supervisor PTY
+     master fd to a local Unix client with SCM_RIGHTS, pauses the replay reader
+     during the lease, records `fd_handoff` lifecycle events, and resumes
+     ordinary supervisor stdin/resize/replay control after the client detaches
+   - `exec_shell_attach` includes output-event `terminal_raw_base64` as a
+     compatible text-summary section; human `deepseek agents shell attach
+     --follow` and `--interactive` decode raw output bytes before falling back
+     to text summaries
+   - `deepseek agents shell attach --raw` emits decoded PTY output bytes for
+     one-shot or follow-mode script consumers
+   - `deepseek agents shell proxy <task_id>` wraps `byte_stream raw_proxy=true`
+     for human operators: local raw mode, initial terminal-size sync, key/paste
+     byte forwarding, resize forwarding through supervisor `resize`, direct PTY
+     byte output, and `Ctrl-]` detach
+   - `deepseek agents shell fd-proxy <task_id>` wraps Linux `pty_fd` handoff for
+     local raw-mode PTY takeover through the received master fd; Ctrl-D EOF is
+     covered, Linux PTY master `EIO` after slave close exits cleanly, and
+     local SIGWINCH resize updates the handed-off PTY size; Ctrl-C is covered
+     as target PTY SIGINT delivery; killed-client lease release is covered
    - MCP/ACP schema exposure landed through ACP `session/shell/subscribe` and
-     MCP `exec_shell_terminal_events`
+     MCP `exec_shell_terminal_events`; HTTP SSE emits `raw_base64`, while ACP
+     and MCP progress metadata emit `rawBase64`
 4. Resize:
    - `exec_shell_resize`
    - `TIOCSWINSZ`
@@ -180,7 +221,15 @@ Attach is an API-level terminal stream, not a full UI widget:
    - systemd/launchd templates can supervise the shell supervisor alongside
      runtime and diagnostics services
 8. Windows ConPTY:
-   - separate platform design and tests
+   - `native-supervisor` can now spawn Windows ConPTY jobs through
+     `portable-pty`
+   - shell-supervisor daemon/client IPC can now use a workspace-local loopback
+     TCP endpoint recorded in `.dscode/shell-supervisor/supervisor.tcp`
+   - Windows target compile gate passes with
+     `cargo check --target x86_64-pc-windows-gnu --all-targets`
+   - CI has targeted Windows endpoint/status, TCP daemon/client, real binary
+     shell-fixture, and start/resize smoke commands; the actual runner evidence
+     still needs to be collected
 
 ## Verification Plan
 
@@ -189,7 +238,28 @@ Future implementation should add these gates:
 - `cargo test exec_shell_supervisor_protocol --lib`
 - `cargo test exec_shell_supervisor_replay_terminal_events --lib`
 - `cargo test exec_shell_supervisor_resize_updates_tty_size --lib`
+- `cargo test exec_shell_replay_reads_terminal_event_log_by_cursor --lib`
+- `cargo test agents_shell --lib`
+- `cargo test agents_shell_cli_args_build_protocol_requests --lib`
+- `cargo test agents_shell_cli_controls_supervised_native_pty --test shell_supervisor_owner_exit`
+- `cargo test terminal_event_log_records_raw_base64_for_byte_replay --lib`
+- `cargo test mcp_tools_call_shell_terminal_events_emits_progress_notifications --lib`
+- `cargo test acp_session_shell_subscribe_pushes_terminal_events --lib`
+- `cargo test shell_terminal_event_stream_endpoint_replays_sse_frames --lib`
 - `cargo test --test shell_supervisor_owner_exit`
+- `cargo check --target x86_64-pc-windows-gnu --all-targets`
+- Windows runner:
+  `cargo test exec_shell_supervisor_status_treats_tcp_endpoint_as_ready --lib -- --nocapture`
+- Windows runner:
+  `cargo test shell_supervisor_tcp_endpoint_parser_accepts_loopback_only --lib -- --nocapture`
+- Windows runner:
+  `cargo test shell_supervisor_windows_tcp_daemon_client_smoke --lib -- --nocapture`
+- Windows runner:
+  `cargo test shell_supervisor_protocol_tty_start_records_native_pty_events --lib -- --nocapture`
+- Windows runner:
+  `cargo test shell_supervisor_protocol_native_pty_resize_records_event --lib -- --nocapture`
+- Windows runner:
+  `deepseek agents shell-fixture-smoke --json`
 - `cargo test serve --lib`
 - `cargo fmt --check`
 - `cargo check`
@@ -198,12 +268,30 @@ Future implementation should add these gates:
 ## Current Decision
 
 Do not add fake live resize or fake attach on top of the `script` backend.
-The supervisor protocol skeleton, terminal event replay/attach plumbing, and
-the first Linux `native-supervisor` PTY backend have landed. Normal
+The supervisor protocol skeleton, terminal event replay/attach plumbing, the
+first Linux `native-supervisor` PTY backend, and the Windows ConPTY
+`native-supervisor` backend have landed. Normal
 `exec_shell tty=true` still uses `script`; shell-supervisor `tty=true` starts
 own a native PTY master, write `terminal-events.jsonl`, and support live
-`TIOCSWINSZ` resize through the in-process supervisor. HTTP shell terminal SSE,
+Linux `TIOCSWINSZ` or Windows ConPTY resize through the in-process supervisor.
+The Windows daemon/client path now has a loopback TCP endpoint first slice using
+the same newline JSON protocol. CI now wires TCP daemon/client and real binary
+shell-fixture smoke; the actual Windows runner result is still needed before
+closing platform parity.
+HTTP shell terminal SSE,
 ACP `session/shell/subscribe`, and MCP `exec_shell_terminal_events` progress
-notifications now cover protocol-level terminal event consumption. Remaining
-hard slices are actual installed systemd/launchd service smoke evidence and
-Windows ConPTY.
+notifications now cover protocol-level terminal event consumption, including
+optional base64 raw PTY bytes for output/input events. Human follow and
+interactive attach now consume those raw output bytes when available, and
+`--raw` exposes them directly for scripts. Supervisor `attach` now exposes a
+structured `terminal_raw_outputs` field, `attach_stream` provides repeated
+attach frames over one socket connection for follow clients, and `byte_stream`
+adds duplex stdin/resize control frames plus raw-output byte frames for
+scriptable PTY consumers. `raw_proxy=true` now provides a raw socket-byte proxy
+slice over the same event-log attach path, `deepseek agents shell proxy` adds a
+human raw-mode wrapper around it, and Linux `pty_fd` hands the native PTY master
+fd to a local Unix client with SCM_RIGHTS. Ctrl-C, Ctrl-D EOF, SIGWINCH resize,
+and killed-client release now have coverage through the CLI fd-proxy path.
+Remaining hard slices are actual installed systemd/launchd service smoke
+evidence and the actual Windows CI runner result for the wired ConPTY/TCP
+shell-supervisor gates.

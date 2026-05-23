@@ -26,6 +26,14 @@ needs to fail closed when live samples are too thin.
 - New dogfood ledger rows include `model_transport` as `online` only when the
   configured non-offline API key environment variable is present; legacy rows
   read as `unknown` and do not count toward live gates.
+- `deepseek dogfood external-fixture` now also fails closed before real
+  execution when the current model transport is not `online`. `--dry-run`
+  remains available for planning, and `--allow-offline` is explicit
+  rehearsal-only behavior that does not satisfy release evidence gates.
+- `dogfood external-fixture --evidence-out <path>` writes
+  `deepseek.dogfood.external_fixture_evidence.v1` with the source workdir,
+  appended external-fixture ledger row(s), model transport, release-evidence
+  readiness, and a ledger `fnv1a64` fingerprint for artifact upload.
 - The release docs, install docs, and multilingual README surface the strict
   readiness command used for the 100 model-backed-run / overall 90% /
   25-per-category / 90% success-rate dogfood target.
@@ -35,6 +43,8 @@ needs to fail closed when live samples are too thin.
 - `cargo test parses_dogfood_report_subcommand --lib`
 - `cargo test dogfood_report_rejects_invalid_evidence_gate --lib`
 - `cargo test report_requirements_pass_with_external_and_category_evidence --lib`
+- `cargo test external_fixture_requires_online_transport_unless_rehearsal --lib`
+- `cargo test external_fixture_evidence_summary_records_release_ready_row --lib`
 - `cargo test report_requirements_fail_on_missing_live_evidence --lib`
 - `cargo test dogfood --lib -- --test-threads=1`
 - `cargo fmt --check`

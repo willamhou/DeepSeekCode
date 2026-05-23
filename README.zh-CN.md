@@ -112,8 +112,9 @@ deepseek tui --runtime-url http://127.0.0.1:13000
 DeepSeekCode 已经可以直接拿来写自己的代码，但还没有达到 Claude Code CLI /
 Codex CLI 的产品成熟度。最大差距集中在：
 
-- 当前 bounded interactive attach 和 CI 已验证默认 TUI 入口之外，字节级 PTY
-  proxy 与 Windows shell-supervisor ConPTY 证明；
+- 新增 compile-checked backend、当前 Linux PTY fd handoff、bounded interactive
+  attach 和 CI 已验证默认 TUI 入口之外，Windows shell-supervisor ConPTY/TCP
+  daemon 运行证明；
 - 真实 disposable 外部仓库上更厚的 live write-fixture 样本证据；
 - npm registry 发布和 Homebrew tap，这两项还缺少对应凭据；
 - 超出确定性 TUI snapshot、已 review 并提交的真实 model-backed README 媒体素材。

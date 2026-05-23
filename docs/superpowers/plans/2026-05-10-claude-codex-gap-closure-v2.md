@@ -1,7 +1,7 @@
 # Claude/Codex Gap Closure Plan V2
 
-最后更新：`2026-05-10`
-状态：`Phase 12A baseline refreshed; Phase 12B next`
+最后更新：`2026-05-23`
+状态：`Phase 12B underway`
 关联 spec：`docs/superpowers/specs/2026-05-10-claude-codex-gap-audit-v2.md`
 
 ## 目标
@@ -56,18 +56,20 @@
 - 已跑完整 unit test：`/home/willamhou/.cargo/bin/cargo test --offline`，`611 passed`
 - 已追加 6 条 Phase 12A dogfood replay，覆盖 product gap planning、product readiness planning、failed-validation retry、Rust/JS/Python PR retry validate
 - 当前 sandbox 无法解析 `api.deepseek.com`，这些 replay 使用 `DEEPSEEK_API_KEY_ENV=DEEPSEEK_API_KEY_OFFLINE` 走 offline fallback；真实在线 dogfood 仍是后续硬门槛
-- 已重建 `.dscode/dogfood/latest.md`：`39` runs，最新 6 条均为 `success`，没有新增 failed/stuck/manual
-- 默认 benchmark manifest 已扩到 `67` cases，其中 `subagent` category 为 `20` cases
-- 已连续跑 5 次完整离线 benchmark：`DEEPSEEK_API_KEY_ENV=DEEPSEEK_API_KEY_OFFLINE /home/willamhou/.cargo/bin/cargo run --offline -- benchmark`，最新 `67/67`
-- Benchmark trend gate 已从 warmup 变为 `pass against 4 comparable runs`
-- Benchmark live gate：`pass (runs 39)`
+- 当前本机 dogfood ledger snapshot 为 `20` runs，`19` success、`1` historical failed、`0` stuck、`0` manual；`pr_workflow` offline replay 为 `14/14` success，`recovery` offline replay 为 `3/3`，`write_validate` 为 `2/3` success。真实在线 dogfood 仍是后续硬门槛
+- 默认 benchmark manifest 当前为 `82` cases，其中 `subagent` category 为 `20` cases，`pr_workflow` category 为 `25` cases，`mcp` category 为 `3` cases
+- `deepseek benchmark` 现在支持 `--category <name>` 与可重复 `--case <name>` targeted selection。Filtered benchmark run 只写 report，不推进 benchmark history，也不强制 full trend/live gate。当前 `cargo run --quiet -- benchmark --category subagent --out /tmp/deepseek-subagent-benchmark.md` 实测 `20/20`，trend/live gate 均为 filtered selection skip。
+- `deepseek chat` / `repl` / `interactive` 现在在真实 TTY 中使用内置 raw-mode line editor，支持 Up/Down 历史、草稿恢复、左右移动、Home/End、Backspace/Delete、Ctrl+A/E/U/K/W、Tab slash/session completion、`/sessions [prefix]`、空行 Ctrl+D、prompt Ctrl+C 和运行中 turn 的 cooperative Ctrl+C cancellation，关闭了早期 REPL spec 中的 readline/history、session listing/load completion 与基础中断候选缺口。
+- 默认 benchmark manifest 已扩到 `82` cases。当前完整离线 benchmark 实测 `82/82`：PR workflow planner/action/comment-plan 项全绿；Python `pytest`/`uv run pytest` 本机缺依赖路径已由 `run_shell` fallback 覆盖；Go write-validate fixtures 通过用户级 Go toolchain 自动发现路径验证；MCP dynamic/generic/allowlist-deny planning cases 均通过。
+- Benchmark trend gate：`skipped (need at least 3 prior comparable runs, found 2)`，因为当前 82-case history 仍在 comparable warmup
+- Benchmark live gate：`pass against previous dogfood snapshot (runs 5 -> 20)`
 
 ### Acceptance
 
 - `cargo test --offline` 全绿：done
-- `deepseek benchmark` 全绿：done
-- `.dscode/benchmarks/latest.md` 不再显示 stale `48/49`：done；当前为 `67/67`
-- `.dscode/dogfood/latest.md` 中新增 dogfood 不引入 failed/stuck/manual：done
+- `deepseek benchmark` 全绿：done；当前 `82/82`
+- `.dscode/benchmarks/latest.md` 不再显示 stale `48/49`：done；最新完整报告已刷新到 `.dscode/benchmarks/latest.md`
+- `.dscode/dogfood/latest.md` 中新增 dogfood 不引入新的 failed/stuck/manual：done；current ledger snapshot still has `1` historical failed record, but the new `pr_workflow` and `recovery` replay batches are clean
 
 ## Phase 12B - Native VS Code Workbench
 
@@ -129,7 +131,8 @@
 
 - 在测试 repo 中，GitHub Action 能读取 PR diff 并发布 review comment
 - `deepseek pr fix` 与 action 路径共享核心 prompt/context builder
-- PR workflow benchmark 至少 25 条
+- PR workflow benchmark 至少 25 条：done；默认 manifest 已有 `25` 条 `pr_workflow`
+- PR workflow planner/action/comment-plan 离线 benchmark：done；当前非环境 PR 红点已清零
 - dogfood `pr_workflow` 至少 25 runs，success rate `>=90%`
 
 ## Phase 12D - Extension Surface Hardening
@@ -162,9 +165,36 @@
 ### Acceptance
 
 - MCP benchmark covers stdio, HTTP, SSE, schema, approval allow/deny
+  - Current: `mcp fixture-smoke` covers stdio/HTTP/SSE discovery/call/schema
+    injection, prompt/resource/template discovery and reads, bad-server
+    isolation, plus approval allow/deny; default benchmark adds dynamic MCP,
+    generic `mcp_call`, and allowlist-deny recovery planning cases.
 - Hook benchmark covers prompt submit, pre tool, post tool, session start/stop
+  - Current: `hooks fixture-smoke` runs a local no-network agent-loop fixture
+    that records `session_start`, `user_prompt_submit`, `pre_tool_use`,
+    `post_tool_use`, and `session_stop`, verifies structured
+    allow/add_context propagation, and proves a real `list_files` tool call
+    completed.
+- Skills/custom commands have discoverability docs and metadata validation
+  - Current: `skills list` and `skills validate` scan the same bundled/user
+    skill directories as runtime loading, report overrides and metadata
+    warnings, and `skills validate --strict --json --dir skills` passes the
+    bundled 16 skills with zero warnings/errors. Docs now include PR review,
+    release-check, and security-lite skill examples.
 - Subagent benchmark >=20 cases
+  - Current: default benchmark manifest has 20 `subagent` category cases.
+    `dispatch_subagents` now accepts per-child `write_scope` / `write_set`,
+    reports per-child files/write scopes, aggregate readback next action,
+    blocked child count, and write-scope conflicts. The parent planner consumes
+    both single and parallel subagent summaries for mandatory readback.
+    `agents subagent-fixture-smoke --json` locally verifies parser,
+    disjoint write scopes, readback metadata, blocker summaries, conflict
+    summaries, and artifact shape. `benchmark --category subagent` now verifies
+    the 20-case subagent slice independently and currently passes `20/20` with
+    history/trend/live gate writes skipped for the filtered run.
 - No unbounded nested dispatch
+  - Current: tool registry exposes dispatch tools only while child depth is
+    below the bounded `MAX_SUBAGENT_DEPTH`.
 
 ## Phase 12E - Background Worktree Runner And Distribution
 
@@ -192,6 +222,30 @@
   - MCP trust model
   - hook trust model
 
+Current first slice:
+
+- `deepseek task start/list/show/stop/diff/merge/reject` is now a first-class
+  CLI surface.
+- `task start` creates an isolated `.dscode/task-runner/worktrees/<id>` git
+  worktree, default branch `deepseek-task/<id>`, durable JSON metadata under
+  `.dscode/task-runner/records/`, stdout/stderr logs under
+  `.dscode/task-runner/logs/`, and launches `deepseek exec --json` there.
+- `task start --no-run` creates only the worktree and record, giving release
+  checks a no-credential path.
+- `deepseek task fixture-smoke --json` creates a temporary git repo and proves
+  the no-model worktree/record/list, merge check, merge apply, and reject paths
+  locally.
+- `task merge` requires a clean original worktree by default, applies the task
+  patch plus untracked regular files back to the original repo, and marks the
+  record `merged`; `task reject` marks the record `rejected` and removes only
+  the managed task worktree unless `--keep-worktree` is explicit.
+- CI runs the task fixture smoke against Linux/macOS/Windows debug binaries,
+  and the Release Matrix runs it against each release binary before packaging.
+- `deepseek github action --background-task` now converts a resolved GitHub PR
+  event into the same local task-runner record/worktree instead of executing
+  `pr review/fix/patch` inline; `--task-id` gives workflow-stable ids and
+  `--task-no-run` supports local no-credential gates.
+
 ### Acceptance
 
 - Long task can continue after parent CLI exits
@@ -211,9 +265,106 @@
 
 ## Immediate Next Action
 
-Start Phase 12B:
+Phase 12B is now underway. The VS Code native agent panel slice landed in
+`docs/superpowers/specs/2026-05-22-vscode-native-agent-panel.md`: the sidebar
+webview runs `deepseek exec --json` directly, renders assistant/tool JSONL
+events, supports cancel, injects active editor diagnostics and Git diff
+context, resumes the latest exec session, provides active-file and workspace
+changed-file review/accept/revert controls, and runs workspace validation
+commands with captured output. The next slice added a generated patch artifact
+queue: assistant/tool unified diffs are tracked separately from already-written
+Git changes, pending artifacts can be opened/applied/rejected, single-file
+artifacts open as VS Code diffs, and `Apply` verifies with `git apply --check`
+before mutating the workspace. An extension-host smoke harness now creates a
+temporary workspace with a mocked DeepSeekCode binary and drives the panel
+provider inside a VS Code extension runner when `VSCODE_BIN`/`code` is
+available. A headless panel fixture now covers diagnostic context injection,
+assistant-generated patch capture, single-file diff opening, checked `git apply`,
+workspace change refresh, and validation command success in a temporary Git repo.
+Continue Phase 12B with the remaining evidence work:
 
-1. Design the VS Code native agent workbench surface and event protocol.
-2. Add a webview chat panel with streaming assistant output and tool trace state.
-3. Inject active file, selection, diagnostics, and git diff summary into IDE-originated tasks.
-4. Add patch review/apply/reject and validation command controls.
+1. Run the extension-host smoke on a machine with VS Code CLI available and
+   record the output.
+2. Capture manual GUI fixture evidence for diagnostic -> patch -> diff ->
+   validation.
+
+Phase 12C has also started. The first GitHub automation slice landed in
+`docs/superpowers/specs/2026-05-22-github-action-bridge.md`: `deepseek github
+action` parses GitHub event payloads into PR references, enforces `@deepseek`
+triggers for comment/review events by default, supports `--dry-run`, and
+delegates runs to the existing `deepseek pr review/fix/patch` implementations
+through `--mode auto|review|fix|patch`. `--require-mode` and `--github-output`
+now make the write workflow's target resolution a tested CLI behavior instead
+of an embedded JSON-parsing script, and `deepseek github pr-head` moves PR head
+owner/ref resolution plus fork-owned branch refusal into the same tested CLI
+surface. `@deepseek fix` and `@deepseek patch` can now route to the existing
+CI-log repair and patch workflows without a second implementation. The
+repository includes a disabled-by-default
+`.github/workflows/deepseek-code-review.yml` example guarded by
+`DEEPSEEK_CODE_REVIEW_ENABLED=true`; it pins `--mode review` as the safe default
+for summary comments. A second disabled-by-default write workflow,
+`.github/workflows/deepseek-code-write.yml`, is guarded by
+`DEEPSEEK_CODE_WRITE_ENABLED=true`, reacts only to `@deepseek fix` / `@deepseek
+patch`, resolves target step outputs through `deepseek github action --dry-run
+--github-output --require-mode fix --require-mode patch`, resolves and guards
+the PR head through `deepseek github pr-head`, checks out the same-repository PR
+head, and commits/pushes resulting changes after running `--mode auto`.
+`deepseek github fixture-smoke` now provides a local no-network gate for review
+target routing, write-mode routing, PR-head/fork guard behavior, a temporary
+Git remote checkout/commit/push verification, and background task delegation via
+`github action --background-task --task-no-run`. Continue Phase 12C with:
+
+1. Run the workflow in a fixture repository and capture a real PR review
+   comment.
+2. Run the write workflow in a fixture repository and capture a PR-head
+   checkout plus commit/push evidence for `--mode fix` / `--mode patch`.
+3. Collect online `pr_workflow` dogfood evidence for the new action-labeled
+   cases. Offline replay evidence is now available; hosted/model-backed
+   evidence is still required.
+
+Phase 12D has started with
+`docs/superpowers/specs/2026-05-23-mcp-fixture-smoke.md`. `deepseek mcp
+fixture-smoke --json` now creates a temporary MCP config, exercises the current
+binary as a stdio MCP server, starts local loopback HTTP and SSE MCP fixtures,
+verifies tool discovery and tool calls across all three transports, and proves
+dynamic `mcp__server__tool` registry exposure plus input schema caching. The
+same fixture now also injects a failing `broken-stdio` server and proves healthy
+server discovery still succeeds, then verifies generic `mcp_call` and dynamic
+`mcp__server__tool` permission request, allowlisted allow, and allowlist deny
+paths. The benchmark runner now supports per-case self MCP fixtures, and the
+default manifest adds three MCP planning cases for dynamic remote tool calls,
+generic `mcp_call`, and allowlist-deny recovery via `mcp_list_tools`; the
+targeted MCP manifest passed `3/3` from `/tmp`, and the full default benchmark
+refresh now passes `82/82` with the `mcp` category at `3/3`. The same fixture
+smoke now also verifies stdio/HTTP/SSE prompts, resources, and resource
+templates in one command.
+
+Hooks now have `docs/superpowers/specs/2026-05-23-hooks-fixture-smoke.md`.
+`deepseek hooks fixture-smoke --json` creates a temporary hook root and
+workspace, installs structured allow/add_context recorder scripts, runs the
+real agent loop with a deterministic fixture model client, triggers `list_files`,
+and verifies `session_start`, `user_prompt_submit`, `pre_tool_use`,
+`post_tool_use`, and `session_stop` payloads plus hook context propagation. The
+latest local CLI smoke reports all lifecycle booleans true.
+
+Skills/custom commands now have
+`docs/superpowers/specs/2026-05-23-skills-custom-command-validation.md`.
+`deepseek skills list` and `deepseek skills validate` expose the runtime skill
+directory order as a user-runnable CLI, validate core TOML metadata and
+allowed tool names, report same-name overrides, and support `--strict` for CI
+gates. The latest local smoke `deepseek skills validate --strict --json --dir
+skills` passes the bundled 16 skills with `error_count=0` and
+`warning_count=0`.
+
+Subagents now have
+`docs/superpowers/specs/2026-05-23-subagent-fixture-smoke.md`.
+`dispatch_subagents` accepts `write_scope` / `write_set`, exposes aggregate
+parallel readback metadata, reports blocked child count and write-scope
+conflicts, and persists the write scope into thread artifacts. The parent
+offline planner now consumes both `dispatch_subagent` and `dispatch_subagents`
+summaries for child-file readback. The latest local smoke `deepseek agents
+subagent-fixture-smoke --json` reports all booleans true and `child_count=2`.
+The targeted subagent benchmark now passes `20/20`, the full default benchmark
+refresh passes `82/82`, and offline dogfood replay now covers the local release
+gate slices at `runs=20`. Continue Phase 12D with online model-backed dogfood
+and external compatibility evidence.

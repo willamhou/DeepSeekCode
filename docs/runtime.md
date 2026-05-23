@@ -1401,8 +1401,8 @@ best-effort `script` resize path.
 `deepseek agents shell-supervisor --json` starts the workspace-local protocol
 bridge on Unix, writes `.dscode/shell-supervisor/manifest.json`, binds
 `supervisor.sock`, and answers newline-JSON `health`, `status`, `show`,
-`start`, `wait`, `replay`, `attach`, `stdin`, `resize`, `cancel`, and
-`shutdown` requests. The `show` response includes a
+`start`, `wait`, `replay`, `attach`, `attach_stream`, `byte_stream`, `stdin`,
+`resize`, `cancel`, and `shutdown` requests. The `show` response includes a
 `job_inventory` summary rendered from the durable `.dscode/shell-jobs` table, so
 a supervisor client can inspect persisted shell jobs without separately calling
 the model tool. The `start` request accepts a safe `command`, optional
@@ -1419,9 +1419,12 @@ daemon's active job count backed by durable shell job manifests, probes `show`
 for protocol job-inventory parity when the daemon is healthy, and never prints
 `control_token_hash`. Each healthy protocol response also refreshes the
 workspace supervisor manifest's `active_jobs` and `updated_at` fields so
-manifest-only observers do not keep a startup-only job count. Remaining
-boundaries are full interactive terminal takeover and broader platform proof
-beyond the current Unix/Linux native-supervisor path.
+manifest-only observers do not keep a startup-only job count. On Windows, the
+supervisor daemon/client control path uses a loopback TCP endpoint written to
+`.dscode/shell-supervisor/supervisor.tcp` and stored in the manifest as
+`tcp://127.0.0.1:<port>`. CI now wires Windows TCP daemon/client runtime smoke
+and targeted ConPTY start/resize smoke; the remaining boundary is the actual
+Windows runner result for those gates.
 Local file-backed TUI sessions surface the same read-only protocol check through
 the command palette with `shell supervisor` and `jobs supervisor`, rendering the
 status plus durable shell job inventory in the shell detail panel.
@@ -1448,8 +1451,58 @@ durable stdout PTY/log bytes, including command/status/TTY geometry metadata,
 bytes. It is intended for attach-style terminal viewers; stderr-only logs remain
 available through `exec_shell_replay stream=stderr`. Human operators can use
 `deepseek agents shell attach <task_id> --follow` to continuously print only
-new terminal payloads while the job is running; `--wait-ms`, `--poll-ms`,
-`--max-ms`, `--cursor`, `--tail`, and `--limit-bytes` tune the follow loop.
+new terminal payloads while the job is running. Follow mode uses supervisor
+`attach_stream` and receives newline-delimited JSON frames over one Unix socket
+connection; `--wait-ms`, `--poll-ms`, `--max-ms`, `--cursor`, `--tail`, and
+`--limit-bytes` tune the stream.
+`--raw` makes one-shot or follow attach emit only decoded PTY output bytes when
+terminal-event raw bytes are available, which is the scriptable byte-oriented
+path for terminal consumers.
+`deepseek agents shell attach <task_id> --interactive` / `--takeover` enters
+local raw mode, forwards keyboard input through supervisor `stdin`, forwards
+terminal resize metadata, and replays terminal output back until the job exits,
+`--max-ms` expires, or `Ctrl-]` detaches. For native-supervisor terminal event
+logs, `--raw`, `--follow`/`attach_stream`, and `--interactive` prefer structured
+`terminal_raw_outputs` from the supervisor `attach` JSON response, then fall
+back to the compatible `terminal_raw_base64` summary section. Older stdout-log
+snapshots fall back to text payloads unless `--raw` is attached to a native
+terminal-event summary without raw bytes.
+`deepseek agents shell byte-stream <task_id>` is the scriptable byte-stream
+proxy slice: it opens one supervisor socket request, optionally applies
+`--input` / `--close-stdin` and `--rows` plus `--cols`, then emits decoded PTY
+bytes in non-JSON mode or newline-JSON frames with
+`byte_outputs[].bytes_base64` in `--json` mode. It also accepts `--cursor`,
+`--wait-ms`, `--poll-ms`, `--max-ms`, `--max-events`, `--tail`, and
+`--limit-bytes`. The protocol method also accepts additional newline-JSON
+control frames on the same socket while the stream is open: `{"type":"stdin",
+"input":"..."}`, UTF-8 `bytes_base64` stdin frames, `{"type":"resize",
+"rows":34,"cols":102}`, `{"type":"close_stdin"}`, and `{"type":"detach"}`.
+Applied control frames are echoed in `control_frames`. This remains a
+supervisor-protocol byte stream. With `--raw-proxy` or request field
+`raw_proxy=true`, the stream switches to raw proxy mode after the initial JSON
+request: subsequent socket input bytes are forwarded to PTY stdin with
+`input_base64`, and decoded PTY output bytes are written directly back to the
+socket without JSON framing.
+`deepseek agents shell proxy <task_id>` is the human-facing raw-proxy wrapper:
+it enters local raw mode, syncs the current terminal size before connecting,
+forwards key and paste bytes over the raw proxy, forwards resize events through
+supervisor `resize`, writes PTY output bytes to the local terminal, and detaches
+with `Ctrl-]`. The lower-level `byte-stream --raw-proxy` remains available for
+scripts that want plain stdin/stdout copying without terminal raw mode.
+`deepseek agents shell fd-proxy <task_id>` is the Linux local fd-handoff path:
+for native-supervisor jobs it requests supervisor `pty_fd`, receives the PTY
+master fd over SCM_RIGHTS, drives terminal input/output through that fd in raw
+mode, and detaches with `Ctrl-]`. The Linux regression tests verify both direct
+`pty_fd` and CLI `fd-proxy` handoff release: after the client detaches, ordinary
+supervisor `resize`, `stdin`, and terminal `replay` continue on the same PTY
+job. CLI `fd-proxy` also treats Linux PTY master `EIO` after slave close as
+normal EOF, with Ctrl-D coverage proving that a shell can exit cleanly through
+the fd handoff path. Local terminal `SIGWINCH` resize events are applied to the
+handed-off PTY master, with regression coverage proving the child sees the new
+`stty size`. Ctrl-C is forwarded through the same raw input path and has
+coverage proving the target PTY foreground process group receives SIGINT. A
+killed fd-proxy client closes the control socket, releases the supervisor lease,
+and lets ordinary `resize`, `stdin`, and `replay` continue.
 For supervisor-backed terminal event logs, `exec_shell_terminal_events
 cwd=<path> task_id=<id> cursor=<seq>` returns `schema:
 deepseek.exec_shell.terminal_events.v1`, `next_cursor`, `events`,
@@ -1458,7 +1511,24 @@ deepseek.exec_shell.terminal_events.v1`, `next_cursor`, `events`,
 `tail`, `wait_ms`, and `poll_ms`. When an MCP `tools/call` request includes
 `params._meta.progressToken`, each returned terminal event is also emitted as a
 standard `notifications/progress` frame with
-`_meta.deepseek.kind = deepseek.mcp.shell_terminal_event.v1`.
+`_meta.deepseek.kind = deepseek.mcp.shell_terminal_event.v1`. Native-supervisor
+terminal event records include optional `raw_base64` for PTY output/input bytes;
+supervisor `attach` exposes output events as structured `terminal_raw_outputs`,
+`exec_shell_attach` summaries also expose output events through
+`terminal_raw_base64`, HTTP SSE frames expose event bytes as `raw_base64`, while
+ACP and MCP progress metadata expose the same bytes as `rawBase64`.
+The supervisor protocol also exposes `attach_stream` for follow clients that
+want repeated attach frames without repeatedly opening new socket requests, and
+`byte_stream` for duplex stdin/resize control frames plus raw-output byte
+frames, or raw proxy bytes after `raw_proxy=true`, on one socket. Windows
+currently supports the newline JSON control path and `attach_stream` over
+loopback TCP, but not `byte_stream/raw_proxy`.
+On Linux native-supervisor jobs, the same Unix socket protocol exposes
+`pty_fd`: the supervisor pauses its PTY replay reader, sends a duplicated PTY
+master fd to the local client with SCM_RIGHTS, records `fd_handoff` lifecycle
+events, and resumes replay when the client disconnects. The post-disconnect
+path is covered by tests that resize and write through the normal supervisor
+control plane after the fd lease has ended.
 `exec_shell_interact` distinguishes older detached durable records without FIFO
 stdin from unknown task ids and returns an explicit diagnostic instead of a
 generic missing-task error. MCP server mode
@@ -1668,6 +1738,7 @@ Current artifact shape:
 Task: inspect repository layout
 Agent: reviewer
 Skill: -
+Write scope: src/cli/app.rs
 Steps: 3
 
 ## Summary
@@ -1676,6 +1747,25 @@ meta.child_task=...
 meta.child_outcome=ok
 ...
 ```
+
+Parallel summaries also include aggregate coordination metadata:
+
+```text
+meta.parallel_children=2
+meta.parallel_blocked_children=0
+meta.parallel_readback_required=true
+meta.parallel_next_action=read_file:src/cli/app.rs
+meta.parallel_child_1_write_scope=src/cli/app.rs
+meta.parallel_child_1_files=src/cli/app.rs
+meta.parallel_write_scope_conflicts=src/cli/app.rs
+```
+
+The parent planner consumes both `dispatch_subagent` and `dispatch_subagents`
+summaries. When a child reports `meta.child_files` or a parallel child reports
+`meta.parallel_child_N_files`, the parent must read back those files before
+treating child edits as authoritative. `deepseek agents subagent-fixture-smoke
+--json` verifies the parser, readback metadata, blocker summary, conflict
+summary, and artifact shape locally without network access.
 
 Thread IDs must be ASCII alphanumeric plus `-` or `_`, must not start with `.`,
 and must not contain `..`. These artifacts are inspectable through:

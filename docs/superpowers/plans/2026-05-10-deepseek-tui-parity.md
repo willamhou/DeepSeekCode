@@ -51,8 +51,14 @@ work without taking on the full Feishu/Lighthouse bridge in one slice.
 DeepSeekCode service deployment now also has `deepseek agents service-doctor`,
 which adapts DeepSeek-TUI's Lighthouse doctor-script idea to the local
 systemd/launchd template model by checking the selected binary/workspace,
-template command topology, optional rendered `--out` files, and CI-friendly
-JSON evidence without starting services.
+template command topology, exact generated command vectors, optional rendered
+`--out` files, and CI-friendly JSON evidence without starting services. The
+local gate parses systemd `ExecStart` plus `WorkingDirectory` and launchd
+`ProgramArguments` plus `WorkingDirectory` back into argv/workdir, so quoting
+or argument-order regressions are caught before clean-machine installation.
+`service-doctor --installed` is a read-only follow-up gate for already installed
+user services: it inspects the four systemd units or four launchd labels and
+fails closed when they are missing, inactive, failed, or disabled.
 `deepseek agents service-smoke` now also starts the selected binary's HTTP
 runtime on a loopback ephemeral port, probes `/health`, starts the Unix shell
 supervisor protocol bridge, probes `health`, runs `start` -> `wait` -> `attach`
@@ -92,9 +98,13 @@ DeepSeek-TUI's Windows-sensitive `Instant` underflow test fix to DeepSeekCode's
 `elapsed()`-based run loop.
 Shell-supervisor status and runtime docs now also describe the current control
 surface truthfully: the daemon supports health, status, show, start, wait,
-replay, attach, stdin, resize, cancel, and shutdown, and `tty=true` creates
-native-supervisor PTY jobs on supported Unix/Linux builds, while byte-level PTY
-proxying and broader platform proof remain open.
+replay, attach, attach_stream, byte_stream, pty_fd, stdin, resize, cancel, and
+shutdown, and `tty=true` creates native-supervisor PTY jobs on supported Linux
+builds. Linux now has local SCM_RIGHTS PTY master fd handoff; broader platform
+proof remains open. Direct `pty_fd` and CLI `fd-proxy` regression tests now
+cover fd-lease release back to ordinary supervisor stdin/resize/replay, and CLI
+`fd-proxy` covers Ctrl-C interrupt delivery, Ctrl-D EOF clean exit, and SIGWINCH
+resize forwarding, plus killed-client lease release.
 The human shell control CLI now also supports `deepseek agents shell attach
 <task_id> --follow`, a cursor-following terminal payload stream over durable
 attach snapshots. This narrows the operator-facing terminal gap without claiming
@@ -103,9 +113,10 @@ The human shell control CLI now also supports `deepseek agents shell attach
 <task_id> --interactive` / `--takeover`, a bounded raw-mode local terminal loop
 that forwards keypresses to supervisor `stdin`, forwards terminal resize events
 to supervisor `resize`, and streams stdout replay back to the operator until the
-job exits or `Ctrl-]` detaches. This gives a usable PTY control path while still
-leaving byte-perfect PTY fd proxying and Windows shell-supervisor ConPTY as
-separate proof work.
+job exits or `Ctrl-]` detaches. `deepseek agents shell proxy` wraps raw-proxy
+bytes for human takeover, and `deepseek agents shell fd-proxy` wraps Linux
+`pty_fd` SCM_RIGHTS handoff. This gives a usable Linux PTY control path while
+still leaving Windows shell-supervisor ConPTY as separate proof work.
 Dogfood readiness evidence is now also transport-aware: new ledger rows record
 `model_transport`, the report surfaces model-backed counts and table transport,
 and release gates can require model-backed totals, success rate, and
@@ -116,7 +127,27 @@ read-only per-category replay plan, including current model transport,
 model-backed progress, replayable benchmark cases, and next batch commands.
 `deepseek dogfood live-run` adds the guarded execution step for that backlog:
 it defaults to a dry-run selection, caps the next batch, and requires
-`--execute` plus online model transport before spending model calls.
+`--execute` plus online model transport before spending model calls. It can now
+load a repository-external key file with `--api-key-file` / `--key-file`,
+restore the previous environment value on return, and carry that flag through
+the dry-run and execute commands without printing the key value. The live-plan
+and live-run dry-run JSON now also include the exact post-run `dogfood report`
+evidence gate, so model-backed batches have a scripted acceptance check after
+online execution. Executed live batches can also pass `--evidence-out <path>` to
+write a `deepseek.dogfood.live_run_evidence.v1` summary with before/after live
+counts, appended model-backed rows, per-case outcomes, benchmark gate status,
+and a ledger file `fnv1a64` fingerprint without storing the API key value.
+`deepseek dogfood live-evidence
+--file <path>` now verifies that summary as a fail-closed release gate, with
+default completed/online/appended-model-backed requirements and optional
+benchmark gate enforcement. Its `--require-report-gate` mode evaluates the
+structured `evidence_gate` against the current ledger using the same live
+requirements as `dogfood report`, without executing a shell command from the
+evidence JSON, and rechecks the ledger fingerprint before matching appended
+case evidence back to ledger rows.
+The verifier can also write the
+`deepseek.dogfood.live_evidence_verification.v1` result with `--out <path>` so
+CI/release jobs can fail closed and upload the verification artifact.
 OpenAI-compatible tool-call streaming now also preserves same-turn batch
 responses by indexed `tool_calls`, matching DeepSeek-TUI's latest fix for
 gateways that ignore `parallel_tool_calls:false`; DeepSeekCode executes the
@@ -132,6 +163,30 @@ TTY sessions by opening the full-screen workbench directly; `deepseek chat` /
 `repl` / `interactive` remain explicit aliases for the line-oriented REPL, and
 non-full-screen contexts keep the prior REPL path with its existing fail-closed
 TTY guidance.
+The line-oriented REPL now also has built-in raw-mode input history and editing:
+Up/Down browse submitted prompts and slash commands, Down restores the draft,
+and the editor supports basic cursor/control-key editing without requiring
+`rlwrap`. Running REPL turns also route SIGINT through the existing
+`AgentLoopOptions.cancel_check`, so model streams and cancel-aware tools can
+cooperatively cancel without leaving a half-recorded transcript turn. The same
+line editor now completes built-in slash commands and saved session names after
+`/load ` with Tab, and `/sessions [prefix]` lists saved session names without
+loading them.
+Local background worktree tasks now have a first Phase 12E slice:
+`deepseek task start/list/show/stop/diff/merge/reject` creates isolated git
+worktrees under `.dscode/task-runner/worktrees/`, stores JSON task records and
+stdout/stderr logs under `.dscode/task-runner/`, and launches
+`deepseek exec --json` in the task worktree so a long task can outlive the
+parent CLI process. Operators can inspect tracked/untracked diff, dry-run merge
+checks, merge task patch/untracked regular files back to the original clean
+repo, or reject and remove the managed worktree. The companion
+`deepseek task fixture-smoke --json` gate proves the no-model `--no-run`
+worktree/record/list/merge/reject path in a temporary git repo. CI now runs
+that gate against Linux/macOS/Windows debug binaries, and the Release Matrix
+runs it against each release binary before packaging. `deepseek github action
+--background-task` can now route a resolved PR review/fix/patch event into this
+same task runner, with `--task-id` for stable workflow ids and `--task-no-run`
+for no-credential local workflow gates.
 That default-entrypoint behavior now has a repo-native PTY release smoke:
 `deepseek tui --entrypoint-smoke [--smoke-bin <path>]` starts bare `deepseek`
 through Unix `script` or Windows ConPTY, verifies alternate-screen TUI
@@ -179,9 +234,11 @@ handle open through clean exit, and has green evidence from `main` CI run
 green CI run `26013911327`.
 The largest remaining DeepSeek-TUI / Claude Code CLI / Codex CLI gaps are now:
 
-- byte-level shell/PTY proxy proof and Windows shell-supervisor ConPTY beyond
-  the bounded interactive attach, CI-smoked default TUI entrypoint, current
-  shell-supervisor coverage, and platform compile/version/snapshot checks;
+- Windows shell-supervisor ConPTY/TCP daemon runtime evidence beyond the new
+  `portable-pty` native-supervisor backend, loopback TCP daemon/client smoke
+  wiring, Windows target compile gate, CI-smoked default TUI entrypoint, bounded
+  interactive attach, raw proxy, Linux fd handoff, and current shell-supervisor
+  coverage;
 - model-backed live dogfood and external write-fixture sample depth across
   disposable real repositories;
 - release-channel proof for npm and Homebrew once credentials are available;
@@ -1336,9 +1393,10 @@ Landed first slice:
   `SERVICES.md` with systemd/launchd install/start/status/log/restart/stop
   lifecycle commands and runtime health checks
 - `deepseek agents service-doctor` validates service template topology,
-  selected binary/workspace paths, optional rendered `--out` files, and emits
-  text or `deepseek.agents.service_doctor.v1` JSON evidence. Missing local
-  service-manager commands are warnings so release CI can still verify
+  selected binary/workspace paths, exact parsed argv/workdir vectors for
+  generated systemd/launchd commands, optional rendered `--out` files, and
+  emits text or `deepseek.agents.service_doctor.v1` JSON evidence. Missing
+  local service-manager commands are warnings so release CI can still verify
   generated systemd/launchd files before clean-machine installation.
 - `deepseek agents service-smoke` starts `serve --http --once` from the selected
   binary, probes runtime `/health`, starts `agents shell-supervisor --json`,
@@ -1361,11 +1419,17 @@ Landed first slice:
   release archives, and non-placeholder `.sha256` files when artifact
   directories are supplied; `--strict` fails on blocked or skipped checks and
   `--json` emits `deepseek.publish_status.v1` for CI/release scripts
+- `deepseek update publish-status --live-evidence-verification <path>` now also
+  validates the `dogfood live-evidence --out` artifact, requiring completed
+  online evidence with appended model-backed rows, a passed report gate, and
+  ledger fingerprints before strict release readiness can pass
 - `deepseek update publish-status` now also emits a public install audit for
   source checkout, GitHub Release, npm, Homebrew, GHCR, and Cargo registry
   policy, with explicit `source_available`, `ready_to_publish`,
   `requires_publish`, and `source_only_policy` states plus verification commands
-  for live release evidence
+  for live release evidence; public binary/package channels stay
+  `requires_publish` until both package materials and live evidence verification
+  are present
 - `deepseek pr live-status <pr> --json` emits
   `deepseek.pr_live_status.v1`, making live PR fixture readiness scriptable
   without posting GitHub comments
@@ -1380,8 +1444,12 @@ Remaining:
 - Published Homebrew tap with real release asset SHA-256 values
 - Tagged GitHub Release and GHCR image evidence for the public binary/container
   install channels
+- Windows CI result for the targeted shell-supervisor TCP endpoint/status,
+  TCP daemon/client, real binary shell fixture, and ConPTY start/resize smoke
+  now wired into `.github/workflows/ci.yml`
 - Actual installed systemd/launchd service smoke evidence on a clean machine
-  beyond the local `service-doctor` and `service-smoke` checks
+  using `service-doctor --installed` and `service-smoke --installed`, plus the
+  existing local command-vector gate and non-installed `service-smoke` checks
 
 ## Completion Audit Gate
 

@@ -64,6 +64,7 @@ deepseek update package --bin target/release/deepseek
 - dogfood live gate
 
 任一 gate 失败都应阻断 release。
+`deepseek benchmark --category <name>` 和可重复的 `--case <name>` 可用于本地 targeted evidence；filtered run 只写 report，不推进 history，也不能替代发布前的完整 benchmark。
 
 如果新增 dogfood 失败已经完成排查，并且需要把当前 live snapshot 作为新的已知基线，必须显式运行
 `deepseek benchmark --accept-live-baseline`；普通发布检查不要使用这个选项。
@@ -87,10 +88,25 @@ deepseek dogfood external-fixture --workdir /tmp/disposable-repo --benchmark-gat
   'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
 deepseek dogfood report --limit 10
 deepseek dogfood live-plan --limit 10
-deepseek dogfood live-run --limit 3
+deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 3 --json
+deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 3
 # Add --execute only when you intend to spend online model calls:
-deepseek dogfood live-run --limit 3 --execute
+deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 3 \
+  --evidence-out .dscode/dogfood/live-evidence.json --execute
+deepseek dogfood live-evidence --file .dscode/dogfood/live-evidence.json \
+  --out .dscode/dogfood/live-evidence-verification.json \
+  --require-benchmark-gate --require-report-gate
 ```
+
+`live-plan` and `live-run --json` print `post_run_report_command`; run it after
+the online batch to verify the model-backed rows and category thresholds. With
+`--evidence-out`, the online batch also writes a
+`deepseek.dogfood.live_run_evidence.v1` JSON summary without storing the API key
+value. The summary includes a ledger file `fnv1a64` fingerprint. `dogfood
+live-evidence` verifies that summary as a fail-closed gate.
+`--require-report-gate` checks the structured live thresholds and ledger
+fingerprint against the ledger path from the evidence file.
+Use `--out` to persist the verification JSON for release evidence upload.
 
 严格发布检查可以让 report 根据证据阈值 fail closed：
 
@@ -204,8 +220,8 @@ Release Matrix 会把每个平台的 release binary stage 到
 npm tarball，并在 tag run 且配置 `NPM_TOKEN` 时先发布平台包，再发布 root wrapper
 包。
 正式发布前可以在下载 workflow artifacts 后运行
-`deepseek update publish-status --dist dist-assets --npm-dist npm-dist --strict`
-检查 npm token、平台 tarball、Homebrew tap 配置和 release `.sha256` 文件是否
+`deepseek update publish-status --dist dist-assets --npm-dist npm-dist --live-evidence-verification .dscode/dogfood/live-evidence-verification.json --strict`
+检查 npm token、平台 tarball、Homebrew tap 配置、release `.sha256` 文件和已验证 online dogfood evidence 是否
 齐全；加 `--json` 会输出 `deepseek.publish_status.v1`，便于 CI 或 release
 脚本消费。输出中的 `public_install` 会区分 source checkout、GitHub Release、
 npm、Homebrew、GHCR 和 Cargo registry 当前是 `source_available`、
@@ -259,8 +275,9 @@ deepseek doctor --json
 Tag 发布时如果配置了 repository variable `HOMEBREW_TAP_REPOSITORY` 和 secret
 `HOMEBREW_TAP_TOKEN`，Release Matrix 会在 GitHub Release assets 发布后自动渲染
 并推送 tap 仓库的 `Formula/deepseek.rb`。
-`deepseek update publish-status --dist <release-assets> --strict` 会把缺少 tap
-变量或占位 checksum 识别为未 ready。
+`deepseek update publish-status --dist <release-assets> --live-evidence-verification <verification-json> --strict`
+会把缺少 tap 变量、占位 checksum 或未验证 online dogfood evidence 识别为未
+ready。
 
 ## 升级
 
@@ -496,21 +513,21 @@ curl http://127.0.0.1:8765/runtime
 - `deepseek`：在真实 TTY 中直接进入全屏 TUI workbench
 - `deepseek "task"` 或 `deepseek run "task"`：执行单次任务
 - `deepseek tui [--demo]`：启动 ratatui/crossterm 全屏 workbench shell；`--once` 可输出 CI 快照；`--entrypoint-smoke --smoke-bin <path>` 会在真实 PTY 中验证裸入口进入 TUI；command palette 支持 `mcp` full-width manager screen 和项目级 `mcp init/add/enable/disable/remove/validate`
-- `deepseek benchmark`：跑本地 benchmark 基线
+- `deepseek benchmark`：跑本地 benchmark 基线；`--category <name>` / `--case <name>` 可跑 targeted report-only slice
 - `deepseek dogfood ...`：记录或回放真实任务
 - `deepseek update`：打印 source checkout 安装命令和 release package/verify 提示
 - `deepseek update package`：生成本地 release package（binary、manifest、install/rollback scripts）
 - `deepseek update verify-install`：在隔离目录验证 version/config/doctor/exec JSONL/benchmark sample
 - `deepseek update install-package` / `deepseek update rollback`：安装本地 release package 或回滚到备份 binary
 - `deepseek update download-plan [--version ... --base-url ... --platform ... --json]`：打印当前平台 release archive、checksum、验证和解压命令，可指向自有镜像目录
-- `deepseek update publish-status [--dist ... --npm-dist ... --strict --json]`：检查 npm/Homebrew 发布所需 token、tap 配置、平台包和 release checksum
+- `deepseek update publish-status [--dist ... --npm-dist ... --live-evidence-verification ... --strict --json]`：检查 npm/Homebrew 发布所需 token、tap 配置、平台包、release checksum 和 online dogfood evidence
 - `deepseek pr live-status <pr> [--require-write --json]`：只读检查真实 GitHub PR 是否具备 live review/retry fixture 前置条件
 - `deepseek config network allow|deny <host>`：把网络 host 策略写回项目 `.dscode/config.toml`，用于持久化 web/search/fetch 的允许或拒绝规则
 - `deepseek agents run-task <task-id>`：认领并执行 pending durable runtime task，写回同一 thread 的 turns/items/usage/status
 - `deepseek agents daemon [--interval-ms 1000] [--budget N]`：本地轮询 `.dscode/runtime`，触发到期 automation、执行 thread-linked pending task，并自动追加 non-destructive compaction summary
 - `deepseek agents service --kind systemd|launchd|all --out <dir>`：渲染 workspace-specific runtime、agents daemon、diagnostics watch 和 shell-supervisor 常驻服务模板
-- `deepseek agents service-doctor --kind systemd|launchd|all [--out <dir> --json]`：静态验证服务模板拓扑、二进制、工作目录和可选 `--out` 目录中的已生成文件；缺失 service manager 只作为 warning，模板缺失或过期作为 blocker
-- `deepseek agents service-smoke [--bin <path> --workdir <dir> --json]`：不安装 service manager，直接启动所选 binary 的 `serve --http --once` 和 Unix `agents shell-supervisor --json`，探活 runtime `/health` 与 shell-supervisor socket，并通过 `start` -> `wait` -> `attach` -> `replay` 做 shell-supervisor 控制面 smoke；Linux 会验证 `tty=true` 的 `native-supervisor` PTY 后端，以及 PTY `stdin`、`resize`、terminal `replay` 和 `cancel`；建议 release smoke 使用 `/tmp/dsc-smk` 这类较短隔离目录，避免 Unix socket 路径长度限制
+- `deepseek agents service-doctor --kind systemd|launchd|all [--out <dir> --installed --json]`：静态验证服务模板拓扑、二进制、工作目录和可选 `--out` 目录中的已生成文件；会把 systemd `ExecStart`/`WorkingDirectory` 和 launchd `ProgramArguments`/`WorkingDirectory` 解析回精确 argv/workdir，提前捕获 quoting 或参数顺序回归；缺失 service manager 只作为 warning，模板缺失或过期作为 blocker；加 `--installed` 后只读检查实际 user service，systemd 通过 `systemctl --user show` 验证四个 unit 已 loaded/active/enabled，launchd 通过 `launchctl print gui/<uid>/<label>` 验证四个 label 正在运行，缺失或未运行会作为 blocker
+- `deepseek agents service-smoke [--kind systemd|launchd|all --bin <path> --workdir <dir> --addr <host:port> --installed --json]`：默认不安装 service manager，直接启动所选 binary 的 `serve --http --once` 和 Unix `agents shell-supervisor --json`，探活 runtime `/health` 与 shell-supervisor socket，并通过 `start` -> `wait` -> `attach` -> `replay` 做 shell-supervisor 控制面 smoke；Linux 会验证 `tty=true` 的 `native-supervisor` PTY 后端，以及 PTY `stdin`、`resize`、terminal `replay`、`cancel`、`byte_stream` duplex/raw proxy、`pty_fd` fd handoff 和 human `agents shell proxy`；建议 release smoke 使用 `/tmp/dsc-smk` 这类较短隔离目录，避免 Unix socket 路径长度限制；加 `--installed` 后不启动或停止任何进程，而是复用 installed service checks、探活实际 runtime `/health` 和已有 shell-supervisor socket，并且要求 `--addr` 是具体端口而不是 `127.0.0.1:0`
 - `deepseek diagnostics [--changed] [--json] [paths...]` / `deepseek diagnostics --watch --json ...`：运行本地语言诊断；watch 模式会在同一进程内复用 warmed stdio LSP session，失败时回退到 compiler/type-check checker；JSON 模式输出 `deepseek.diagnostics.report.v1` 或 newline-delimited `deepseek.diagnostics.daemon_tick.v1`；`deepseek agents service` 可为 `diagnostics --watch --changed --json` 和 `agents shell-supervisor --json` 生成常驻 worker 模板
 - `deepseek restore snapshot [label]` / `list` / `show <id>` / `revert-turn <id> [--apply]`：管理 rollback snapshots（tracked diff + untracked files、目录 metadata、Unix special files）
 - `deepseek serve --http`：启动本地 runtime skeleton，提供 `/health` 与 `/runtime`

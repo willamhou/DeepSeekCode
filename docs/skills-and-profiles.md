@@ -144,6 +144,64 @@ require_shell_confirmation = false
 shell_allowlist = ["cargo test", "pytest", "pnpm test", "npm test", "go test", "mvn test", "gradle test"]
 ```
 
+## Discovery 与 Validation
+
+运行时按下面顺序加载 skills，后面的同名 skill 覆盖前面的同名 skill：
+
+1. bundled repo skills：`skills/`，或安装包旁边的 `skills/`
+2. user skills：`workspace.user_skills_dir`，默认 `~/.config/dscode/skills`
+
+CLI 提供同一套发现与验证入口：
+
+```bash
+deepseek skills list
+deepseek skills list --json
+deepseek skills validate --strict
+deepseek skills validate --json --dir skills
+```
+
+`skills validate` 会检查 `.toml` loader 错误、空 `name` / `description` /
+`system_append` / `suggested_steps`、空 `allowed_tools`，以及
+`allowed_tools` 中不存在的工具名。`--strict` 会把 warning 也作为非零退出，
+适合 CI、release gate 或技能库发布前检查。
+
+## 常见 Skill 示例
+
+PR review 只需要读 diff 与上下文，保持 read-only：
+
+```toml
+name = "pr-review"
+description = "Review a GitHub PR diff and report correctness/security risks"
+allowed_tools = ["list_files", "read_file", "search_text", "git_diff"]
+system_append = "Review only. Do not modify files. Lead with actionable findings."
+suggested_steps = ["Read the diff", "Inspect surrounding context", "Group findings by severity"]
+```
+
+Release 检查适合绑定 lint/test/build 和发布状态：
+
+```toml
+name = "release-check"
+description = "Run release readiness checks before tagging or publishing"
+allowed_tools = ["list_files", "read_file", "run_shell", "git_diff", "todo_write"]
+system_append = "Run lint, tests, build, and publish-status before declaring release readiness."
+suggested_steps = ["Run lint", "Run tests", "Run build", "Run publish-status", "Review diff"]
+
+[policy]
+require_write_confirmation = false
+require_shell_confirmation = false
+shell_allowlist = ["cargo test", "cargo build", "cargo clippy", "deepseek update publish-status"]
+```
+
+Security-lite 检查适合聚焦 secrets、unsafe shell、权限面和依赖风险：
+
+```toml
+name = "security-lite"
+description = "Review a change for obvious secrets, shell, permission, and dependency risks"
+allowed_tools = ["list_files", "read_file", "search_text", "git_diff"]
+system_append = "Look for leaked secrets, unsafe shell commands, broad permissions, and dependency risk. Report findings only."
+suggested_steps = ["Inspect diff", "Search for secrets", "Review shell and permissions", "Summarize risks"]
+```
+
 ## 推荐的首批 Skills
 
 - `fix-tests`
