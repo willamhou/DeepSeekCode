@@ -253,6 +253,9 @@ pub fn parse_failed_job_from_run(body: &str, job_name: &str) -> AppResult<(u64, 
 use crate::util::process::{run_capture, run_capture_stdout};
 
 pub fn ensure_gh_auth() -> AppResult<()> {
+    if gh_env_token_present() {
+        return Ok(());
+    }
     let captured = run_capture("gh", &["auth", "status"])?;
     if !captured.success {
         return Err(crate::error::policy_denied(format!(
@@ -261,6 +264,17 @@ pub fn ensure_gh_auth() -> AppResult<()> {
         )));
     }
     Ok(())
+}
+
+fn gh_env_token_present() -> bool {
+    gh_env_token_present_with(|name| std::env::var(name).ok())
+}
+
+fn gh_env_token_present_with(mut get_var: impl FnMut(&str) -> Option<String>) -> bool {
+    ["GH_TOKEN", "GITHUB_TOKEN"]
+        .iter()
+        .filter_map(|name| get_var(name))
+        .any(|value| !value.trim().is_empty())
 }
 
 fn run_gh(args: &[&str]) -> AppResult<String> {
@@ -508,6 +522,22 @@ mod tests {
     #[test]
     fn rejects_non_numeric_id() {
         assert!(parse_pr_ref("owner/repo#abc").is_err());
+    }
+
+    #[test]
+    fn gh_env_token_present_accepts_github_actions_tokens() {
+        assert!(gh_env_token_present_with(|name| match name {
+            "GH_TOKEN" => Some("  token  ".to_string()),
+            _ => None,
+        }));
+        assert!(gh_env_token_present_with(|name| match name {
+            "GITHUB_TOKEN" => Some("token".to_string()),
+            _ => None,
+        }));
+        assert!(!gh_env_token_present_with(|name| match name {
+            "GH_TOKEN" => Some("  ".to_string()),
+            _ => None,
+        }));
     }
 
     #[test]
