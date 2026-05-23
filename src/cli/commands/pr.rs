@@ -11,6 +11,7 @@ use crate::integrations::github::{
 };
 use crate::model::protocol::Observation;
 use crate::util::json::json_escape;
+use std::path::{Component, Path, PathBuf};
 
 pub fn run(action: PrAction) -> AppResult<()> {
     match action {
@@ -437,6 +438,20 @@ fn run_patch(
         ));
     }
 
+    if let Some(edit) = request.and_then(parse_direct_replacement_request) {
+        let changed = apply_direct_replacement(&edit)?;
+        if changed {
+            println!("applied requested replacement in {}", edit.path.display());
+        } else {
+            println!(
+                "requested replacement already present in {}",
+                edit.path.display()
+            );
+        }
+        finish_patch(&config, &pr, commit, benchmark_gate)?;
+        return Ok(());
+    }
+
     let task = build_patch_task_text(&pr, request);
     let context = TaskContext::new(task, None);
     let observations = vec![Observation::ok("git_diff", pr.diff.clone())];
@@ -451,6 +466,15 @@ fn run_patch(
         },
     )?;
 
+    finish_patch(&config, &pr, commit, benchmark_gate)
+}
+
+fn finish_patch(
+    config: &AppConfig,
+    pr: &PrContext,
+    commit: bool,
+    benchmark_gate: bool,
+) -> AppResult<()> {
     if commit {
         run_git(&["add", "-A"])?;
         let message = format!("deepseek: fix PR #{}", pr.number);
@@ -479,6 +503,111 @@ fn append_requested_action(text: &mut String, request: Option<&str>) {
         text.push_str("\n\nRequested action from GitHub comment: ");
         text.push_str(request);
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectReplacementRequest {
+    path: PathBuf,
+    find: String,
+    replace: String,
+}
+
+fn parse_direct_replacement_request(request: &str) -> Option<DirectReplacementRequest> {
+    let request = request.trim();
+    if request.is_empty() {
+        return None;
+    }
+    let lower = request.to_ascii_lowercase();
+    let quoted = quoted_segments(request);
+
+    if lower.contains(" becomes ") && quoted.len() >= 3 {
+        return Some(DirectReplacementRequest {
+            path: safe_relative_path(&quoted[0]).ok()?,
+            find: quoted[1].clone(),
+            replace: quoted[2].clone(),
+        });
+    }
+
+    if lower.contains("replace ")
+        && lower.contains(" with ")
+        && lower.contains(" in ")
+        && quoted.len() >= 2
+    {
+        let in_index = lower.rfind(" in ")?;
+        return Some(DirectReplacementRequest {
+            path: safe_relative_path(request[in_index + 4..].trim().trim_matches('`')).ok()?,
+            find: quoted[quoted.len() - 2].clone(),
+            replace: quoted[quoted.len() - 1].clone(),
+        });
+    }
+
+    None
+}
+
+fn quoted_segments(text: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut index = 0;
+    while index < text.len() {
+        let Some((start_offset, quote)) = text[index..]
+            .char_indices()
+            .find(|(_, ch)| matches!(ch, '`' | '"'))
+        else {
+            break;
+        };
+        let start_quote = index + start_offset;
+        let content_start = start_quote + quote.len_utf8();
+        let Some(end_offset) = text[content_start..].find(quote) else {
+            break;
+        };
+        let content_end = content_start + end_offset;
+        segments.push(text[content_start..content_end].to_string());
+        index = content_end + quote.len_utf8();
+    }
+    segments
+}
+
+fn safe_relative_path(path: &str) -> AppResult<PathBuf> {
+    let path = Path::new(path.trim());
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(app_error("direct patch request path must be relative"));
+    }
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(app_error(
+            "direct patch request path cannot escape the workspace",
+        ));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn apply_direct_replacement(edit: &DirectReplacementRequest) -> AppResult<bool> {
+    let body = std::fs::read_to_string(&edit.path).map_err(|error| {
+        app_error(format!(
+            "failed to read direct patch target {}: {error}",
+            edit.path.display()
+        ))
+    })?;
+    if !body.contains(&edit.find) {
+        if body.contains(&edit.replace) {
+            return Ok(false);
+        }
+        return Err(app_error(format!(
+            "direct patch target {} did not contain requested text",
+            edit.path.display()
+        )));
+    }
+    let updated = body.replacen(&edit.find, &edit.replace, 1);
+    std::fs::write(&edit.path, updated).map_err(|error| {
+        app_error(format!(
+            "failed to write direct patch target {}: {error}",
+            edit.path.display()
+        ))
+    })?;
+    Ok(true)
 }
 
 fn run_git(args: &[&str]) -> AppResult<()> {
@@ -513,6 +642,25 @@ mod tests {
             job_id: 7,
             log_tail: "FAILED at line 42".to_string(),
             failed_step: Some("cargo test".to_string()),
+        }
+    }
+
+    fn unique_pr_test_dir(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "deepseek-pr-test-{}-{nanos}",
+            label.replace('/', "-")
+        ))
+    }
+
+    struct CwdGuard(PathBuf);
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
         }
     }
 
@@ -567,6 +715,48 @@ mod tests {
 
         assert!(text.contains("Requested action from GitHub comment"));
         assert!(text.contains("change docs/hosted-workflow-fixture.md to after"));
+    }
+
+    #[test]
+    fn parses_direct_replacement_from_comment_request() {
+        let request = parse_direct_replacement_request(
+            "change `docs/hosted-workflow-fixture.md` so `Current state: before` becomes `Current state: after`",
+        )
+        .unwrap();
+
+        assert_eq!(
+            request.path,
+            PathBuf::from("docs/hosted-workflow-fixture.md")
+        );
+        assert_eq!(request.find, "Current state: before");
+        assert_eq!(request.replace, "Current state: after");
+    }
+
+    #[test]
+    fn apply_direct_replacement_updates_one_file() {
+        let root = unique_pr_test_dir("direct-replacement");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let original_cwd = std::env::current_dir().unwrap();
+        let guard = CwdGuard(original_cwd);
+        std::env::set_current_dir(&root).unwrap();
+        std::fs::write(
+            root.join("docs/hosted-workflow-fixture.md"),
+            "Requested state: after\nCurrent state: before\n",
+        )
+        .unwrap();
+
+        let changed = apply_direct_replacement(&DirectReplacementRequest {
+            path: PathBuf::from("docs/hosted-workflow-fixture.md"),
+            find: "Current state: before".to_string(),
+            replace: "Current state: after".to_string(),
+        })
+        .unwrap();
+
+        assert!(changed);
+        let body = std::fs::read_to_string(root.join("docs/hosted-workflow-fixture.md")).unwrap();
+        assert!(body.contains("Current state: after"));
+        drop(guard);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
