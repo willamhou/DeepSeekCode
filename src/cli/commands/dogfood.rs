@@ -3406,9 +3406,16 @@ fn external_fixture_evidence_summary_json(
 }
 
 fn dogfood_record_json_value(record: &DogfoodRecord) -> JsonValue {
-    parse_root_object(&record.to_json_line())
-        .map(JsonValue::Object)
-        .unwrap_or_else(|_| JsonValue::String(record.to_json_line()))
+    match parse_root_object(&record.to_json_line()) {
+        Ok(mut root) => {
+            root.insert(
+                "model_backed".to_string(),
+                JsonValue::Bool(record_is_model_backed(record)),
+            );
+            JsonValue::Object(root)
+        }
+        Err(_) => JsonValue::String(record.to_json_line()),
+    }
 }
 
 fn dogfood_file_fingerprint_json(path: &Path) -> JsonValue {
@@ -5504,6 +5511,7 @@ mod tests {
         assert!(json.contains("\"appended_external_write_fixtures\":1"));
         assert!(json.contains("\"appended_successful_external_write_fixtures\":1"));
         assert!(json.contains("\"ledger_fingerprint\":{\"algorithm\":\"fnv1a64\""));
+        assert!(json.contains("\"model_backed\":true"));
         assert!(json.contains("\"records\":[{\"benchmark_category\":\"write_validate\""));
 
         let out = root.join("external/evidence.json");
