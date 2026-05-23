@@ -8,6 +8,9 @@
 !/.dscode/fixtures/**
 /.dscode/fixtures/**/.dscode/
 /.dscode/fixtures/**/.dscode/**
+/.dscode/fixtures/**/__pycache__/
+/.dscode/fixtures/**/*.pyc
+/.dscode/fixtures/**/uv.lock
 /.idea/
 /.vscode/
 .DS_Store
