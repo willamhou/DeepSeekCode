@@ -24,7 +24,8 @@ impl Tool for GithubPrContextTool {
     }
 
     fn execute(&self, input: ToolInput) -> AppResult<ToolOutput> {
-        let number = required_reference(&input, "github_pr_context")?;
+        let target = pr_target_from_input(&input, "github_pr_context")?;
+        let number = target.number;
         let max_chars =
             parse_usize_arg(&input, "max_chars", DEFAULT_MAX_CHARS).clamp(1, HARD_MAX_CHARS);
         let mut args = vec![
@@ -34,7 +35,7 @@ impl Tool for GithubPrContextTool {
             "--json".to_string(),
             "number,title,state,author,body,comments,reviews,reviewDecision,statusCheckRollup,baseRefName,headRefName,headRefOid,baseRefOid,files,url,createdAt,updatedAt".to_string(),
         ];
-        append_repo_args(&mut args, &input);
+        append_repo_arg(&mut args, target.repo.as_deref());
         let raw = run_gh(&args)?;
         let root = parse_root_object(&raw)?;
         let number = root
@@ -84,7 +85,7 @@ impl Tool for GithubPrContextTool {
                 number.clone(),
                 "--patch".to_string(),
             ];
-            append_repo_args(&mut diff_args, &input);
+            append_repo_arg(&mut diff_args, target.repo.as_deref());
             let diff = run_gh(&diff_args)?;
             summary.push_str("diff:\n");
             summary.push_str(&clip(&diff, diff_chars));
@@ -333,6 +334,43 @@ fn required_reference(input: &ToolInput, tool_name: &str) -> AppResult<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .ok_or_else(|| app_error(format!("{tool_name} requires `number`")))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GithubPrTarget {
+    number: String,
+    repo: Option<String>,
+}
+
+fn pr_target_from_input(input: &ToolInput, tool_name: &str) -> AppResult<GithubPrTarget> {
+    let reference = required_reference(input, tool_name)?;
+    let repo_arg = optional_repo_arg(input);
+    if let Some((repo, number)) = split_qualified_pr_reference(&reference) {
+        if let Some(repo_arg) = repo_arg.as_deref() {
+            if repo_arg != repo {
+                return Err(app_error(format!(
+                    "{tool_name} received conflicting repositories `{repo}` and `{repo_arg}`"
+                )));
+            }
+        }
+        return Ok(GithubPrTarget {
+            number: number.to_string(),
+            repo: Some(repo.to_string()),
+        });
+    }
+    Ok(GithubPrTarget {
+        number: reference,
+        repo: repo_arg,
+    })
+}
+
+fn split_qualified_pr_reference(reference: &str) -> Option<(&str, &str)> {
+    let trimmed = reference.trim();
+    let (repo, number) = trimmed.split_once('#')?;
+    if repo.split('/').count() != 2 || !number.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some((repo, number))
 }
 
 fn validate_positive_number(value: &str, key: &str) -> AppResult<()> {
@@ -623,15 +661,23 @@ fn require_nonempty_json_array_field(
 }
 
 fn append_repo_args(args: &mut Vec<String>, input: &ToolInput) {
-    if let Some(repo) = input
+    append_repo_arg(args, optional_repo_arg(input).as_deref());
+}
+
+fn append_repo_arg(args: &mut Vec<String>, repo: Option<&str>) {
+    if let Some(repo) = repo {
+        args.push("-R".to_string());
+        args.push(repo.to_string());
+    }
+}
+
+fn optional_repo_arg(input: &ToolInput) -> Option<String> {
+    input
         .get("repo")
         .or_else(|| input.get("repository"))
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
-        args.push("-R".to_string());
-        args.push(repo.to_string());
-    }
+        .map(str::to_string)
 }
 
 fn run_gh(args: &[String]) -> AppResult<String> {
@@ -803,6 +849,31 @@ exit 2
         assert!(output.summary.contains("meta.number=7"));
         assert!(output.summary.contains("PR #7: Fix parser"));
         assert!(output.summary.contains("diff --git"));
+    }
+
+    #[test]
+    fn pr_target_from_input_splits_qualified_reference() {
+        let target = pr_target_from_input(
+            &ToolInput::new().with_arg("ref", "willamhou/DeepSeekCode#10"),
+            "github_pr_context",
+        )
+        .unwrap();
+
+        assert_eq!(target.number, "10");
+        assert_eq!(target.repo.as_deref(), Some("willamhou/DeepSeekCode"));
+    }
+
+    #[test]
+    fn pr_target_from_input_rejects_conflicting_repo() {
+        let err = pr_target_from_input(
+            &ToolInput::new()
+                .with_arg("ref", "willamhou/DeepSeekCode#10")
+                .with_arg("repo", "other/repo"),
+            "github_pr_context",
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("conflicting repositories"));
     }
 
     #[cfg(unix)]

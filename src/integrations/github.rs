@@ -267,6 +267,18 @@ fn run_gh(args: &[&str]) -> AppResult<String> {
     run_capture_stdout("gh", args)
 }
 
+fn pr_comment_args(repo: &str, number: u64, body_file: &str) -> Vec<String> {
+    vec![
+        "pr".to_string(),
+        "comment".to_string(),
+        number.to_string(),
+        "--repo".to_string(),
+        repo.to_string(),
+        "--body-file".to_string(),
+        body_file.to_string(),
+    ]
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GhPrSelector {
     arg: String,
@@ -405,9 +417,10 @@ pub fn post_pr_comment(repo: &str, number: u64, body: &str) -> AppResult<()> {
     file.flush()?;
     drop(file);
 
-    let target = format!("{repo}#{number}");
     let path_str = path.to_string_lossy().into_owned();
-    let result = run_gh(&["pr", "comment", &target, "--body-file", &path_str]).map(|_| ());
+    let args = pr_comment_args(repo, number, &path_str);
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let result = run_gh(&arg_refs).map(|_| ());
     let _ = std::fs::remove_file(&path);
     result
 }
@@ -551,6 +564,23 @@ mod tests {
         let selector = gh_pr_selector(&PrRef::Number(10));
         assert_eq!(selector.arg, "10");
         assert_eq!(selector.repo, None);
+    }
+
+    #[test]
+    fn pr_comment_args_use_number_with_repo_flag() {
+        let args = pr_comment_args("willamhou/DeepSeekCode", 10, "/tmp/body.md");
+        assert_eq!(
+            args,
+            vec![
+                "pr",
+                "comment",
+                "10",
+                "--repo",
+                "willamhou/DeepSeekCode",
+                "--body-file",
+                "/tmp/body.md"
+            ]
+        );
     }
 
     #[test]

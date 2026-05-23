@@ -298,7 +298,7 @@ fn run_review(config: AppConfig, reference: &str, post: bool, out: Option<&str>)
     let result = runtime.run_with(
         context,
         AgentLoopOptions {
-            steps: 4,
+            steps: 6,
             initial_observations: observations,
             ..AgentLoopOptions::default()
         },
@@ -326,7 +326,7 @@ fn build_review_body(pr: &PrContext, planner_output: &str) -> String {
 
 fn build_review_task_text(pr: &PrContext) -> String {
     format!(
-        "Review pull request #{} '{}' on {}/{}. Highlight correctness risks, security concerns, and style violations. Output a markdown report.",
+        "Review pull request #{} '{}' in repository {} on branch {}. Use the provided PR diff and changed-file observations first. Highlight correctness risks, security concerns, and style violations. Output a markdown report.",
         pr.number, pr.title, pr.repo, pr.branch
     )
 }
@@ -427,7 +427,7 @@ fn run_patch(
     runtime.run_with(
         context,
         AgentLoopOptions {
-            steps: 4,
+            steps: 8,
             initial_observations: observations,
             ..AgentLoopOptions::default()
         },
@@ -449,8 +449,8 @@ fn run_patch(
 
 fn build_patch_task_text(pr: &PrContext) -> String {
     format!(
-        "Address review feedback or apply the requested change in PR #{} '{}'. PR diff is the current head; propose minimal additional changes.",
-        pr.number, pr.title
+        "Address review feedback or apply the requested change in PR #{} '{}' in repository {} on branch {}. Use the provided PR diff observation and the current checkout first; when the requested change is clear, edit files directly, then run focused validation.",
+        pr.number, pr.title, pr.repo, pr.branch
     )
 }
 
