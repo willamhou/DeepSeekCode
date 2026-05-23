@@ -306,7 +306,7 @@ deepseek agents clear-current
 
 ## Dispatch
 
-`dispatch_subagent` accepts an optional `agent` argument. When set, DeepseekCode
+`dispatch_subagent` accepts an optional `agent` argument. When set, DeepSeekCode
 loads the matching project or user agent and injects its prompt into the child
 task. Project agents take precedence over user agents with the same name.
 

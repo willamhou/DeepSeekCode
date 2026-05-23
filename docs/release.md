@@ -114,8 +114,28 @@ ledger by timestamp, outcome, transport, and category.
 Use `--out` to persist the verification JSON for release evidence upload.
 For external fixtures, `--evidence-out` writes
 `deepseek.dogfood.external_fixture_evidence.v1` with the source workdir, appended
-external-fixture ledger row(s), release-evidence readiness boolean, and the same
-ledger fingerprint binding used by live-run evidence.
+external-fixture ledger row(s), the extracted `validate with ...` command,
+`post_validation_passed`, release-evidence readiness boolean, and the same
+ledger fingerprint binding used by live-run evidence. `dogfood
+external-evidence --require-successful-external-fixtures N` fails closed unless
+the evidence is online/model-backed, completed, matched back to the current
+ledger, and has `post_validation_passed=true`.
+
+The current tracked multi-file release fixture is the disposable Python invoice
+sample:
+
+```bash
+fixture_dir=/tmp/deepseek-external-fixtures/python-invoice-multifile
+scripts/create-multifile-external-fixture.sh "$fixture_dir"
+task='replace `return amount - discount` with `return max(amount - discount, 0.0)` in src/invoice_math/pricing.py and replace `Invoice total` with `Final total` in src/invoice_math/summary.py, validate with python3 -m unittest discover -s tests'
+deepseek dogfood external-fixture --workdir "$fixture_dir" \
+  --evidence-out .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
+  "$task"
+deepseek dogfood external-evidence \
+  --file .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
+  --out .dscode/dogfood/external-fixture-python-invoice-multifile-verification.json \
+  --require-successful-external-fixtures 1
+```
 
 For a release-readiness evidence gate, make the report fail closed when the
 ledger does not have enough live proof:

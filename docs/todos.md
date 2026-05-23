@@ -23,7 +23,7 @@ The system prompt nudges the LLM to use `todo_write` when:
 - it spans multiple files / non-trivial refactoring, OR
 - it requires running tests or shell commands as part of completion.
 
-The LLM is prompted to mark exactly one todo as `in_progress` at a time. DeepseekCode
+The LLM is prompted to mark exactly one todo as `in_progress` at a time. DeepSeekCode
 does **not** strictly validate this — the renderer shows multiple
 in_progress items if they appear, so the user can see the LLM going off track.
 
