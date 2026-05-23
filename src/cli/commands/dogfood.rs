@@ -1918,12 +1918,18 @@ fn select_replayable_cases(
         .iter()
         .filter(|case| case.workdir.is_some() && case.seed_observations.is_none())
         .filter(|case| category.is_none_or(|expected| case.category == expected))
+        .filter(|case| live_release_replay_eligible(case))
         .cloned()
         .collect::<Vec<_>>();
     if let Some(limit) = limit {
         selected.truncate(limit);
     }
     selected
+}
+
+fn live_release_replay_eligible(case: &BenchmarkCaseSummary) -> bool {
+    let notes = case.notes.as_deref().unwrap_or("").to_ascii_lowercase();
+    !notes.contains("write+validate failure case")
 }
 
 #[derive(Debug, Clone)]
@@ -2627,6 +2633,7 @@ fn replayable_live_cases_for_category(
         .filter(|case| case.category == category)
         .filter(|case| case.workdir.is_some())
         .filter(|case| case.seed_observations.is_none())
+        .filter(|case| live_release_replay_eligible(case))
         .map(|case| case.name.clone())
         .collect()
 }
@@ -5080,6 +5087,21 @@ mod tests {
                 seed_observations: Some("run_shell:failed:test failed".to_string()),
             },
             BenchmarkCaseSummary {
+                name: "fixture-recover-write-validate-rust-mini".to_string(),
+                task: "replace `a - b` with `a * b` in src/lib.rs and validate with cargo test"
+                    .to_string(),
+                category: "write_validate".to_string(),
+                skill: None,
+                workdir: Some("fixtures/rust-write-mini".to_string()),
+                isolate_workdir: true,
+                budget: 6,
+                notes: Some(
+                    "Real isolated Rust write+validate failure case for apply_patch -> git_diff -> run_shell -> read_file"
+                        .to_string(),
+                ),
+                seed_observations: None,
+            },
+            BenchmarkCaseSummary {
                 name: "fixture-recover-empty-search".to_string(),
                 task: "recover from missing symbol search".to_string(),
                 category: "recovery".to_string(),
@@ -5134,6 +5156,7 @@ mod tests {
         ));
         assert!(!text.contains("dogfood replay-benchmark"));
         assert!(!text.contains("seeded-write-validate,"));
+        assert!(!text.contains("fixture-recover-write-validate-rust-mini"));
         assert!(text.contains("recovery: live 0/1"));
     }
 
@@ -6269,6 +6292,43 @@ budget = 6
         let selected = select_replayable_cases(&cases, Some("pr_workflow"), None);
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].name, "fixture-pr-retry-validate-rust-mini");
+    }
+
+    #[test]
+    fn select_replayable_cases_skips_expected_validation_failure_readback_cases() {
+        let cases = vec![
+            BenchmarkCaseSummary {
+                name: "fixture-recover-write-validate-rust-mini".to_string(),
+                task: "replace `a - b` with `a * b` in src/lib.rs and validate with cargo test"
+                    .to_string(),
+                category: "write_validate".to_string(),
+                skill: None,
+                workdir: Some("fixtures/rust-write-mini".to_string()),
+                isolate_workdir: true,
+                budget: 6,
+                notes: Some(
+                    "Real isolated Rust write+validate failure case for apply_patch -> git_diff -> run_shell -> read_file"
+                        .to_string(),
+                ),
+                seed_observations: None,
+            },
+            BenchmarkCaseSummary {
+                name: "fixture-retry-write-validate-rust-mini".to_string(),
+                task: "replace `a - b` with `a * b` in src/lib.rs and validate with cargo test until the tests pass"
+                    .to_string(),
+                category: "write_validate".to_string(),
+                skill: None,
+                workdir: Some("fixtures/rust-write-mini".to_string()),
+                isolate_workdir: true,
+                budget: 8,
+                notes: Some("Real isolated Rust write+validate retry case".to_string()),
+                seed_observations: None,
+            },
+        ];
+
+        let selected = select_replayable_cases(&cases, Some("write_validate"), None);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "fixture-retry-write-validate-rust-mini");
     }
 
     #[test]

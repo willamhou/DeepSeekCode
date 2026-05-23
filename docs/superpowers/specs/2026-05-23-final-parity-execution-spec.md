@@ -54,8 +54,14 @@ Live execution update from this pass:
   and finishes after passing validation.
 - Re-running the same `pr_workflow` case succeeded with `apply_patch` followed
   by `npm test`.
-- Current local live ledger is `4` online runs, `3` successes, and `1`
-  historical stuck run. This is useful smoke evidence but does not satisfy the
+- A follow-up 5-case batch exposed that expected failure-readback cases should
+  not be counted as release live success samples; live-plan now skips those
+  cases. The retry case now succeeds by applying `a * b`, reading back the failed
+  validation state, retrying with `a + b`, and passing `cargo test`.
+- Current local live ledger is `17` online runs, `15` successes, and `2`
+  historical stuck runs. The latest small gate passed at `live-runs=17`,
+  overall success `>=88%`, `write_validate:4:75`, `recovery:9:88`, and
+  `pr_workflow:4:75`. This is useful smoke evidence but does not satisfy the
   release gate below.
 
 ## Residual Gap Table

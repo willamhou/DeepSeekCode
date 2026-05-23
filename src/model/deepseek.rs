@@ -1622,6 +1622,7 @@ fn next_required_action_for_prompt(input: &ModelRequest) -> Option<String> {
 }
 
 fn required_action_response(input: &ModelRequest) -> Option<ModelResponse> {
+    let task_lower = input.task.to_lowercase();
     if let Some(edit_request) = derive_edit_request(&input.task) {
         let has_patch_tool = input
             .available_tools
@@ -1650,6 +1651,35 @@ fn required_action_response(input: &ModelRequest) -> Option<ModelResponse> {
                         .with_arg("find", edit_request.find)
                         .with_arg("replace", edit_request.replace),
                 },
+            });
+        }
+
+        if has_patch_tool {
+            if let Some(retry_request) = derive_failed_validation_retry_edit_request(
+                &edit_request,
+                &input.observations,
+                &task_lower,
+            ) {
+                return Some(ModelResponse {
+                    message: format!(
+                        "DeepSeekCode guardrail is applying a targeted retry in {} after failed validation.",
+                        retry_request.path
+                    ),
+                    action: ModelAction::CallTool {
+                        tool_name: "apply_patch".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("path", retry_request.path)
+                            .with_arg("find", retry_request.find)
+                            .with_arg("replace", retry_request.replace),
+                    },
+                });
+            }
+        }
+
+        if explicit_failed_validation_readback_complete(&edit_request, input, &task_lower) {
+            return Some(ModelResponse {
+                message: "DeepSeekCode guardrail observed failed validation and the requested readback, so it is stopping before speculative retries.".to_string(),
+                action: ModelAction::Finish,
             });
         }
     }
@@ -1691,6 +1721,38 @@ fn required_action_response(input: &ModelRequest) -> Option<ModelResponse> {
             },
         }),
     }
+}
+
+fn explicit_failed_validation_readback_complete(
+    edit_request: &EditRequest,
+    input: &ModelRequest,
+    task_lower: &str,
+) -> bool {
+    if task_requests_retry_until_passing(task_lower) {
+        return false;
+    }
+
+    let Some(last) = input.observations.last() else {
+        return false;
+    };
+    if last.tool_name != "read_file" || last.is_failure() {
+        return false;
+    }
+    if !last.summary.contains(&edit_request.replace) {
+        return false;
+    }
+
+    let Some(last_patch_index) = input.observations.iter().rposition(|observation| {
+        observation.tool_name == "apply_patch" && !observation.is_failure()
+    }) else {
+        return false;
+    };
+    input.observations[last_patch_index + 1..]
+        .iter()
+        .any(|observation| {
+            observation.tool_name == "run_shell"
+                && observation.summary.contains("meta.result=failed")
+        })
 }
 
 fn render_todos_for_prompt(todos: &[crate::core::todos::Todo]) -> String {
@@ -6349,6 +6411,73 @@ mod tests {
 
         let response = required_action_response(&req).expect("expected guardrail response");
         assert!(matches!(response.action, ModelAction::Finish));
+    }
+
+    #[test]
+    fn required_action_response_stops_after_failed_validation_readback_without_retry_request() {
+        let mut req = empty_request_with_todos(Vec::new());
+        req.task =
+            "replace `a - b` with `a * b` in src/lib.rs and validate with cargo test".to_string();
+        req.suggested_test_command = Some("cargo test".to_string());
+        req.available_tools = vec![
+            "apply_patch".to_string(),
+            "run_shell".to_string(),
+            "read_file".to_string(),
+        ];
+        req.observations = vec![
+            Observation::ok(
+                "apply_patch",
+                "Updated src/lib.rs using single replacement mode.",
+            ),
+            Observation::ok(
+                "run_shell",
+                "meta.command_kind=test\nmeta.exit_code=101\nmeta.result=failed\nmeta.failure_kind=test_failure\nmeta.failed_tests=tests::adds_numbers",
+            ),
+            Observation::ok(
+                "read_file",
+                "pub fn add(a: i32, b: i32) -> i32 {\n    a * b\n}",
+            ),
+        ];
+
+        let response = required_action_response(&req).expect("expected guardrail response");
+        assert!(matches!(response.action, ModelAction::Finish));
+    }
+
+    #[test]
+    fn required_action_response_retries_after_failed_validation_when_requested() {
+        let mut req = empty_request_with_todos(Vec::new());
+        req.task = "replace `a - b` with `a * b` in src/lib.rs and validate with cargo test until the tests pass".to_string();
+        req.suggested_test_command = Some("cargo test".to_string());
+        req.available_tools = vec![
+            "apply_patch".to_string(),
+            "run_shell".to_string(),
+            "read_file".to_string(),
+        ];
+        req.observations = vec![
+            Observation::ok(
+                "apply_patch",
+                "Updated src/lib.rs using single replacement mode.",
+            ),
+            Observation::ok(
+                "run_shell",
+                "meta.command_kind=test\nmeta.exit_code=101\nmeta.result=failed\nmeta.failure_kind=test_failure\nmeta.failed_tests=tests::adds_numbers",
+            ),
+            Observation::ok(
+                "read_file",
+                "pub fn add(a: i32, b: i32) -> i32 {\n    a * b\n}",
+            ),
+        ];
+
+        let response = required_action_response(&req).expect("expected guardrail response");
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "apply_patch");
+                assert_eq!(input.get("path"), Some("src/lib.rs"));
+                assert_eq!(input.get("find"), Some("a * b"));
+                assert_eq!(input.get("replace"), Some("a + b"));
+            }
+            _ => panic!("expected retry apply_patch"),
+        }
     }
 
     #[test]
