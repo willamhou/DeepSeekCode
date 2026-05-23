@@ -35,6 +35,7 @@ const DEFAULT_WAIT_MS: u64 = 5_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
 const DEFAULT_REPLAY_LIMIT_BYTES: u64 = 20_000;
 const MAX_REPLAY_LIMIT_BYTES: u64 = 100_000;
+const FINISHED_LOG_SETTLE_MS: u64 = 250;
 const PTY_BACKEND_SCRIPT: &str = "script";
 const PTY_BACKEND_NONE: &str = "none";
 const PTY_BACKEND_NATIVE_SUPERVISOR: &str = "native-supervisor";
@@ -223,6 +224,17 @@ fn run_managed_foreground_shell(
         let mut manager = shell_manager().lock().unwrap();
         manager.refresh(&task_id)?;
         if manager.is_finished(&task_id)? {
+            let record_dir = manager
+                .jobs
+                .get(&task_id)
+                .map(|job| job.record_dir.clone())
+                .ok_or_else(|| app_error(format!("unknown background shell task: {task_id}")))?;
+            drop(manager);
+            wait_for_shell_logs_to_settle(
+                &record_dir,
+                Instant::now() + Duration::from_millis(FINISHED_LOG_SETTLE_MS),
+            );
+            let manager = shell_manager().lock().unwrap();
             let snapshot = manager.render_snapshot(&task_id)?;
             return Ok(ToolOutput {
                 summary: format!(
@@ -406,6 +418,22 @@ impl Tool for ExecShellShowTool {
             });
         }
         manager.refresh(task_id)?;
+        if manager.is_finished(task_id)? {
+            let record_dir = manager
+                .jobs
+                .get(task_id)
+                .map(|job| job.record_dir.clone())
+                .ok_or_else(|| app_error(format!("unknown background shell task: {task_id}")))?;
+            drop(manager);
+            wait_for_shell_logs_to_settle(
+                &record_dir,
+                Instant::now() + Duration::from_millis(FINISHED_LOG_SETTLE_MS),
+            );
+            let manager = shell_manager().lock().unwrap();
+            return Ok(ToolOutput {
+                summary: manager.render_snapshot(task_id)?,
+            });
+        }
         Ok(ToolOutput {
             summary: manager.render_snapshot(task_id)?,
         })
@@ -2538,11 +2566,23 @@ struct ShellSupervisorManifest {
 }
 
 fn shell_job_record_dir(cwd: &str, task_id: &str) -> PathBuf {
-    Path::new(cwd).join(".dscode/shell-jobs").join(task_id)
+    absolute_shell_workspace_path(cwd)
+        .join(".dscode/shell-jobs")
+        .join(task_id)
 }
 
 fn shell_job_manifest_path(cwd: &str, task_id: &str) -> PathBuf {
     shell_job_record_dir(cwd, task_id).join("manifest.json")
+}
+
+fn absolute_shell_workspace_path(cwd: &str) -> PathBuf {
+    let path = Path::new(cwd);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(path)
 }
 
 fn shell_supervisor_state_dir(cwd: &str) -> PathBuf {
@@ -4447,7 +4487,7 @@ fn wait_for_shell_logs_to_settle(record_dir: &Path, deadline: Instant) {
         let current = shell_log_totals(record_dir);
         if current == previous {
             stable_polls += 1;
-            if stable_polls >= 2 {
+            if stable_polls >= 4 {
                 break;
             }
         } else {
