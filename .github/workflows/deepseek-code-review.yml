@@ -1,0 +1,50 @@
+name: DeepSeekCode Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    name: DeepSeekCode PR review
+    if: >-
+      ${{
+        vars.DEEPSEEK_CODE_REVIEW_ENABLED == 'true' &&
+        (
+          github.event_name == 'pull_request' ||
+          (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@deepseek')) ||
+          (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@deepseek')) ||
+          (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@deepseek'))
+        )
+      }}
+    runs-on: ubuntu-latest
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+    steps:
+      - name: Checkout DeepSeekCode
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run DeepSeekCode GitHub Action bridge
+        if: ${{ env.DEEPSEEK_API_KEY != '' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: cargo run --locked -- github action --mode review --post --trigger "@deepseek"
+
+      - name: Explain disabled secret
+        if: ${{ env.DEEPSEEK_API_KEY == '' }}
+        run: |
+          echo "DeepSeekCode review skipped: configure the DEEPSEEK_API_KEY secret."

@@ -68,6 +68,12 @@ jobs:
       - name: Verify Release Binary
         run: ${{ matrix.binary }} version
 
+      - name: Verify Release Binary Task Worktree Runner
+        run: ${{ matrix.binary }} task fixture-smoke --json
+
+      - name: Verify Release Binary GitHub Action Bridge
+        run: ${{ matrix.binary }} github fixture-smoke --json
+
       - name: Verify Release Binary TUI Snapshot
         if: runner.os != 'Windows'
         env:
@@ -261,6 +267,7 @@ jobs:
             echo "- npm wrapper tests and root/platform dry packs"
             echo "- staged npm platform binary smoke"
             echo "- release binary TUI snapshot checks"
+            echo "- release binary task worktree runner smoke"
             echo "- model-backed README demo evidence checks"
             echo "- model-backed README SVG render self-test"
             echo "- Homebrew formula syntax and render smoke"

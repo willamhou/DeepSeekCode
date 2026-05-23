@@ -38,6 +38,12 @@ jobs:
       - name: Build Debug Binary
         run: cargo build --bin deepseek
 
+      - name: Task Worktree Runner Smoke
+        run: target/debug/deepseek task fixture-smoke --json
+
+      - name: GitHub Action Bridge Smoke
+        run: target/debug/deepseek github fixture-smoke --json
+
       - name: TUI Entrypoint Smoke
         run: target/debug/deepseek tui --entrypoint-smoke --smoke-bin target/debug/deepseek
 
@@ -93,6 +99,23 @@ jobs:
 
       - name: Verify Debug Binary
         run: ${{ matrix.binary }} version
+
+      - name: Task Worktree Runner Smoke
+        run: ${{ matrix.binary }} task fixture-smoke --json
+
+      - name: GitHub Action Bridge Smoke
+        run: ${{ matrix.binary }} github fixture-smoke --json
+
+      - name: Windows Shell Supervisor ConPTY Smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo test exec_shell_supervisor_status_treats_tcp_endpoint_as_ready --lib -- --nocapture
+          cargo test shell_supervisor_tcp_endpoint_parser_accepts_loopback_only --lib -- --nocapture
+          cargo test shell_supervisor_windows_tcp_daemon_client_smoke --lib -- --nocapture
+          cargo test shell_supervisor_protocol_tty_start_records_native_pty_events --lib -- --nocapture
+          cargo test shell_supervisor_protocol_native_pty_resize_records_event --lib -- --nocapture
+          & "${{ matrix.binary }}" agents shell-fixture-smoke --json
 
       - name: TUI Demo Snapshot
         if: runner.os != 'Windows'
