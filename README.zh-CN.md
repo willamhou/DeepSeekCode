@@ -118,8 +118,8 @@ DeepSeekCode 已经可以直接拿来写自己的代码，但还没有达到 Cla
 Codex CLI 的产品成熟度。如果只看 Linux/macOS 本地 coding-agent CLI，剩余差距主要是
 证据厚度和分发打磨：
 
-- macOS shell/runtime 证据需要超过入口 smoke；CI/release matrix 现在会跑
-  `agents shell-fixture-smoke` 和 `agents service-smoke`；
+- macOS shell/runtime 的 hosted CI 证据已经在 PR #14 / CI run #35 通过；
+  release binary 证据等待下一次 release matrix 产出；
 - 更丰富的 multi-file external fixture 样本；仓库已提供 disposable Python invoice
   fixture 脚手架；
 - Homebrew 发布仍缺 tap 凭据；
