@@ -46,7 +46,7 @@ dogfood 证据。
   `recovery 23/25`、`pr_workflow 47/50`。
 - README 已提交真实 model-backed SVG，展示失败 Rust 测试、模型修改、通过 `cargo test`
   和最终 diff。
-- `v0.1.1` 已有 GitHub Release binaries、GHCR image、npm/Homebrew packaging metadata、
+- `v0.1.2` 已有 GitHub Release binaries、GHCR image、npm/Homebrew packaging metadata、
   release matrix、download-plan 和 publish-status 检查。
 - PR #18 增加 `deepseek quickstart` / `deepseek onboarding` 首跑检查，并通过 CI：
   https://github.com/willamhou/DeepSeekCode/actions/runs/26335387193

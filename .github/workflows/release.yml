@@ -94,9 +94,12 @@ jobs:
             ${{ matrix.binary }} agents service-smoke --workdir "$smoke_workdir" --bin ${{ matrix.binary }} --json
           fi
 
-      - name: Verify Multi-file External Fixture Scaffold
+      - name: Verify External Fixture Catalog
         if: runner.os != 'Windows'
-        run: scripts/create-multifile-external-fixture.sh "$RUNNER_TEMP/deepseek-external-fixture"
+        run: |
+          scripts/create-multifile-external-fixture.sh "$RUNNER_TEMP/deepseek-external-fixture-python" python-invoice-multifile
+          scripts/create-multifile-external-fixture.sh "$RUNNER_TEMP/deepseek-external-fixture-rust" rust-order-multifile
+          scripts/create-multifile-external-fixture.sh "$RUNNER_TEMP/deepseek-external-fixture-node" node-task-report
 
       - name: Verify Release Binary TUI Snapshot
         if: runner.os != 'Windows'
@@ -292,6 +295,8 @@ jobs:
             echo "- staged npm platform binary smoke"
             echo "- release binary TUI snapshot checks"
             echo "- release binary task worktree runner smoke"
+            echo "- release binary release-smoke operator command is included in this version"
+            echo "- external fixture catalog scaffold smoke"
             echo "- model-backed README demo evidence checks"
             echo "- model-backed README SVG render self-test"
             echo "- Homebrew formula syntax and render smoke"
