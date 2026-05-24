@@ -25,12 +25,19 @@ working, not to explain every feature.
 
 ## Command Flow
 
+macOS Homebrew path:
+
 ```bash
 brew tap willamhou/deepseekcode
 brew install deepseek
 deepseek version
+deepseek config init
+printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
 deepseek quickstart
 ```
+
+For a live recording, configure the API key off camera or replace
+`<api-key>` with a redacted placeholder in the final edit.
 
 In a disposable repository:
 
@@ -45,8 +52,10 @@ model-backed SVG in the README and record a shorter install/quickstart clip.
 
 ## What To Emphasize On Screen
 
-- `brew install` works.
+- macOS `brew install` works.
+- Linux users have release archive and source-install paths.
 - `deepseek quickstart` gives first-run confidence.
+- API key setup is explicit before a real model call.
 - The agent reads repo context before editing.
 - File changes are reviewable with `git diff`.
 - Tests or checks run in the same terminal loop.
@@ -61,7 +70,7 @@ Recommended content:
 ```text
 DeepSeekCode
 DeepSeek-first terminal code agent
-Homebrew install | Linux/macOS | Public beta
+macOS Homebrew | Linux release assets | Public beta
 ```
 
 Recommended dimensions:

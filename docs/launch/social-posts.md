@@ -5,7 +5,7 @@ Use these for X, LinkedIn, Bluesky, Discord, Slack, or project update channels.
 ## One-Liner
 
 ```text
-DeepSeekCode v0.1.3 is a public-beta, DeepSeek-first terminal code agent for Linux/macOS: Homebrew install, release binaries, GHCR, Linux arm64, and release-smoke evidence.
+DeepSeekCode v0.1.3 is a public-beta, DeepSeek-first terminal code agent for Linux/macOS: macOS Homebrew install, Linux release binaries, GHCR, Linux arm64, and release-smoke evidence.
 ```
 
 ## X Thread
@@ -15,16 +15,20 @@ DeepSeekCode v0.1.3 public beta is out.
 
 It is a DeepSeek-first terminal code agent for local repository work: inspect files, edit code, run checks, review diffs, and keep the session in one terminal.
 
-Install:
+macOS install:
 brew tap willamhou/deepseekcode
 brew install deepseek
+deepseek config init
+printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
 deepseek quickstart
 deepseek
+
+Linux users can use the release archive or source install path in the README.
 
 This release includes:
 - Linux x64 + Linux arm64
 - macOS x64 + macOS arm64
-- verified Homebrew tap
+- verified macOS Homebrew tap
 - GitHub Release binaries
 - GHCR image
 - release-smoke checks against public assets
@@ -49,14 +53,18 @@ I released DeepSeekCode v0.1.3 as a public beta.
 
 DeepSeekCode is a DeepSeek-first terminal code agent for local repository work. It is built around a terminal-first loop: inspect a repo, edit files, run checks, review diffs, and continue from the same local session.
 
-The v0.1.3 release now has public GitHub Release binaries, Linux x64/arm64 and macOS x64/arm64 assets, a verified Homebrew tap, GHCR image publishing, and release-smoke checks against the published artifacts.
+The v0.1.3 release now has public GitHub Release binaries, Linux x64/arm64 and macOS x64/arm64 assets, a verified macOS Homebrew tap, GHCR image publishing, and release-smoke checks against the published artifacts.
 
-Install:
+macOS install:
 
 brew tap willamhou/deepseekcode
 brew install deepseek
+deepseek config init
+printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
 deepseek quickstart
 deepseek
+
+Linux users can use the release archive or source install path documented in the README.
 
 This is still a public beta. npm publishing is not live yet, Windows is not the current focus, and I want more real-world feedback from Linux/macOS terminal workflows.
 
@@ -69,11 +77,15 @@ https://github.com/willamhou/DeepSeekCode
 ```text
 I am dogfooding DeepSeekCode v0.1.3, a DeepSeek-first terminal code agent for Linux/macOS.
 
-Install:
+macOS install:
 brew tap willamhou/deepseekcode
 brew install deepseek
+deepseek config init
+printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
 deepseek quickstart
 deepseek
+
+Linux: use the release archive or source install path in the README.
 
 Repo: https://github.com/willamhou/DeepSeekCode
 

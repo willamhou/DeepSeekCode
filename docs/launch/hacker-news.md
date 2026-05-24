@@ -37,16 +37,22 @@ inspect a repo, edit files, run checks, review the diff, and keep working from
 the same terminal.
 
 The current public beta is focused on Linux/macOS. v0.1.3 has GitHub Release
-binaries, Linux x64/arm64 and macOS x64/arm64 assets, a verified Homebrew tap,
-a GHCR image, and release-smoke checks that download and validate the public
-release assets.
+binaries, Linux x64/arm64 and macOS x64/arm64 assets, a verified macOS
+Homebrew tap, a GHCR image, and release-smoke checks that download and validate
+the public release assets.
 
-Quick try:
+Quick try on macOS:
 
 brew tap willamhou/deepseekcode
 brew install deepseek
+deepseek config init
+printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
 deepseek quickstart
 deepseek
+
+Linux users can use the release archives or source install path from the
+README; Linux x64 and Linux arm64 release assets are part of the v0.1.3 smoke
+coverage.
 
 What works today: full-screen TUI, REPL, one-shot run mode, repo-aware file
 tools, shell workflows with approvals, sessions/runtime state, MCP/ACP surfaces,
@@ -68,5 +74,7 @@ and where DeepSeek-backed workflows feel different in practice.
 - Do not ask for upvotes.
 - If someone asks about npm, say it is prepared but not published yet because
   the registry token is not configured.
+- If someone asks about Linuxbrew, say the release assets are smoke-tested on
+  Linux x64/arm64, while Homebrew smoke currently covers macOS x64/arm64.
 - If someone asks about Windows, say release assets exist, but Linux/macOS local
   CLI dogfooding is the current milestone.

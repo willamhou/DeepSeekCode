@@ -40,7 +40,7 @@ plain chat wrapper. The default path is terminal-first and repo-aware:
 
 ## Quick Start
 
-Install with Homebrew:
+Install with Homebrew (verified on macOS x64/arm64):
 
 ```bash
 brew tap willamhou/deepseekcode

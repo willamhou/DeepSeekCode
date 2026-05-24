@@ -4,7 +4,7 @@
 
 ## Homebrew
 
-macOS/Linux 推荐从公开 tap 安装：
+macOS 推荐从公开 tap 安装：
 
 ```bash
 brew tap willamhou/deepseekcode
@@ -15,6 +15,8 @@ deepseek doctor --json
 ```
 
 `v0.1.3` 的 tap 已通过 macOS x64 和 macOS arm64 Homebrew Smoke 验证。
+Linux 用户建议优先使用下面的 release archive 或源码安装路径；`v0.1.3`
+的 Linux x64 和 Linux arm64 release assets 已通过 Release Smoke 验证。
 
 ## 从源码安装
 
