@@ -265,7 +265,8 @@ git -C "$demo_repo" commit -q -m "Create empty 2048 demo repo"
 
 reset_demo_attempt() {
   git reset -q --hard HEAD
-  git clean -q -fd -- .
+  # The retry repo must return to README-only, even if an attempt wrote ignores or nested repos.
+  git clean -q -ffdx -- .
 }
 
 require_html_id() {
