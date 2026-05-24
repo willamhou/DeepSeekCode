@@ -161,6 +161,7 @@ release と dogfood evidence:
 - [Install](./docs/install.md)
 - [Public beta guide](./docs/public-beta.md)
 - [Current status and roadmap](./docs/current-status.md)
+- [Launch kit](./docs/launch/README.md)
 - [Release checklist](./docs/release.md)
 - [Dogfood evidence](./docs/dogfood-evidence.md)
 - [Demo assets](./docs/demo/README.md)

@@ -155,6 +155,7 @@ deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 - [安装](./docs/install.md)
 - [Public beta 指南](./docs/public-beta.md)
 - [当前状态与路线](./docs/current-status.md)
+- [宣发素材包](./docs/launch/README.md)
 - [发布 checklist](./docs/release.md)
 - [Dogfood 证据](./docs/dogfood-evidence.md)
 - [Demo 素材](./docs/demo/README.md)
