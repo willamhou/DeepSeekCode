@@ -39,9 +39,10 @@ hardening gaps rather than architecture blockers:
   read-only MCP/resource tools should be added incrementally after each surface
   proves side-effect free. Parallel chunk telemetry is recorded on tool result
   events through `meta.parallel_*` lines.
-- Evidence surfaces exist locally, but the repair/cache command and
-  prompt-layer deltas should become recurring release evidence alongside live
-  model-backed dogfood runs.
+- Deterministic repair/cache evidence and prompt-prefix stability now run in
+  the release matrix and are uploaded as loop evidence artifacts. The remaining
+  evidence gap is recurring live model-backed dogfood across real gateways and
+  dynamic MCP/resource surfaces.
 
 ## What To Absorb
 
@@ -483,7 +484,8 @@ Reason: this speeds up exploration without changing write safety.
 ### Phase 5: Evidence And Polish
 
 Status on 2026-05-24: initial runtime event replay/diff CLI and repair/cache
-dogfood evidence command landed.
+dogfood evidence command landed, and the release matrix now runs that evidence
+with the prompt-prefix stability gate.
 `deepseek events replay <thread>` renders compact chronological runtime event
 summaries with stable labels for thread, turn, item, usage, prompt-layer,
 permission, goal, and task events. `deepseek events diff <left-thread>
@@ -493,13 +495,17 @@ when paths were recorded, repair events, repeated-tool suppressions, and event
 kind deltas. Both commands support `--json` for regression evidence and demos.
 `deepseek dogfood repair-cache-evidence` creates a deterministic local
 before/after run that exercises `tool_call_repair`, prompt-layer events, cache
-hit/miss usage, `events replay`, `events diff`, and `stats`.
+hit/miss usage, `events replay`, `events diff`, and `stats`. The Release Matrix
+packaging job persists the repair/cache JSON and `stats --require-prefix-stable`
+JSON as `deepseek-loop-evidence`.
 
 Deliver:
 
 - `deepseek events diff` and replay summaries; landed;
 - dogfood evidence comparing before/after repair and cache behavior; landed via
   `deepseek dogfood repair-cache-evidence --json`;
+- recurring release evidence for deterministic repair/cache and prompt-prefix
+  stability; landed in the Release Matrix packaging job;
 - README/current-status updates once behavior is verified; landed.
 
 Reason: public claims should be backed by observable runtime data.

@@ -29,7 +29,7 @@ through runtime surfaces:
 deepseek dogfood repair-cache-evidence --json
 deepseek events replay <after-thread-id> --limit 50
 deepseek events diff <before-thread-id> <after-thread-id>
-deepseek stats --thread <after-thread-id>
+deepseek stats --thread <after-thread-id> --require-prefix-stable
 ```
 
 The first command writes `.dscode/dogfood/repair-cache-evidence.json`. The JSON
@@ -41,6 +41,11 @@ contains the before/after thread ids and command list. Expected evidence:
 - `events diff` shows failed tool calls dropping from 1 to 0 and cache hit rate
   increasing from 0% to 75%;
 - `stats --thread` shows `repair_count: 1` and prompt-layer diagnostics.
+
+The Release Matrix packaging job runs the same deterministic evidence path with
+`--out target/loop-evidence/repair-cache-evidence.json`, gates the resulting
+after thread with `deepseek stats --require-prefix-stable --json`, and uploads
+the JSON files as the `deepseek-loop-evidence` artifact.
 
 ## Fixture Catalog
 

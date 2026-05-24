@@ -256,6 +256,23 @@ jobs:
           node packaging/homebrew/verify-formula.js --formula target/deepseek.rb --release
           ruby -c target/deepseek.rb
 
+      - name: DeepSeek Loop Repair Cache Evidence
+        run: |
+          mkdir -p target/loop-evidence
+          cargo run --bin deepseek -- dogfood repair-cache-evidence \
+            --out target/loop-evidence/repair-cache-evidence.json \
+            --json | tee target/loop-evidence/repair-cache-evidence-summary.json
+          after_thread="$(node -e "const fs=require('fs'); const j=JSON.parse(fs.readFileSync('target/loop-evidence/repair-cache-evidence.json','utf8')); if (!j.after_thread_id) process.exit(1); process.stdout.write(j.after_thread_id)")"
+          cargo run --bin deepseek -- stats --thread "$after_thread" \
+            --require-prefix-stable --json \
+            | tee target/loop-evidence/repair-cache-prefix-stats.json
+
+      - name: Upload DeepSeek Loop Evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-loop-evidence
+          path: target/loop-evidence/*.json
+
       - name: Docker Artifact Smoke
         run: |
           docker build -t deepseek-code:ci .
@@ -288,7 +305,7 @@ jobs:
             echo
             echo "Automated release generated from ${GITHUB_SHA}."
             echo
-            echo "Artifacts include Linux x64, Linux arm64, macOS x64, macOS arm64, and Windows x64 packages plus SHA-256 checksum files."
+            echo "Artifacts include Linux x64, Linux arm64, macOS x64, macOS arm64, and Windows x64 packages plus SHA-256 checksum files, plus deterministic DeepSeek loop evidence JSON."
             echo "Docker image target: ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME#v} (also :${GITHUB_REF_NAME} and :latest)."
             echo
             echo "Verification gates completed in this workflow:"
@@ -306,6 +323,7 @@ jobs:
             echo "- model-backed README demo evidence checks"
             echo "- model-backed README SVG render self-test"
             echo "- Homebrew formula syntax and render smoke"
+            echo "- DeepSeek loop repair/cache evidence and prompt-prefix stability gate"
             echo "- Docker artifact smoke"
             echo "- runtime service template smoke"
           } > release-notes.md

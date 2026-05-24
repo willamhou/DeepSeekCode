@@ -49,6 +49,10 @@ docs/demo/record-model-backed-demo.sh --dry-run
 docs/demo/record-model-backed-demo.sh --redaction-self-test
 docs/demo/verify-model-backed-demo.js --self-test
 docs/demo/render-model-backed-demo-svg.js --self-test
+mkdir -p target/loop-evidence
+deepseek dogfood repair-cache-evidence --out target/loop-evidence/repair-cache-evidence.json --json
+after_thread=$(node -e "const fs=require('fs'); const j=JSON.parse(fs.readFileSync('target/loop-evidence/repair-cache-evidence.json','utf8')); process.stdout.write(j.after_thread_id)")
+deepseek stats --thread "$after_thread" --require-prefix-stable --json
 ```
 
 `deepseek benchmark` must pass all three layers:
@@ -61,6 +65,9 @@ The live gate blocks release when new dogfood failures, stuck runs, or manual in
 Failed benchmark gates do not advance the saved benchmark history baseline. After triaging known live failures, use
 `deepseek benchmark --accept-live-baseline` only to intentionally accept the current dogfood snapshot; do not use it for normal release checks.
 `deepseek benchmark --category <name>` and repeatable `--case <name>` are for targeted evidence reports only; filtered runs skip history writes and full trend/live enforcement, so they do not replace the release benchmark.
+The Release Matrix packaging job also runs the deterministic repair/cache
+evidence command and `stats --require-prefix-stable`, then uploads the JSON
+outputs as the `deepseek-loop-evidence` artifact.
 
 ## Dogfood Replay
 

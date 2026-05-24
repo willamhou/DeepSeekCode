@@ -73,8 +73,9 @@ dogfood 证据。
   repair-cache-evidence --json` 会生成
   `.dscode/dogfood/repair-cache-evidence.json`，记录 before/after runtime
   threads，并可用 `deepseek events replay`、`deepseek events diff` 和
-  `deepseek stats --thread` 验证 `tool_call_repair`、prompt-layer 事件和
-  cache hit/miss delta。
+  `deepseek stats --thread --require-prefix-stable` 验证 `tool_call_repair`、
+  prompt-layer 事件和 cache hit/miss delta。Release Matrix packaging job 现在
+  会固定运行这条确定性证据链，并上传 `deepseek-loop-evidence` JSON artifact。
 
 ## 当前能力概览
 
