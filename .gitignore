@@ -20,3 +20,4 @@
 *.env
 *.key
 /docs/demo/deepseek-code-model-demo-*.log
+/docs/demo/deepseek-code-2048-demo-*.log
