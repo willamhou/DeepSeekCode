@@ -121,7 +121,8 @@ dogfood 证据。
    read-only parallel dispatch 和 stats/replay surfaces。tool-call repair
    初版已落地：可修复可恢复的截断 JSON 参数、从显式 JSON-shaped 文本中找回已知工具调用，
    支持 `model.tool_schema_flattening = "auto"` 下的 schema flatten/re-nest，并在
-   TUI runtime、exec durable runtime events 和 `exec --json` 中留下 repair 证据；不可修复的 malformed tool-call parse
+   TUI runtime、exec durable runtime events、`exec --json` 和 `DSCODE_DEBUG_TOOL_REPAIR=1`
+   opt-in debug logs 中留下 repair 证据；不可修复的 malformed tool-call parse
    failure 会转成下一步模型可见的 failed `model` observation，而不是直接硬失败；重复工具调用守卫已区分只读和写状态工具，
    prompt-layer diagnostics 与 `deepseek stats` MVP 也已接入 exec、TUI 和 runtime daemon
    turns，并可展示 model preset/route split、per-layer token/hash trend 与 cache-stable hash-change totals，

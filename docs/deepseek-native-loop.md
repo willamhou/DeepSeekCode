@@ -387,8 +387,9 @@ arguments, flattens nested object tool schemas behind
   dispatch, includes available dynamic MCP tools in the bounded text/reasoning
   scavenge allowlist, converts non-recoverable malformed tool-call parse failures into
   model-facing failed observations for the next loop step, emits visible repair
-  notes, persists structured `tool_call_repair` runtime events, and surfaces
-  repair evidence in the TUI/runtime stream. Storm detection is now
+  notes, persists structured `tool_call_repair` runtime events, emits opt-in
+  stderr debug logs with `DSCODE_DEBUG_TOOL_REPAIR=1`, and surfaces repair
+  evidence in the TUI/runtime stream. Storm detection is now
   mutating-aware: read-only calls get one warning retry, while mutating or
   unknown calls are suppressed before the second identical execution.
 
@@ -403,6 +404,7 @@ Deliver:
 - repair runtime events; landed as structured `tool_call_repair` events,
   runtime stream items, durable `exec` runtime events, and `exec --json` repair
   notices;
+- opt-in repair debug logs; landed via `DSCODE_DEBUG_TOOL_REPAIR=1`;
 - unit tests for malformed JSON, truncated JSON, scavenged calls, and unknown
   tool rejection; landed.
 

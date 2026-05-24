@@ -33,6 +33,7 @@ const DEFAULT_MODEL_STREAM_TIMEOUT_SECS: u64 = 180;
 const MAX_MODEL_STREAM_TIMEOUT_SECS: u64 = 900;
 const DEFAULT_MODEL_MAX_TOKENS: u64 = 4096;
 const MAX_MODEL_COMPLETION_TOKENS: u64 = 32_768;
+const TOOL_REPAIR_DEBUG_ENV: &str = "DSCODE_DEBUG_TOOL_REPAIR";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolSchemaFlattening {
@@ -4871,7 +4872,33 @@ fn emit_tool_repair_notes(events: &mut dyn StreamEvents, notes: &[ToolRepairNote
             "[tool-call repair:{}] {}\n",
             note.kind, note.detail
         ));
+        emit_tool_repair_debug_note(note);
     }
+}
+
+fn emit_tool_repair_debug_note(note: &ToolRepairNote) {
+    if tool_repair_debug_enabled(env::var(TOOL_REPAIR_DEBUG_ENV).ok().as_deref()) {
+        eprintln!("{}", tool_repair_debug_line(note));
+    }
+}
+
+fn tool_repair_debug_enabled(value: Option<&str>) -> bool {
+    value
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn tool_repair_debug_line(note: &ToolRepairNote) -> String {
+    format!(
+        "[deepseek tool-call repair:{}] {}",
+        note.kind,
+        note.detail.split_whitespace().collect::<Vec<_>>().join(" ")
+    )
 }
 
 fn read_cancelable_frame<R: BufRead>(
@@ -6027,7 +6054,8 @@ mod tests {
         parse_anthropic_messages, parse_anthropic_translation_response, parse_anthropic_usage,
         parse_openai_chat_completion, parse_openai_translation_response, parse_openai_usage,
         replacement_fingerprint, required_action_response, translation_system_prompt, ApiFlavor,
-        DeepSeekClient, GithubPrContextRequest, ReasoningTier, ToolSchemaFlattening,
+        DeepSeekClient, GithubPrContextRequest, ReasoningTier, ToolRepairNote,
+        ToolSchemaFlattening,
     };
     use crate::config::types::ModelConfig;
     use crate::model::client::ModelClient;
@@ -11159,6 +11187,31 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
         let mut events = NoopStreamEvents;
         let (_resp, usage) = super::parse_openai_stream(&mut cur, &mut events).unwrap();
         assert!(usage.is_none());
+    }
+
+    #[test]
+    fn tool_repair_debug_flag_requires_explicit_truthy_value() {
+        assert!(super::tool_repair_debug_enabled(Some("1")));
+        assert!(super::tool_repair_debug_enabled(Some("true")));
+        assert!(super::tool_repair_debug_enabled(Some("YES")));
+        assert!(super::tool_repair_debug_enabled(Some("on")));
+        assert!(!super::tool_repair_debug_enabled(None));
+        assert!(!super::tool_repair_debug_enabled(Some("")));
+        assert!(!super::tool_repair_debug_enabled(Some("0")));
+        assert!(!super::tool_repair_debug_enabled(Some("false")));
+    }
+
+    #[test]
+    fn tool_repair_debug_line_is_single_line() {
+        let note = ToolRepairNote {
+            kind: "scavenged-tool-call",
+            detail: "recovered\nread_file\tfrom text".to_string(),
+        };
+
+        assert_eq!(
+            super::tool_repair_debug_line(&note),
+            "[deepseek tool-call repair:scavenged-tool-call] recovered read_file from text"
+        );
     }
 
     #[test]
