@@ -35,10 +35,11 @@ hardening gaps rather than architecture blockers:
   flows. Auto-escalation remains an initial heuristic and still needs dogfood
   calibration against real failure modes.
 - Parallel dispatch is deliberately conservative. Built-in local read tools and
-  common runtime query tools now cover the initial and extended safe set;
-  read-only MCP/resource tools should be added incrementally after each surface
-  proves side-effect free. Parallel chunk telemetry is recorded on tool result
-  events through `meta.parallel_*` lines.
+  common runtime query tools now cover the initial and extended safe set, and
+  MCP inventory/prompt/resource bridge tools have explicit read-only opt-in.
+  Arbitrary `mcp_call` and dynamic `mcp__server__tool` calls remain serial until
+  each remote surface proves side-effect free. Parallel chunk telemetry is
+  recorded on tool result events through `meta.parallel_*` lines.
 - Deterministic repair/cache evidence and prompt-prefix stability now run in
   the release matrix and are uploaded as loop evidence artifacts. The remaining
   evidence gap is recurring live model-backed dogfood across real gateways and
@@ -112,10 +113,11 @@ Absorb:
 Reasonix marks tools as `parallelSafe` and runs only safe read-style batches in
 parallel. Writes remain serial barriers.
 
-DeepSeekCode now executes opt-in local read and runtime query batches
-concurrently while preserving deterministic output order and recording
-`meta.parallel_*` telemetry. The next boundary is explicit opt-in for
-read-only MCP/resource surfaces after side-effect safety is proven.
+DeepSeekCode now executes opt-in local read, runtime query, and MCP
+inventory/prompt/resource bridge batches concurrently while preserving
+deterministic output order and recording `meta.parallel_*` telemetry. Arbitrary
+MCP tool calls remain serial unless a future remote surface gets explicit
+side-effect-free metadata.
 
 Absorb:
 
@@ -463,18 +465,21 @@ play. The parallel-safe local read set is `list_files`, `list_dir`,
 `file_search`, `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame`,
 `project_map`, and `validate_data`; common runtime query tools include
 `task_list`, `task_read`, `agent_list`, `agent_result`, `automation_list`,
-`automation_read`, `pr_attempt_list`, and `pr_attempt_read`. Results are written
-back in the original model-call order, mixed read/write batches fall back to
-serial execution at write barriers, `DSCODE_TOOL_DISPATCH=serial` disables the
-path, and `DSCODE_PARALLEL_MAX` caps concurrency. Tool events from this path
-include `meta.parallel_dispatch`, `meta.parallel_chunk_size`, and
+`automation_read`, `pr_attempt_list`, and `pr_attempt_read`. Read-only MCP
+bridge calls `mcp_list_tools`, `mcp_list_prompts`, `mcp_get_prompt`,
+`mcp_list_resources`, `mcp_read_resource`, and
+`mcp_list_resource_templates` are also opt-in parallel-safe. Results are
+written back in the original model-call order, mixed read/write batches fall
+back to serial execution at write barriers, `DSCODE_TOOL_DISPATCH=serial`
+disables the path, and `DSCODE_PARALLEL_MAX` caps concurrency. Tool events from
+this path include `meta.parallel_dispatch`, `meta.parallel_chunk_size`, and
 `meta.parallel_elapsed_ms` telemetry.
 
 Deliver:
 
 - tool metadata; landed for registry read-only and parallel-safe flags;
 - same-turn read-only parallel chunks; landed for the initial and extended local
-  opt-in tool set;
+  opt-in tool set plus read-only MCP bridge surfaces;
 - output-order preservation; landed for observations and tool events;
 - serial fallback; landed for writes, shell, approval/user-input, hooks, repeats,
   side-effect MCP calls, and `DSCODE_TOOL_DISPATCH=serial`;

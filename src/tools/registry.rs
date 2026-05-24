@@ -530,6 +530,12 @@ pub fn tool_metadata_for_name(name: &str) -> ToolMetadata {
             | "pr_attempt_read"
             | "automation_list"
             | "automation_read"
+            | "mcp_list_tools"
+            | "mcp_list_prompts"
+            | "mcp_get_prompt"
+            | "mcp_list_resources"
+            | "mcp_read_resource"
+            | "mcp_list_resource_templates"
     );
     ToolMetadata {
         read_only,
@@ -573,6 +579,30 @@ pub fn execute_parallel_safe_tool(
         "pr_attempt_read" => PrAttemptReadTool::new(config).execute(input),
         "automation_list" => AutomationListTool::new(config).execute(input),
         "automation_read" => AutomationReadTool::new(config).execute(input),
+        "mcp_list_tools" => McpListToolsTool {
+            config: config.clone(),
+        }
+        .execute(input),
+        "mcp_list_prompts" => McpListPromptsTool {
+            config: config.clone(),
+        }
+        .execute(input),
+        "mcp_get_prompt" => McpGetPromptTool {
+            config: config.clone(),
+        }
+        .execute(input),
+        "mcp_list_resources" => McpListResourcesTool {
+            config: config.clone(),
+        }
+        .execute(input),
+        "mcp_read_resource" => McpReadResourceTool {
+            config: config.clone(),
+        }
+        .execute(input),
+        "mcp_list_resource_templates" => McpListResourceTemplatesTool {
+            config: config.clone(),
+        }
+        .execute(input),
         _ => Err(app_error(format!(
             "parallel-safe tool executor missing implementation for {name}"
         ))),
@@ -1249,6 +1279,26 @@ while IFS= read -r line; do
       printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"echo: hello"}],"structuredContent":{"ok":true},"isError":false}}'
       exit 0
       ;;
+    *'"method":"prompts/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"prompts":[{"name":"review_pr","description":"Review a PR","arguments":[{"name":"number","description":"PR number","required":true}]}]}}'
+      exit 0
+      ;;
+    *'"method":"prompts/get"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"description":"Review prompt","messages":[{"role":"user","content":{"type":"text","text":"Review PR #42"}}]}}'
+      exit 0
+      ;;
+    *'"method":"resources/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"resources":[{"uri":"file:///tmp/readme.md","name":"readme","description":"Project readme","mimeType":"text/markdown"}]}}'
+      exit 0
+      ;;
+    *'"method":"resources/read"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"contents":[{"uri":"file:///tmp/readme.md","mimeType":"text/markdown","text":"Hello from MCP"}]}}'
+      exit 0
+      ;;
+    *'"method":"resources/templates/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"resourceTemplates":[{"uriTemplate":"file:///tmp/{name}.md","name":"file-template","description":"File template","mimeType":"text/markdown"}]}}'
+      exit 0
+      ;;
   esac
 done
 "#,
@@ -1387,13 +1437,24 @@ done
         assert!(registry.metadata("automation_list").read_only);
         assert!(registry.metadata("automation_list").parallel_safe);
         assert!(registry.metadata("automation_read").parallel_safe);
+        assert!(registry.metadata("mcp_list_tools").read_only);
+        assert!(registry.metadata("mcp_list_tools").parallel_safe);
+        assert!(registry.metadata("mcp_list_prompts").parallel_safe);
+        assert!(registry.metadata("mcp_get_prompt").parallel_safe);
+        assert!(registry.metadata("mcp_list_resources").parallel_safe);
+        assert!(registry.metadata("mcp_read_resource").parallel_safe);
+        assert!(
+            registry
+                .metadata("mcp_list_resource_templates")
+                .parallel_safe
+        );
 
         assert!(!registry.metadata("todo_add").read_only);
         assert!(!registry.metadata("todo_add").parallel_safe);
         assert!(!registry.metadata("run_shell").parallel_safe);
         assert!(!registry.metadata("apply_patch").parallel_safe);
-        assert!(registry.metadata("mcp_read_resource").read_only);
-        assert!(!registry.metadata("mcp_read_resource").parallel_safe);
+        assert!(!registry.metadata("mcp_call").parallel_safe);
+        assert!(!registry.metadata("mcp__fake__echo").parallel_safe);
     }
 
     #[test]
@@ -1538,6 +1599,86 @@ done
         )
         .unwrap();
         assert!(automation_read.summary.contains(&automation.id));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn execute_parallel_safe_tool_runs_mcp_read_only_bridge_tools() {
+        let root = temp_root("parallel-safe-mcp");
+        let config = fake_mcp_server_config(&root, false);
+        let policy = ExecutionPolicy::new(&ApprovalConfig::default(), None);
+
+        let list_tools = execute_parallel_safe_tool(
+            "mcp_list_tools",
+            ToolInput::new().with_arg("server", "fake"),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(list_tools.summary.contains("fake [stdio]: 1 tool(s)"));
+
+        let list_prompts = execute_parallel_safe_tool(
+            "mcp_list_prompts",
+            ToolInput::new().with_arg("server", "fake"),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(list_prompts.summary.contains("review_pr"));
+
+        let get_prompt = execute_parallel_safe_tool(
+            "mcp_get_prompt",
+            ToolInput::new()
+                .with_arg("server", "fake")
+                .with_arg("prompt", "review_pr")
+                .with_arg("arguments", r#"{"number":42}"#),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(get_prompt.summary.contains("Review PR #42"));
+
+        let list_resources = execute_parallel_safe_tool(
+            "mcp_list_resources",
+            ToolInput::new().with_arg("server", "fake"),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(list_resources.summary.contains("file:///tmp/readme.md"));
+
+        let read_resource = execute_parallel_safe_tool(
+            "mcp_read_resource",
+            ToolInput::new()
+                .with_arg("server", "fake")
+                .with_arg("uri", "file:///tmp/readme.md"),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(read_resource.summary.contains("Hello from MCP"));
+
+        let list_templates = execute_parallel_safe_tool(
+            "mcp_list_resource_templates",
+            ToolInput::new().with_arg("server", "fake"),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(list_templates.summary.contains("file:///tmp/{name}.md"));
+
+        assert!(execute_parallel_safe_tool(
+            "mcp_call",
+            ToolInput::new()
+                .with_arg("server", "fake")
+                .with_arg("tool", "echo"),
+            &policy,
+            &config,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("not parallel-safe"));
 
         let _ = std::fs::remove_dir_all(root);
     }
