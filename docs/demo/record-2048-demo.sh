@@ -264,8 +264,8 @@ git -C "$demo_repo" add README.md
 git -C "$demo_repo" commit -q -m "Create empty 2048 demo repo"
 
 reset_demo_attempt() {
-  rm -f -- index.html styles.css app.js
   git reset -q --hard HEAD
+  git clean -q -fd -- .
 }
 
 require_html_id() {
@@ -399,7 +399,14 @@ run_session() {
 
 set +e
 run_session 2>&1 | redact_demo_stream | tee "$demo_out"
-session_status=${PIPESTATUS[0]}
+pipeline_status=("${PIPESTATUS[@]}")
+session_status=0
+for status in "${pipeline_status[@]}"; do
+  if [[ "$status" -ne 0 ]]; then
+    session_status=$status
+    break
+  fi
+done
 set -e
 
 echo

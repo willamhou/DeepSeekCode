@@ -575,10 +575,11 @@ pub(crate) fn set_diagnostics_post_edit_at(
 
 pub(crate) fn model_config_summary_at(root: &std::path::Path) -> AppResult<ModelConfigSummary> {
     let path = network_config_path_at(root);
-    if !path.exists() {
-        init_config_at(root, false)?;
-    }
-    let content = std::fs::read_to_string(&path)?;
+    let content = if path.exists() {
+        std::fs::read_to_string(&path)?
+    } else {
+        String::new()
+    };
     let defaults = AppConfig::default();
     Ok(ModelConfigSummary {
         path,
@@ -1898,6 +1899,22 @@ mod tests {
         init_config_at(&root, true).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("DeepSeekCode project configuration"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn config_model_and_provider_summaries_are_read_only_without_config() {
+        let root = temp_root("summary-read-only");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let model = model_config_summary_at(&root).unwrap();
+        let provider = provider_config_summary_at(&root).unwrap();
+
+        assert_eq!(model.path, root.join(".dscode/config.toml"));
+        assert_eq!(model.model, AppConfig::default().model.model);
+        assert_eq!(provider.provider, "deepseek");
+        assert!(!root.join(".dscode").exists());
 
         let _ = std::fs::remove_dir_all(root);
     }
