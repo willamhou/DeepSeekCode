@@ -29,7 +29,7 @@ use crate::tools::list_files::{ListDirTool, ListFilesTool};
 use crate::tools::mcp::{
     remote_tool_registry_name, McpCallTool, McpGetPromptTool, McpListPromptsTool,
     McpListResourceTemplatesTool, McpListResourcesTool, McpListToolsTool, McpReadResourceTool,
-    McpRemoteToolTool,
+    McpRemoteToolTool, MCP_DYNAMIC_TOOL_PREFIX,
 };
 use crate::tools::notes::{NoteTool, RememberTool};
 use crate::tools::notify::NotifyTool;
@@ -505,7 +505,7 @@ pub fn tool_metadata_for_name(name: &str) -> ToolMetadata {
             | "rlm_process_events"
             | "rlm_process_wait"
             | "rlm_python_sessions"
-    );
+    ) || dynamic_mcp_tool_is_read_only(name);
     let parallel_safe = matches!(
         name,
         "list_files"
@@ -542,6 +542,44 @@ pub fn tool_metadata_for_name(name: &str) -> ToolMetadata {
         parallel_safe,
         storm_exempt: false,
     }
+}
+
+fn dynamic_mcp_tool_is_read_only(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(MCP_DYNAMIC_TOOL_PREFIX) else {
+        return false;
+    };
+    let Some((_server, remote_tool)) = rest.split_once("__") else {
+        return false;
+    };
+    matches!(
+        remote_tool,
+        "list_files"
+            | "list_dir"
+            | "read_file"
+            | "retrieve_tool_result"
+            | "search_text"
+            | "grep_files"
+            | "file_search"
+            | "web_run"
+            | "web_search"
+            | "fetch_url"
+            | "finance"
+            | "image_ocr"
+            | "image_analyze"
+            | "review"
+            | "pr_review_comment_plan"
+            | "github_issue_context"
+            | "github_pr_context"
+            | "git_status"
+            | "git_diff"
+            | "git_log"
+            | "git_show"
+            | "git_blame"
+            | "project_map"
+            | "diagnostics"
+            | "validate_data"
+            | "recall_archive"
+    )
 }
 
 pub fn execute_parallel_safe_tool(

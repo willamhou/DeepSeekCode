@@ -972,6 +972,103 @@ pub(crate) fn load_manifest_case_summaries(path: &Path) -> AppResult<Vec<Benchma
     Ok(cases.iter().map(BenchmarkCaseSummary::from).collect())
 }
 
+pub(crate) struct BenchmarkDogfoodCaseExecution {
+    pub task: String,
+    pub category: String,
+    pub skill: Option<String>,
+    pub budget: usize,
+    pub notes: Option<String>,
+    pub workdir: String,
+    pub duration_ms: u64,
+    pub outcome: BenchmarkDogfoodCaseOutcome,
+}
+
+pub(crate) enum BenchmarkDogfoodCaseOutcome {
+    Passed(RunResult),
+    EvaluationFailed {
+        result: RunResult,
+        failures: Vec<String>,
+    },
+    RunFailed(Box<dyn std::error::Error>),
+}
+
+pub(crate) fn run_manifest_case_for_dogfood(
+    base_config: &AppConfig,
+    manifest_path: &Path,
+    case_name: &str,
+    notes: Option<String>,
+) -> AppResult<BenchmarkDogfoodCaseExecution> {
+    let manifest_text = fs::read_to_string(manifest_path).map_err(|error| {
+        app_error(format!(
+            "failed to read benchmark manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let cases = parse_manifest(&manifest_text)?;
+    let case = cases
+        .into_iter()
+        .find(|case| case.name == case_name)
+        .ok_or_else(|| {
+            app_error(format!(
+                "benchmark case `{case_name}` was not found in {}",
+                manifest_path.display()
+            ))
+        })?;
+    let manifest_dir = manifest_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let resolved_workdir = resolve_case_workdir(&manifest_dir, case.workdir.as_deref())?;
+    let (execution_workdir, cleanup_workdir) =
+        prepare_case_workdir(resolved_workdir.as_deref(), case.isolate_workdir)?;
+    let case_config = prepare_case_config(base_config, &case, execution_workdir.as_deref())?;
+    let workdir = execution_workdir
+        .as_deref()
+        .or(resolved_workdir.as_deref())
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| ".".to_string());
+    let started = Instant::now();
+    let run_result =
+        run_case_in_workdir(execution_workdir.as_deref(), case.isolate_workdir, || {
+            AgentLoop::new(case_config).run_with(
+                TaskContext::new(case.task.clone(), case.skill.clone()),
+                AgentLoopOptions {
+                    steps: case.budget,
+                    initial_observations: case.seed_observations.clone(),
+                    ..AgentLoopOptions::default()
+                },
+            )
+        });
+    if let Some(path) = cleanup_workdir.as_deref() {
+        let _ = fs::remove_dir_all(path);
+    }
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let outcome = match run_result {
+        Ok(result) => {
+            let evaluation = case.evaluate(&result);
+            if evaluation.passed {
+                BenchmarkDogfoodCaseOutcome::Passed(result)
+            } else {
+                BenchmarkDogfoodCaseOutcome::EvaluationFailed {
+                    result,
+                    failures: evaluation.failures,
+                }
+            }
+        }
+        Err(error) => BenchmarkDogfoodCaseOutcome::RunFailed(error),
+    };
+    Ok(BenchmarkDogfoodCaseExecution {
+        task: case.task,
+        category: case.category,
+        skill: case.skill,
+        budget: case.budget,
+        notes: notes.or(case.notes),
+        workdir,
+        duration_ms,
+        outcome,
+    })
+}
+
 #[derive(Default)]
 struct PendingCase {
     name: Option<String>,

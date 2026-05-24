@@ -3686,6 +3686,10 @@ mod cr1_regression_test {
         assert_eq!(super::repeat_short_circuit_threshold("read_file"), 2);
         assert_eq!(super::repeat_short_circuit_threshold("todo_add"), 1);
         assert_eq!(super::repeat_short_circuit_threshold("write_file"), 1);
+        assert_eq!(
+            super::repeat_short_circuit_threshold("mcp__stdio-self__read_file"),
+            2
+        );
         assert_eq!(super::repeat_short_circuit_threshold("mcp__fake__write"), 1);
     }
 

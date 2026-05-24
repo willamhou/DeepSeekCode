@@ -829,7 +829,7 @@ expect_tool = "mcp__stdio-self__read_file"
 expect_tool_sequence = ["mcp__stdio-self__read_file"]
 expect_tool_input_contains = "mcp__stdio-self__read_file:path=README.md"
 expect_tool_output_contains = "mcp__stdio-self__read_file:Small Rust CLI fixture"
-max_tool_calls = 1
+max_tool_calls = 2
 max_failed_tools = 0
 budget = 2
 

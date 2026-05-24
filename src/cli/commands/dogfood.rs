@@ -13,7 +13,9 @@ use crate::cli::app::{
     DogfoodLivePlanArgs, DogfoodLiveRunArgs, DogfoodOutcome, DogfoodPromoteArgs,
     DogfoodRepairCacheEvidenceArgs, DogfoodReplayArgs, DogfoodReportArgs, DogfoodRunArgs,
 };
-use crate::cli::commands::benchmark::BenchmarkCaseSummary;
+use crate::cli::commands::benchmark::{
+    BenchmarkCaseSummary, BenchmarkDogfoodCaseExecution, BenchmarkDogfoodCaseOutcome,
+};
 use crate::config::load::load_or_default;
 use crate::core::context::TaskContext;
 use crate::core::loop_runtime::{AgentLoop, AgentLoopOptions, RunResult};
@@ -960,33 +962,131 @@ fn live_run_command(
     for case in &selected {
         println!("replay: {} ({})", case.name, case.category);
         let before_case_records = latest_records.len();
-        let run_result = run_live_task(
+        let execution = crate::cli::commands::benchmark::run_manifest_case_for_dogfood(
             config,
-            DogfoodRunArgs {
-                task: String::new(),
+            &manifest_path,
+            &case.name,
+            Some(format!("live-dogfood; category={}", case.category)),
+        );
+        let mut run_error = execution.as_ref().err().map(|error| error.to_string());
+        if let Ok(execution) = execution {
+            let BenchmarkDogfoodCaseExecution {
+                task,
+                category,
+                skill,
+                budget,
+                notes,
+                workdir,
+                duration_ms,
+                outcome,
+            } = execution;
+            let timestamp_secs = unix_now_secs()?;
+            let dogfood_args = DogfoodRunArgs {
+                task: task.clone(),
                 from_benchmark: Some(case.name.clone()),
                 benchmark_manifest: Some(manifest_path.display().to_string()),
-                skill: None,
-                budget: None,
-                workdir: None,
+                skill: skill.clone(),
+                budget: Some(budget),
+                workdir: Some(workdir.clone()),
                 isolate_workdir: false,
                 outcome: None,
                 manual_intervention: false,
                 benchmark_gate: false,
-                notes: Some(format!("live-dogfood; category={}", case.category)),
-            },
-        );
+                notes: notes.clone(),
+            };
+            let mut record = match outcome {
+                BenchmarkDogfoodCaseOutcome::Passed(result) => DogfoodRecord::from_result(
+                    timestamp_secs,
+                    duration_ms,
+                    config.model.model.clone(),
+                    model_transport,
+                    workdir.clone(),
+                    budget,
+                    &dogfood_args,
+                    false,
+                    &result,
+                ),
+                BenchmarkDogfoodCaseOutcome::EvaluationFailed { result, failures } => {
+                    let message = format!("benchmark assertions failed: {}", failures.join("; "));
+                    run_error = Some(message.clone());
+                    let mut record = DogfoodRecord::from_result(
+                        timestamp_secs,
+                        duration_ms,
+                        config.model.model.clone(),
+                        model_transport,
+                        workdir.clone(),
+                        budget,
+                        &dogfood_args,
+                        false,
+                        &result,
+                    );
+                    record.outcome = DogfoodOutcome::Failed;
+                    record.error_kind = Some("benchmark_assertion".to_string());
+                    record.final_message = clip(&message, 240);
+                    record
+                }
+                BenchmarkDogfoodCaseOutcome::RunFailed(error) => {
+                    run_error = Some(error.to_string());
+                    if dogfood_error_is_environment_transport_failure(error.as_ref()) {
+                        first_run_error = Some(error);
+                        let after_case_records = load_records_or_empty(&ledger_path)?;
+                        let appended_records =
+                            after_case_records.get(before_case_records..).unwrap_or(&[]);
+                        case_evidence.push(live_run_case_evidence_json(
+                            case,
+                            appended_records,
+                            run_error.as_deref(),
+                        ));
+                        latest_records = after_case_records;
+                        break;
+                    }
+                    DogfoodRecord::from_error(
+                        timestamp_secs,
+                        duration_ms,
+                        config.model.model.clone(),
+                        model_transport,
+                        workdir.clone(),
+                        budget,
+                        &dogfood_args,
+                        false,
+                        error.as_ref(),
+                    )
+                }
+            };
+            record.benchmark_category = Some(category.clone());
+            append_record(&ledger_path, &record)?;
+            let records = load_records(&ledger_path)?;
+            write_report(
+                &ledger_path,
+                &config.workspace.dogfood_report_path(),
+                &records,
+                DEFAULT_REPORT_LIMIT,
+            )?;
+            println!(
+                "ledger: {} (outcome: {}, manual_intervention: {})",
+                ledger_path.display(),
+                record.outcome.label(),
+                if record.manual_intervention {
+                    "yes"
+                } else {
+                    "no"
+                }
+            );
+            println!(
+                "report: {}",
+                config.workspace.dogfood_report_path().display()
+            );
+        }
         let after_case_records = load_records_or_empty(&ledger_path)?;
         let appended_records = after_case_records.get(before_case_records..).unwrap_or(&[]);
-        let run_error = run_result.as_ref().err().map(|error| error.to_string());
         case_evidence.push(live_run_case_evidence_json(
             case,
             appended_records,
             run_error.as_deref(),
         ));
         latest_records = after_case_records;
-        if let Err(error) = run_result {
-            first_run_error = Some(error);
+        if let Some(error) = run_error {
+            first_run_error = Some(app_error(error));
             break;
         }
     }
@@ -1781,7 +1881,16 @@ fn live_evidence_ledger_match_failures(
         let model_backed_appended =
             live_evidence_u64(case_root, "model_backed_records_appended").unwrap_or(0);
         case_model_backed_total = case_model_backed_total.saturating_add(model_backed_appended);
-        if live_evidence_case_matches_any_record(case_root, records) {
+        if let Some(record) = live_evidence_case_matching_record(case_root, records) {
+            if let Some(surface) = live_evidence_mcp_loop_surface(case_root) {
+                let actual = mcp_loop_surface_from_record(record);
+                if actual != Some(surface) {
+                    let name = live_evidence_string(case_root, "name").unwrap_or("unknown");
+                    failures.push(format!(
+                        "case evidence #{index} `{name}` claims MCP {surface} surface but matched ledger tool_trace does not prove it"
+                    ));
+                }
+            }
             continue;
         }
         let name = live_evidence_string(case_root, "name").unwrap_or("unknown");
@@ -1858,18 +1967,25 @@ fn live_evidence_case_matches_any_record(
     case_root: &BTreeMap<String, JsonValue>,
     records: &[DogfoodRecord],
 ) -> bool {
+    live_evidence_case_matching_record(case_root, records).is_some()
+}
+
+fn live_evidence_case_matching_record<'a>(
+    case_root: &BTreeMap<String, JsonValue>,
+    records: &'a [DogfoodRecord],
+) -> Option<&'a DogfoodRecord> {
     let Some(timestamp_secs) = live_evidence_u64(case_root, "timestamp_secs") else {
-        return false;
+        return None;
     };
     let Some(outcome) = live_evidence_string(case_root, "outcome") else {
-        return false;
+        return None;
     };
     let Some(model_transport) = live_evidence_string(case_root, "model_transport") else {
-        return false;
+        return None;
     };
     let model_backed = live_evidence_bool(case_root, "model_backed").unwrap_or(false);
     let category = live_evidence_string(case_root, "benchmark_category");
-    records.iter().any(|record| {
+    records.iter().find(|record| {
         record.timestamp_secs == timestamp_secs
             && record.outcome.label() == outcome
             && record.model_transport == model_transport
@@ -1916,9 +2032,7 @@ fn live_evidence_has_mcp_loop_surface_kind(
 }
 
 fn live_evidence_mcp_loop_surface(case: &BTreeMap<String, JsonValue>) -> Option<&'static str> {
-    live_evidence_string(case, "mcp_loop_surface")
-        .and_then(mcp_loop_surface_from_str)
-        .or_else(|| live_evidence_string(case, "name").and_then(mcp_loop_surface_from_case_name))
+    live_evidence_string(case, "mcp_loop_surface").and_then(mcp_loop_surface_from_str)
 }
 
 fn live_evidence_requires_mcp_loop_surface_gate(root: &BTreeMap<String, JsonValue>) -> bool {
@@ -3275,12 +3389,22 @@ fn build_live_plan(
                 .cloned()
                 .unwrap_or_default();
             let replayable_cases = replayable_live_cases_for_category(summaries, &target.category);
-            let needed_runs = target.min_runs.saturating_sub(stats.runs);
-            let recommended_cases = replayable_cases
-                .iter()
-                .take(needed_runs.min(limit_per_category))
-                .cloned()
-                .collect::<Vec<_>>();
+            let needed_runs = needed_successful_live_runs_for_gate(
+                stats.runs,
+                stats.success,
+                target.min_runs,
+                target.min_success_percent,
+            );
+            let recommended_cases = if replayable_cases.is_empty() {
+                Vec::new()
+            } else {
+                replayable_cases
+                    .iter()
+                    .cycle()
+                    .take(needed_runs.min(limit_per_category))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
             LiveCategoryPlan {
                 category: target.category.clone(),
                 target_runs: target.min_runs,
@@ -3304,6 +3428,31 @@ fn build_live_plan(
         live_success,
         category_plans,
     }
+}
+
+fn needed_successful_live_runs_for_gate(
+    runs: usize,
+    success: usize,
+    min_runs: usize,
+    min_success_percent: f64,
+) -> usize {
+    for needed in 0usize..=10_000 {
+        let future_runs = runs.saturating_add(needed);
+        let future_success = success.saturating_add(needed);
+        if future_runs >= min_runs
+            && success_rate_satisfies(future_success, future_runs, min_success_percent)
+        {
+            return needed;
+        }
+    }
+    10_000
+}
+
+fn success_rate_satisfies(success: usize, runs: usize, min_success_percent: f64) -> bool {
+    if runs == 0 {
+        return min_success_percent <= 0.0;
+    }
+    (success as f64 / runs as f64) * 100.0 >= min_success_percent
 }
 
 fn select_live_run_cases(plan: &LivePlan, categories: &[String], limit: usize) -> Vec<LiveRunCase> {
@@ -3783,7 +3932,7 @@ fn live_run_case_evidence_json(
     root.insert(
         "mcp_loop_surface".to_string(),
         if case.category == "mcp" {
-            mcp_loop_surface_from_case_name(&case.name)
+            mcp_loop_surface_from_records(appended_records)
                 .map(|surface| JsonValue::String(surface.to_string()))
                 .unwrap_or(JsonValue::Null)
         } else {
@@ -3866,11 +4015,28 @@ fn live_run_case_evidence_json(
     JsonValue::Object(root)
 }
 
-fn mcp_loop_surface_from_case_name(name: &str) -> Option<&'static str> {
-    let lower = name.to_ascii_lowercase();
-    if lower.contains("mcp-dynamic") {
+fn mcp_loop_surface_from_records(records: &[DogfoodRecord]) -> Option<&'static str> {
+    records.iter().find_map(mcp_loop_surface_from_record)
+}
+
+fn mcp_loop_surface_from_record(record: &DogfoodRecord) -> Option<&'static str> {
+    mcp_loop_surface_from_tool_trace(&record.tool_trace)
+}
+
+fn mcp_loop_surface_from_tool_trace(tool_trace: &str) -> Option<&'static str> {
+    let mut saw_dynamic = false;
+    let mut saw_resource = false;
+    for tool in tool_trace.split(" -> ").map(str::trim) {
+        if tool.starts_with(crate::tools::mcp::MCP_DYNAMIC_TOOL_PREFIX) {
+            saw_dynamic = true;
+        }
+        if tool == "mcp_read_resource" {
+            saw_resource = true;
+        }
+    }
+    if saw_dynamic {
         Some("dynamic")
-    } else if lower.contains("mcp-resource") {
+    } else if saw_resource {
         Some("resource")
     } else {
         None
@@ -5981,6 +6147,50 @@ mod tests {
     }
 
     #[test]
+    fn live_plan_needed_runs_accounts_for_success_rate() {
+        let mut failed_mcp = test_record(10, "mcp", DogfoodOutcome::Failed);
+        failed_mcp.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
+        let summaries = vec![BenchmarkCaseSummary {
+            name: "fixture-mcp-dynamic-readme".to_string(),
+            task: "Use the dynamic MCP read_file tool".to_string(),
+            category: "mcp".to_string(),
+            skill: None,
+            workdir: Some("fixtures/rust-cli-mini".to_string()),
+            isolate_workdir: true,
+            budget: 2,
+            notes: None,
+            seed_observations: None,
+        }];
+        let targets = vec![DogfoodCategoryRequirement {
+            category: "mcp".to_string(),
+            min_runs: 3,
+            min_success_percent: 90.0,
+        }];
+
+        let plan = build_live_plan(
+            Path::new(".dscode/dogfood/ledger.jsonl"),
+            Path::new(".dscode/benchmarks.txt"),
+            &[failed_mcp],
+            &summaries,
+            MODEL_TRANSPORT_ONLINE,
+            100,
+            90.0,
+            &targets,
+            10,
+        );
+
+        let mcp = plan
+            .category_plans
+            .iter()
+            .find(|category| category.category == "mcp")
+            .unwrap();
+        assert_eq!(mcp.live_runs, 1);
+        assert_eq!(mcp.live_success, 0);
+        assert_eq!(mcp.needed_runs, 9);
+        assert_eq!(mcp.recommended_cases.len(), 9);
+    }
+
+    #[test]
     fn live_plan_json_includes_targets_and_recommendations() {
         let summaries = vec![BenchmarkCaseSummary {
             name: "fixture-pr-retry-validate-rust-mini".to_string(),
@@ -6290,9 +6500,10 @@ mod tests {
     }
 
     #[test]
-    fn live_run_case_evidence_marks_mcp_loop_surface_from_case_name() {
+    fn live_run_case_evidence_marks_mcp_loop_surface_from_tool_trace() {
         let mut dynamic_record = test_record(20, "mcp", DogfoodOutcome::Success);
         dynamic_record.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
+        dynamic_record.tool_trace = "mcp__stdio-self__read_file".to_string();
         let dynamic = json_value_to_string(&live_run_case_evidence_json(
             &LiveRunCase {
                 category: "mcp".to_string(),
@@ -6305,6 +6516,7 @@ mod tests {
 
         let mut resource_record = test_record(21, "mcp", DogfoodOutcome::Success);
         resource_record.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
+        resource_record.tool_trace = "mcp_list_resources -> mcp_read_resource".to_string();
         let resource = json_value_to_string(&live_run_case_evidence_json(
             &LiveRunCase {
                 category: "mcp".to_string(),
@@ -6314,6 +6526,19 @@ mod tests {
             None,
         ));
         assert!(resource.contains("\"mcp_loop_surface\":\"resource\""));
+
+        let mut local_record = test_record(22, "mcp", DogfoodOutcome::Success);
+        local_record.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
+        local_record.tool_trace = "read_file".to_string();
+        let local = json_value_to_string(&live_run_case_evidence_json(
+            &LiveRunCase {
+                category: "mcp".to_string(),
+                name: "fixture-mcp-dynamic-readme".to_string(),
+            },
+            &[local_record],
+            None,
+        ));
+        assert!(local.contains("\"mcp_loop_surface\":null"));
     }
 
     #[test]
