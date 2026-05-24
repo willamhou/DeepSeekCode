@@ -103,6 +103,7 @@ fn update_words() -> &'static [&'static str] {
         "homebrew-formula",
         "publish-status",
         "download-plan",
+        "release-smoke",
     ]
 }
 

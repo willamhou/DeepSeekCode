@@ -75,7 +75,8 @@ dogfood 证据。
 
 这个限定目标的核心交互能力和 evidence gate 已经成立。下一步主要是 release hardening：
 
-1. 等下一次 release matrix 产出 release-binary 级别的 Linux/macOS shell/runtime smoke 证据。
+1. 等下一次 release matrix 产出 release-binary 级别的 Linux/macOS shell/runtime smoke 证据；
+   操作员可以用 `deepseek update release-smoke --version <version>` 复验当前平台 release binary。
 2. 配置 Homebrew tap 凭据，完成 tap 发布和公开安装验证。
 3. 可选再增加 1-2 个真实外部 repo fixture，扩大 multi-file/多语言样本厚度。
 4. 继续压缩 README、install、release、current-status；当前推荐首跑入口是

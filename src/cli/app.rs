@@ -1413,6 +1413,7 @@ pub enum UpdateAction {
     HomebrewFormula(UpdateHomebrewFormulaArgs),
     PublishStatus(UpdatePublishStatusArgs),
     DownloadPlan(UpdateDownloadPlanArgs),
+    ReleaseSmoke(UpdateReleaseSmokeArgs),
 }
 
 impl Default for UpdateAction {
@@ -1485,6 +1486,17 @@ pub struct UpdateDownloadPlanArgs {
     pub repo: Option<String>,
     pub base_url: Option<String>,
     pub platform: Option<String>,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdateReleaseSmokeArgs {
+    pub version: Option<String>,
+    pub repo: Option<String>,
+    pub base_url: Option<String>,
+    pub platform: Option<String>,
+    pub out: Option<String>,
+    pub keep_workdir: bool,
     pub json: bool,
 }
 
@@ -2641,9 +2653,15 @@ fn parse_update_args(args: Vec<String>) -> Result<UpdateArgs, String> {
                 )?);
                 return Ok(parsed);
             }
+            "release-smoke" => {
+                parsed.action = UpdateAction::ReleaseSmoke(parse_update_release_smoke_args(
+                    args.into_iter().skip(index + 1).collect(),
+                )?);
+                return Ok(parsed);
+            }
             other => {
                 return Err(format!(
-                    "unknown update argument `{other}`; expected --check|--print-command|package|verify-install|install-package|rollback|homebrew-formula|publish-status|download-plan"
+                    "unknown update argument `{other}`; expected --check|--print-command|package|verify-install|install-package|rollback|homebrew-formula|publish-status|download-plan|release-smoke"
                 ));
             }
         }
@@ -2907,6 +2925,60 @@ fn parse_update_download_plan_args(args: Vec<String>) -> Result<UpdateDownloadPl
             other => {
                 return Err(format!(
                     "unknown flag for `update download-plan`: {other}; expected --version|--repo|--base-url|--platform|--json"
+                ));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_update_release_smoke_args(args: Vec<String>) -> Result<UpdateReleaseSmokeArgs, String> {
+    let mut parsed = UpdateReleaseSmokeArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--version" if index + 1 < args.len() => {
+                parsed.version = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--version" => {
+                return Err("update release-smoke --version requires a value".to_string())
+            }
+            "--repo" if index + 1 < args.len() => {
+                parsed.repo = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--repo" => return Err("update release-smoke --repo requires owner/name".to_string()),
+            "--base-url" if index + 1 < args.len() => {
+                parsed.base_url = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--base-url" => {
+                return Err("update release-smoke --base-url requires a URL".to_string())
+            }
+            "--platform" if index + 1 < args.len() => {
+                parsed.platform = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--platform" => {
+                return Err("update release-smoke --platform requires a value".to_string())
+            }
+            "--out" if index + 1 < args.len() => {
+                parsed.out = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--out" => return Err("update release-smoke --out requires a path".to_string()),
+            "--keep-workdir" => {
+                parsed.keep_workdir = true;
+                index += 1;
+            }
+            "--json" => {
+                parsed.json = true;
+                index += 1;
+            }
+            other => {
+                return Err(format!(
+                    "unknown flag for `update release-smoke`: {other}; expected --version|--repo|--base-url|--platform|--out|--keep-workdir|--json"
                 ));
             }
         }
@@ -8540,6 +8612,46 @@ mod tests {
                     assert!(plan.json);
                 }
                 other => panic!("expected update download-plan, got {other:?}"),
+            },
+            other => panic!("expected Command::Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_update_release_smoke() {
+        let cli = Cli::from_argv(vec![
+            "update".to_string(),
+            "release-smoke".to_string(),
+            "--version".to_string(),
+            "v1.2.3".to_string(),
+            "--repo".to_string(),
+            "example/deepseek".to_string(),
+            "--base-url".to_string(),
+            "https://mirror.example/releases/v1.2.3".to_string(),
+            "--platform".to_string(),
+            "linux-x64".to_string(),
+            "--out".to_string(),
+            "target/release-smoke-test".to_string(),
+            "--keep-workdir".to_string(),
+            "--json".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Update(args)) => match args.action {
+                UpdateAction::ReleaseSmoke(smoke) => {
+                    assert_eq!(smoke.version.as_deref(), Some("v1.2.3"));
+                    assert_eq!(smoke.repo.as_deref(), Some("example/deepseek"));
+                    assert_eq!(
+                        smoke.base_url.as_deref(),
+                        Some("https://mirror.example/releases/v1.2.3")
+                    );
+                    assert_eq!(smoke.platform.as_deref(), Some("linux-x64"));
+                    assert_eq!(smoke.out.as_deref(), Some("target/release-smoke-test"));
+                    assert!(smoke.keep_workdir);
+                    assert!(smoke.json);
+                }
+                other => panic!("expected update release-smoke, got {other:?}"),
             },
             other => panic!("expected Command::Update, got {other:?}"),
         }

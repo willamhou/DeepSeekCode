@@ -149,6 +149,16 @@ deepseek update download-plan --version 0.1.1
 deepseek update download-plan --version 0.1.1 --json
 ```
 
+也可以让 CLI 直接完成当前平台 release binary smoke：下载 archive 和 `.sha256`、
+校验 checksum、解压 binary，并在隔离目录跑 `version`、`config init`、`doctor`、
+`exec --json` 和一个 benchmark sample。这个命令只适用于当前机器架构已经有对应
+release asset 的平台，例如 Linux x64、macOS x64、macOS arm64：
+
+```bash
+deepseek update release-smoke --version 0.1.1
+deepseek update release-smoke --version 0.1.1 --json
+```
+
 ```bash
 curl -L -o deepseek-linux-x64.tar.gz \
   https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.1/deepseek-linux-x64.tar.gz
@@ -535,6 +545,7 @@ curl http://127.0.0.1:8765/runtime
 - `deepseek update verify-install`：在隔离目录验证 version/config/doctor/exec JSONL/benchmark sample
 - `deepseek update install-package` / `deepseek update rollback`：安装本地 release package 或回滚到备份 binary
 - `deepseek update download-plan [--version ... --base-url ... --platform ... --json]`：打印当前平台 release archive、checksum、验证和解压命令，可指向自有镜像目录
+- `deepseek update release-smoke [--version ... --repo ... --base-url ... --platform ... --out ... --keep-workdir --json]`：下载、校验并执行当前平台 release binary install smoke
 - `deepseek update publish-status [--dist ... --npm-dist ... --live-evidence-verification ... --strict --json]`：检查 npm/Homebrew 发布所需 token、tap 配置、平台包、release checksum 和 online dogfood evidence
 - `deepseek pr live-status <pr> [--require-write --json]`：只读检查真实 GitHub PR 是否具备 live review/retry fixture 前置条件
 - `deepseek config network allow|deny <host>`：把网络 host 策略写回项目 `.dscode/config.toml`，用于持久化 web/search/fetch 的允许或拒绝规则

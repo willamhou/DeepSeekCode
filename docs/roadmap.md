@@ -35,6 +35,9 @@ and documentation polish.
 - Run the next release matrix and preserve release-binary smoke evidence for
   Linux/macOS TUI entrypoint, shell fixture, service smoke, task worktree smoke,
   GitHub bridge smoke, and multi-file fixture scaffold.
+- Use `deepseek update release-smoke --version <version>` on Linux x64,
+  macOS x64, and macOS arm64 to validate downloaded release binaries outside
+  the source checkout.
 - Keep `deepseek update publish-status --strict` fail-closed on verified online
   dogfood evidence, release assets, npm package artifacts, Homebrew checksums,
   and public install readiness.
