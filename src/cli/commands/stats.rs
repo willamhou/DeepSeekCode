@@ -391,7 +391,15 @@ fn render_stats_summary(summary: &StatsSummary) -> String {
         basis_points_percent(summary.prompt_cache_hit_basis_points)
     ));
     out.push_str(&format!(
-        "estimated_cost_usd: {}\n",
+        "estimated_input_cost_usd: {}\n",
+        microusd_decimal(summary.estimated_input_cost_microusd)
+    ));
+    out.push_str(&format!(
+        "estimated_output_cost_usd: {}\n",
+        microusd_decimal(summary.estimated_output_cost_microusd)
+    ));
+    out.push_str(&format!(
+        "estimated_total_cost_usd: {}\n",
         microusd_decimal(summary.estimated_total_cost_microusd)
     ));
     if summary.unpriced_record_count > 0 {
@@ -963,6 +971,8 @@ mod tests {
             thread_count: 1,
             model_turns: 2,
             prompt_cache_hit_basis_points: 7550,
+            estimated_input_cost_microusd: 234,
+            estimated_output_cost_microusd: 1000,
             estimated_total_cost_microusd: 1234,
             ..StatsSummary::default()
         };
@@ -988,7 +998,9 @@ mod tests {
         );
         let rendered = render_stats_summary(&summary);
         assert!(rendered.contains("prompt_cache_hit_rate: 75.50%"));
-        assert!(rendered.contains("estimated_cost_usd: 0.001234"));
+        assert!(rendered.contains("estimated_input_cost_usd: 0.000234"));
+        assert!(rendered.contains("estimated_output_cost_usd: 0.001000"));
+        assert!(rendered.contains("estimated_total_cost_usd: 0.001234"));
         assert!(rendered.contains("prompt_layer_cache_stable_hash_changes: 0"));
         assert!(rendered.contains("- deepseek-v4-flash: 2"));
         assert!(rendered.contains("model_presets:"));
