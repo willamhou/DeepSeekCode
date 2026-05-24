@@ -32,8 +32,9 @@ hardening gaps rather than architecture blockers:
   DeepSeek-backed examples across real gateways, dynamic MCP schemas, and
   non-recoverable malformed-call recovery paths before treating it as mature.
 - Model presets and session budgets work, including explicit budget raise/off
-  flows. Auto-escalation remains an initial heuristic and still needs dogfood
-  calibration against real failure modes.
+  flows. Auto-escalation now covers repeated repair, malformed tool-call,
+  tool-call storm, empty read/search, validation-after-edit, and unproductive
+  step signals; it still needs dogfood calibration against real failure modes.
 - Parallel dispatch is deliberately conservative. Built-in local read tools and
   common runtime query tools now cover the initial and extended safe set, and
   MCP inventory/prompt/resource bridge tools have explicit read-only opt-in.
@@ -98,8 +99,9 @@ Reasonix uses DeepSeek model economics directly: flash-first defaults, pro as a
 visible escalation, `/pro` for the next turn, and budget-aware session behavior.
 
 DeepSeekCode already has DeepSeek V4 pricing, usage cost estimates, first-class
-`flash | auto | pro` presets, visible escalation, and runtime budget records.
-The remaining work is dogfood calibration of the auto-escalation heuristic.
+`flash | auto | pro` presets, visible escalation, runtime budget records, and
+local auto-escalation triggers for repair/failure recovery signals. The
+remaining work is dogfood calibration of the auto-escalation heuristic.
 
 Absorb:
 
@@ -243,7 +245,7 @@ Preset semantics:
 - `auto`: default to flash, escalate visibly to pro for the current or next turn
   when failure signals cross a threshold.
 
-Candidate auto-escalation signals:
+Implemented auto-escalation signals:
 
 - tool-call repair fired repeatedly in the same turn;
 - malformed tool calls after repair;
@@ -445,7 +447,10 @@ Deliver:
 
 - `preset = auto | flash | pro` config; landed;
 - CLI/TUI commands for preset and `/pro`; landed;
-- visible auto-escalation; landed for auto routes that select Pro;
+- visible auto-escalation; landed for auto routes that select Pro, including
+  explicit recovery reasons for repeated repair, malformed tool-call,
+  tool-call storm, empty read/search, validation-after-edit, and unproductive
+  steps;
 - session budget warning/refusal; landed for current agent-loop estimated
   DeepSeek spend and cross-process runtime sessions;
 - explicit budget raise/off commands; landed for CLI and TUI model surfaces;

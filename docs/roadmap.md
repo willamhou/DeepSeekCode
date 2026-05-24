@@ -93,6 +93,10 @@ npm remains useful for Node-oriented users but is not the primary blocker.
   cross-process runtime budget metadata. Budget raise/disable flows are now
   explicit through `deepseek config budget raise <MICROUSD>`, `deepseek config
   budget +<MICROUSD>`, `deepseek config budget off`, and TUI `model budget ...`.
+  Auto escalation now has explicit local triggers for repeated repair signals,
+  malformed tool calls, tool-call storms, empty read/search loops,
+  validation-after-edit failures, and repeated unproductive steps; remaining
+  work is live dogfood calibration.
   The repair/cache evidence command now records comparable before/after runtime
   threads with cache-hit deltas and replay/diff/stats commands.
 - Parallel-safe read dispatch has landed for same-turn batches across local

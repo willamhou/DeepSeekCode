@@ -12,7 +12,8 @@ use crate::error::tool_failure;
 use crate::error::AppResult;
 use crate::model::client::ModelClient;
 use crate::model::protocol::{
-    ImageInput, ModelAction, ModelRequest, ModelResponse, TokenUsage, ToolCallRequest,
+    ImageInput, ModelAction, ModelRequest, ModelResponse, ObservationKind, TokenUsage,
+    ToolCallRequest,
 };
 use crate::model::tool_repair::{
     flatten_tool_schema_auto, parse_tool_arguments_with_repair, re_nest_tool_arguments,
@@ -1196,6 +1197,7 @@ struct ModelRoute {
 impl ModelRoute {
     fn resolve(config: &ModelConfig, input: &ModelRequest) -> Self {
         let complexity = RouteComplexity::classify(input);
+        let recovery_signal = route_recovery_signal(input);
         let preset = ModelPreset::from_config(&config.preset);
         let raw_model = config.model.trim();
         let preset_controls_model = raw_model.is_empty() || is_preset_controlled_model(raw_model);
@@ -1219,12 +1221,18 @@ impl ModelRoute {
                     ),
                     RouteComplexity::Complex => (
                         "deepseek-v4-pro".to_string(),
-                        "complex task or recovery signals".to_string(),
+                        recovery_signal
+                            .map(|signal| signal.reason)
+                            .unwrap_or("complex task or recovery signals")
+                            .to_string(),
                         true,
                     ),
                     RouteComplexity::Deep => (
                         "deepseek-v4-pro".to_string(),
-                        "deep task or failure signals".to_string(),
+                        recovery_signal
+                            .map(|signal| signal.reason)
+                            .unwrap_or("deep task or failure signals")
+                            .to_string(),
                         true,
                     ),
                 },
@@ -1295,6 +1303,9 @@ impl RouteComplexity {
     fn classify(input: &ModelRequest) -> Self {
         let mut score = 0u8;
         let text = route_text(input);
+        if let Some(signal) = route_recovery_signal(input) {
+            score = score.saturating_add(signal.score);
+        }
         if input.planning_mode {
             score = score.saturating_add(2);
         }
@@ -1362,6 +1373,120 @@ impl RouteComplexity {
             Self::Simple
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RouteRecoverySignal {
+    score: u8,
+    reason: &'static str,
+}
+
+fn route_recovery_signal(input: &ModelRequest) -> Option<RouteRecoverySignal> {
+    let mut repair_count = 0usize;
+    let mut malformed_count = 0usize;
+    let mut repeated_count = 0usize;
+    let mut empty_read_count = 0usize;
+    let edited = input.observations.iter().any(|observation| {
+        matches!(observation.kind, ObservationKind::Patch) && !observation.is_failure()
+    });
+    let mut validation_failed_after_edit = false;
+
+    for observation in &input.observations {
+        let text = format!(
+            "{} {}",
+            observation.tool_name.to_ascii_lowercase(),
+            observation.summary.to_ascii_lowercase()
+        );
+        if text.contains("[tool-call repair")
+            || text.contains("tool_call_repair")
+            || text.contains("toolrepairnote")
+            || text.contains("repaired truncated")
+        {
+            repair_count += 1;
+        }
+        if text.contains("malformed")
+            || text.contains("tool_call_parse_failed")
+            || text.contains("parse failed")
+            || text.contains("unterminated")
+        {
+            malformed_count += 1;
+        }
+        if text.contains("repeated identical") || text.contains("tool-call storm") {
+            repeated_count += 1;
+        }
+        if matches!(
+            observation.kind,
+            ObservationKind::SearchResults
+                | ObservationKind::Listing
+                | ObservationKind::FileExcerpt
+        ) && (text.contains("no matches")
+            || text.contains("no results")
+            || text.contains("not found")
+            || text.contains("0 match")
+            || text.contains("0 result"))
+        {
+            empty_read_count += 1;
+        }
+        if edited
+            && observation.is_failure()
+            && (text.contains("test")
+                || text.contains("validation")
+                || text.contains("exit code")
+                || text.contains("failed"))
+        {
+            validation_failed_after_edit = true;
+        }
+    }
+
+    if repeated_count > 0 {
+        return Some(RouteRecoverySignal {
+            score: 4,
+            reason: "repeated identical tool-call storm",
+        });
+    }
+    if repair_count >= 2 {
+        return Some(RouteRecoverySignal {
+            score: 4,
+            reason: "repeated tool-call repair signals",
+        });
+    }
+    if malformed_count > 0 {
+        return Some(RouteRecoverySignal {
+            score: 4,
+            reason: "malformed tool-call recovery signals",
+        });
+    }
+    if validation_failed_after_edit {
+        return Some(RouteRecoverySignal {
+            score: 4,
+            reason: "validation failed after edits",
+        });
+    }
+    if empty_read_count >= 2 {
+        return Some(RouteRecoverySignal {
+            score: 3,
+            reason: "repeated empty read or search results",
+        });
+    }
+
+    let unproductive_steps = input
+        .recent_steps
+        .iter()
+        .filter(|step| {
+            let step = step.to_ascii_lowercase();
+            step.contains("no actionable")
+                || step.contains("no tool call")
+                || step.contains("could not proceed")
+        })
+        .count();
+    if unproductive_steps >= 2 {
+        return Some(RouteRecoverySignal {
+            score: 3,
+            reason: "multiple unproductive assistant steps",
+        });
+    }
+
+    None
 }
 
 fn route_text(input: &ModelRequest) -> String {
@@ -7352,6 +7477,130 @@ mod tests {
         assert_eq!(route.reasoning, super::ReasoningTier::Max);
         assert!(route.escalated);
         assert_eq!(route.preset, "auto");
+    }
+
+    #[test]
+    fn auto_route_escalates_after_repeated_tool_call_repair_signals() {
+        let config = ModelConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            model: "auto".to_string(),
+            preset: "auto".to_string(),
+            api_key_env: "DSCODE_TEST_NO_KEY".to_string(),
+            reasoning_effort: "auto".to_string(),
+            tool_schema_flattening: "auto".to_string(),
+            session_budget_microusd: 0,
+        };
+        let mut request = empty_request_with_todos(Vec::new());
+        request.task = "continue the current edit".to_string();
+        request.observations = vec![
+            Observation::ok("tool_call_repair", "[tool-call repair] missing arguments"),
+            Observation::ok("model", "ToolRepairNote repaired truncated tool call"),
+        ];
+
+        let route = super::ModelRoute::resolve(&config, &request);
+
+        assert_eq!(route.model, "deepseek-v4-pro");
+        assert_eq!(route.reasoning, super::ReasoningTier::High);
+        assert!(route.escalated);
+        assert_eq!(route.reason, "repeated tool-call repair signals");
+    }
+
+    #[test]
+    fn auto_route_escalates_after_repeated_empty_read_results() {
+        let config = ModelConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            model: "auto".to_string(),
+            preset: "auto".to_string(),
+            api_key_env: "DSCODE_TEST_NO_KEY".to_string(),
+            reasoning_effort: "auto".to_string(),
+            tool_schema_flattening: "auto".to_string(),
+            session_budget_microusd: 0,
+        };
+        let mut request = empty_request_with_todos(Vec::new());
+        request.task = "find the relevant file".to_string();
+        request.observations = vec![
+            Observation::ok("search_text", "no matches for handler"),
+            Observation::ok("list_files", "0 results for generated path"),
+        ];
+
+        let route = super::ModelRoute::resolve(&config, &request);
+
+        assert_eq!(route.model, "deepseek-v4-pro");
+        assert_eq!(route.reasoning, super::ReasoningTier::High);
+        assert!(route.escalated);
+        assert_eq!(route.reason, "repeated empty read or search results");
+    }
+
+    #[test]
+    fn auto_route_escalates_after_validation_failure_following_edit() {
+        let config = ModelConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            model: "auto".to_string(),
+            preset: "auto".to_string(),
+            api_key_env: "DSCODE_TEST_NO_KEY".to_string(),
+            reasoning_effort: "auto".to_string(),
+            tool_schema_flattening: "auto".to_string(),
+            session_budget_microusd: 0,
+        };
+        let mut request = empty_request_with_todos(Vec::new());
+        request.task = "repair the failing build".to_string();
+        request.observations = vec![
+            Observation::ok("apply_patch", "updated src/lib.rs"),
+            Observation::failed("run_shell", "tests failed with exit code 101"),
+        ];
+
+        let route = super::ModelRoute::resolve(&config, &request);
+
+        assert_eq!(route.model, "deepseek-v4-pro");
+        assert_eq!(route.reasoning, super::ReasoningTier::Max);
+        assert!(route.escalated);
+        assert_eq!(route.reason, "validation failed after edits");
+    }
+
+    #[test]
+    fn auto_route_escalates_for_malformed_storm_and_unproductive_signals() {
+        let config = ModelConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            model: "auto".to_string(),
+            preset: "auto".to_string(),
+            api_key_env: "DSCODE_TEST_NO_KEY".to_string(),
+            reasoning_effort: "auto".to_string(),
+            tool_schema_flattening: "auto".to_string(),
+            session_budget_microusd: 0,
+        };
+
+        let mut malformed = empty_request_with_todos(Vec::new());
+        malformed.task = "continue".to_string();
+        malformed.observations = vec![Observation::failed(
+            "model",
+            "tool_call_parse_failed: malformed arguments",
+        )];
+        let route = super::ModelRoute::resolve(&config, &malformed);
+        assert_eq!(route.model, "deepseek-v4-pro");
+        assert_eq!(route.reasoning, super::ReasoningTier::Max);
+        assert_eq!(route.reason, "malformed tool-call recovery signals");
+
+        let mut storm = empty_request_with_todos(Vec::new());
+        storm.task = "continue".to_string();
+        storm.observations = vec![Observation::ok(
+            "dispatcher",
+            "repeated identical tool-call storm detected",
+        )];
+        let route = super::ModelRoute::resolve(&config, &storm);
+        assert_eq!(route.model, "deepseek-v4-pro");
+        assert_eq!(route.reasoning, super::ReasoningTier::High);
+        assert_eq!(route.reason, "repeated identical tool-call storm");
+
+        let mut unproductive = empty_request_with_todos(Vec::new());
+        unproductive.task = "continue".to_string();
+        unproductive.recent_steps = vec![
+            "no actionable tool call was emitted".to_string(),
+            "could not proceed without repeating".to_string(),
+        ];
+        let route = super::ModelRoute::resolve(&config, &unproductive);
+        assert_eq!(route.model, "deepseek-v4-pro");
+        assert_eq!(route.reasoning, super::ReasoningTier::High);
+        assert_eq!(route.reason, "multiple unproductive assistant steps");
     }
 
     #[test]
