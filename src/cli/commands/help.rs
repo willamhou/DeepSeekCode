@@ -132,7 +132,7 @@ fn run_help() -> &'static str {
         "DeepSeekCode run\n",
         "\n",
         "Usage:\n",
-        "  deepseek run [--skill <name>] [--budget <1..200>] [--benchmark-gate] \"<task>\"\n",
+        "  deepseek run [--skill <name>] [--budget <1..200>] [--preset <auto|flash|pro>] [--pro-next] [--benchmark-gate] \"<task>\"\n",
         "\n",
         "Runs one coding-agent task and exits. Use bare `deepseek` for the interactive\n",
         "full-screen workbench or `deepseek chat` for the line-oriented REPL."
@@ -144,8 +144,8 @@ fn exec_help() -> &'static str {
         "DeepSeekCode exec\n",
         "\n",
         "Usage:\n",
-        "  deepseek exec run [--skill <name>] [--budget <1..200>] [--image <path>] [--json] \"<task>\"\n",
-        "  deepseek exec resume [session-id] [--skill <name>] [--budget <1..200>] [--image <path>] [--json] [task]\n",
+        "  deepseek exec run [--skill <name>] [--budget <1..200>] [--preset <auto|flash|pro>] [--pro-next] [--image <path>] [--json] \"<task>\"\n",
+        "  deepseek exec resume [session-id] [--skill <name>] [--budget <1..200>] [--preset <auto|flash|pro>] [--pro-next] [--image <path>] [--json] [task]\n",
         "\n",
         "Runs or resumes durable coding-agent tasks with structured output support."
     )
@@ -482,6 +482,17 @@ mod tests {
         assert!(help.contains("--require-external-write-fixtures <n>"));
         assert!(help.contains("--require-recent-clean <n>"));
         assert!(help.contains("--require-live-category"));
+    }
+
+    #[test]
+    fn run_and_exec_help_document_model_routing_flags() {
+        let run_help = render_help(&["run".to_string()]);
+        assert!(run_help.contains("--preset <auto|flash|pro>"));
+        assert!(run_help.contains("--pro-next"));
+
+        let exec_help = render_help(&["exec".to_string()]);
+        assert!(exec_help.contains("--preset <auto|flash|pro>"));
+        assert!(exec_help.contains("--pro-next"));
     }
 
     #[test]
