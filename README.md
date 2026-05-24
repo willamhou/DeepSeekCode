@@ -9,8 +9,9 @@ working from the same terminal.
 > Public beta status: usable today for Linux/macOS dogfooding and repository
 > work. `v0.1.3` ships GitHub Release binaries, a verified GHCR image, TUI and
 > service smoke gates, `deepseek quickstart`, a release-binary smoke verifier,
-> and a verified Homebrew tap. npm registry publishing, broader external repo
-> evidence, and richer launch media are still product-hardening work.
+> a verified Homebrew tap, and model-backed README launch media. npm registry
+> publishing, larger external repo evidence, and broader hosted product proof
+> are still product-hardening work.
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
@@ -19,6 +20,14 @@ working from the same terminal.
 <p align="center">
   <strong>Real model-backed edit and test loop</strong><br>
   <img src="./docs/demo/deepseek-code-model-demo.svg" alt="DeepSeekCode real model-backed demo: failing Rust test fixed and validated" width="100%">
+</p>
+
+<p align="center">
+  <strong>Model-backed 2048 launch demo</strong><br>
+  <a href="./docs/demo/deepseek-code-2048-gameplay.mp4">
+    <img src="./docs/demo/deepseek-code-2048-gameplay.gif" alt="DeepSeekCode model-backed 2048 demo: empty repo to playable browser game" width="100%">
+  </a><br>
+  <sub>Generated from a real DeepSeekCode run against an empty disposable web repo.</sub>
 </p>
 
 ## Why It Exists
@@ -121,7 +130,7 @@ git.
   live queue status, event replay, cancellation, recovery, and drain controls.
 - CI-smoked Linux/macOS/Windows entrypoints plus release assets for Linux x64,
   Linux arm64, macOS x64, macOS arm64, and Windows x64.
-- Verified model-backed README demo and online multi-file external fixture
+- Verified model-backed README demos and online multi-file external fixture
   evidence for the current release-readiness path.
 
 ## Current Limits
@@ -130,8 +139,8 @@ For the Linux/macOS local CLI milestone, the core interaction loop is already in
 place. The remaining gaps are mainly evidence depth and distribution polish:
 
 - npm registry publishing and public `npm install` verification;
-- optional additional external repo fixtures beyond the Python invoice sample;
-- optional GIF/MP4 launch media beyond the committed model-backed SVG.
+- optional larger external repo fixtures beyond the disposable Python/Rust/Node
+  samples.
 
 Windows long-tail service proof, hosted IDE evidence, and installed service
 proof are broader product-hardening work. They are not blockers for the

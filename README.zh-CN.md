@@ -8,7 +8,8 @@ DeepSeekCode 是一个 DeepSeek-first 的终端 code agent，面向本地开发�
 > Public beta 状态：今天已经可以用于 Linux/macOS dogfood 和仓库内代码任务。
 > `v0.1.3` 已提供 GitHub Release 二进制、实测 GHCR 镜像、TUI/service smoke gate、
 > `deepseek quickstart`、release-binary smoke verifier 和已验证的 Homebrew tap。
-> npm registry 发布、更广的外部仓库证据，以及更精致的发布素材仍属于产品硬化工作。
+> README 中也已经有真实 model-backed 发布素材。npm registry 发布、更大型的外部
+> 仓库证据，以及更广的 hosted product proof 仍属于产品硬化工作。
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
@@ -17,6 +18,14 @@ DeepSeekCode 是一个 DeepSeek-first 的终端 code agent，面向本地开发�
 <p align="center">
   <strong>真实 model-backed 编辑与测试闭环</strong><br>
   <img src="./docs/demo/deepseek-code-model-demo.svg" alt="DeepSeekCode 真实 model-backed demo：修复失败 Rust 测试并完成验证" width="100%">
+</p>
+
+<p align="center">
+  <strong>真实 model-backed 2048 可视化 demo</strong><br>
+  <a href="./docs/demo/deepseek-code-2048-gameplay.mp4">
+    <img src="./docs/demo/deepseek-code-2048-gameplay.gif" alt="DeepSeekCode 真实 model-backed 2048 demo：从空仓库生成可玩的浏览器游戏" width="100%">
+  </a><br>
+  <sub>由一次真实 DeepSeekCode 运行生成，目标仓库是一个空的临时 Web repo。</sub>
 </p>
 
 ## 为什么做它
@@ -115,7 +124,7 @@ deepseek tui --runtime-url http://127.0.0.1:13000
   event replay、cancel、recover 和 drain controls。
 - Linux/macOS/Windows entrypoint 已纳入 CI smoke；release assets 覆盖 Linux x64、
   Linux arm64、macOS x64、macOS arm64 和 Windows x64。
-- 已提交真实 model-backed README demo，并记录 online multi-file external fixture
+- 已提交真实 model-backed README demos，并记录 online multi-file external fixture
   证据。
 
 ## 当前限制
@@ -124,8 +133,7 @@ deepseek tui --runtime-url http://127.0.0.1:13000
 和分发打磨：
 
 - npm registry 发布和公开 `npm install` 验证；
-- Python invoice 样本之外，可选再补更多真实外部 repo fixtures；
-- 已提交 model-backed SVG 之外，可选补 GIF/MP4 发布素材。
+- disposable Python/Rust/Node 样本之外，可选再补更大型的真实外部 repo fixtures。
 
 Windows 长尾 service proof、hosted IDE 证据和真实安装后的 service proof 属于更大的
 产品硬化，不是 Linux/macOS 本地 code-agent CLI milestone 的 blocker。

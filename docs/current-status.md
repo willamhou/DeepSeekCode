@@ -43,7 +43,8 @@ dogfood 证据。
   `105` 条 online run、`99` 条 success，分类为 `write_validate 29/30`、
   `recovery 23/25`、`pr_workflow 47/50`。
 - README 已提交真实 model-backed SVG，展示失败 Rust 测试、模型修改、通过 `cargo test`
-  和最终 diff。
+  和最终 diff；同时已提交 2048 GIF/MP4，展示从空 repo 到可玩浏览器游戏的
+  model-backed 可视化流程。
 - `v0.1.3` 已发布 GitHub Release binaries，并通过 Release Matrix：
   https://github.com/willamhou/DeepSeekCode/actions/runs/26351958964
 - `v0.1.3` release assets 覆盖 Linux x64、Linux arm64、macOS x64、macOS arm64 和
@@ -109,10 +110,8 @@ dogfood 证据。
    已手动发布并验证。
 3. 在干净 Linux/macOS 机器上安装 systemd/launchd user services，记录
    `service-doctor --installed` 和 `service-smoke --installed` 证据。
-4. 产出并审核基于 `docs/demo/record-2048-demo.sh` 的 30-60 秒 GIF/MP4，
-   展示从空 repo 到可玩 2048 的 model-backed 可视化流程。
-5. 补真实 VS Code CLI runner 或 manual GUI fixture 证据。
-6. 持续和 Claude Code CLI / Codex CLI / DeepSeek-TUI 做核心 loop 对照，只保留会影响真实用户使用的差距。
+4. 补真实 VS Code CLI runner 或 manual GUI fixture 证据。
+5. 持续和 Claude Code CLI / Codex CLI / DeepSeek-TUI 做核心 loop 对照，只保留会影响真实用户使用的差距。
 
 ## 推荐公开表述
 
@@ -121,8 +120,8 @@ dogfood 证据。
 > Linux/macOS shell-supervisor smoke gates, release binaries including Linux
 > arm64, clean hosted release-smoke evidence, a verified Homebrew tap, a 100-run
 > online dogfood release gate, verified online multi-file external fixture
-> evidence, real hosted GitHub workflow evidence, and a committed real
-> model-backed README demo SVG. The remaining Linux/macOS CLI work is broader
-> external sample depth and continuing documentation polish; hosted IDE,
-> Windows/service proof, npm publishing, and optional richer demo media remain
-> broader product-hardening work.
+> evidence, real hosted GitHub workflow evidence, and committed real
+> model-backed README demo media including edit/test and 2048 flows. The
+> remaining Linux/macOS CLI work is broader external sample depth and continuing
+> documentation polish; hosted IDE, Windows/service proof, and npm publishing
+> remain broader product-hardening work.

@@ -9,8 +9,9 @@ DeepSeekCode は DeepSeek-first のターミナル code agent です。ローカ
 > Public beta status: Linux/macOS の dogfood とリポジトリ作業には今日から利用できます。
 > `v0.1.3` は GitHub Release binaries、検証済み GHCR image、TUI/service smoke gates、
 > `deepseek quickstart`、release-binary smoke verifier、検証済み Homebrew tap を
-> 備えています。npm registry publishing、より広い external repo evidence、
-> リッチな launch media は引き続き product-hardening work です。
+> 備え、README には model-backed launch media も含まれています。npm registry
+> publishing、より大きな external repo evidence、broader hosted product proof は
+> 引き続き product-hardening work です。
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
@@ -19,6 +20,14 @@ DeepSeekCode は DeepSeek-first のターミナル code agent です。ローカ
 <p align="center">
   <strong>Real model-backed edit and test loop</strong><br>
   <img src="./docs/demo/deepseek-code-model-demo.svg" alt="DeepSeekCode real model-backed demo: failing Rust test fixed and validated" width="100%">
+</p>
+
+<p align="center">
+  <strong>Model-backed 2048 launch demo</strong><br>
+  <a href="./docs/demo/deepseek-code-2048-gameplay.mp4">
+    <img src="./docs/demo/deepseek-code-2048-gameplay.gif" alt="DeepSeekCode model-backed 2048 demo: empty repo to playable browser game" width="100%">
+  </a><br>
+  <sub>空の disposable web repo に対する実 DeepSeekCode run から生成されています。</sub>
 </p>
 
 ## 目的
@@ -120,7 +129,7 @@ git から無視されます。
   status、event replay、cancel、recover、drain controls。
 - Linux/macOS/Windows entrypoints は CI smoke 済み。release assets は Linux x64、
   Linux arm64、macOS x64、macOS arm64、Windows x64 を含みます。
-- 実 model-backed README demo と online multi-file external fixture evidence を
+- 実 model-backed README demos と online multi-file external fixture evidence を
   記録済みです。
 
 ## 現在の制限
@@ -129,8 +138,7 @@ Linux/macOS local CLI milestone に絞れば、中心となる interaction loop 
 成立しています。残りは主に evidence depth と distribution polish です。
 
 - npm registry publishing と public `npm install` verification。
-- Python invoice sample 以外の optional external repo fixtures。
-- committed model-backed SVG 以外の optional GIF/MP4 launch media。
+- disposable Python/Rust/Node samples 以外の optional larger external repo fixtures。
 
 Windows long-tail service proof、hosted IDE evidence、installed service proof は
 より広い product hardening であり、Linux/macOS local code-agent CLI milestone の

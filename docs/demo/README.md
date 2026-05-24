@@ -14,13 +14,16 @@ missing keyframes.
 
 The committed `deepseek-code-model-demo.svg` is generated from a verified real
 model-backed transcript. It shows the source-evidence loop: failing `cargo test`,
-`deepseek exec`, a one-line Rust patch, and passing `cargo test`. A polished GIF
-or MP4 can still be added later for launch pages.
+`deepseek exec`, a one-line Rust patch, and passing `cargo test`.
 
 `record-2048-demo.sh` captures a more visual launch demo: an empty disposable
 web repository, a model-backed `deepseek exec` run that builds a playable 2048
 game with plain HTML/CSS/JS, file validation, `git diff --stat`, and an
 optional local preview server for browser gameplay capture.
+
+The committed `deepseek-code-2048-gameplay.gif` and
+`deepseek-code-2048-gameplay.mp4` are generated from a reviewed real
+model-backed 2048 transcript and browser gameplay capture.
 
 ## Model-Backed Demo Capture
 

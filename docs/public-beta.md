@@ -15,7 +15,7 @@ The honest public-beta claim is:
 > DeepSeekCode is usable today for Linux/macOS dogfooding and repository work,
 > with a full-screen TUI, REPL, durable runtime, permissioned tools, shell/PTY
 > workflows, release binaries, a verified Homebrew tap, a model-backed README
-> demo, online dogfood evidence, and first-run checks. npm distribution,
+> demo set, online dogfood evidence, and first-run checks. npm distribution,
 > broader external samples, and hosted product evidence are still in progress.
 
 Do not describe the project as fully equivalent to Claude Code CLI or Codex CLI
@@ -81,7 +81,8 @@ deepseek run "summarize this repository and identify the main test command"
 
 The strongest current proof points are:
 
-- the two README SVG demos, including the model-backed edit/test loop;
+- the README demos: TUI SVG, model-backed edit/test SVG, and model-backed 2048
+  GIF/MP4;
 - `deepseek quickstart` and `deepseek doctor --json` for first-run readiness;
 - CI-smoked TUI entrypoints and service/shell fixtures;
 - `deepseek update release-smoke --version 0.1.3 --json` for release binary
@@ -107,9 +108,8 @@ Keep these caveats visible when promoting the project:
   evidence base stronger.
 - Hosted IDE evidence and broader Windows service proof are outside the current
   Linux/macOS local CLI milestone.
-- Rich GIF/MP4 launch media can improve conversion, but the committed SVG demo
-  is already enough to show the core loop. The 2048 recorder in
-  `docs/demo/record-2048-demo.sh` is the recommended next visual launch asset.
+- The committed 2048 GIF/MP4 should still be reviewed in context before each
+  major push, especially if README positioning or release copy changes.
 
 ## Promotion Checklist
 
@@ -147,6 +147,7 @@ Longer public-beta copy:
 > DeepSeekCode is a public-beta terminal code agent built around DeepSeek and
 > local repository work. It can inspect files, apply patches, run checks, review
 > diffs, resume sessions, and drive shell workflows from the terminal. The
-> Linux/macOS local CLI loop is ready for dogfooding, and Homebrew is verified
-> for macOS installs; npm distribution, broader external repo samples, hosted
-> IDE evidence, and richer launch media are still being hardened.
+> Linux/macOS local CLI loop is ready for dogfooding, Homebrew is verified for
+> macOS installs, and README launch media now includes a model-backed 2048 demo;
+> npm distribution, broader external repo samples, and hosted IDE evidence are
+> still being hardened.

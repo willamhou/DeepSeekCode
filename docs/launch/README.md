@@ -29,15 +29,16 @@ Use this concise public-beta claim:
 
 ## Recommended Launch Order
 
-1. Record or refresh the short terminal demo with [demo-script.md](./demo-script.md).
+1. Review the committed README demo media, including the 2048 GIF/MP4, and
+   refresh only if the UI or positioning changed materially.
 2. Upload a repository social preview image in GitHub repository settings.
 3. Post the GitHub release or repository link on personal channels.
 4. Post a technical feedback thread with [hacker-news.md](./hacker-news.md).
 5. Post Chinese community copy from [chinese-community.md](./chinese-community.md).
 6. Use [social-posts.md](./social-posts.md) for X, LinkedIn, Discord, Slack, and
    follow-up posts.
-7. Treat [product-hunt.md](./product-hunt.md) as a later launch unless npm and
-   richer launch media are ready.
+7. Treat [product-hunt.md](./product-hunt.md) as a later launch unless npm is
+   published and broader install evidence is current.
 
 ## Preflight
 
@@ -60,7 +61,7 @@ Also verify:
   and install guide.
 - `docs/current-status.md` still reflects the latest release evidence.
 - Known caveats are visible: npm is not live, Windows is not the current public
-  beta focus, and richer GIF/MP4 launch media can still be added.
+  beta focus, and hosted product evidence is still broader hardening work.
 
 ## Tone
 
