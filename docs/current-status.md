@@ -23,12 +23,12 @@ dogfood 证据。
 
 但它还不是“可以公开宣称等同 Claude Code CLI / Codex CLI”的成熟产品。剩余差距主要是：
 
-- release-binary 级别的下一轮 release matrix smoke 证据；当前已有
-  `deepseek update release-smoke --version <version>` 可用于本地复验；
 - Homebrew tap 和 npm registry 的发布凭据与公开安装验证；
 - 更多真实外部 repo 样本；
 - 持续维护精简的新用户文档、public beta 说明和故障排查路径；
-- hosted IDE、真实安装后的 systemd/launchd service smoke、以及更广的 Windows 长尾验证。
+- 干净 Linux x64/macOS 机器上的 release-binary install smoke 复验；
+- Linux arm64 release artifact、hosted IDE、真实安装后的 systemd/launchd service smoke、
+  以及更广的 Windows 长尾验证。
 
 ## 已经成立的证据
 
@@ -46,8 +46,12 @@ dogfood 证据。
   `recovery 23/25`、`pr_workflow 47/50`。
 - README 已提交真实 model-backed SVG，展示失败 Rust 测试、模型修改、通过 `cargo test`
   和最终 diff。
-- `v0.1.2` 已有 GitHub Release binaries、GHCR image、npm/Homebrew packaging metadata、
-  release matrix、download-plan 和 publish-status 检查。
+- `v0.1.2` 已发布 GitHub Release binaries，并通过 Release Matrix：
+  https://github.com/willamhou/DeepSeekCode/actions/runs/26349960665
+- `v0.1.2` GHCR image 已由 workflow 推送，公开 registry manifest 可读取，digest 为
+  `sha256:c927e14280c6a7f41a11811a23d0f7824eaf936cdd58ca2f7a7f28d62b12d75a`。
+- `v0.1.2` npm/Homebrew packaging metadata、download-plan 和 publish-status 检查已就绪；
+  npm registry 发布因缺少 `NPM_TOKEN` 跳过，Homebrew tap 发布因缺少 tap 配置跳过。
 - PR #18 增加 `deepseek quickstart` / `deepseek onboarding` 首跑检查，并通过 CI：
   https://github.com/willamhou/DeepSeekCode/actions/runs/26335387193
 - PR #19 增加 `deepseek update release-smoke`，用于发布二进制复验，并通过 CI：
@@ -83,11 +87,13 @@ dogfood 证据。
 
 这个限定目标的核心交互能力和 evidence gate 已经成立。下一步主要是 release hardening：
 
-1. 等下一次 release matrix 产出 release-binary 级别的 Linux/macOS shell/runtime smoke 证据；
-   操作员可以用 `deepseek update release-smoke --version <version>` 复验当前平台 release binary。
+1. 在干净 Linux x64 和 macOS 机器上执行
+   `deepseek update release-smoke --version 0.1.2 --json`，记录公开 release binary 安装复验。
 2. 配置 Homebrew tap 凭据，完成 tap 发布和公开安装验证。
-3. 可选再增加 1-2 个真实外部 repo fixture，扩大 multi-file/多语言样本厚度。
-4. 持续维护 README、install、release、current-status、public-beta 和 dogfood evidence
+3. 评估是否需要 Linux arm64 release artifact；当前本机 `aarch64` 不能执行已发布的
+   `linux-x64` artifact。
+4. 可选再增加 1-2 个真实外部 repo fixture，扩大 multi-file/多语言样本厚度。
+5. 持续维护 README、install、release、current-status、public-beta 和 dogfood evidence
    文档；当前推荐首跑入口是 `deepseek quickstart`，README 只保留安装、试用、证据入口。
 
 ### 更大产品目标
@@ -106,6 +112,7 @@ dogfood 证据。
 > dogfood release gate, verified online multi-file external fixture evidence,
 > real hosted GitHub workflow evidence, and a committed real model-backed README
 > demo SVG. The remaining Linux/macOS CLI work is Homebrew publishing,
-> next-release binary smoke evidence, broader external sample depth, and
-> continuing documentation polish; hosted IDE, Windows/service proof, npm publishing, and
-> optional richer demo media remain broader product-hardening work.
+> clean-machine release binary smoke evidence, broader external sample depth,
+> and continuing documentation polish; hosted IDE, Linux arm64, Windows/service
+> proof, npm publishing, and optional richer demo media remain broader
+> product-hardening work.
