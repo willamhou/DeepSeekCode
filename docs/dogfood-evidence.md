@@ -11,15 +11,40 @@ does not match the ledger.
 
 The most useful public-beta evidence today is:
 
-- online multi-file external fixture evidence;
+- tracked online multi-file external fixture evidence for Python, Rust, and
+  Node samples;
+- reusable Python, Rust, and Node external fixture scaffolds;
 - live dogfood report gates;
 - release-binary smoke checks through `deepseek update release-smoke`.
 
+## Fixture Catalog
+
+Use disposable git repositories outside this checkout. The fixture generator
+creates a failing repository, commits the starting point, verifies that the
+initial validation command fails, and prints dry-run, evidence, and verification
+commands.
+
+```bash
+base=/tmp/deepseek-external-fixtures
+scripts/create-multifile-external-fixture.sh "$base/python-invoice-multifile" python-invoice-multifile --force
+scripts/create-multifile-external-fixture.sh "$base/rust-order-multifile" rust-order-multifile --force
+scripts/create-multifile-external-fixture.sh "$base/node-task-report" node-task-report --force
+```
+
+Available fixture kinds:
+
+- `python-invoice-multifile`: Python package with pricing and invoice label
+  edits, validated by `python3 -m unittest discover -s tests`.
+- `rust-order-multifile`: Rust crate with pricing and receipt label edits,
+  validated by `cargo test`.
+- `node-task-report`: Node fixture with archived-task filtering and report
+  heading edits, validated by `node tests/report.test.js`.
+
 ## External Write Fixture
 
-Use a disposable git repository outside this checkout. The command dry-runs
-preflight first, then runs against an isolated copy and records the result in
-the dogfood report.
+For release evidence, dry-run preflight first, then run the command against an
+isolated copy and record the result in the dogfood report. The Python invoice
+fixture remains the canonical tracked sample:
 
 ```bash
 fixture_dir=/tmp/deepseek-external-fixtures/python-invoice-multifile
@@ -37,6 +62,16 @@ deepseek dogfood external-evidence \
 
 The verification file should report that the external fixture matched the
 current ledger and that post-validation passed.
+
+Tracked Rust and Node evidence files:
+
+- `.dscode/dogfood/external-fixture-rust-order-multifile-evidence.json`
+- `.dscode/dogfood/external-fixture-rust-order-multifile-verification.json`
+- `.dscode/dogfood/external-fixture-node-task-report-evidence.json`
+- `.dscode/dogfood/external-fixture-node-task-report-verification.json`
+
+Refresh them with the `evidence_command` and `verify_command` printed by the
+generator.
 
 ## Live Dogfood Evidence
 

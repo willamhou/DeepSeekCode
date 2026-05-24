@@ -65,8 +65,11 @@ jobs:
       - name: TUI Entrypoint Smoke
         run: target/debug/deepseek tui --entrypoint-smoke --smoke-bin target/debug/deepseek
 
-      - name: Multi-file External Fixture Scaffold Smoke
-        run: scripts/create-multifile-external-fixture.sh "$RUNNER_TEMP/deepseek-external-fixture"
+      - name: External Fixture Catalog Smoke
+        run: |
+          scripts/create-multifile-external-fixture.sh "$RUNNER_TEMP/deepseek-external-fixture-python" python-invoice-multifile
+          scripts/create-multifile-external-fixture.sh "$RUNNER_TEMP/deepseek-external-fixture-rust" rust-order-multifile
+          scripts/create-multifile-external-fixture.sh "$RUNNER_TEMP/deepseek-external-fixture-node" node-task-report
 
       - name: Secret Scan
         run: node scripts/check-secrets.js

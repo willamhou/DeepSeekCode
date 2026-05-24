@@ -121,12 +121,22 @@ external-evidence --require-successful-external-fixtures N` fails closed unless
 the evidence is online/model-backed, completed, matched back to the current
 ledger, and has `post_validation_passed=true`.
 
-The current tracked multi-file release fixture is the disposable Python invoice
-sample:
+The canonical tracked release fixture is the disposable Python invoice sample.
+Tracked Rust and Node evidence files are also available for broader evidence
+depth, and the fixture generator can refresh all three samples:
+
+```bash
+base=/tmp/deepseek-external-fixtures
+scripts/create-multifile-external-fixture.sh "$base/python-invoice-multifile" python-invoice-multifile --force
+scripts/create-multifile-external-fixture.sh "$base/rust-order-multifile" rust-order-multifile --force
+scripts/create-multifile-external-fixture.sh "$base/node-task-report" node-task-report --force
+```
+
+Use the Python invoice fixture as the canonical release-evidence path:
 
 ```bash
 fixture_dir=/tmp/deepseek-external-fixtures/python-invoice-multifile
-scripts/create-multifile-external-fixture.sh "$fixture_dir"
+scripts/create-multifile-external-fixture.sh "$fixture_dir" python-invoice-multifile --force
 task='replace `return amount - discount` with `return max(amount - discount, 0.0)` in src/invoice_math/pricing.py and replace `Invoice total` with `Final total` in src/invoice_math/summary.py, validate with python3 -m unittest discover -s tests'
 deepseek dogfood external-fixture --workdir "$fixture_dir" \
   --evidence-out .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
