@@ -1,0 +1,52 @@
+name: Homebrew Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      tap:
+        description: "Homebrew tap to verify"
+        required: true
+        default: "willamhou/deepseekcode"
+      formula:
+        description: "Formula name"
+        required: true
+        default: "deepseek"
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  homebrew-smoke:
+    name: Homebrew Smoke (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-x64
+            os: macos-15-intel
+          - name: macos-arm64
+            os: macos-14
+    steps:
+      - name: Tap Formula
+        run: brew tap "${{ inputs.tap }}"
+
+      - name: Install Formula
+        run: brew install "${{ inputs.tap }}/${{ inputs.formula }}"
+
+      - name: Verify Version
+        run: deepseek version | tee "deepseek-version-${{ matrix.name }}.txt"
+
+      - name: Verify Doctor
+        run: deepseek doctor --json | tee "deepseek-doctor-${{ matrix.name }}.json"
+
+      - name: Upload Smoke Evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: homebrew-smoke-${{ matrix.name }}
+          path: |
+            deepseek-version-${{ matrix.name }}.txt
+            deepseek-doctor-${{ matrix.name }}.json
