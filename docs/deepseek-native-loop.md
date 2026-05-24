@@ -53,8 +53,9 @@ compaction are designed together.
 
 DeepSeekCode already stores provider-reported cache hit/miss tokens and
 estimated cost in runtime usage records, and the TUI has `/cache`, `/cost`, and
-usage panels. The gap is not raw telemetry; the gap is making prompt-prefix
-stability measurable and deliberate.
+usage panels. Prompt-prefix stability is now measurable through prompt-layer
+hashes, trend stats, a fail-closed `--require-prefix-stable` gate, and
+configurable daemon compaction thresholds.
 
 Absorb:
 
@@ -78,8 +79,9 @@ Reasonix has a repair pipeline for DeepSeek-style tool-call failures:
 
 DeepSeekCode already supports OpenAI-compatible and Anthropic-compatible tool
 calls, same-turn batch tool calls, and repeat-call detection in the agent loop.
-The main gap is a systematic repair module before parser failures become hard
-model failures.
+It now has a systematic repair module before parser failures become hard model
+failures; the remaining work is live DeepSeek-backed evidence across more
+gateways and malformed-call edge cases.
 
 Absorb:
 
@@ -93,9 +95,10 @@ Absorb:
 Reasonix uses DeepSeek model economics directly: flash-first defaults, pro as a
 visible escalation, `/pro` for the next turn, and budget-aware session behavior.
 
-DeepSeekCode already has DeepSeek V4 pricing and usage cost estimates. The gap
-is policy: there is no first-class `flash | auto | pro` preset with visible
-failure-triggered escalation.
+DeepSeekCode already has DeepSeek V4 pricing, usage cost estimates, first-class
+`flash | auto | pro` presets, visible escalation, and runtime budget records.
+The remaining work is dogfood calibration of the auto-escalation heuristic and
+clearer user raise-budget flows.
 
 Absorb:
 
@@ -109,9 +112,10 @@ Absorb:
 Reasonix marks tools as `parallelSafe` and runs only safe read-style batches in
 parallel. Writes remain serial barriers.
 
-DeepSeekCode already preserves same-turn batch tool calls. The next step is to
-execute read-only, side-effect-free batches concurrently while preserving
-deterministic output order.
+DeepSeekCode now executes opt-in local read and runtime query batches
+concurrently while preserving deterministic output order and recording
+`meta.parallel_*` telemetry. The next boundary is explicit opt-in for
+read-only MCP/resource surfaces after side-effect safety is proven.
 
 Absorb:
 
@@ -125,8 +129,10 @@ Absorb:
 Reasonix has `stats`, `diff`, and replay-oriented transcript tools that make
 cache/cost behavior easy to inspect.
 
-DeepSeekCode already persists runtime events and usage records. The gap is a
-small CLI layer that turns the data into user-facing evidence.
+DeepSeekCode already persists runtime events and usage records and exposes them
+through `deepseek stats`, `deepseek events replay`, `deepseek events diff`, and
+deterministic repair/cache dogfood evidence. The remaining work is making that
+evidence recurring in release operations alongside live dogfood runs.
 
 Absorb:
 
