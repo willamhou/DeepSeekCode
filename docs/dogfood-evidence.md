@@ -130,7 +130,7 @@ deepseek dogfood report --limit 20 \
 After installing a published release binary, verify the current platform with:
 
 ```bash
-deepseek update release-smoke --version 0.1.1 --json
+deepseek update release-smoke --version 0.1.2 --json
 ```
 
 This is the lightweight operator command for checking release archive

@@ -21417,7 +21417,7 @@ model.model = "deepseek-v4-pro"
         let (kind, detail) = app.mcp_detail.as_ref().expect("change detail");
         assert_eq!(*kind, TuiMcpDetailKind::Change);
         assert!(detail.contains("DeepSeekCode Changelog"));
-        assert!(detail.contains("## 0.1.0 - 2026-05-09"));
+        assert!(detail.contains("## 0.1.2 - 2026-05-24"));
         assert_eq!(app.status, "changelog shown");
 
         app.composer_focused = true;
