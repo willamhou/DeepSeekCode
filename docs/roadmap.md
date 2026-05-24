@@ -1,6 +1,6 @@
 # Roadmap
 
-Last updated: 2026-05-24
+Last updated: 2026-05-25
 
 This page is the current product roadmap. Older phase-by-phase execution notes
 live in `docs/superpowers/` and in git history; those historical notes are useful
@@ -99,8 +99,9 @@ npm remains useful for Node-oriented users but is not the primary blocker.
   validation-after-edit failures, and repeated unproductive steps. The default
   live dogfood plan/report/evidence gate now also requires MCP dynamic/resource
   loop-surface coverage, an `mcp` live gate of at least three runs, and a
-  seven-day live recency gate; remaining work is the first real online MCP
-  surface batch plus recurring live dogfood calibration with real online runs.
+  seven-day live recency gate; the first real online MCP surface batch has
+  passed locally with `mcp 27/30`, so the remaining work is recurring live
+  dogfood calibration with real online runs.
   Non-recoverable malformed tool-call parse failures are now loop-recoverable:
   they become failed `model` observations with `tool_call_parse_failed` context
   for the next model turn instead of hard-ending the run.

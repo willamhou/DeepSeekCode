@@ -1,6 +1,6 @@
 # DeepSeek-Native Agent Loop Design
 
-Last updated: 2026-05-24
+Last updated: 2026-05-25
 
 This document records the DeepSeek-specific agent-loop ideas worth absorbing
 from external projects and turns them into a DeepSeekCode design plan.
@@ -29,13 +29,15 @@ hardening gaps rather than architecture blockers:
   stats --require-prefix-stable` can fail CI/dogfood checks when prompt-layer
   evidence is missing or stable prompt-prefix layers change hash.
 - Tool-call repair has deterministic coverage, including model-facing failed
-  observations for malformed calls that cannot be repaired, but it needs more
-  live DeepSeek-backed examples across real gateways before treating it as
-  mature. The default live dogfood plan now includes an MCP loop-surface target,
-  and `live-evidence --require-loop-surface-gate` fails closed unless evidence
-  includes MCP dynamic/resource surface coverage plus an `mcp` live gate of at
-  least three runs. The default report/evidence gate also requires a live
-  model-backed row from the last seven days.
+  observations for malformed calls that cannot be repaired. The first real
+  online MCP loop-surface batch has also passed locally, with `mcp` at `27/30`
+  live successes and dynamic/resource surface coverage present. The remaining
+  work is recurring live DeepSeek-backed calibration across real gateways and
+  malformed-call edge cases. The default live dogfood plan includes an MCP
+  loop-surface target, and `live-evidence --require-loop-surface-gate` fails
+  closed unless evidence includes MCP dynamic/resource surface coverage plus an
+  `mcp` live gate of at least three runs. The default report/evidence gate also
+  requires a live model-backed row from the last seven days.
 - Model presets and session budgets work, including explicit budget raise/off
   flows. Auto-escalation now covers repeated repair, malformed tool-call,
   tool-call storm, empty read/search, validation-after-edit, and unproductive
@@ -47,11 +49,12 @@ hardening gaps rather than architecture blockers:
   each remote surface proves side-effect free. Parallel chunk telemetry is
   recorded on tool result events through `meta.parallel_*` lines.
 - Deterministic repair/cache evidence and prompt-prefix stability now run in
-  the release matrix and are uploaded as loop evidence artifacts. The remaining
-  evidence gap is the first real online MCP surface batch plus recurring live
-  model-backed dogfood across real gateways; the local live plan/report/evidence
-  gates now explicitly require MCP dynamic/resource loop-surface coverage and an
-  `mcp` live gate of at least three runs, plus a seven-day live recency gate.
+  the release matrix and are uploaded as loop evidence artifacts. The first real
+  online MCP surface batch now satisfies the local live plan/report/evidence
+  gates: MCP dynamic/resource loop-surface coverage is present, the `mcp` live
+  category is `27/30`, and the seven-day live recency gate passes. The remaining
+  evidence work is recurring live model-backed dogfood across real gateways and
+  continued calibration.
 
 ## What To Absorb
 
@@ -145,8 +148,8 @@ through `deepseek stats`, `deepseek events replay`, `deepseek events diff`, and
 deterministic repair/cache dogfood evidence. The Release Matrix packaging job
 now gates and uploads those deterministic artifacts, and the live dogfood
 release gate now carries an MCP loop-surface category and a seven-day live
-recency gate. The remaining work is the first real online MCP surface batch plus
-recurring live model-backed dogfood cadence across real gateways.
+recency gate. The first real online MCP surface batch has passed; the remaining
+work is recurring live model-backed dogfood cadence across real gateways.
 
 Absorb:
 
