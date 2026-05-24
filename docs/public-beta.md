@@ -129,6 +129,8 @@ Also check:
 - [docs/install.md](./install.md) covers the supported install path.
 - [docs/current-status.md](./current-status.md) has a current date.
 - [docs/demo/README.md](./demo/README.md) can regenerate the committed SVGs.
+- [docs/launch/README.md](./launch/README.md) has current channel copy and
+  launch caveats.
 - Known gaps are described as caveats, not hidden behind vague language.
 
 ## Short Copy
