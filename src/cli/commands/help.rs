@@ -426,7 +426,7 @@ fn dogfood_report_help() -> &'static str {
         "DeepSeekCode dogfood report\n",
         "\n",
         "Usage:\n",
-        "  deepseek dogfood report [--out <path>] [--limit <n>] [--require-min-runs <n>] [--require-success-rate <percent>] [--require-live-runs <n>] [--require-live-success-rate <percent>] [--require-live-recent-days <days>] [--require-category <category>:<min-runs>:<min-success-percent>] [--require-live-category <category>:<min-runs>:<min-success-percent>]\n",
+        "  deepseek dogfood report [--out <path>] [--limit <n>] [--require-min-runs <n>] [--require-success-rate <percent>] [--require-live-runs <n>] [--require-live-success-rate <percent>] [--require-live-recent-days <days>] [--require-external-write-fixtures <n>] [--require-recent-clean <n>] [--require-category <category>:<min-runs>:<min-success-percent>] [--require-live-category <category>:<min-runs>:<min-success-percent>]\n",
         "\n",
         "Renders dogfood ledger stats and optionally enforces release gates."
     )
@@ -473,6 +473,15 @@ mod tests {
         let help = render_help(&topics);
         assert!(help.contains("dogfood replay-benchmark"));
         assert!(help.contains("real\nmodel calls") || help.contains("real model calls"));
+    }
+
+    #[test]
+    fn dogfood_report_help_documents_release_gate_flags() {
+        let topics = vec!["dogfood".to_string(), "report".to_string()];
+        let help = render_help(&topics);
+        assert!(help.contains("--require-external-write-fixtures <n>"));
+        assert!(help.contains("--require-recent-clean <n>"));
+        assert!(help.contains("--require-live-category"));
     }
 
     #[test]
