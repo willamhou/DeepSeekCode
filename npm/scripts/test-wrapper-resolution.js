@@ -13,6 +13,7 @@ const { spawnSync } = require("node:child_process");
 const TARGETS = {
   "darwin:arm64": "macos-arm64",
   "darwin:x64": "macos-x64",
+  "linux:arm64": "linux-arm64",
   "linux:x64": "linux-x64",
 };
 

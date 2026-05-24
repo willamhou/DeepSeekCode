@@ -29,6 +29,11 @@ jobs:
             artifact: deepseek-linux-x64
             binary: ./target/release/deepseek
             npm_platform: linux-x64
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            artifact: deepseek-linux-arm64
+            binary: ./target/release/deepseek
+            npm_platform: linux-arm64
           - name: macos-x64
             os: macos-15-intel
             artifact: deepseek-macos-x64
@@ -243,8 +248,9 @@ jobs:
         run: |
           mkdir -p target/homebrew-shas
           printf '%064d  deepseek-linux-x64.tar.gz\n' 1 > target/homebrew-shas/deepseek-linux-x64.tar.gz.sha256
-          printf '%064d  deepseek-macos-x64.tar.gz\n' 2 > target/homebrew-shas/deepseek-macos-x64.tar.gz.sha256
-          printf '%064d  deepseek-macos-arm64.tar.gz\n' 3 > target/homebrew-shas/deepseek-macos-arm64.tar.gz.sha256
+          printf '%064d  deepseek-linux-arm64.tar.gz\n' 2 > target/homebrew-shas/deepseek-linux-arm64.tar.gz.sha256
+          printf '%064d  deepseek-macos-x64.tar.gz\n' 3 > target/homebrew-shas/deepseek-macos-x64.tar.gz.sha256
+          printf '%064d  deepseek-macos-arm64.tar.gz\n' 4 > target/homebrew-shas/deepseek-macos-arm64.tar.gz.sha256
           version="$(node -e "const fs = require('fs'); process.stdout.write(fs.readFileSync('Cargo.toml', 'utf8').match(/^version = \"([^\"]+)\"/m)[1])")"
           cargo run --bin deepseek -- update homebrew-formula --version "$version" --repo willamhou/DeepSeekCode --dist target/homebrew-shas --formula packaging/homebrew/deepseek.rb --out target/deepseek.rb
           node packaging/homebrew/verify-formula.js --formula target/deepseek.rb --release
@@ -282,7 +288,7 @@ jobs:
             echo
             echo "Automated release generated from ${GITHUB_SHA}."
             echo
-            echo "Artifacts include Linux x64, macOS x64, macOS arm64, and Windows x64 packages plus SHA-256 checksum files."
+            echo "Artifacts include Linux x64, Linux arm64, macOS x64, macOS arm64, and Windows x64 packages plus SHA-256 checksum files."
             echo "Docker image target: ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME#v} (also :${GITHUB_REF_NAME} and :latest)."
             echo
             echo "Verification gates completed in this workflow:"

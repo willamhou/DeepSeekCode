@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-code/cli-macos-x64",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "macOS x64 binary for the DeepSeek Code CLI",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://github.com/willamhou/DeepSeekCode",

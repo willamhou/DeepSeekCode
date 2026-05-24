@@ -7,7 +7,7 @@ DeepSeekCode は DeepSeek-first のターミナル code agent です。ローカ
 同じターミナルで作業を続ける流れを前提にしています。
 
 > Public beta status: Linux/macOS の dogfood とリポジトリ作業には今日から利用できます。
-> `v0.1.2` は GitHub Release binaries、検証済み GHCR image、TUI/service smoke gates、
+> `v0.1.3` は GitHub Release binaries、検証済み GHCR image、TUI/service smoke gates、
 > `deepseek quickstart`、release-binary smoke verifier を備えています。Homebrew、
 > npm registry publishing、より広い external repo evidence、リッチな launch media は
 > 引き続き product-hardening work です。
@@ -52,11 +52,11 @@ deepseek doctor --json
 または release archive をダウンロード:
 
 ```bash
-deepseek update download-plan --version 0.1.2
+deepseek update download-plan --version 0.1.3
 curl -L -o deepseek-linux-x64.tar.gz \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.2/deepseek-linux-x64.tar.gz
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.3/deepseek-linux-x64.tar.gz
 curl -L -o deepseek-linux-x64.tar.gz.sha256 \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.2/deepseek-linux-x64.tar.gz.sha256
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.3/deepseek-linux-x64.tar.gz.sha256
 shasum -a 256 -c deepseek-linux-x64.tar.gz.sha256
 tar -xzf deepseek-linux-x64.tar.gz
 ./deepseek version
@@ -65,7 +65,7 @@ tar -xzf deepseek-linux-x64.tar.gz
 または公開済み container を実行:
 
 ```bash
-docker run --rm ghcr.io/willamhou/deepseekcode:0.1.2 version
+docker run --rm ghcr.io/willamhou/deepseekcode:0.1.3 version
 ```
 
 local checkout からインストール:
@@ -110,7 +110,7 @@ git から無視されます。
 - RLM helpers: recursive/long-input analysis、model-session context、live queue
   status、event replay、cancel、recover、drain controls。
 - Linux/macOS/Windows entrypoints は CI smoke 済み。release assets は Linux x64、
-  macOS x64、macOS arm64、Windows x64 を含みます。
+  Linux arm64、macOS x64、macOS arm64、Windows x64 を含みます。
 - 実 model-backed README demo と online multi-file external fixture evidence を
   記録済みです。
 
@@ -139,7 +139,7 @@ cargo test --lib -- --test-threads=1
 node scripts/check-secrets.js
 deepseek quickstart --json
 deepseek update publish-status --json
-deepseek update release-smoke --version 0.1.2 --json
+deepseek update release-smoke --version 0.1.3 --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
 

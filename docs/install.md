@@ -139,31 +139,31 @@ deepseek dogfood report --limit 20 \
 
 ## Release Binary
 
-GitHub Release 已经提供 `v0.1.2` 的 Linux x64、macOS x64、macOS arm64 和
-Windows x64 包，以及对应 `.sha256` 文件。例如 Linux x64：
+GitHub Release 已经提供 `v0.1.3` 的 Linux x64、Linux arm64、macOS x64、
+macOS arm64 和 Windows x64 包，以及对应 `.sha256` 文件。例如 Linux x64：
 
 先让 CLI 根据当前平台打印下载、checksum 和解压命令：
 
 ```bash
-deepseek update download-plan --version 0.1.2
-deepseek update download-plan --version 0.1.2 --json
+deepseek update download-plan --version 0.1.3
+deepseek update download-plan --version 0.1.3 --json
 ```
 
 也可以让 CLI 直接完成当前平台 release binary smoke：下载 archive 和 `.sha256`、
 校验 checksum、解压 binary，并在隔离目录跑 `version`、`config init`、`doctor`、
 `exec --json` 和一个 benchmark sample。这个命令只适用于当前机器架构已经有对应
-release asset 的平台，例如 Linux x64、macOS x64、macOS arm64：
+release asset 的平台，例如 Linux x64、Linux arm64、macOS x64、macOS arm64：
 
 ```bash
-deepseek update release-smoke --version 0.1.2
-deepseek update release-smoke --version 0.1.2 --json
+deepseek update release-smoke --version 0.1.3
+deepseek update release-smoke --version 0.1.3 --json
 ```
 
 ```bash
 curl -L -o deepseek-linux-x64.tar.gz \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.2/deepseek-linux-x64.tar.gz
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.3/deepseek-linux-x64.tar.gz
 curl -L -o deepseek-linux-x64.tar.gz.sha256 \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.2/deepseek-linux-x64.tar.gz.sha256
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.3/deepseek-linux-x64.tar.gz.sha256
 shasum -a 256 -c deepseek-linux-x64.tar.gz.sha256
 tar -xzf deepseek-linux-x64.tar.gz
 ./deepseek version
@@ -174,7 +174,7 @@ tar -xzf deepseek-linux-x64.tar.gz
 
 ```bash
 DSCODE_RELEASE_BASE_URL=https://<mirror>/<release-assets> \
-  deepseek update download-plan --version 0.1.2
+  deepseek update download-plan --version 0.1.3
 ```
 
 本地 release binary 路径固定为：
@@ -217,16 +217,15 @@ docker run --rm deepseek-code:local version
 Tag 版 `Release Matrix` workflow 会把同一个 Dockerfile 构建并推送到 GHCR：
 
 ```bash
-docker pull ghcr.io/willamhou/deepseekcode:0.1.2
-docker run --rm ghcr.io/willamhou/deepseekcode:0.1.2 version
+docker pull ghcr.io/willamhou/deepseekcode:0.1.3
+docker run --rm ghcr.io/willamhou/deepseekcode:0.1.3 version
 ```
 
 同一次 tag 发布会写入 `<version>`、`v<version>` 和 `latest` 三个 tag；镜像名会按
-GHCR 要求转成小写。`v0.1.2` 的 workflow 已推送公开 registry manifest，digest 为
-`sha256:c927e14280c6a7f41a11811a23d0f7824eaf936cdd58ca2f7a7f28d62b12d75a`；有 Docker
-权限的机器仍应按上面的 `docker run` 命令做本地 pull/run smoke。
+GHCR 要求转成小写。每次发布后都要读取公开 registry manifest 并记录真实 digest；
+有 Docker 权限的机器仍应按上面的 `docker run` 命令做本地 pull/run smoke。
 
-npm wrapper 位于 `npm/`，用于发布时把平台 binary 包装成 `deepseek` 命令。root 包通过 optional dependency 解析当前平台的 binary 包，例如 `@deepseek-code/cli-linux-x64`、`@deepseek-code/cli-macos-arm64`、`@deepseek-code/cli-macos-x64` 和 `@deepseek-code/cli-windows-x64`。发布前至少验证 wrapper 语法、平台包解析和本地 binary 转发：
+npm wrapper 位于 `npm/`，用于发布时把平台 binary 包装成 `deepseek` 命令。root 包通过 optional dependency 解析当前平台的 binary 包，例如 `@deepseek-code/cli-linux-x64`、`@deepseek-code/cli-linux-arm64`、`@deepseek-code/cli-macos-arm64`、`@deepseek-code/cli-macos-x64` 和 `@deepseek-code/cli-windows-x64`。发布前至少验证 wrapper 语法、平台包解析和本地 binary 转发：
 
 ```bash
 (cd npm && npm run check:version)
@@ -248,11 +247,9 @@ npm tarball，并在 tag run 且配置 `NPM_TOKEN` 时先发布平台包，再�
 齐全；加 `--json` 会输出 `deepseek.publish_status.v1`，便于 CI 或 release
 脚本消费。输出中的 `public_install` 会区分 source checkout、GitHub Release、
 npm、Homebrew、GHCR 和 Cargo registry 当前是 `source_available`、
-`ready_to_publish`、`requires_publish` 还是 `source_only_policy`。目前 GitHub
-Release 和 GHCR 已有公开验证；`v0.1.2` 的 npm 发布 job 因缺少 `NPM_TOKEN`
-明确跳过，Homebrew tap job 也因缺少 `HOMEBREW_TAP_REPOSITORY` 或
-`HOMEBREW_TAP_TOKEN` 跳过。在配置 registry/tap 凭据并完成外部验证前，不要把
-npm/Homebrew 写成已可用。
+`ready_to_publish`、`requires_publish` 还是 `source_only_policy`。每次 tag 发布后
+都要重新记录 GitHub Release、GHCR、npm 和 Homebrew 的真实状态；在配置
+registry/tap 凭据并完成外部验证前，不要把 npm/Homebrew 写成已可用。
 
 ## Runtime 服务模板
 
@@ -280,6 +277,7 @@ release assets：
 - `deepseek-macos-arm64.tar.gz`
 - `deepseek-macos-x64.tar.gz`
 - `deepseek-linux-x64.tar.gz`
+- `deepseek-linux-arm64.tar.gz`
 
 正式发布前必须把 formula 里的 `sha256` 占位值替换为对应 release asset 的真实
 SHA-256。GitHub `Release Matrix` workflow 会为每个 archive 上传旁路

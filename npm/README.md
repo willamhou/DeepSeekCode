@@ -6,6 +6,7 @@ Published installs resolve the binary from the platform-specific optional npm
 package for the current host:
 
 - `@deepseek-code/cli-linux-x64`
+- `@deepseek-code/cli-linux-arm64`
 - `@deepseek-code/cli-macos-x64`
 - `@deepseek-code/cli-macos-arm64`
 - `@deepseek-code/cli-windows-x64`

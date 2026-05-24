@@ -715,12 +715,13 @@ fn current_release_platform() -> String {
 fn release_archive_name(platform: &str) -> AppResult<String> {
     let archive = match platform {
         "linux-x64" => "deepseek-linux-x64.tar.gz",
+        "linux-arm64" => "deepseek-linux-arm64.tar.gz",
         "macos-x64" => "deepseek-macos-x64.tar.gz",
         "macos-arm64" => "deepseek-macos-arm64.tar.gz",
         "windows-x64" => "deepseek-windows-x64.zip",
         other => {
             return Err(app_error(format!(
-                "unsupported release platform `{other}`; expected linux-x64, macos-x64, macos-arm64, or windows-x64"
+                "unsupported release platform `{other}`; expected linux-x64, linux-arm64, macos-x64, macos-arm64, or windows-x64"
             )))
         }
     };
@@ -1104,6 +1105,7 @@ fn release_asset_status(dist: Option<&str>) -> PublishStatusCheck {
 
     let expected = [
         "deepseek-linux-x64.tar.gz",
+        "deepseek-linux-arm64.tar.gz",
         "deepseek-macos-x64.tar.gz",
         "deepseek-macos-arm64.tar.gz",
         "deepseek-windows-x64.zip",
@@ -1293,7 +1295,13 @@ fn homebrew_tap_status(env: &impl Fn(&str) -> Option<String>) -> PublishStatusCh
     }
 }
 
-const NPM_PLATFORMS: &[&str] = &["linux-x64", "macos-arm64", "macos-x64", "windows-x64"];
+const NPM_PLATFORMS: &[&str] = &[
+    "linux-x64",
+    "linux-arm64",
+    "macos-arm64",
+    "macos-x64",
+    "windows-x64",
+];
 
 fn npm_metadata_failures(repo: &Path, version: &str) -> AppResult<Vec<String>> {
     let npm_root = repo.join("npm");
@@ -1477,6 +1485,7 @@ fn is_owner_repo(value: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HomebrewShas {
     linux_x64: String,
+    linux_arm64: String,
     macos_x64: String,
     macos_arm64: String,
 }
@@ -1484,6 +1493,7 @@ struct HomebrewShas {
 fn read_homebrew_shas(dist: &Path) -> AppResult<HomebrewShas> {
     Ok(HomebrewShas {
         linux_x64: read_sha256_file(&dist.join("deepseek-linux-x64.tar.gz.sha256"))?,
+        linux_arm64: read_sha256_file(&dist.join("deepseek-linux-arm64.tar.gz.sha256"))?,
         macos_x64: read_sha256_file(&dist.join("deepseek-macos-x64.tar.gz.sha256"))?,
         macos_arm64: read_sha256_file(&dist.join("deepseek-macos-arm64.tar.gz.sha256"))?,
     })
@@ -1538,8 +1548,11 @@ fn render_homebrew_formula(version: &str, repo: &str, shas: &HomebrewShas) -> Ap
     if Hardware::CPU.intel?
       url "https://github.com/{repo}/releases/download/{tag}/deepseek-linux-x64.tar.gz"
       sha256 "{linux_x64}"
+    elsif Hardware::CPU.arm?
+      url "https://github.com/{repo}/releases/download/{tag}/deepseek-linux-arm64.tar.gz"
+      sha256 "{linux_arm64}"
     else
-      odie "DeepSeekCode Homebrew formula currently publishes Linux x64 only"
+      odie "DeepSeekCode Homebrew formula currently publishes Linux x64 and arm64 only"
     end
   end
 
@@ -1560,6 +1573,7 @@ end
         macos_arm64 = shas.macos_arm64,
         macos_x64 = shas.macos_x64,
         linux_x64 = shas.linux_x64,
+        linux_arm64 = shas.linux_arm64,
     ))
 }
 
@@ -2212,6 +2226,7 @@ mod tests {
             "example/deepseek",
             &HomebrewShas {
                 linux_x64: "a".repeat(64),
+                linux_arm64: "d".repeat(64),
                 macos_x64: "b".repeat(64),
                 macos_arm64: "c".repeat(64),
             },
@@ -2225,6 +2240,7 @@ mod tests {
         assert!(formula.contains(&format!("sha256 \"{}\"", "a".repeat(64))));
         assert!(formula.contains(&format!("sha256 \"{}\"", "b".repeat(64))));
         assert!(formula.contains(&format!("sha256 \"{}\"", "c".repeat(64))));
+        assert!(formula.contains(&format!("sha256 \"{}\"", "d".repeat(64))));
     }
 
     #[test]
@@ -2234,6 +2250,11 @@ mod tests {
         std::fs::write(
             root.join("deepseek-linux-x64.tar.gz.sha256"),
             format!("{}  deepseek-linux-x64.tar.gz\n", "a".repeat(64)),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("deepseek-linux-arm64.tar.gz.sha256"),
+            format!("{}  deepseek-linux-arm64.tar.gz\n", "d".repeat(64)),
         )
         .unwrap();
         std::fs::write(
@@ -2250,6 +2271,7 @@ mod tests {
         let shas = read_homebrew_shas(&root).unwrap();
 
         assert_eq!(shas.linux_x64, "a".repeat(64));
+        assert_eq!(shas.linux_arm64, "d".repeat(64));
         assert_eq!(shas.macos_x64, "b".repeat(64));
         assert_eq!(shas.macos_arm64, "c".repeat(64));
     }
@@ -2309,6 +2331,7 @@ mod tests {
 
         for (index, artifact) in [
             "deepseek-linux-x64.tar.gz",
+            "deepseek-linux-arm64.tar.gz",
             "deepseek-macos-x64.tar.gz",
             "deepseek-macos-arm64.tar.gz",
             "deepseek-windows-x64.zip",
@@ -2421,6 +2444,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         for artifact in [
             "deepseek-linux-x64.tar.gz",
+            "deepseek-linux-arm64.tar.gz",
             "deepseek-macos-x64.tar.gz",
             "deepseek-macos-arm64.tar.gz",
             "deepseek-windows-x64.zip",

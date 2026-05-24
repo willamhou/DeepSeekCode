@@ -15,7 +15,7 @@ const TARGETS = {
     triple: "x86_64-apple-darwin",
   },
   "linux:arm64": {
-    packageSuffix: null,
+    packageSuffix: "linux-arm64",
     triple: "aarch64-unknown-linux-gnu",
   },
   "linux:x64": {
