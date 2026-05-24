@@ -10,7 +10,7 @@ launch media is still mostly SVG-based.
 Go when:
 
 - npm is either published or the page clearly says Homebrew is the primary
-  install path.
+  macOS install path and Linux uses release archives or source install.
 - A 30-60 second demo video exists.
 - At least three clean screenshots or gallery images exist.
 - README, install docs, and current status match the latest release.
@@ -50,14 +50,14 @@ I built DeepSeekCode because I wanted a terminal-first code-agent workflow for D
 
 The current public beta focuses on Linux/macOS local repo work: inspect a repository, edit files, run commands, review diffs, and continue from the same terminal session.
 
-v0.1.3 includes GitHub Release binaries, Linux arm64 support, a verified Homebrew tap, GHCR publishing, release-smoke checks, and model-backed demo evidence in the README.
+v0.1.3 includes GitHub Release binaries, Linux arm64 support, a verified macOS Homebrew tap, GHCR publishing, release-smoke checks, and model-backed demo evidence in the README.
 
 It is still early. npm publishing is not live yet, Windows is not the current public-beta focus, and I am looking for feedback from people who already use terminal-first coding agents.
 ```
 
 ## Gallery Ideas
 
-1. Homebrew install and quickstart.
+1. macOS Homebrew install and quickstart.
 2. Full-screen TUI in a local repo.
 3. Agent proposing a file change.
 4. `git diff` after the agent edit.

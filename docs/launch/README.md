@@ -16,7 +16,7 @@ Use this concise public-beta claim:
 
 > DeepSeekCode v0.1.3 is a public-beta, DeepSeek-first code-agent CLI for
 > Linux/macOS. It ships GitHub Release binaries, Linux arm64 support, verified
-> Homebrew install, GHCR image, and release-smoke evidence for the local
+> macOS Homebrew install, GHCR image, and release-smoke evidence for the local
 > terminal coding loop.
 
 ## Links
@@ -56,6 +56,8 @@ Also verify:
 - README Quick Start still points to the latest release.
 - Homebrew install works from a clean macOS machine:
   `brew tap willamhou/deepseekcode && brew install deepseek`.
+- Linux users can find release archive and source-install paths in the README
+  and install guide.
 - `docs/current-status.md` still reflects the latest release evidence.
 - Known caveats are visible: npm is not live, Windows is not the current public
   beta focus, and richer GIF/MP4 launch media can still be added.

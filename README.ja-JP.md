@@ -40,7 +40,7 @@ repo-aware です。
 
 ## クイックスタート
 
-Homebrew でインストール:
+Homebrew でインストール（macOS x64/arm64 で検証済み）:
 
 ```bash
 brew tap willamhou/deepseekcode

@@ -6,7 +6,7 @@
 ## 标题
 
 ```text
-我做了一个类似 Claude Code 的 DeepSeek 终端代码 Agent，Linux/macOS 可以直接 brew 安装
+我做了一个类似 Claude Code 的 DeepSeek 终端代码 Agent，macOS 可 brew 安装，Linux 有 release 包
 ```
 
 更克制的版本：
@@ -22,18 +22,22 @@ DeepSeekCode v0.1.3：一个 DeepSeek-first 的终端 code-agent CLI
 
 它是一个 DeepSeek-first 的终端 code agent，目标是做一个更接近 Claude Code / Codex CLI 的本地开发闭环：在终端里看仓库、改文件、跑检查、看 diff，然后继续同一个 session 迭代。
 
-现在 Linux/macOS 已经可以直接试：
+现在 macOS 可以直接用 Homebrew 试：
 
 brew tap willamhou/deepseekcode
 brew install deepseek
+deepseek config init
+printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
 deepseek quickstart
 deepseek
+
+Linux 用户可以走 GitHub Release archive 或源码安装；v0.1.3 的 Linux x64 / Linux arm64 release assets 已经纳入 release-smoke。
 
 这版补齐了几个之前不敢公开推的东西：
 
 - GitHub Release 二进制产物
 - Linux x64 / Linux arm64 / macOS x64 / macOS arm64
-- 已验证的 Homebrew tap
+- 已验证的 macOS Homebrew tap
 - GHCR 镜像
 - release-smoke：从公开 release 下载、校验 sha256、解压并跑最小验证
 - README 里有真实 model-backed 的编辑/测试闭环 demo
@@ -58,9 +62,15 @@ DeepSeekCode v0.1.3 public beta 发了。
 
 一个 DeepSeek-first 的终端 code-agent CLI，面向 Linux/macOS 本地开发闭环：看仓库、改文件、跑命令、看 diff、继续 session。
 
-安装：
+macOS 安装：
 brew tap willamhou/deepseekcode
 brew install deepseek
+deepseek config init
+printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
+deepseek quickstart
+deepseek
+
+Linux 可以用 GitHub Release archive 或源码安装，README 里有命令。
 
 Repo:
 https://github.com/willamhou/DeepSeekCode

@@ -36,7 +36,7 @@ DeepSeekCode 的目标不是普通聊天壳，而是更接近 Claude Code CLI / 
 
 ## 快速开始
 
-通过 Homebrew 安装：
+通过 Homebrew 安装（已验证 macOS x64/arm64）：
 
 ```bash
 brew tap willamhou/deepseekcode
