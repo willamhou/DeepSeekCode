@@ -1347,6 +1347,25 @@ pub struct ConfigArgs {
     pub network_deny: Option<String>,
     pub auth_env: Option<String>,
     pub auth_stdin: bool,
+    pub model_action: Option<ConfigModelAction>,
+    pub provider_action: Option<ConfigProviderAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigModelAction {
+    Show,
+    List,
+    Set(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigProviderAction {
+    Show,
+    List,
+    Set {
+        provider: String,
+        model: Option<String>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -2339,6 +2358,8 @@ fn parse_config_args(args: Vec<String>) -> Result<ConfigArgs, String> {
         network_deny: None,
         auth_env: None,
         auth_stdin: false,
+        model_action: None,
+        provider_action: None,
     };
 
     let mut index = 0;
@@ -2387,9 +2408,25 @@ fn parse_config_args(args: Vec<String>) -> Result<ConfigArgs, String> {
                     }
                 }
             }
+            "model" => {
+                if parsed.model_action.is_some() {
+                    return Err("config model can only be specified once".to_string());
+                }
+                let rest = &args[index + 1..];
+                parsed.model_action = Some(parse_config_model_action(rest)?);
+                index = args.len();
+            }
+            "provider" => {
+                if parsed.provider_action.is_some() {
+                    return Err("config provider can only be specified once".to_string());
+                }
+                let rest = &args[index + 1..];
+                parsed.provider_action = Some(parse_config_provider_action(rest)?);
+                index = args.len();
+            }
             other => {
                 return Err(format!(
-                    "unknown config argument `{other}`; expected init|auth [ENV] --stdin|network allow|network deny|--force|--print-default"
+                    "unknown config argument `{other}`; expected init|auth [ENV] --stdin|model [show|list|MODEL]|provider [show|list|NAME [MODEL]]|network allow|network deny|--force|--print-default"
                 ));
             }
         }
@@ -2398,6 +2435,11 @@ fn parse_config_args(args: Vec<String>) -> Result<ConfigArgs, String> {
     let network_mutations =
         usize::from(parsed.network_allow.is_some()) + usize::from(parsed.network_deny.is_some());
     let auth_mutation = parsed.auth_env.is_some() || parsed.auth_stdin;
+    let config_action_count = network_mutations
+        + usize::from(auth_mutation)
+        + usize::from(parsed.init)
+        + usize::from(parsed.model_action.is_some())
+        + usize::from(parsed.provider_action.is_some());
     if network_mutations > 1 {
         return Err("config accepts only one network allow/deny mutation at a time".to_string());
     }
@@ -2424,8 +2466,58 @@ fn parse_config_args(args: Vec<String>) -> Result<ConfigArgs, String> {
     if parsed.force && !parsed.init {
         return Err("config --force requires init".to_string());
     }
+    if config_action_count > 1 {
+        return Err(
+            "config accepts only one action at a time: init, auth, model, provider, or network"
+                .to_string(),
+        );
+    }
+    if (parsed.model_action.is_some() || parsed.provider_action.is_some())
+        && (parsed.print_default || parsed.force)
+    {
+        return Err(
+            "config model/provider cannot be combined with --force or --print-default".to_string(),
+        );
+    }
 
     Ok(parsed)
+}
+
+fn parse_config_model_action(args: &[String]) -> Result<ConfigModelAction, String> {
+    match args {
+        [] => Ok(ConfigModelAction::Show),
+        [value] if matches!(value.as_str(), "show" | "status") => Ok(ConfigModelAction::Show),
+        [value] if matches!(value.as_str(), "list" | "ls") => Ok(ConfigModelAction::List),
+        [value] if !value.starts_with('-') => Ok(ConfigModelAction::Set(value.clone())),
+        [value] => Err(format!(
+            "unknown config model argument `{value}`; expected show|list|MODEL"
+        )),
+        _ => Err("config model accepts at most one argument: show|list|MODEL".to_string()),
+    }
+}
+
+fn parse_config_provider_action(args: &[String]) -> Result<ConfigProviderAction, String> {
+    match args {
+        [] => Ok(ConfigProviderAction::Show),
+        [value] if matches!(value.as_str(), "show" | "status") => Ok(ConfigProviderAction::Show),
+        [value] if matches!(value.as_str(), "list" | "ls") => Ok(ConfigProviderAction::List),
+        [provider] if !provider.starts_with('-') => Ok(ConfigProviderAction::Set {
+            provider: provider.clone(),
+            model: None,
+        }),
+        [provider, model] if !provider.starts_with('-') && !model.starts_with('-') => {
+            Ok(ConfigProviderAction::Set {
+                provider: provider.clone(),
+                model: Some(model.clone()),
+            })
+        }
+        [value] => Err(format!(
+            "unknown config provider argument `{value}`; expected show|list|NAME [MODEL]"
+        )),
+        _ => {
+            Err("config provider accepts at most two arguments: show|list|NAME [MODEL]".to_string())
+        }
+    }
 }
 
 fn parse_tui_args(args: Vec<String>) -> Result<TuiArgs, String> {
@@ -8269,6 +8361,64 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("config auth requires --stdin"));
+    }
+
+    #[test]
+    fn cli_from_argv_routes_config_provider_set() {
+        let cli = Cli::from_argv(vec![
+            "config".to_string(),
+            "provider".to_string(),
+            "openrouter".to_string(),
+            "flash".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Config(args)) => {
+                assert_eq!(
+                    args.provider_action,
+                    Some(ConfigProviderAction::Set {
+                        provider: "openrouter".to_string(),
+                        model: Some("flash".to_string()),
+                    })
+                );
+                assert!(!args.init);
+                assert!(!args.print_default);
+            }
+            other => panic!("expected Command::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_config_model_list() {
+        let cli = Cli::from_argv(vec![
+            "config".to_string(),
+            "model".to_string(),
+            "list".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Config(args)) => {
+                assert_eq!(args.model_action, Some(ConfigModelAction::List));
+                assert!(!args.init);
+                assert!(!args.print_default);
+            }
+            other => panic!("expected Command::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_rejects_multiple_config_actions() {
+        let error = Cli::from_argv(vec![
+            "config".to_string(),
+            "init".to_string(),
+            "provider".to_string(),
+            "deepseek".to_string(),
+        ])
+        .unwrap_err();
+
+        assert!(error.contains("config accepts only one action"));
     }
 
     #[test]

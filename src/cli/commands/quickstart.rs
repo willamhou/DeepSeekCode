@@ -31,6 +31,8 @@ struct QuickstartReport {
     cwd: String,
     config_path: String,
     config_present: bool,
+    base_url: String,
+    model: String,
     api_key_env: String,
     api_key_present: bool,
     terminal_tty: bool,
@@ -75,6 +77,8 @@ fn build_quickstart_report_from_state(
         cwd,
         config_path,
         config_present,
+        base_url: config.model.base_url.clone(),
+        model: config.model.model.clone(),
         api_key_env: config.model.api_key_env.clone(),
         api_key_present,
         terminal_tty,
@@ -95,6 +99,10 @@ fn quickstart_next_commands(
     let mut commands = Vec::new();
     if !config_present {
         commands.push("deepseek config init".to_string());
+    }
+    commands.push("deepseek config provider show".to_string());
+    if !config_present || !api_key_present {
+        commands.push("deepseek config provider list".to_string());
     }
     if !api_key_present {
         commands.push(format!(
@@ -143,6 +151,8 @@ fn render_text_report(report: &QuickstartReport) -> String {
         report.api_key_env
     )
     .expect("write to string");
+    writeln!(&mut out, "- model: {}", report.model).expect("write to string");
+    writeln!(&mut out, "- base URL: {}", report.base_url).expect("write to string");
     writeln!(
         &mut out,
         "- terminal: {}",
@@ -206,6 +216,8 @@ fn render_json_report(report: &QuickstartReport) -> String {
         ("cwd", JsonValue::String(report.cwd.clone())),
         ("config_path", JsonValue::String(report.config_path.clone())),
         ("config_present", JsonValue::Bool(report.config_present)),
+        ("base_url", JsonValue::String(report.base_url.clone())),
+        ("model", JsonValue::String(report.model.clone())),
         ("api_key_env", JsonValue::String(report.api_key_env.clone())),
         ("api_key_present", JsonValue::Bool(report.api_key_present)),
         ("terminal_tty", JsonValue::Bool(report.terminal_tty)),

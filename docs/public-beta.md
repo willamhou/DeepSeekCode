@@ -108,7 +108,8 @@ Keep these caveats visible when promoting the project:
 - Hosted IDE evidence and broader Windows service proof are outside the current
   Linux/macOS local CLI milestone.
 - Rich GIF/MP4 launch media can improve conversion, but the committed SVG demo
-  is already enough to show the core loop.
+  is already enough to show the core loop. The 2048 recorder in
+  `docs/demo/record-2048-demo.sh` is the recommended next visual launch asset.
 
 ## Promotion Checklist
 

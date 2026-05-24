@@ -1,4 +1,4 @@
-use crate::cli::app::ConfigArgs;
+use crate::cli::app::{ConfigArgs, ConfigModelAction, ConfigProviderAction};
 use crate::config::load::{config_assignments, load_or_default, parse_dotenv_assignment};
 use crate::config::types::AppConfig;
 use crate::core::network_policy::{decide, normalize_host, NetworkDecision};
@@ -7,6 +7,14 @@ use crate::error::AppResult;
 use std::io::Read as _;
 
 pub fn run(args: ConfigArgs) -> AppResult<()> {
+    if let Some(action) = args.model_action.clone() {
+        run_model_action(action)?;
+        return Ok(());
+    }
+    if let Some(action) = args.provider_action.clone() {
+        run_provider_action(action)?;
+        return Ok(());
+    }
     if let Some(host) = args.network_allow {
         let result =
             persist_network_rule_at(&std::env::current_dir()?, &host, NetworkRuleTarget::Allow)?;
@@ -52,6 +60,59 @@ pub fn run(args: ConfigArgs) -> AppResult<()> {
             "Config file path: {}",
             config.workspace.config_path().display()
         );
+    }
+    Ok(())
+}
+
+fn run_model_action(action: ConfigModelAction) -> AppResult<()> {
+    let cwd = std::env::current_dir()?;
+    match action {
+        ConfigModelAction::Show => {
+            let summary = model_config_summary_at(&cwd)?;
+            print_model_summary(&summary);
+        }
+        ConfigModelAction::List => {
+            let summary = provider_config_summary_at(&cwd)?;
+            print_model_list(&summary);
+        }
+        ConfigModelAction::Set(model) => {
+            let result = set_model_at(&cwd, &model)?;
+            if result.changed {
+                println!("model: {} -> {}", result.previous, result.model);
+            } else {
+                println!("model: {} already selected", result.model);
+            }
+            println!("config: {}", result.path.display());
+        }
+    }
+    Ok(())
+}
+
+fn run_provider_action(action: ConfigProviderAction) -> AppResult<()> {
+    let cwd = std::env::current_dir()?;
+    match action {
+        ConfigProviderAction::Show => {
+            let summary = provider_config_summary_at(&cwd)?;
+            print_provider_summary(&summary);
+        }
+        ConfigProviderAction::List => print_provider_list(),
+        ConfigProviderAction::Set { provider, model } => {
+            let result = set_provider_at(&cwd, &provider, model.as_deref())?;
+            if result.changed {
+                println!(
+                    "provider: {} -> {} ({})",
+                    result.previous_provider, result.provider, result.label
+                );
+            } else {
+                println!(
+                    "provider: {} already selected ({})",
+                    result.provider, result.label
+                );
+            }
+            println!("model: {}", result.model);
+            println!("api key env: {}", result.api_key_env);
+            println!("config: {}", result.path.display());
+        }
     }
     Ok(())
 }
@@ -212,6 +273,45 @@ fn print_network_rule_result(result: &NetworkRuleResult) {
         println!("{}: {} already present", result.key, result.host);
     }
     println!("config: {}", result.path.display());
+}
+
+fn print_model_summary(summary: &ModelConfigSummary) {
+    println!("model: {}", summary.model);
+    println!("base_url: {}", summary.base_url);
+    println!("api_key_env: {}", summary.api_key_env);
+    println!("reasoning_effort: {}", summary.reasoning_effort);
+    println!("config: {}", summary.path.display());
+}
+
+fn print_provider_summary(summary: &ProviderConfigSummary) {
+    println!("provider: {} ({})", summary.provider, summary.label);
+    println!("base_url: {}", summary.base_url);
+    println!("model: {}", summary.model);
+    println!("api_key_env: {}", summary.api_key_env);
+    println!("reasoning_effort: {}", summary.reasoning_effort);
+    println!("config: {}", summary.path.display());
+}
+
+fn print_provider_list() {
+    println!("Supported providers");
+    for preset in provider_presets() {
+        println!(
+            "- {} ({}) model={} api_key_env={}",
+            preset.name, preset.label, preset.default_model, preset.api_key_env
+        );
+    }
+}
+
+fn print_model_list(summary: &ProviderConfigSummary) {
+    println!(
+        "Models for provider {} ({})",
+        summary.provider, summary.label
+    );
+    for model in provider_model_completion_values(&summary.provider) {
+        println!("- {model}");
+    }
+    println!("current: {}", summary.model);
+    println!("config: {}", summary.path.display());
 }
 
 pub(crate) fn network_policy_summary_at(root: &std::path::Path) -> AppResult<NetworkPolicySummary> {

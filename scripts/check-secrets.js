@@ -40,6 +40,7 @@ const SKIP_DIRS = new Set([
 const SKIP_PATH_PATTERNS = [
   /^\.env(?:\.|$)/,
   /^docs\/demo\/deepseek-code-model-demo-.*\.log$/,
+  /^docs\/demo\/deepseek-code-2048-demo-.*\.log$/,
   /^npm\/platforms\/[^/]+\/bin\//,
   /\.key$/,
 ];

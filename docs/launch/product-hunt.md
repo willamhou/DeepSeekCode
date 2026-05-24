@@ -11,7 +11,8 @@ Go when:
 
 - npm is either published or the page clearly says Homebrew is the primary
   macOS install path and Linux uses release archives or source install.
-- A 30-60 second demo video exists.
+- A 30-60 second demo video exists, ideally from the 2048 recorder in
+  `docs/demo/record-2048-demo.sh`.
 - At least three clean screenshots or gallery images exist.
 - README, install docs, and current status match the latest release.
 - Known limitations are visible and defensible.
@@ -58,8 +59,8 @@ It is still early. npm publishing is not live yet, Windows is not the current pu
 ## Gallery Ideas
 
 1. macOS Homebrew install and quickstart.
-2. Full-screen TUI in a local repo.
-3. Agent proposing a file change.
-4. `git diff` after the agent edit.
-5. Passing test/check output.
+2. DeepSeekCode generating the playable 2048 app from an empty repo.
+3. Browser gameplay of the generated 2048 app.
+4. Full-screen TUI in a local repo.
+5. `git diff` after the agent edit.
 6. Release evidence: GitHub Release, Homebrew Smoke, and GHCR.
