@@ -1,16 +1,16 @@
 {
-  "name": "@deepseek-code/cli-macos-arm64",
+  "name": "@deepseek-code/cli-linux-arm64",
   "version": "0.1.3",
-  "description": "macOS arm64 binary for the DeepSeek Code CLI",
+  "description": "Linux arm64 binary for the DeepSeek Code CLI",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://github.com/willamhou/DeepSeekCode",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/willamhou/DeepSeekCode.git",
-    "directory": "npm/platforms/macos-arm64"
+    "directory": "npm/platforms/linux-arm64"
   },
   "os": [
-    "darwin"
+    "linux"
   ],
   "cpu": [
     "arm64"

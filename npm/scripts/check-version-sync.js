@@ -5,7 +5,7 @@ const { join } = require("path");
 
 const repoRoot = join(__dirname, "..", "..");
 const npmRoot = join(repoRoot, "npm");
-const platformDirs = ["linux-x64", "macos-arm64", "macos-x64", "windows-x64"];
+const platformDirs = ["linux-arm64", "linux-x64", "macos-arm64", "macos-x64", "windows-x64"];
 const failures = [];
 
 function readText(path) {
@@ -65,7 +65,12 @@ if (cargoVersion && homebrewVersion !== cargoVersion) {
   fail(`Homebrew formula version ${homebrewVersion ?? "<missing>"} does not match Cargo.toml ${cargoVersion}`);
 }
 
-for (const artifact of ["deepseek-linux-x64", "deepseek-macos-x64", "deepseek-macos-arm64"]) {
+for (const artifact of [
+  "deepseek-linux-x64",
+  "deepseek-linux-arm64",
+  "deepseek-macos-x64",
+  "deepseek-macos-arm64",
+]) {
   const expected = `/releases/download/v${cargoVersion}/${artifact}.tar.gz`;
   if (cargoVersion && !homebrewFormula.includes(expected)) {
     fail(`Homebrew formula is missing release URL suffix ${expected}`);

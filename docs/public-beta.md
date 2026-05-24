@@ -55,8 +55,8 @@ deepseek
 For release archive users, start with:
 
 ```bash
-deepseek update download-plan --version 0.1.2
-deepseek update release-smoke --version 0.1.2 --json
+deepseek update download-plan --version 0.1.3
+deepseek update release-smoke --version 0.1.3 --json
 ```
 
 Then try a bounded task in an existing repository:
@@ -72,7 +72,7 @@ The strongest current proof points are:
 - the two README SVG demos, including the model-backed edit/test loop;
 - `deepseek quickstart` and `deepseek doctor --json` for first-run readiness;
 - CI-smoked TUI entrypoints and service/shell fixtures;
-- `deepseek update release-smoke --version 0.1.2 --json` for release binary
+- `deepseek update release-smoke --version 0.1.3 --json` for release binary
   verification on the current platform;
 - online Python, Rust, and Node external fixture evidence recorded through
   dogfood tooling.
@@ -106,7 +106,7 @@ cargo test --lib -- --test-threads=1
 node scripts/check-secrets.js
 deepseek quickstart --json
 deepseek update publish-status --json
-deepseek update release-smoke --version 0.1.2 --json
+deepseek update release-smoke --version 0.1.3 --json
 ```
 
 Also check:

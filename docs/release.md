@@ -278,8 +278,8 @@ gh workflow run "Release Matrix"
 gh run watch
 ```
 
-The workflow builds release binaries for Linux x64, macOS x64, macOS arm64,
-and Windows x64. Linux runs the full serial test suite with
+The workflow builds release binaries for Linux x64, Linux arm64, macOS x64,
+macOS arm64, and Windows x64. Linux jobs run the full serial test suite with
 `cargo test -- --test-threads=1`; macOS and Windows run
 `cargo check --all-targets` before the release binary/package smoke so the
 platform matrix still catches compile drift without depending on Unix-specific
@@ -360,8 +360,8 @@ gh attestation verify deepseek-macos-arm64.tar.gz.sha256 --repo <owner>/<repo>
 evidence: it downloads the archive and `.sha256`, verifies the checksum,
 extracts the `deepseek` binary, and runs the same install verifier used by
 `deepseek update verify-install`. It only executes binaries for the current
-platform, so Linux arm64 hosts still need an x64 runner until Linux arm64
-release assets exist.
+platform; use the Release Smoke workflow when you need clean hosted evidence
+for Linux x64, Linux arm64, macOS x64, and macOS arm64 from one run.
 
 If GitHub release downloads are slow or blocked for an operator, mirror the
 release archive and `.sha256` files to a private/static asset host and point the
@@ -388,9 +388,9 @@ ruby -c packaging/homebrew/deepseek.rb
 
 Before publishing a tap, download the release matrix `.sha256` files next to
 their archives and run `deepseek update homebrew-formula`. The updater reads
-`deepseek-linux-x64.tar.gz.sha256`, `deepseek-macos-x64.tar.gz.sha256`, and
-`deepseek-macos-arm64.tar.gz.sha256`, then rewrites the formula with matching
-release URLs and checksums.
+`deepseek-linux-x64.tar.gz.sha256`, `deepseek-linux-arm64.tar.gz.sha256`,
+`deepseek-macos-x64.tar.gz.sha256`, and `deepseek-macos-arm64.tar.gz.sha256`,
+then rewrites the formula with matching release URLs and checksums.
 
 To automate tap publishing from the tag workflow, set repository variable
 `HOMEBREW_TAP_REPOSITORY` to the tap repository, for example

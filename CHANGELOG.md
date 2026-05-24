@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.1.3 - 2026-05-24
+
+Linux arm64 distribution hardening.
+
+### Added
+
+- Linux arm64 release matrix target using the native `ubuntu-24.04-arm`
+  hosted runner.
+- Linux arm64 release asset support in `deepseek update download-plan` and
+  `deepseek update release-smoke`.
+- Linux arm64 npm platform package metadata and wrapper resolution support.
+- Homebrew formula support for Linux arm64 release assets.
+- Manual clean-machine release-smoke and Homebrew smoke workflows for public
+  release/tap verification evidence.
+
+### Changed
+
+- Release assets now cover Linux x64, Linux arm64, macOS x64, macOS arm64, and
+  Windows x64.
+- Documentation points at the `v0.1.3` release/install paths.
+
+### Verification
+
+- `cargo fmt --check`
+- `cargo test --lib -- --test-threads=1`
+- `cargo package --allow-dirty`
+- `npm --prefix npm test`
+- `node scripts/check-secrets.js`
+- `node npm/scripts/check-version-sync.js`
+- `node packaging/homebrew/verify-formula.js`
+- `target/debug/deepseek update download-plan --version 0.1.3 --platform linux-arm64 --json`
+
 ## 0.1.2 - 2026-05-24
 
 Public beta release for the Linux/macOS local code-agent CLI milestone.

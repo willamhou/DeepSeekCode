@@ -108,7 +108,7 @@ if (stringValue(formula, "version") !== version) {
   failures.push(`formula version must match Cargo.toml ${version}`);
 }
 
-for (const platform of ["macos-arm64", "macos-x64", "linux-x64"]) {
+for (const platform of ["macos-arm64", "macos-x64", "linux-x64", "linux-arm64"]) {
   const url = `https://github.com/willamhou/DeepSeekCode/releases/download/${expectedTag}/deepseek-${platform}.tar.gz`;
   if (!formula.includes(`url "${url}"`)) {
     failures.push(`missing release URL for ${platform}`);
@@ -128,8 +128,8 @@ if (!formula.includes('system "#{bin}/deepseek", "doctor", "--json"')) {
 const shas = [...formula.matchAll(/^\s*sha256\s+"([0-9a-fA-F]{64})"/gm)].map((match) =>
   match[1].toLowerCase(),
 );
-if (shas.length !== 3) {
-  failures.push(`expected 3 sha256 entries, found ${shas.length}`);
+if (shas.length !== 4) {
+  failures.push(`expected 4 sha256 entries, found ${shas.length}`);
 }
 const placeholderShas = shas.filter((sha) => /^0{64}$/.test(sha)).length;
 if (args.release && placeholderShas > 0) {
