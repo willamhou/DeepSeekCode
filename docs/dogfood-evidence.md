@@ -138,8 +138,8 @@ rm -f /tmp/deepseek-live.key
 `live-evidence --require-report-gate` verifies the structured gate, rechecks the
 ledger fingerprint from the evidence file, and matches appended case evidence
 back to current ledger rows. `--require-loop-surface-gate` additionally fails
-unless the evidence includes an MCP loop-surface case and the embedded report
-gate requires `mcp` live evidence.
+unless the evidence includes an MCP loop-surface case and the structured
+`evidence_gate` requires `mcp` live evidence.
 
 ## Release Evidence Gate
 

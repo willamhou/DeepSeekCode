@@ -1213,6 +1213,9 @@ fn live_evidence_failures(
             failures
                 .push("post_run_report_command is missing MCP loop-surface live gate".to_string());
         }
+        if !live_evidence_report_gate_has_category(root, "mcp") {
+            failures.push("evidence_gate is missing MCP loop-surface live category".to_string());
+        }
         if !live_evidence_has_mcp_loop_surface_case(root) {
             failures.push("live evidence has no MCP loop-surface case".to_string());
         }
@@ -1424,6 +1427,10 @@ fn live_evidence_verification_json(
     out.insert(
         "loop_surface_case_present".to_string(),
         JsonValue::Bool(live_evidence_has_mcp_loop_surface_case(root)),
+    );
+    out.insert(
+        "loop_surface_gate_required".to_string(),
+        JsonValue::Bool(live_evidence_requires_mcp_loop_surface_gate(root)),
     );
     out.insert(
         "report_gate_passed".to_string(),
@@ -1809,6 +1816,28 @@ fn live_evidence_has_mcp_loop_surface_case(root: &BTreeMap<String, JsonValue>) -
                 .any(|case| live_evidence_string(case, "benchmark_category") == Some("mcp"))
         })
         .unwrap_or(false)
+}
+
+fn live_evidence_requires_mcp_loop_surface_gate(root: &BTreeMap<String, JsonValue>) -> bool {
+    live_evidence_string(root, "post_run_report_command")
+        .is_some_and(|command| command.contains("--require-live-category mcp:"))
+        && live_evidence_report_gate_has_category(root, "mcp")
+}
+
+fn live_evidence_report_gate_has_category(
+    root: &BTreeMap<String, JsonValue>,
+    category: &str,
+) -> bool {
+    root.get("evidence_gate")
+        .and_then(live_evidence_object)
+        .and_then(|gate| gate.get("require_live_categories"))
+        .and_then(json_as_array)
+        .is_some_and(|categories| {
+            categories
+                .iter()
+                .filter_map(live_evidence_object)
+                .any(|entry| live_evidence_string(entry, "category") == Some(category))
+        })
 }
 
 fn external_evidence_records(root: &BTreeMap<String, JsonValue>) -> Option<&Vec<JsonValue>> {
@@ -6063,6 +6092,12 @@ mod tests {
                 "online_ready":true,
                 "appended_model_backed_records":1,
                 "post_run_report_command":"deepseek dogfood report --limit 20 --require-live-runs 1 --require-live-success-rate 90 --require-live-category write_validate:1:90",
+                "evidence_gate":{
+                    "command":"deepseek dogfood report --limit 20 --require-live-runs 1 --require-live-success-rate 90 --require-live-category write_validate:1:90",
+                    "require_live_runs":1,
+                    "require_live_success_rate":90.0,
+                    "require_live_categories":[{"category":"write_validate","min_runs":1,"min_success_rate":90.0}]
+                },
                 "cases":[{
                     "ledger_records_appended":1,
                     "model_backed":true,
@@ -6081,6 +6116,10 @@ mod tests {
             .contains("post_run_report_command is missing MCP loop-surface live gate")));
         assert!(failures
             .iter()
+            .any(|failure| failure
+                .contains("evidence_gate is missing MCP loop-surface live category")));
+        assert!(failures
+            .iter()
             .any(|failure| failure.contains("live evidence has no MCP loop-surface case")));
         let verification = json_value_to_string(&live_evidence_verification_json(
             "live-evidence.json",
@@ -6090,6 +6129,7 @@ mod tests {
             &[],
         ));
         assert!(verification.contains("\"loop_surface_case_present\":false"));
+        assert!(verification.contains("\"loop_surface_gate_required\":false"));
 
         let passing_root = parse_root_object(
             r#"{
@@ -6099,6 +6139,12 @@ mod tests {
                 "online_ready":true,
                 "appended_model_backed_records":1,
                 "post_run_report_command":"deepseek dogfood report --limit 20 --require-live-runs 1 --require-live-success-rate 90 --require-live-category mcp:1:90",
+                "evidence_gate":{
+                    "command":"deepseek dogfood report --limit 20 --require-live-runs 1 --require-live-success-rate 90 --require-live-category mcp:1:90",
+                    "require_live_runs":1,
+                    "require_live_success_rate":90.0,
+                    "require_live_categories":[{"category":"mcp","min_runs":1,"min_success_rate":90.0}]
+                },
                 "cases":[{
                     "ledger_records_appended":1,
                     "model_backed":true,
@@ -6118,6 +6164,7 @@ mod tests {
             &[],
         ));
         assert!(verification.contains("\"loop_surface_case_present\":true"));
+        assert!(verification.contains("\"loop_surface_gate_required\":true"));
     }
 
     #[test]

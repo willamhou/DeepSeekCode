@@ -1170,7 +1170,7 @@ fn live_evidence_verification_status(path: Option<&str>) -> PublishStatusCheck {
     let Some(path) = path else {
         return PublishStatusCheck::skipped(
             "live_evidence",
-            "pass --live-evidence-verification <path> after `deepseek dogfood live-evidence --require-report-gate --require-loop-surface-gate --out <path>`",
+            "pass --live-evidence-verification <path> after `deepseek dogfood live-evidence --file <evidence.json> --require-report-gate --require-loop-surface-gate --out <path>`",
         );
     };
     let path = Path::new(path);
@@ -1223,6 +1223,9 @@ fn live_evidence_verification_status(path: Option<&str>) -> PublishStatusCheck {
     if json_field_bool(&root, "loop_surface_case_present") != Some(true) {
         failures.push("verification is missing MCP loop-surface evidence".to_string());
     }
+    if json_field_bool(&root, "loop_surface_gate_required") != Some(true) {
+        failures.push("verification did not require the MCP loop-surface report gate".to_string());
+    }
     if json_field_object(&root, "ledger_fingerprint").is_none() {
         failures.push("verification is missing the evidence ledger fingerprint".to_string());
     }
@@ -1236,7 +1239,7 @@ fn live_evidence_verification_status(path: Option<&str>) -> PublishStatusCheck {
         PublishStatusCheck::ready(
             "live_evidence",
             format!(
-                "verified online dogfood evidence with MCP loop-surface coverage is present ({} appended model-backed row(s)): {}",
+                "verified online dogfood evidence with MCP loop-surface coverage and gate is present ({} appended model-backed row(s)): {}",
                 appended,
                 path.display()
             ),
@@ -2364,7 +2367,7 @@ mod tests {
         let live_evidence = root.join("live-evidence-verification.json");
         std::fs::write(
             &live_evidence,
-            r#"{"kind":"deepseek.dogfood.live_evidence_verification.v1","ok":true,"completed":true,"online_ready":true,"model_transport":"online","appended_model_backed_records":3,"report_gate_required":true,"report_gate_passed":true,"loop_surface_case_present":true,"ledger_fingerprint":{"ok":true,"algorithm":"fnv1a64","path":".dscode/dogfood/ledger.jsonl","bytes":123,"fnv1a64":"abc"},"current_ledger_fingerprint":{"ok":true,"algorithm":"fnv1a64","path":".dscode/dogfood/ledger.jsonl","bytes":123,"fnv1a64":"abc"}}"#,
+            r#"{"kind":"deepseek.dogfood.live_evidence_verification.v1","ok":true,"completed":true,"online_ready":true,"model_transport":"online","appended_model_backed_records":3,"report_gate_required":true,"report_gate_passed":true,"loop_surface_case_present":true,"loop_surface_gate_required":true,"ledger_fingerprint":{"ok":true,"algorithm":"fnv1a64","path":".dscode/dogfood/ledger.jsonl","bytes":123,"fnv1a64":"abc"},"current_ledger_fingerprint":{"ok":true,"algorithm":"fnv1a64","path":".dscode/dogfood/ledger.jsonl","bytes":123,"fnv1a64":"abc"}}"#,
         )
         .unwrap();
 
@@ -2430,7 +2433,7 @@ mod tests {
         let live_evidence = root.join("live-evidence-verification.json");
         std::fs::write(
             &live_evidence,
-            r#"{"kind":"deepseek.dogfood.live_evidence_verification.v1","ok":true,"completed":true,"online_ready":true,"model_transport":"online","appended_model_backed_records":3,"report_gate_required":true,"report_gate_passed":true,"loop_surface_case_present":false,"ledger_fingerprint":{"ok":true},"current_ledger_fingerprint":{"ok":true}}"#,
+            r#"{"kind":"deepseek.dogfood.live_evidence_verification.v1","ok":true,"completed":true,"online_ready":true,"model_transport":"online","appended_model_backed_records":3,"report_gate_required":true,"report_gate_passed":true,"loop_surface_case_present":false,"loop_surface_gate_required":true,"ledger_fingerprint":{"ok":true},"current_ledger_fingerprint":{"ok":true}}"#,
         )
         .unwrap();
 
@@ -2440,6 +2443,25 @@ mod tests {
 
         assert_eq!(check.status, PublishStatus::Blocked);
         assert!(check.detail.contains("MCP loop-surface evidence"));
+    }
+
+    #[test]
+    fn publish_status_blocks_live_evidence_without_loop_surface_report_gate() {
+        let root = temp_root("publish-live-evidence-loop-surface-gate-blocked");
+        std::fs::create_dir_all(&root).unwrap();
+        let live_evidence = root.join("live-evidence-verification.json");
+        std::fs::write(
+            &live_evidence,
+            r#"{"kind":"deepseek.dogfood.live_evidence_verification.v1","ok":true,"completed":true,"online_ready":true,"model_transport":"online","appended_model_backed_records":3,"report_gate_required":true,"report_gate_passed":true,"loop_surface_case_present":true,"loop_surface_gate_required":false,"ledger_fingerprint":{"ok":true},"current_ledger_fingerprint":{"ok":true}}"#,
+        )
+        .unwrap();
+
+        let check = live_evidence_verification_status(Some(
+            live_evidence.to_str().expect("utf8 live evidence path"),
+        ));
+
+        assert_eq!(check.status, PublishStatus::Blocked);
+        assert!(check.detail.contains("loop-surface report gate"));
     }
 
     #[test]

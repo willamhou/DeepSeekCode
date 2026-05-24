@@ -119,7 +119,8 @@ structured `evidence_gate` thresholds against the current ledger instead of
 executing a shell command from the JSON file, rechecks the ledger fingerprint,
 and verifies that each appended case evidence row can be matched back to the
 ledger by timestamp, outcome, transport, and category.
-`--require-loop-surface-gate` additionally requires MCP loop-surface evidence.
+`--require-loop-surface-gate` additionally requires MCP loop-surface evidence
+and a structured `evidence_gate` `mcp` live-category threshold.
 Use `--out` to persist the verification JSON for release evidence upload.
 For external fixtures, `--evidence-out` writes
 `deepseek.dogfood.external_fixture_evidence.v1` with the source workdir, appended
@@ -328,7 +329,8 @@ deepseek update publish-status \
 `--strict` fails when `NPM_TOKEN`/`NODE_AUTH_TOKEN`,
 `HOMEBREW_TAP_REPOSITORY`, `HOMEBREW_TAP_TOKEN`, platform release archives,
 non-placeholder `.sha256` files, platform npm package tarballs, or verified
-online dogfood live evidence with MCP loop-surface coverage are missing.
+online dogfood live evidence with MCP loop-surface coverage and gate are
+missing.
 The text and JSON output also include a `public_install` audit for source
 checkout, GitHub Release, npm, Homebrew, GHCR, and Cargo registry policy. Treat
 `ready_to_publish` as local readiness only: do not advertise npm, Homebrew,
