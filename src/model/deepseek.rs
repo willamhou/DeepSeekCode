@@ -24,6 +24,11 @@ use crate::util::json::{
 use crate::util::process::StreamingProcess;
 use crate::util::sse::{read_frame, SseFrame};
 
+const DEFAULT_MODEL_STREAM_TIMEOUT_SECS: u64 = 180;
+const MAX_MODEL_STREAM_TIMEOUT_SECS: u64 = 900;
+const DEFAULT_MODEL_MAX_TOKENS: u64 = 4096;
+const MAX_MODEL_COMPLETION_TOKENS: u64 = 32_768;
+
 pub struct DeepSeekClient {
     pub config: ModelConfig,
 }
@@ -239,13 +244,14 @@ impl DeepSeekClient {
         };
         let tool_fields = openai_tool_fields(&input.available_tools, reasoning);
         let reasoning_fields = openai_reasoning_fields(&self.config.base_url, reasoning);
+        let max_tokens = model_max_tokens().to_string();
         let body = format!(
             concat!(
                 "{{",
                 "\"model\":\"{}\",",
                 "{}",
                 "{}",
-                "\"max_tokens\":1024,",
+                "\"max_tokens\":{},",
                 "\"stream\":true,",
                 "\"stream_options\":{{\"include_usage\":true}},",
                 "{}",
@@ -258,17 +264,19 @@ impl DeepSeekClient {
             json_escape(&route.model),
             temperature_field,
             reasoning_fields,
+            max_tokens,
             tool_fields,
             json_escape(&system_prompt),
             user_message,
         );
 
         let auth = format!("Authorization: Bearer {api_key}");
+        let stream_timeout = model_stream_timeout_secs().to_string();
         let args = [
             "-sS",
             "-N",
             "--max-time",
-            "60",
+            stream_timeout.as_str(),
             "-X",
             "POST",
             endpoint.as_str(),
@@ -321,11 +329,12 @@ impl DeepSeekClient {
         let reasoning = route.reasoning;
         let tool_fields = anthropic_tool_fields(&input.available_tools, reasoning);
         let reasoning_fields = reasoning.anthropic_fields();
+        let max_tokens = model_max_tokens().to_string();
         let body = format!(
             concat!(
                 "{{",
                 "\"model\":\"{}\",",
-                "\"max_tokens\":1024,",
+                "\"max_tokens\":{},",
                 "\"stream\":true,",
                 "{}",
                 "{}",
@@ -336,6 +345,7 @@ impl DeepSeekClient {
                 "}}"
             ),
             json_escape(&route.model),
+            max_tokens,
             reasoning_fields,
             tool_fields,
             json_escape(&system_prompt),
@@ -343,11 +353,12 @@ impl DeepSeekClient {
         );
 
         let api_header = format!("x-api-key: {api_key}");
+        let stream_timeout = model_stream_timeout_secs().to_string();
         let args = [
             "-sS",
             "-N",
             "--max-time",
-            "60",
+            stream_timeout.as_str(),
             "-X",
             "POST",
             endpoint.as_str(),
@@ -1346,6 +1357,28 @@ Rules:\n\
 4. Translate natural-language prose naturally and professionally.\n\
 5. If the input is already in {target_language} or contains no prose to translate, return it as-is."
     )
+}
+
+fn model_stream_timeout_secs() -> u64 {
+    model_stream_timeout_secs_from(env::var("DSCODE_MODEL_STREAM_TIMEOUT_SECS").ok().as_deref())
+}
+
+fn model_stream_timeout_secs_from(raw: Option<&str>) -> u64 {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(MAX_MODEL_STREAM_TIMEOUT_SECS))
+        .unwrap_or(DEFAULT_MODEL_STREAM_TIMEOUT_SECS)
+}
+
+fn model_max_tokens() -> u64 {
+    model_max_tokens_from(env::var("DSCODE_MODEL_MAX_TOKENS").ok().as_deref())
+}
+
+fn model_max_tokens_from(raw: Option<&str>) -> u64 {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(MAX_MODEL_COMPLETION_TOKENS))
+        .unwrap_or(DEFAULT_MODEL_MAX_TOKENS)
 }
 
 fn run_curl_json(args: &[&str], body: &str) -> AppResult<String> {
@@ -9878,6 +9911,26 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
         assert_eq!(usage.completion, 11);
         assert_eq!(usage.prompt_cache_hit, 9);
         assert_eq!(usage.prompt_cache_miss, 21);
+    }
+
+    #[test]
+    fn model_stream_timeout_uses_agent_friendly_default_and_bounds_env() {
+        assert_eq!(super::model_stream_timeout_secs_from(None), 180);
+        assert_eq!(super::model_stream_timeout_secs_from(Some("")), 180);
+        assert_eq!(super::model_stream_timeout_secs_from(Some("abc")), 180);
+        assert_eq!(super::model_stream_timeout_secs_from(Some("0")), 180);
+        assert_eq!(super::model_stream_timeout_secs_from(Some("240")), 240);
+        assert_eq!(super::model_stream_timeout_secs_from(Some("9999")), 900);
+    }
+
+    #[test]
+    fn model_max_tokens_uses_code_agent_default_and_bounds_env() {
+        assert_eq!(super::model_max_tokens_from(None), 4096);
+        assert_eq!(super::model_max_tokens_from(Some("")), 4096);
+        assert_eq!(super::model_max_tokens_from(Some("abc")), 4096);
+        assert_eq!(super::model_max_tokens_from(Some("0")), 4096);
+        assert_eq!(super::model_max_tokens_from(Some("8192")), 8192);
+        assert_eq!(super::model_max_tokens_from(Some("999999")), 32_768);
     }
 
     use crate::error::AppResult;
