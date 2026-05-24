@@ -91,6 +91,10 @@ fn apply_text_replacement_with_session(
         path.display(),
         if replace_all { "global" } else { "single" }
     );
+    summary.push_str(&format!(
+        "\nmeta.replacement_fingerprint={}",
+        replacement_fingerprint(find, replace)
+    ));
     append_post_edit_diagnostics(
         &mut summary,
         Path::new("."),
@@ -123,6 +127,31 @@ fn apply_replacement(
     };
 
     Ok(updated)
+}
+
+fn replacement_fingerprint(find: &str, replace: &str) -> String {
+    let mut canonical = String::new();
+    push_fingerprint_part(&mut canonical, "find", find);
+    push_fingerprint_part(&mut canonical, "replace", replace);
+    format!("{:016x}", fnv1a64(canonical.as_bytes()))
+}
+
+fn push_fingerprint_part(out: &mut String, key: &str, value: &str) {
+    out.push_str(key);
+    out.push('=');
+    out.push_str(&value.len().to_string());
+    out.push(':');
+    out.push_str(value);
+    out.push('\n');
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 #[cfg(test)]
@@ -693,6 +722,30 @@ mod tests {
     fn errors_when_find_is_missing() {
         let error = apply_replacement("hello", "missing", "x", false).unwrap_err();
         assert!(error.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn text_replacement_summary_includes_replacement_fingerprint() {
+        let dir = unique_test_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("demo.txt");
+        fs::write(&file, "alpha\nbeta\n").unwrap();
+
+        let output = apply_text_replacement_with_session(
+            &ToolInput::new()
+                .with_arg("path", file.to_string_lossy().into_owned())
+                .with_arg("find", "alpha")
+                .with_arg("replace", "omega"),
+            &DiagnosticsConfig::default(),
+            None,
+        )
+        .unwrap();
+
+        assert!(output.summary.contains("Updated "));
+        assert!(output.summary.contains("meta.replacement_fingerprint="));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "omega\nbeta\n");
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

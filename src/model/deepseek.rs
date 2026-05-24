@@ -5640,11 +5640,56 @@ fn next_pending_edit_request(input: &ModelRequest) -> Option<EditRequest> {
 }
 
 fn edit_request_patch_succeeded(input: &ModelRequest, request: &EditRequest) -> bool {
+    let same_path_count = derive_edit_requests(&input.task)
+        .into_iter()
+        .filter(|candidate| candidate.path == request.path)
+        .count();
+    let fingerprint_marker = if same_path_count > 1 {
+        Some(format!(
+            "meta.replacement_fingerprint={}",
+            replacement_fingerprint(&request.find, &request.replace)
+        ))
+    } else {
+        None
+    };
+
     input.observations.iter().any(|observation| {
-        observation.tool_name == "apply_patch"
-            && !observation.is_failure()
-            && observation.summary.contains(&request.path)
+        if observation.tool_name != "apply_patch"
+            || observation.is_failure()
+            || !observation.summary.contains(&request.path)
+        {
+            return false;
+        }
+
+        fingerprint_marker
+            .as_ref()
+            .is_none_or(|marker| observation.summary.contains(marker))
     })
+}
+
+fn replacement_fingerprint(find: &str, replace: &str) -> String {
+    let mut canonical = String::new();
+    push_fingerprint_part(&mut canonical, "find", find);
+    push_fingerprint_part(&mut canonical, "replace", replace);
+    format!("{:016x}", fnv1a64(canonical.as_bytes()))
+}
+
+fn push_fingerprint_part(out: &mut String, key: &str, value: &str) {
+    out.push_str(key);
+    out.push('=');
+    out.push_str(&value.len().to_string());
+    out.push(':');
+    out.push_str(value);
+    out.push('\n');
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 fn trim_edit_path_suffix(raw: &str) -> &str {
@@ -5722,8 +5767,8 @@ mod tests {
         last_patched_file_path, next_pending_edit_request, openai_tool_fields,
         parse_anthropic_messages, parse_anthropic_translation_response, parse_anthropic_usage,
         parse_openai_chat_completion, parse_openai_translation_response, parse_openai_usage,
-        required_action_response, translation_system_prompt, ApiFlavor, DeepSeekClient,
-        GithubPrContextRequest, ReasoningTier, ToolSchemaFlattening,
+        replacement_fingerprint, required_action_response, translation_system_prompt, ApiFlavor,
+        DeepSeekClient, GithubPrContextRequest, ReasoningTier, ToolSchemaFlattening,
     };
     use crate::config::types::ModelConfig;
     use crate::model::client::ModelClient;
@@ -7969,6 +8014,88 @@ mod tests {
             }
             other => panic!("expected pending multi-file apply_patch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn explicit_edit_guardrail_applies_second_pending_same_file_edit() {
+        let request = ModelRequest {
+            system_prompt: String::new(),
+            task: "replace `return amount - discount` with `return max(amount - discount, 0.0)` in src/invoice_math/pricing.py and replace `discount_label` with `final_label` in src/invoice_math/pricing.py, validate with python3 -m unittest discover -s tests".to_string(),
+            image_inputs: Vec::new(),
+            profile_name: "python".to_string(),
+            profile_hints: Vec::new(),
+            primary_file: None,
+            suggested_test_command: Some("python3 -m unittest discover -s tests".to_string()),
+            available_tools: vec!["apply_patch".to_string(), "read_file".to_string()],
+            observations: vec![
+                Observation::ok("list_files", "src/invoice_math/pricing.py"),
+                Observation::ok(
+                    "apply_patch",
+                    format!(
+                        "Updated src/invoice_math/pricing.py using single replacement mode.\nmeta.replacement_fingerprint={}",
+                        replacement_fingerprint(
+                            "return amount - discount",
+                            "return max(amount - discount, 0.0)"
+                        )
+                    ),
+                ),
+                Observation::ok(
+                    "read_file",
+                    "5 def render_label():\n6     return discount_label",
+                ),
+            ],
+            todos: Vec::new(),
+            planning_mode: false,
+            recent_steps: Vec::new(),
+        };
+
+        let pending = next_pending_edit_request(&request).expect("expected pending edit");
+        assert_eq!(pending.path, "src/invoice_math/pricing.py");
+        assert_eq!(pending.find, "discount_label");
+        assert_eq!(pending.replace, "final_label");
+
+        let response = required_action_response(&request).expect("expected guardrail response");
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "apply_patch");
+                assert_eq!(input.get("path"), Some("src/invoice_math/pricing.py"));
+                assert_eq!(input.get("find"), Some("discount_label"));
+                assert_eq!(input.get("replace"), Some("final_label"));
+            }
+            other => panic!("expected pending same-file apply_patch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_edit_guardrail_requires_fingerprint_for_same_file_edits() {
+        let request = ModelRequest {
+            system_prompt: String::new(),
+            task: "replace `return amount - discount` with `return max(amount - discount, 0.0)` in src/invoice_math/pricing.py and replace `discount_label` with `final_label` in src/invoice_math/pricing.py, validate with python3 -m unittest discover -s tests".to_string(),
+            image_inputs: Vec::new(),
+            profile_name: "python".to_string(),
+            profile_hints: Vec::new(),
+            primary_file: None,
+            suggested_test_command: Some("python3 -m unittest discover -s tests".to_string()),
+            available_tools: vec!["apply_patch".to_string(), "read_file".to_string()],
+            observations: vec![
+                Observation::ok("list_files", "src/invoice_math/pricing.py"),
+                Observation::ok(
+                    "apply_patch",
+                    "Updated src/invoice_math/pricing.py using single replacement mode.",
+                ),
+                Observation::ok(
+                    "read_file",
+                    "5 def apply_discount(amount, discount):\n6     return amount - discount",
+                ),
+            ],
+            todos: Vec::new(),
+            planning_mode: false,
+            recent_steps: Vec::new(),
+        };
+
+        let pending = next_pending_edit_request(&request).expect("expected pending edit");
+        assert_eq!(pending.find, "return amount - discount");
+        assert_eq!(pending.replace, "return max(amount - discount, 0.0)");
     }
 
     #[test]
