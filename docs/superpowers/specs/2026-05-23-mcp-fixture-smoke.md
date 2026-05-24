@@ -58,12 +58,14 @@ The JSON report now includes:
 - `http_templates`
 - `sse_templates`
 
-The default benchmark manifest now also carries three MCP planning cases:
+The default benchmark manifest now also carries four MCP planning cases:
 
 - `fixture-mcp-dynamic-readme` verifies the offline planner can call a dynamic
   `mcp__stdio-self__read_file` tool directly.
 - `fixture-mcp-generic-call-readme` verifies the generic `mcp_call` path for
   `stdio-self/read_file`.
+- `fixture-mcp-resource-workspace` verifies MCP resource discovery followed by
+  `mcp_read_resource` against the fixture workspace resource.
 - `fixture-mcp-allowlist-deny-recovery` verifies a denied `mcp_call` recovers by
   listing configured MCP tools instead of falling into repository search or
   generic replanning.
@@ -86,12 +88,13 @@ setting a case-local MCP allowlist.
     `http_prompt_ok=true`, `sse_prompt_ok=true`, `stdio_resource_ok=true`,
     `http_resource_ok=true`, `sse_resource_ok=true`, and template counts
     `3/1/1`.
-- `/home/wilamhou/codes/github/DeepSeekCode/target/debug/dscode benchmark --manifest /tmp/deepseek-mcp-benchmarks.txt --out /tmp/deepseek-mcp-benchmark.md --accept-live-baseline`
-  from `/tmp`, which passed `3/3` MCP cases
-- `cargo run --quiet -- benchmark`, which refreshed the default manifest at
-  `82/82` with the new `mcp` category passing `3/3`; the 82-case trend gate is
-  still in comparable warmup with `found 2`, and live gate passes against the
-  previous dogfood snapshot, `runs 5 -> 20`
+- `DEEPSEEK_API_KEY_ENV=DEEPSEEK_API_KEY_OFFLINE cargo run --quiet -- benchmark
+  --category mcp --out /tmp/deepseek-mcp-benchmark.md` passes the current
+  default MCP slice at `4/4` deterministically through the offline planner.
+- A historical `cargo run --quiet -- benchmark` refresh passed the prior
+  `82/82` default manifest with the older `3/3` MCP slice; rerun a full default
+  benchmark after the current 84-case manifest expansion when release evidence
+  needs a fresh full baseline.
 
 ## Remaining
 

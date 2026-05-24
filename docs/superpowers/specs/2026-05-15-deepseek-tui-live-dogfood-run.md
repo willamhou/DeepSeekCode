@@ -39,6 +39,8 @@ Claude/Codex/DeepSeek-TUI gap.
 - `dogfood live-evidence --require-report-gate` also verifies the evidence file's
   structured live gate against the current ledger, rechecks the ledger
   fingerprint, and matches appended case rows back to ledger records.
+- `dogfood live-evidence --require-loop-surface-gate` additionally requires MCP
+  loop-surface evidence and an embedded `mcp` live-category report gate.
 - `dogfood live-evidence --out <path>` persists the verification JSON for
   release evidence upload.
 
@@ -50,7 +52,7 @@ Claude/Codex/DeepSeek-TUI gap.
 - Unit coverage for the batch evidence summary JSON and file writer.
 - Parser/unit coverage for the batch evidence verifier.
 - Command smoke:
-  - `deepseek dogfood live-run --limit 3`
+  - `deepseek dogfood live-run --limit 4`
   - `deepseek dogfood live-run --limit 2 --category recovery`
 
 ## Remaining

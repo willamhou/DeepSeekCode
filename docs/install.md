@@ -115,14 +115,15 @@ deepseek dogfood external-evidence \
   --require-successful-external-fixtures 1
 deepseek dogfood report --limit 10
 deepseek dogfood live-plan --limit 10
-deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 3 --json
-deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 3
+deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 4 --json
+deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 4
 # Add --execute only when you intend to spend online model calls:
-deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 3 \
+deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 4 \
   --evidence-out .dscode/dogfood/live-evidence.json --execute
 deepseek dogfood live-evidence --file .dscode/dogfood/live-evidence.json \
   --out .dscode/dogfood/live-evidence-verification.json \
-  --require-benchmark-gate --require-report-gate
+  --require-benchmark-gate --require-report-gate \
+  --require-loop-surface-gate
 ```
 
 `live-plan` and `live-run --json` print `post_run_report_command`; run it after
@@ -133,6 +134,7 @@ value. The summary includes a ledger file `fnv1a64` fingerprint. `dogfood
 live-evidence` verifies that summary as a fail-closed gate.
 `--require-report-gate` checks the structured live thresholds and ledger
 fingerprint against the ledger path from the evidence file.
+`--require-loop-surface-gate` additionally requires MCP loop-surface evidence.
 Use `--out` to persist the verification JSON for release evidence upload.
 
 严格发布检查可以让 report 根据证据阈值 fail closed：
@@ -150,7 +152,8 @@ deepseek dogfood report --limit 20 \
   --require-category pr_workflow:25:90 \
   --require-live-category write_validate:25:90 \
   --require-live-category recovery:25:90 \
-  --require-live-category pr_workflow:25:90
+  --require-live-category pr_workflow:25:90 \
+  --require-live-category mcp:3:90
 ```
 
 ## Release Binary

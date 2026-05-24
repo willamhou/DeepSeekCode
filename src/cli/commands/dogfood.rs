@@ -36,7 +36,7 @@ const CATEGORY_TREND_WINDOW: usize = 5;
 const DEFAULT_LIVE_TARGET_RUNS: usize = 100;
 const DEFAULT_LIVE_TARGET_SUCCESS_RATE: f64 = 90.0;
 const DEFAULT_LIVE_PLAN_LIMIT: usize = 25;
-const DEFAULT_LIVE_RUN_LIMIT: usize = 3;
+const DEFAULT_LIVE_RUN_LIMIT: usize = 4;
 const MODEL_TRANSPORT_OFFLINE: &str = "offline";
 const MODEL_TRANSPORT_ONLINE: &str = "online";
 const MODEL_TRANSPORT_UNKNOWN: &str = "unknown";
@@ -44,6 +44,7 @@ const LIVE_PLAN_TARGET_CATEGORIES: &[(&str, usize, f64)] = &[
     ("write_validate", 25, 90.0),
     ("recovery", 25, 90.0),
     ("pr_workflow", 25, 90.0),
+    ("mcp", 3, 90.0),
 ];
 
 pub fn run(action: DogfoodAction) -> AppResult<()> {
@@ -1207,6 +1208,15 @@ fn live_evidence_failures(
     {
         failures.push("post_run_report_command is missing live evidence gates".to_string());
     }
+    if args.require_loop_surface_gate {
+        if !report_command.contains("--require-live-category mcp:") {
+            failures
+                .push("post_run_report_command is missing MCP loop-surface live gate".to_string());
+        }
+        if !live_evidence_has_mcp_loop_surface_case(root) {
+            failures.push("live evidence has no MCP loop-surface case".to_string());
+        }
+    }
     failures
 }
 
@@ -1410,6 +1420,10 @@ fn live_evidence_verification_json(
     out.insert(
         "report_gate_required".to_string(),
         JsonValue::Bool(report_gate_required),
+    );
+    out.insert(
+        "loop_surface_case_present".to_string(),
+        JsonValue::Bool(live_evidence_has_mcp_loop_surface_case(root)),
     );
     out.insert(
         "report_gate_passed".to_string(),
@@ -1784,6 +1798,17 @@ fn live_evidence_object(value: &JsonValue) -> Option<&BTreeMap<String, JsonValue
 
 fn live_evidence_cases(root: &BTreeMap<String, JsonValue>) -> Option<&Vec<JsonValue>> {
     root.get("cases").and_then(json_as_array)
+}
+
+fn live_evidence_has_mcp_loop_surface_case(root: &BTreeMap<String, JsonValue>) -> bool {
+    live_evidence_cases(root)
+        .map(|cases| {
+            cases
+                .iter()
+                .filter_map(live_evidence_object)
+                .any(|case| live_evidence_string(case, "benchmark_category") == Some("mcp"))
+        })
+        .unwrap_or(false)
 }
 
 fn external_evidence_records(root: &BTreeMap<String, JsonValue>) -> Option<&Vec<JsonValue>> {
@@ -5719,6 +5744,17 @@ mod tests {
     }
 
     #[test]
+    fn live_plan_default_targets_include_mcp_loop_surface() {
+        let targets = live_plan_targets(Vec::new());
+        let mcp = targets
+            .iter()
+            .find(|target| target.category == "mcp")
+            .expect("default live plan should require MCP loop-surface evidence");
+        assert_eq!(mcp.min_runs, 3);
+        assert_eq!(mcp.min_success_percent, 90.0);
+    }
+
+    #[test]
     fn live_plan_json_includes_targets_and_recommendations() {
         let summaries = vec![BenchmarkCaseSummary {
             name: "fixture-pr-retry-validate-rust-mini".to_string(),
@@ -6015,6 +6051,73 @@ mod tests {
         assert!(verification_written.contains("\"deepseek.dogfood.live_evidence_verification.v1\""));
         assert!(verification_written.contains("\"report_gate_passed\":true"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_evidence_requires_mcp_loop_surface_gate_when_requested() {
+        let missing_root = parse_root_object(
+            r#"{
+                "kind":"deepseek.dogfood.live_run_evidence.v1",
+                "completed":true,
+                "model_transport":"online",
+                "online_ready":true,
+                "appended_model_backed_records":1,
+                "post_run_report_command":"deepseek dogfood report --limit 20 --require-live-runs 1 --require-live-success-rate 90 --require-live-category write_validate:1:90",
+                "cases":[{
+                    "ledger_records_appended":1,
+                    "model_backed":true,
+                    "error":null,
+                    "benchmark_category":"write_validate"
+                }]
+            }"#,
+        )
+        .unwrap();
+        let args = DogfoodLiveEvidenceArgs {
+            require_loop_surface_gate: true,
+            ..DogfoodLiveEvidenceArgs::default()
+        };
+        let failures = live_evidence_failures(&missing_root, &args);
+        assert!(failures.iter().any(|failure| failure
+            .contains("post_run_report_command is missing MCP loop-surface live gate")));
+        assert!(failures
+            .iter()
+            .any(|failure| failure.contains("live evidence has no MCP loop-surface case")));
+        let verification = json_value_to_string(&live_evidence_verification_json(
+            "live-evidence.json",
+            &missing_root,
+            &failures,
+            false,
+            &[],
+        ));
+        assert!(verification.contains("\"loop_surface_case_present\":false"));
+
+        let passing_root = parse_root_object(
+            r#"{
+                "kind":"deepseek.dogfood.live_run_evidence.v1",
+                "completed":true,
+                "model_transport":"online",
+                "online_ready":true,
+                "appended_model_backed_records":1,
+                "post_run_report_command":"deepseek dogfood report --limit 20 --require-live-runs 1 --require-live-success-rate 90 --require-live-category mcp:1:90",
+                "cases":[{
+                    "ledger_records_appended":1,
+                    "model_backed":true,
+                    "error":null,
+                    "benchmark_category":"mcp"
+                }]
+            }"#,
+        )
+        .unwrap();
+        let failures = live_evidence_failures(&passing_root, &args);
+        assert!(failures.is_empty(), "{failures:?}");
+        let verification = json_value_to_string(&live_evidence_verification_json(
+            "live-evidence.json",
+            &passing_root,
+            &failures,
+            false,
+            &[],
+        ));
+        assert!(verification.contains("\"loop_surface_case_present\":true"));
     }
 
     #[test]

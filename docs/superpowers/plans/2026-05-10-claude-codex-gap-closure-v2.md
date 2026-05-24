@@ -57,17 +57,17 @@
 - 已追加 6 条 Phase 12A dogfood replay，覆盖 product gap planning、product readiness planning、failed-validation retry、Rust/JS/Python PR retry validate
 - 当前 sandbox 无法解析 `api.deepseek.com`，这些 replay 使用 `DEEPSEEK_API_KEY_ENV=DEEPSEEK_API_KEY_OFFLINE` 走 offline fallback；真实在线 dogfood 仍是后续硬门槛
 - 当前本机 dogfood ledger snapshot 为 `20` runs，`19` success、`1` historical failed、`0` stuck、`0` manual；`pr_workflow` offline replay 为 `14/14` success，`recovery` offline replay 为 `3/3`，`write_validate` 为 `2/3` success。真实在线 dogfood 仍是后续硬门槛
-- 默认 benchmark manifest 当前为 `82` cases，其中 `subagent` category 为 `20` cases，`pr_workflow` category 为 `25` cases，`mcp` category 为 `3` cases
+- 默认 benchmark manifest 当前为 `84` cases，其中 `subagent` category 为 `20` cases，`pr_workflow` category 为 `26` cases，`mcp` category 为 `4` cases
 - `deepseek benchmark` 现在支持 `--category <name>` 与可重复 `--case <name>` targeted selection。Filtered benchmark run 只写 report，不推进 benchmark history，也不强制 full trend/live gate。当前 `cargo run --quiet -- benchmark --category subagent --out /tmp/deepseek-subagent-benchmark.md` 实测 `20/20`，trend/live gate 均为 filtered selection skip。
 - `deepseek chat` / `repl` / `interactive` 现在在真实 TTY 中使用内置 raw-mode line editor，支持 Up/Down 历史、草稿恢复、左右移动、Home/End、Backspace/Delete、Ctrl+A/E/U/K/W、Tab slash/session completion、`/sessions [prefix]`、空行 Ctrl+D、prompt Ctrl+C 和运行中 turn 的 cooperative Ctrl+C cancellation，关闭了早期 REPL spec 中的 readline/history、session listing/load completion 与基础中断候选缺口。
-- 默认 benchmark manifest 已扩到 `82` cases。当前完整离线 benchmark 实测 `82/82`：PR workflow planner/action/comment-plan 项全绿；Python `pytest`/`uv run pytest` 本机缺依赖路径已由 `run_shell` fallback 覆盖；Go write-validate fixtures 通过用户级 Go toolchain 自动发现路径验证；MCP dynamic/generic/allowlist-deny planning cases 均通过。
-- Benchmark trend gate：`skipped (need at least 3 prior comparable runs, found 2)`，因为当前 82-case history 仍在 comparable warmup
+- 默认 benchmark manifest 已扩到 `84` cases。最近完整离线 benchmark 的历史证据是扩展前 `82/82`；当前 84-case manifest 新增了 MCP resource loop-surface case，发布前需要刷新完整默认 benchmark。
+- Benchmark trend gate：`skipped (need at least 3 prior comparable runs, found 2)`，因为 82-case history 当时仍在 comparable warmup
 - Benchmark live gate：`pass against previous dogfood snapshot (runs 5 -> 20)`
 
 ### Acceptance
 
 - `cargo test --offline` 全绿：done
-- `deepseek benchmark` 全绿：done；当前 `82/82`
+- `deepseek benchmark` 全绿：历史 `82/82` done；当前 `84` case manifest 需要在发布前刷新完整 baseline
 - `.dscode/benchmarks/latest.md` 不再显示 stale `48/49`：done；最新完整报告已刷新到 `.dscode/benchmarks/latest.md`
 - `.dscode/dogfood/latest.md` 中新增 dogfood 不引入新的 failed/stuck/manual：done；current ledger snapshot still has `1` historical failed record, but the new `pr_workflow` and `recovery` replay batches are clean
 
@@ -332,12 +332,13 @@ same fixture now also injects a failing `broken-stdio` server and proves healthy
 server discovery still succeeds, then verifies generic `mcp_call` and dynamic
 `mcp__server__tool` permission request, allowlisted allow, and allowlist deny
 paths. The benchmark runner now supports per-case self MCP fixtures, and the
-default manifest adds three MCP planning cases for dynamic remote tool calls,
-generic `mcp_call`, and allowlist-deny recovery via `mcp_list_tools`; the
-targeted MCP manifest passed `3/3` from `/tmp`, and the full default benchmark
-refresh now passes `82/82` with the `mcp` category at `3/3`. The same fixture
-smoke now also verifies stdio/HTTP/SSE prompts, resources, and resource
-templates in one command.
+default manifest adds four MCP planning cases for dynamic remote tool calls,
+generic `mcp_call`, resource discovery/readback, and allowlist-deny recovery via
+`mcp_list_tools`; the targeted MCP manifest previously passed `3/3` from `/tmp`
+before the resource case was added, and the current 84-case default manifest
+needs a fresh full benchmark refresh before release. The same fixture smoke now
+also verifies stdio/HTTP/SSE prompts, resources, and resource templates in one
+command.
 
 Hooks now have `docs/superpowers/specs/2026-05-23-hooks-fixture-smoke.md`.
 `deepseek hooks fixture-smoke --json` creates a temporary hook root and
@@ -364,7 +365,8 @@ conflicts, and persists the write scope into thread artifacts. The parent
 offline planner now consumes both `dispatch_subagent` and `dispatch_subagents`
 summaries for child-file readback. The latest local smoke `deepseek agents
 subagent-fixture-smoke --json` reports all booleans true and `child_count=2`.
-The targeted subagent benchmark now passes `20/20`, the full default benchmark
-refresh passes `82/82`, and offline dogfood replay now covers the local release
-gate slices at `runs=20`. Continue Phase 12D with online model-backed dogfood
-and external compatibility evidence.
+The targeted subagent benchmark now passes `20/20`, the historical full default
+benchmark refresh passed `82/82` before the current 84-case manifest expansion,
+and offline dogfood replay now covers the local release gate slices at
+`runs=20`. Continue Phase 12D with online model-backed dogfood, refreshed full
+benchmark evidence, and external compatibility evidence.

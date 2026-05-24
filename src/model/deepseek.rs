@@ -2600,6 +2600,36 @@ fn build_mcp_tool_response(
         });
     }
 
+    if task_requests_mcp_resource(task_lower) {
+        if tool_available("mcp_read_resource")
+            && used_tools.contains("mcp_list_resources")
+            && !used_tools.contains("mcp_read_resource")
+        {
+            if let Some(uri) = latest_mcp_resource_uri(&input.observations) {
+                return Some(ModelResponse {
+                    message: format!(
+                        "{model_name} planner is reading the listed MCP workspace resource."
+                    ),
+                    action: ModelAction::CallTool {
+                        tool_name: "mcp_read_resource".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("server", "stdio-self")
+                            .with_arg("uri", uri),
+                    },
+                });
+            }
+        }
+        if tool_available("mcp_list_resources") && !used_tools.contains("mcp_list_resources") {
+            return Some(ModelResponse {
+                message: format!("{model_name} planner is listing MCP resources first."),
+                action: ModelAction::CallTool {
+                    tool_name: "mcp_list_resources".to_string(),
+                    input: ToolInput::new().with_arg("server", "stdio-self"),
+                },
+            });
+        }
+    }
+
     let path = preferred_mcp_read_path(input, task_lower);
     if task_requests_generic_mcp_call(task_lower)
         && tool_available("mcp_call")
@@ -2737,6 +2767,11 @@ fn task_requests_generic_mcp_call(task_lower: &str) -> bool {
     task_lower.contains("mcp_call") || task_lower.contains("generic mcp")
 }
 
+fn task_requests_mcp_resource(task_lower: &str) -> bool {
+    !task_lower.contains("resource template")
+        && (task_lower.contains("mcp resource") || task_lower.contains("resources"))
+}
+
 fn preferred_dynamic_mcp_read_tool(available_tools: &[String]) -> Option<&str> {
     available_tools
         .iter()
@@ -2767,10 +2802,29 @@ fn successful_mcp_tool_observed(observations: &[crate::model::protocol::Observat
     observations.iter().any(|observation| {
         !observation.is_failure()
             && (observation.tool_name == "mcp_call"
+                || observation.tool_name == "mcp_read_resource"
                 || observation
                     .tool_name
                     .starts_with(crate::tools::mcp::MCP_DYNAMIC_TOOL_PREFIX))
     })
+}
+
+fn latest_mcp_resource_uri(observations: &[crate::model::protocol::Observation]) -> Option<String> {
+    observations
+        .iter()
+        .rev()
+        .filter(|observation| {
+            observation.tool_name == "mcp_list_resources" && !observation.is_failure()
+        })
+        .flat_map(|observation| observation.summary.lines())
+        .find_map(|line| {
+            let uri = line.trim().strip_prefix("uri:")?.trim();
+            if uri.is_empty() {
+                None
+            } else {
+                Some(uri.to_string())
+            }
+        })
 }
 
 fn mcp_policy_denial_observed(observations: &[crate::model::protocol::Observation]) -> bool {
@@ -7916,6 +7970,57 @@ mod tests {
                     .is_some_and(|value| value.contains("README.md")));
             }
             _ => panic!("expected generic mcp_call"),
+        }
+    }
+
+    #[test]
+    fn offline_planner_lists_mcp_resources_before_reading_resource() {
+        let mut request = empty_request_with_todos(Vec::new());
+        request.task = "Use MCP resource discovery on stdio-self, then read the workspace resource"
+            .to_string();
+        request.available_tools = vec![
+            "mcp_list_resources".to_string(),
+            "mcp_read_resource".to_string(),
+        ];
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "mcp_list_resources");
+                assert_eq!(input.get("server"), Some("stdio-self"));
+            }
+            _ => panic!("expected mcp_list_resources"),
+        }
+    }
+
+    #[test]
+    fn offline_planner_reads_mcp_resource_uri_after_listing() {
+        let mut request = empty_request_with_todos(Vec::new());
+        request.task = "Use MCP resource discovery on stdio-self, then read the workspace resource"
+            .to_string();
+        request.available_tools = vec![
+            "mcp_list_resources".to_string(),
+            "mcp_read_resource".to_string(),
+        ];
+        request.observations = vec![Observation::ok(
+            "mcp_list_resources",
+            "MCP remote resources:\n- stdio-self [stdio]: 1 resource(s)\n  - workspace (application/json): Current workspace\n    uri: file:///tmp/deepseek-workspace\n",
+        )];
+
+        let response = planner()
+            .respond(request, &mut crate::ui::stream::NoopStreamEvents)
+            .unwrap()
+            .0;
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "mcp_read_resource");
+                assert_eq!(input.get("server"), Some("stdio-self"));
+                assert_eq!(input.get("uri"), Some("file:///tmp/deepseek-workspace"));
+            }
+            _ => panic!("expected mcp_read_resource"),
         }
     }
 

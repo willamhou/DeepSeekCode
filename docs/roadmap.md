@@ -88,15 +88,17 @@ npm remains useful for Node-oriented users but is not the primary blocker.
   as the `deepseek-loop-evidence` artifact.
 - Model presets and first-pass budget controls have landed:
   `model.preset = "auto" | "flash" | "pro"`, `deepseek config preset`,
-  `run/exec --preset`, `--pro-next`, TUI `/pro`, visible auto-to-Pro
+  `run/exec --preset`, `--pro-next`, TUI `/pro` with `/pro off` and `/pro show`,
+  visible auto-to-Pro
   escalation events, `model.session_budget_microusd` warning/refusal, and
   cross-process runtime budget metadata. Budget raise/disable flows are now
   explicit through `deepseek config budget raise <MICROUSD>`, `deepseek config
   budget +<MICROUSD>`, `deepseek config budget off`, and TUI `model budget ...`.
   Auto escalation now has explicit local triggers for repeated repair signals,
   malformed tool calls, tool-call storms, empty read/search loops,
-  validation-after-edit failures, and repeated unproductive steps; remaining
-  work is live dogfood calibration.
+  validation-after-edit failures, and repeated unproductive steps. The default
+  live dogfood plan/report/evidence gate now also requires MCP loop-surface
+  coverage; remaining work is live dogfood calibration with real online runs.
   Non-recoverable malformed tool-call parse failures are now loop-recoverable:
   they become failed `model` observations with `tool_call_parse_failed` context
   for the next model turn instead of hard-ending the run.

@@ -125,14 +125,15 @@ dogfood 证据。
    `deepseek stats --require-prefix-stable` 可作为 cache-stable prompt layer hash
    regression gate，runtime daemon compaction threshold/keep-tail 也已可配置；
    `model.preset = "auto" | "flash" | "pro"`、`deepseek config preset`、
-   `run/exec --preset`、`--pro-next`、TUI `/pro` 和
+   `run/exec --preset`、`--pro-next`、TUI `/pro`、`/pro off`、`/pro show` 和
    `model.session_budget_microusd` 的 80% warning / 100% refusal 初版也已落地，runtime
    session/thread records 会同步 `session_budget_microusd`，在 TUI/daemon 进程重启后用
    durable usage 恢复已用成本，`deepseek config budget raise <MICROUSD>`、`deepseek
    config budget +<MICROUSD>`、`deepseek config budget off` 和 TUI `model budget ...`
    会清晰处理 raise/disable runtime limit；auto escalation 已覆盖 repeated repair、
    malformed tool-call、tool-call storm、empty read/search、validation-after-edit 和
-   repeated unproductive step signals，剩余工作是 live dogfood calibration；同回合 batch 中的本地
+   repeated unproductive step signals，默认 live dogfood plan/report/evidence gate
+   现在也要求 MCP loop-surface 覆盖，剩余工作是用真实 online runs 做 calibration；同回合 batch 中的本地
    read/search/git/project-map/data-validation 工具、常见 runtime query 工具，以及
    MCP inventory/prompt/resource 只读桥接工具现在会在无 hooks/permission/repeat 的情况下
    按连续 read-only chunk 并发，并保持结果顺序，tool result 会记录 `meta.parallel_*`

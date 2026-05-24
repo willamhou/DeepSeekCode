@@ -2936,8 +2936,8 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
             .filter(|case| case.category == "mcp")
             .collect::<Vec<_>>();
         assert!(
-            mcp_cases.len() >= 3,
-            "default manifest should include dynamic, generic, and deny-recovery MCP cases"
+            mcp_cases.len() >= 4,
+            "default manifest should include dynamic, generic, resource, and deny-recovery MCP cases"
         );
 
         let dynamic_case = cases
@@ -2953,6 +2953,36 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
         assert_eq!(
             dynamic_case.expect_tool.as_deref(),
             Some("mcp__stdio-self__read_file")
+        );
+
+        let resource_case = cases
+            .iter()
+            .find(|case| case.name == "fixture-mcp-resource-workspace")
+            .expect("default manifest should include MCP resource fixture");
+        assert!(resource_case.mcp_fixture.enabled);
+        assert!(!resource_case.mcp_fixture.expose_remote_tools);
+        assert_eq!(
+            resource_case.mcp_fixture.allowlist,
+            vec!["stdio-self/*".to_string()]
+        );
+        assert_eq!(
+            resource_case.expect_tool.as_deref(),
+            Some("mcp_read_resource")
+        );
+        assert_eq!(
+            resource_case.expect_tool_sequence.as_ref().unwrap(),
+            &vec![
+                "mcp_list_resources".to_string(),
+                "mcp_read_resource".to_string()
+            ]
+        );
+        assert_eq!(
+            resource_case
+                .expect_tool_output_contains
+                .as_ref()
+                .unwrap()
+                .needle,
+            "workspace"
         );
 
         let deny_case = cases

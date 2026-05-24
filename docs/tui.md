@@ -134,7 +134,8 @@ Current surfaces:
   DeepSeek V4 aliases are normalized for the active provider, so official
   DeepSeek endpoints receive bare `deepseek-v4-*` ids while compatible backends
   keep provider-specific ids. `/pro` arms DeepSeek V4 Pro for the next submitted
-  user turn without permanently changing the workspace config. Composer slash
+  user turn, `/pro off` cancels the one-turn override, and `/pro show` inspects
+  it without permanently changing the workspace config. Composer slash
   completions for `/model <name>` and command-palette completions for
   `model <name>` use the selected workspace's current provider so suggested
   model ids match the active backend.

@@ -486,6 +486,7 @@ pub struct DogfoodLiveEvidenceArgs {
     pub require_appended_model_backed: Option<usize>,
     pub require_benchmark_gate: bool,
     pub require_report_gate: bool,
+    pub require_loop_surface_gate: bool,
     pub json: bool,
 }
 
@@ -499,6 +500,7 @@ impl Default for DogfoodLiveEvidenceArgs {
             require_appended_model_backed: Some(1),
             require_benchmark_gate: false,
             require_report_gate: false,
+            require_loop_surface_gate: false,
             json: false,
         }
     }
@@ -5898,6 +5900,11 @@ fn parse_dogfood_live_evidence_args(args: Vec<String>) -> Result<DogfoodLiveEvid
                 index += 1;
                 continue;
             }
+            "--require-loop-surface-gate" => {
+                evidence.require_loop_surface_gate = true;
+                index += 1;
+                continue;
+            }
             "--json" => {
                 evidence.json = true;
                 index += 1;
@@ -7191,6 +7198,7 @@ mod tests {
             "3".to_string(),
             "--require-benchmark-gate".to_string(),
             "--require-report-gate".to_string(),
+            "--require-loop-surface-gate".to_string(),
             "--allow-offline".to_string(),
             "--allow-incomplete".to_string(),
             "--json".to_string(),
@@ -7210,6 +7218,7 @@ mod tests {
                 assert_eq!(args.require_appended_model_backed, Some(3));
                 assert!(args.require_benchmark_gate);
                 assert!(args.require_report_gate);
+                assert!(args.require_loop_surface_gate);
                 assert!(!args.require_online);
                 assert!(!args.require_completed);
                 assert!(args.json);

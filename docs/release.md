@@ -96,14 +96,15 @@ deepseek dogfood external-fixture --workdir /tmp/disposable-repo --benchmark-gat
   'replace `a - b` with `a + b` in src/lib.rs and validate with cargo test'
 deepseek dogfood report --limit 10
 deepseek dogfood live-plan --limit 10
-deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 3 --json
-deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 3
+deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 4 --json
+deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 4
 # Add --execute only when you intend to spend online model calls:
-deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 3 \
+deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 4 \
   --evidence-out .dscode/dogfood/live-evidence.json --execute
 deepseek dogfood live-evidence --file .dscode/dogfood/live-evidence.json \
   --out .dscode/dogfood/live-evidence-verification.json \
-  --require-benchmark-gate --require-report-gate
+  --require-benchmark-gate --require-report-gate \
+  --require-loop-surface-gate
 ```
 
 The `live-plan` and `live-run --json` output include `post_run_report_command`;
@@ -118,6 +119,7 @@ structured `evidence_gate` thresholds against the current ledger instead of
 executing a shell command from the JSON file, rechecks the ledger fingerprint,
 and verifies that each appended case evidence row can be matched back to the
 ledger by timestamp, outcome, transport, and category.
+`--require-loop-surface-gate` additionally requires MCP loop-surface evidence.
 Use `--out` to persist the verification JSON for release evidence upload.
 For external fixtures, `--evidence-out` writes
 `deepseek.dogfood.external_fixture_evidence.v1` with the source workdir, appended
@@ -170,7 +172,8 @@ deepseek dogfood report --limit 20 \
   --require-category pr_workflow:25:90 \
   --require-live-category write_validate:25:90 \
   --require-live-category recovery:25:90 \
-  --require-live-category pr_workflow:25:90
+  --require-live-category pr_workflow:25:90 \
+  --require-live-category mcp:3:90
 ```
 
 ## Artifact

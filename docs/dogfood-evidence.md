@@ -16,7 +16,7 @@ The most useful public-beta evidence today is:
 - deterministic repair/cache evidence for DeepSeek-style malformed tool-call
   recovery and runtime cache diagnostics;
 - reusable Python, Rust, and Node external fixture scaffolds;
-- live dogfood report gates;
+- live dogfood report gates, including MCP loop-surface coverage;
 - release-binary smoke checks through `deepseek update release-smoke`.
 
 ## Repair And Cache Evidence
@@ -110,9 +110,13 @@ Plan and inspect live cases before spending online model calls:
 ```bash
 deepseek dogfood report --limit 10
 deepseek dogfood live-plan --limit 10
-deepseek dogfood live-run --limit 3
-deepseek dogfood live-run --limit 3 --json
+deepseek dogfood live-run --limit 4
+deepseek dogfood live-run --limit 4 --json
 ```
+
+The default live plan targets `write_validate`, `recovery`, `pr_workflow`, and
+`mcp`. The MCP slice includes dynamic remote tools, generic `mcp_call`, resource
+discovery/readback, and deny-recovery fixtures.
 
 When you intend to run online model-backed cases, provide the API key through a
 temporary file outside the repository:
@@ -121,18 +125,21 @@ temporary file outside the repository:
 printf '%s\n' '<deepseek-api-key>' > /tmp/deepseek-live.key
 chmod 600 /tmp/deepseek-live.key
 deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key \
-  --limit 3 \
+  --limit 4 \
   --evidence-out .dscode/dogfood/live-evidence.json \
   --execute
 deepseek dogfood live-evidence --file .dscode/dogfood/live-evidence.json \
   --out .dscode/dogfood/live-evidence-verification.json \
-  --require-benchmark-gate --require-report-gate
+  --require-benchmark-gate --require-report-gate \
+  --require-loop-surface-gate
 rm -f /tmp/deepseek-live.key
 ```
 
 `live-evidence --require-report-gate` verifies the structured gate, rechecks the
 ledger fingerprint from the evidence file, and matches appended case evidence
-back to current ledger rows.
+back to current ledger rows. `--require-loop-surface-gate` additionally fails
+unless the evidence includes an MCP loop-surface case and the embedded report
+gate requires `mcp` live evidence.
 
 ## Release Evidence Gate
 
@@ -152,7 +159,8 @@ deepseek dogfood report --limit 20 \
   --require-category pr_workflow:25:90 \
   --require-live-category write_validate:25:90 \
   --require-live-category recovery:25:90 \
-  --require-live-category pr_workflow:25:90
+  --require-live-category pr_workflow:25:90 \
+  --require-live-category mcp:3:90
 ```
 
 ## Release Binary Smoke

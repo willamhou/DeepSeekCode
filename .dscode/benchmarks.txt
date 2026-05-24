@@ -849,6 +849,22 @@ max_tool_calls = 1
 max_failed_tools = 0
 budget = 2
 
+name = "fixture-mcp-resource-workspace"
+task = "Use MCP resource discovery on stdio-self: list resources, then read the workspace resource and summarize the workspace JSON."
+category = "mcp"
+workdir = "fixtures/rust-cli-mini"
+isolate_workdir = true
+mcp_fixture = true
+mcp_expose_remote_tools = false
+mcp_call_allowlist = ["stdio-self/*"]
+expect_tool = "mcp_read_resource"
+expect_tool_sequence = ["mcp_list_resources", "mcp_read_resource"]
+expect_tool_input_contains = "mcp_read_resource:server=stdio-self"
+expect_tool_output_contains = "mcp_read_resource:workspace"
+max_tool_calls = 2
+max_failed_tools = 0
+budget = 3
+
 name = "fixture-mcp-allowlist-deny-recovery"
 task = "Use generic mcp_call on stdio-self/read_file to read README.md; if MCP policy denies the call, inspect configured MCP tools and report the blocker."
 category = "mcp"

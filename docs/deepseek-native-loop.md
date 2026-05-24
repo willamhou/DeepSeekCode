@@ -30,8 +30,10 @@ hardening gaps rather than architecture blockers:
   evidence is missing or stable prompt-prefix layers change hash.
 - Tool-call repair has deterministic coverage, including model-facing failed
   observations for malformed calls that cannot be repaired, but it needs more
-  live DeepSeek-backed examples across real gateways and dynamic MCP schemas
-  before treating it as mature.
+  live DeepSeek-backed examples across real gateways before treating it as
+  mature. The default live dogfood plan now includes an MCP loop-surface target,
+  and `live-evidence --require-loop-surface-gate` fails closed unless evidence
+  includes MCP resource/dynamic surface coverage.
 - Model presets and session budgets work, including explicit budget raise/off
   flows. Auto-escalation now covers repeated repair, malformed tool-call,
   tool-call storm, empty read/search, validation-after-edit, and unproductive
@@ -44,8 +46,9 @@ hardening gaps rather than architecture blockers:
   recorded on tool result events through `meta.parallel_*` lines.
 - Deterministic repair/cache evidence and prompt-prefix stability now run in
   the release matrix and are uploaded as loop evidence artifacts. The remaining
-  evidence gap is recurring live model-backed dogfood across real gateways and
-  dynamic MCP/resource surfaces.
+  evidence gap is recurring live model-backed dogfood across real gateways; the
+  local live plan/report/evidence gates now explicitly require the MCP
+  loop-surface category.
 
 ## What To Absorb
 
@@ -84,7 +87,7 @@ Reasonix has a repair pipeline for DeepSeek-style tool-call failures:
 DeepSeekCode already supports OpenAI-compatible and Anthropic-compatible tool
 calls, same-turn batch tool calls, and repeat-call detection in the agent loop.
 It now has a systematic repair module before parser failures become hard model
-failures; the remaining work is live DeepSeek-backed evidence across more
+failures; the remaining work is live DeepSeek-backed calibration across more
 gateways and malformed-call edge cases.
 
 Absorb:
@@ -137,8 +140,9 @@ cache/cost behavior easy to inspect.
 DeepSeekCode already persists runtime events and usage records and exposes them
 through `deepseek stats`, `deepseek events replay`, `deepseek events diff`, and
 deterministic repair/cache dogfood evidence. The Release Matrix packaging job
-now gates and uploads those deterministic artifacts; the remaining work is live
-model-backed dogfood cadence across real gateways and MCP/resource surfaces.
+now gates and uploads those deterministic artifacts, and the live dogfood
+release gate now carries an MCP loop-surface category. The remaining work is
+recurring live model-backed dogfood cadence across real gateways.
 
 Absorb:
 
@@ -438,8 +442,9 @@ and exposes `deepseek config preset [auto|flash|pro]`,
 `deepseek config budget [MICROUSD|off|raise MICROUSD|+MICROUSD]`, `deepseek run
 --preset ...`, `deepseek exec --preset ...`, and `--pro-next` overrides. The TUI
 supports `model preset <auto|flash|pro>`, `model budget
-<MICROUSD|off|raise MICROUSD>`, and `/pro` to arm DeepSeek V4 Pro for the next
-submitted user turn. Auto routing emits a visible escalation line/event before
+<MICROUSD|off|raise MICROUSD>`, `/pro` to arm DeepSeek V4 Pro for the next
+submitted user turn, `/pro off` to cancel the one-turn override, and `/pro show`
+to inspect it. Auto routing emits a visible escalation line/event before
 using `deepseek-v4-pro`, and session budget enforcement warns at 80% and refuses
 new model calls once the in-loop estimated DeepSeek spend reaches
 `model.session_budget_microusd`. Runtime session/thread records now also persist
@@ -451,7 +456,7 @@ warning/refusal survives process restarts while `deepseek config budget raise
 Deliver:
 
 - `preset = auto | flash | pro` config; landed;
-- CLI/TUI commands for preset and `/pro`; landed;
+- CLI/TUI commands for preset, `/pro`, `/pro off`, and `/pro show`; landed;
 - visible auto-escalation; landed for auto routes that select Pro, including
   explicit recovery reasons for repeated repair, malformed tool-call,
   tool-call storm, empty read/search, validation-after-edit, and unproductive
