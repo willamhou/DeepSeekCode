@@ -8,9 +8,9 @@ DeepSeekCode は DeepSeek-first のターミナル code agent です。ローカ
 
 > Public beta status: Linux/macOS の dogfood とリポジトリ作業には今日から利用できます。
 > `v0.1.3` は GitHub Release binaries、検証済み GHCR image、TUI/service smoke gates、
-> `deepseek quickstart`、release-binary smoke verifier を備えています。Homebrew、
-> npm registry publishing、より広い external repo evidence、リッチな launch media は
-> 引き続き product-hardening work です。
+> `deepseek quickstart`、release-binary smoke verifier、検証済み Homebrew tap を
+> 備えています。npm registry publishing、より広い external repo evidence、
+> リッチな launch media は引き続き product-hardening work です。
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
@@ -40,7 +40,16 @@ repo-aware です。
 
 ## クイックスタート
 
-ソースからインストール:
+Homebrew でインストール:
+
+```bash
+brew tap willamhou/deepseekcode
+brew install deepseek
+deepseek version
+deepseek quickstart
+```
+
+またはソースからインストール:
 
 ```bash
 cargo install --git https://github.com/willamhou/DeepSeekCode.git --locked
@@ -119,13 +128,11 @@ git から無視されます。
 Linux/macOS local CLI milestone に絞れば、中心となる interaction loop はすでに
 成立しています。残りは主に evidence depth と distribution polish です。
 
-- next-release matrix で release-binary shell/runtime smoke evidence を補強すること。
-  local recheck には `deepseek update release-smoke --version <version>` を使えます。
-- Homebrew tap credentials と public tap install verification。
+- npm registry publishing と public `npm install` verification。
 - Python invoice sample 以外の optional external repo fixtures。
 - committed model-backed SVG 以外の optional GIF/MP4 launch media。
 
-Windows long-tail service proof、hosted IDE evidence、npm registry publishing は
+Windows long-tail service proof、hosted IDE evidence、installed service proof は
 より広い product hardening であり、Linux/macOS local code-agent CLI milestone の
 blocker ではありません。
 

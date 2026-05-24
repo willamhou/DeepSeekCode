@@ -8,9 +8,9 @@ working from the same terminal.
 
 > Public beta status: usable today for Linux/macOS dogfooding and repository
 > work. `v0.1.3` ships GitHub Release binaries, a verified GHCR image, TUI and
-> service smoke gates, `deepseek quickstart`, and a release-binary smoke
-> verifier. Homebrew, npm registry publishing, broader external repo evidence,
-> and richer launch media are still product-hardening work.
+> service smoke gates, `deepseek quickstart`, a release-binary smoke verifier,
+> and a verified Homebrew tap. npm registry publishing, broader external repo
+> evidence, and richer launch media are still product-hardening work.
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
@@ -40,7 +40,16 @@ plain chat wrapper. The default path is terminal-first and repo-aware:
 
 ## Quick Start
 
-Install from source:
+Install with Homebrew:
+
+```bash
+brew tap willamhou/deepseekcode
+brew install deepseek
+deepseek version
+deepseek quickstart
+```
+
+Or install from source:
 
 ```bash
 cargo install --git https://github.com/willamhou/DeepSeekCode.git --locked
@@ -120,15 +129,12 @@ git.
 For the Linux/macOS local CLI milestone, the core interaction loop is already in
 place. The remaining gaps are mainly evidence depth and distribution polish:
 
-- next-release matrix evidence for release-binary shell/runtime smoke, with
-  `deepseek update release-smoke --version <version>` available for local
-  rechecks;
-- Homebrew tap credentials and public tap installation verification;
+- npm registry publishing and public `npm install` verification;
 - optional additional external repo fixtures beyond the Python invoice sample;
 - optional GIF/MP4 launch media beyond the committed model-backed SVG.
 
-Windows long-tail service proof, hosted IDE evidence, and npm registry
-publishing are broader product-hardening work. They are not blockers for the
+Windows long-tail service proof, hosted IDE evidence, and installed service
+proof are broader product-hardening work. They are not blockers for the
 Linux/macOS local code-agent CLI milestone.
 
 ## Evidence

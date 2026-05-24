@@ -7,8 +7,8 @@ DeepSeekCode 是一个 DeepSeek-first 的终端 code agent，面向本地开发�
 
 > Public beta 状态：今天已经可以用于 Linux/macOS dogfood 和仓库内代码任务。
 > `v0.1.3` 已提供 GitHub Release 二进制、实测 GHCR 镜像、TUI/service smoke gate、
-> `deepseek quickstart` 和 release-binary smoke verifier。Homebrew、npm registry
-> 发布、更广的外部仓库证据，以及更精致的发布素材仍属于产品硬化工作。
+> `deepseek quickstart`、release-binary smoke verifier 和已验证的 Homebrew tap。
+> npm registry 发布、更广的外部仓库证据，以及更精致的发布素材仍属于产品硬化工作。
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
@@ -36,7 +36,16 @@ DeepSeekCode 的目标不是普通聊天壳，而是更接近 Claude Code CLI / 
 
 ## 快速开始
 
-从源码安装：
+通过 Homebrew 安装：
+
+```bash
+brew tap willamhou/deepseekcode
+brew install deepseek
+deepseek version
+deepseek quickstart
+```
+
+或者从源码安装：
 
 ```bash
 cargo install --git https://github.com/willamhou/DeepSeekCode.git --locked
@@ -114,14 +123,12 @@ deepseek tui --runtime-url http://127.0.0.1:13000
 如果目标收敛到 Linux/macOS 本地 CLI，核心交互闭环已经成立。剩余差距主要是证据厚度
 和分发打磨：
 
-- 下一轮 release matrix 需要补 release-binary shell/runtime smoke 证据；本地可用
-  `deepseek update release-smoke --version <version>` 复验；
-- Homebrew tap 凭据与公开 tap 安装验证；
+- npm registry 发布和公开 `npm install` 验证；
 - Python invoice 样本之外，可选再补更多真实外部 repo fixtures；
 - 已提交 model-backed SVG 之外，可选补 GIF/MP4 发布素材。
 
-Windows 长尾 service proof、hosted IDE 证据和 npm registry 发布属于更大的产品硬化，
-不是 Linux/macOS 本地 code-agent CLI milestone 的 blocker。
+Windows 长尾 service proof、hosted IDE 证据和真实安装后的 service proof 属于更大的
+产品硬化，不是 Linux/macOS 本地 code-agent CLI milestone 的 blocker。
 
 ## 证据与检查
 
