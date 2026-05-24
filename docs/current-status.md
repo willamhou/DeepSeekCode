@@ -1,6 +1,6 @@
 # DeepSeekCode 当前状态与后续路线
 
-最后更新：2026-05-23
+最后更新：2026-05-24
 
 ## 最终目标
 
@@ -23,10 +23,11 @@ dogfood 证据。
 
 但它还不是“可以公开宣称等同 Claude Code CLI / Codex CLI”的成熟产品。剩余差距主要是：
 
-- release-binary 级别的下一轮 release matrix smoke 证据；
+- release-binary 级别的下一轮 release matrix smoke 证据；当前已有
+  `deepseek update release-smoke --version <version>` 可用于本地复验；
 - Homebrew tap 和 npm registry 的发布凭据与公开安装验证；
 - 更多真实外部 repo 样本；
-- 更精简的新用户文档和故障排查路径；
+- 持续维护精简的新用户文档、public beta 说明和故障排查路径；
 - hosted IDE、真实安装后的 systemd/launchd service smoke、以及更广的 Windows 长尾验证。
 
 ## 已经成立的证据
@@ -47,6 +48,10 @@ dogfood 证据。
   和最终 diff。
 - `v0.1.1` 已有 GitHub Release binaries、GHCR image、npm/Homebrew packaging metadata、
   release matrix、download-plan 和 publish-status 检查。
+- PR #18 增加 `deepseek quickstart` / `deepseek onboarding` 首跑检查，并通过 CI：
+  https://github.com/willamhou/DeepSeekCode/actions/runs/26335387193
+- PR #19 增加 `deepseek update release-smoke`，用于发布二进制复验，并通过 CI：
+  https://github.com/willamhou/DeepSeekCode/actions/runs/26348829744
 
 ## 当前能力概览
 
@@ -79,8 +84,8 @@ dogfood 证据。
    操作员可以用 `deepseek update release-smoke --version <version>` 复验当前平台 release binary。
 2. 配置 Homebrew tap 凭据，完成 tap 发布和公开安装验证。
 3. 可选再增加 1-2 个真实外部 repo fixture，扩大 multi-file/多语言样本厚度。
-4. 继续压缩 README、install、release、current-status；当前推荐首跑入口是
-   `deepseek quickstart`，后续文档只保留必要的安装、配置、试用、排障路径。
+4. 持续维护 README、install、release、current-status、public-beta 和 dogfood evidence
+   文档；当前推荐首跑入口是 `deepseek quickstart`，README 只保留安装、试用、证据入口。
 
 ### 更大产品目标
 
@@ -99,5 +104,5 @@ dogfood 证据。
 > real hosted GitHub workflow evidence, and a committed real model-backed README
 > demo SVG. The remaining Linux/macOS CLI work is Homebrew publishing,
 > next-release binary smoke evidence, broader external sample depth, and
-> documentation polish; hosted IDE, Windows/service proof, npm publishing, and
+> continuing documentation polish; hosted IDE, Windows/service proof, npm publishing, and
 > optional richer demo media remain broader product-hardening work.
