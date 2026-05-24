@@ -115,10 +115,11 @@ counts, appended model-backed rows, per-case outcomes, and benchmark gate result
 without storing the API key value. The summary also binds the evidence to the
 ledger file with an `fnv1a64` fingerprint. `dogfood live-evidence` verifies that
 summary as a fail-closed release step; `--require-report-gate` validates the
-structured `evidence_gate` thresholds against the current ledger instead of
-executing a shell command from the JSON file, rechecks the ledger fingerprint,
-and verifies that each appended case evidence row can be matched back to the
-ledger by timestamp, outcome, transport, and category.
+structured `evidence_gate` thresholds, including the live recency threshold,
+against the current ledger instead of executing a shell command from the JSON
+file, rechecks the ledger fingerprint, and verifies that each appended case
+evidence row can be matched back to the ledger by timestamp, outcome, transport,
+and category.
 `--require-loop-surface-gate` additionally requires MCP dynamic and resource
 loop-surface evidence plus a structured `evidence_gate` `mcp` live-category
 threshold of at least three runs.
@@ -167,6 +168,7 @@ deepseek dogfood report --limit 20 \
   --require-success-rate 90 \
   --require-live-runs 100 \
   --require-live-success-rate 90 \
+  --require-live-recent-days 7 \
   --require-recent-clean 20 \
   --require-external-write-fixtures 3 \
   --require-category write_validate:25:90 \
@@ -330,8 +332,8 @@ deepseek update publish-status \
 `--strict` fails when `NPM_TOKEN`/`NODE_AUTH_TOKEN`,
 `HOMEBREW_TAP_REPOSITORY`, `HOMEBREW_TAP_TOKEN`, platform release archives,
 non-placeholder `.sha256` files, platform npm package tarballs, or verified
-online dogfood live evidence with MCP dynamic/resource loop-surface coverage
-and gate are missing.
+recent online dogfood live evidence with MCP dynamic/resource loop-surface
+coverage and gate are missing.
 The text and JSON output also include a `public_install` audit for source
 checkout, GitHub Release, npm, Homebrew, GHCR, and Cargo registry policy. Treat
 `ready_to_publish` as local readiness only: do not advertise npm, Homebrew,

@@ -136,11 +136,12 @@ deepseek dogfood live-evidence --file .dscode/dogfood/live-evidence.json \
 rm -f /tmp/deepseek-live.key
 ```
 
-`live-evidence --require-report-gate` verifies the structured gate, rechecks the
-ledger fingerprint from the evidence file, and matches appended case evidence
-back to current ledger rows. `--require-loop-surface-gate` additionally fails
-unless the evidence includes MCP dynamic and resource loop-surface cases and the
-structured `evidence_gate` requires at least three `mcp` live runs.
+`live-evidence --require-report-gate` verifies the structured gate, including
+the embedded live recency threshold, rechecks the ledger fingerprint from the
+evidence file, and matches appended case evidence back to current ledger rows.
+`--require-loop-surface-gate` additionally fails unless the evidence includes
+MCP dynamic and resource loop-surface cases and the structured `evidence_gate`
+requires at least three `mcp` live runs.
 
 ## Release Evidence Gate
 
@@ -153,6 +154,7 @@ deepseek dogfood report --limit 20 \
   --require-success-rate 90 \
   --require-live-runs 100 \
   --require-live-success-rate 90 \
+  --require-live-recent-days 7 \
   --require-recent-clean 20 \
   --require-external-write-fixtures 3 \
   --require-category write_validate:25:90 \

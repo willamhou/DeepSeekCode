@@ -416,7 +416,7 @@ fn dogfood_live_evidence_help() -> &'static str {
         "\n",
         "Verifies a `deepseek.dogfood.live_run_evidence.v1` batch summary. Defaults\n",
         "fail closed: completed, online, and at least one appended model-backed row.\n",
-        "`--require-report-gate` validates evidence_gate, ledger fingerprint, and row matches.\n",
+        "`--require-report-gate` validates evidence_gate, live recency, ledger fingerprint, and row matches.\n",
         "`--out` writes the verification JSON as a release evidence artifact."
     )
 }
@@ -426,7 +426,7 @@ fn dogfood_report_help() -> &'static str {
         "DeepSeekCode dogfood report\n",
         "\n",
         "Usage:\n",
-        "  deepseek dogfood report [--out <path>] [--limit <n>] [--require-min-runs <n>] [--require-success-rate <percent>] [--require-live-runs <n>] [--require-live-success-rate <percent>] [--require-category <category>:<min-runs>:<min-success-percent>] [--require-live-category <category>:<min-runs>:<min-success-percent>]\n",
+        "  deepseek dogfood report [--out <path>] [--limit <n>] [--require-min-runs <n>] [--require-success-rate <percent>] [--require-live-runs <n>] [--require-live-success-rate <percent>] [--require-live-recent-days <days>] [--require-category <category>:<min-runs>:<min-success-percent>] [--require-live-category <category>:<min-runs>:<min-success-percent>]\n",
         "\n",
         "Renders dogfood ledger stats and optionally enforces release gates."
     )

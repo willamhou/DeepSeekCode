@@ -31,9 +31,10 @@ Local checks run during this execution pass:
 - `cargo run --quiet -- benchmark --category mcp --out /tmp/deepseek-goal-mcp-benchmark.md`:
   `3/3` passed, filtered history/trend/live gates skipped as expected.
 - `cargo run --quiet -- dogfood report --limit 100 --require-live-runs 100
-  --require-live-success-rate 90 --require-live-category write_validate:25:90
-  --require-live-category recovery:25:90 --require-live-category
-  pr_workflow:25:90`: passed. `live-plan` reports `100` online runs, `94`
+  --require-live-success-rate 90 --require-live-recent-days 7
+  --require-live-category write_validate:25:90 --require-live-category
+  recovery:25:90 --require-live-category pr_workflow:25:90`: passed.
+  `live-plan` reports `100` online runs, `94`
   successes, `write_validate 24/25`, `recovery 23/25`, and `pr_workflow 47/50`.
 - `cargo run --quiet -- dogfood live-evidence --file
   .dscode/dogfood/live-evidence-final-total-pr-4.json --require-report-gate
@@ -92,7 +93,7 @@ Live execution update from this pass:
 |---|---|---|---|
 | Core CLI/TUI coding loop | Usable; full tests and 82-case benchmark baseline are green in existing reports | Mostly evidence depth, not missing local primitives | Full test + default benchmark + recent no-stuck dogfood |
 | Linux/macOS local CLI gate | TUI entrypoint, task worktree, GitHub fixture smoke, online dogfood, Linux shell/runtime smoke, and PR #14 / CI run #35 hosted macOS shell/runtime smoke are available | Next release matrix run still needs to publish release-binary shell/runtime smoke results | Non-Windows `agents shell-fixture-smoke --json`, `agents service-smoke --json`, and TUI entrypoint smoke |
-| Model-backed dogfood | Release live gate passed; current live plan reports `105` online runs and `99` successes, with categories `write_validate 29/30`, `recovery 23/25`, `pr_workflow 47/50` | Preserve verified evidence and keep the gate fail-closed in release status | `dogfood report --require-live-runs 100 --require-live-success-rate 90 --require-live-category write_validate:25:90 --require-live-category recovery:25:90 --require-live-category pr_workflow:25:90` |
+| Model-backed dogfood | Base live gate passed; current live plan reports `113` online runs and `105` successes, with categories `write_validate 35/38`, `recovery 23/25`, `pr_workflow 47/50`, and `mcp 0/3` | Add the first verified recent MCP surface batch and keep the gate fail-closed in release status | `dogfood report --require-live-runs 100 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category write_validate:25:90 --require-live-category recovery:25:90 --require-live-category pr_workflow:25:90 --require-live-category mcp:3:90` |
 | External write fixtures | `4` disposable real repo online write-fixture samples verified for Rust, Python, JavaScript, and Python invoice multi-file; external fixture evidence now includes CLI post-validation | Optional: broaden sample depth beyond the current minimum | `scripts/create-multifile-external-fixture.sh`, then `dogfood external-fixture ... --evidence-out` plus `dogfood external-evidence --require-successful-external-fixtures 1` |
 | README real demo | Committed model-backed SVG exists at `docs/demo/deepseek-code-model-demo.svg`, generated from a verified online transcript | Optional polish: TUI/GIF/MP4 capture for launch pages | `record-model-backed-demo.sh`, verifier, rendered media committed |
 | Windows Shell/PTY proof | Linux PTY fd/proxy path is strong; Windows ConPTY/TCP compile and workflow wiring exist | Need actual Windows runner evidence for ConPTY/TCP shell supervisor and fixture smoke | Windows CI/release job logs and artifact summary |

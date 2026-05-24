@@ -37,8 +37,9 @@ Claude/Codex/DeepSeek-TUI gap.
 - `dogfood live-evidence --file <path>` verifies that evidence file and defaults
   to completed, online, and at least one appended model-backed ledger row.
 - `dogfood live-evidence --require-report-gate` also verifies the evidence file's
-  structured live gate against the current ledger, rechecks the ledger
-  fingerprint, and matches appended case rows back to ledger records.
+  structured live gate, including live recency, against the current ledger,
+  rechecks the ledger fingerprint, and matches appended case rows back to ledger
+  records.
 - `dogfood live-evidence --require-loop-surface-gate` additionally requires MCP
   loop-surface evidence and an embedded `mcp` live-category report gate.
 - `dogfood live-evidence --out <path>` persists the verification JSON for
@@ -58,5 +59,6 @@ Claude/Codex/DeepSeek-TUI gap.
 ## Remaining
 
 This closes the manual command-copy step, but it does not by itself satisfy the
-release evidence gate. The ledger still needs enough successful online
-model-backed rows for the strict `dogfood report` live thresholds to pass.
+release evidence gate. The ledger still needs enough successful and recent
+online model-backed rows for the strict `dogfood report` live thresholds to
+pass.

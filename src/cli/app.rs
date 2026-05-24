@@ -514,6 +514,7 @@ pub struct DogfoodReportArgs {
     pub require_success_rate: Option<f64>,
     pub require_live_runs: Option<usize>,
     pub require_live_success_rate: Option<f64>,
+    pub require_live_recent_days: Option<usize>,
     pub require_external_write_fixtures: Option<usize>,
     pub require_recent_clean: Option<usize>,
     pub require_categories: Vec<DogfoodCategoryRequirement>,
@@ -5979,6 +5980,16 @@ fn parse_dogfood_report_args(args: Vec<String>) -> Result<DogfoodReportArgs, Str
                 index += 2;
                 continue;
             }
+            "--require-live-recent-days" if index + 1 < args.len() => {
+                report.require_live_recent_days = Some(parse_required_usize(
+                    "--require-live-recent-days",
+                    &args[index + 1],
+                    1,
+                    3650,
+                )?);
+                index += 2;
+                continue;
+            }
             "--require-external-write-fixtures" if index + 1 < args.len() => {
                 report.require_external_write_fixtures = Some(parse_required_usize(
                     "--require-external-write-fixtures",
@@ -6017,6 +6028,7 @@ fn parse_dogfood_report_args(args: Vec<String>) -> Result<DogfoodReportArgs, Str
             | "--require-success-rate"
             | "--require-live-runs"
             | "--require-live-success-rate"
+            | "--require-live-recent-days"
             | "--require-external-write-fixtures"
             | "--require-recent-clean"
             | "--require-category"
@@ -6973,6 +6985,8 @@ mod tests {
             "80".to_string(),
             "--require-live-success-rate".to_string(),
             "92".to_string(),
+            "--require-live-recent-days".to_string(),
+            "7".to_string(),
             "--require-external-write-fixtures".to_string(),
             "3".to_string(),
             "--require-recent-clean".to_string(),
@@ -6992,6 +7006,7 @@ mod tests {
                 assert_eq!(args.require_success_rate, Some(90.0));
                 assert_eq!(args.require_live_runs, Some(80));
                 assert_eq!(args.require_live_success_rate, Some(92.0));
+                assert_eq!(args.require_live_recent_days, Some(7));
                 assert_eq!(args.require_external_write_fixtures, Some(3));
                 assert_eq!(args.require_recent_clean, Some(20));
                 assert_eq!(args.require_categories.len(), 1);

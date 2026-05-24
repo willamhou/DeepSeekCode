@@ -142,9 +142,9 @@ and a ledger file `fnv1a64` fingerprint without storing the API key value.
 default completed/online/appended-model-backed requirements and optional
 benchmark gate enforcement. Its `--require-report-gate` mode evaluates the
 structured `evidence_gate` against the current ledger using the same live
-requirements as `dogfood report`, without executing a shell command from the
-evidence JSON, and rechecks the ledger fingerprint before matching appended
-case evidence back to ledger rows.
+requirements as `dogfood report`, including live recency, without executing a
+shell command from the evidence JSON, and rechecks the ledger fingerprint before
+matching appended case evidence back to ledger rows.
 The verifier can also write the
 `deepseek.dogfood.live_evidence_verification.v1` result with `--out <path>` so
 CI/release jobs can fail closed and upload the verification artifact.
@@ -1422,8 +1422,8 @@ Landed first slice:
   `--json` emits `deepseek.publish_status.v1` for CI/release scripts
 - `deepseek update publish-status --live-evidence-verification <path>` now also
   validates the `dogfood live-evidence --out` artifact, requiring completed
-  online evidence with appended model-backed rows, a passed report gate, and
-  ledger fingerprints before strict release readiness can pass
+  recent online evidence with appended model-backed rows, a passed report gate,
+  and ledger fingerprints before strict release readiness can pass
 - `deepseek update publish-status` now also emits a public install audit for
   source checkout, GitHub Release, npm, Homebrew, GHCR, and Cargo registry
   policy, with explicit `source_available`, `ready_to_publish`,

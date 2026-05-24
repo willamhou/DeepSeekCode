@@ -34,7 +34,8 @@ hardening gaps rather than architecture blockers:
   mature. The default live dogfood plan now includes an MCP loop-surface target,
   and `live-evidence --require-loop-surface-gate` fails closed unless evidence
   includes MCP dynamic/resource surface coverage plus an `mcp` live gate of at
-  least three runs.
+  least three runs. The default report/evidence gate also requires a live
+  model-backed row from the last seven days.
 - Model presets and session budgets work, including explicit budget raise/off
   flows. Auto-escalation now covers repeated repair, malformed tool-call,
   tool-call storm, empty read/search, validation-after-edit, and unproductive
@@ -47,10 +48,10 @@ hardening gaps rather than architecture blockers:
   recorded on tool result events through `meta.parallel_*` lines.
 - Deterministic repair/cache evidence and prompt-prefix stability now run in
   the release matrix and are uploaded as loop evidence artifacts. The remaining
-  evidence gap is recurring live model-backed dogfood across real gateways; the
-  local live plan/report/evidence gates now explicitly require MCP
-  dynamic/resource loop-surface coverage and an `mcp` live gate of at least
-  three runs.
+  evidence gap is the first real online MCP surface batch plus recurring live
+  model-backed dogfood across real gateways; the local live plan/report/evidence
+  gates now explicitly require MCP dynamic/resource loop-surface coverage and an
+  `mcp` live gate of at least three runs, plus a seven-day live recency gate.
 
 ## What To Absorb
 
@@ -89,8 +90,8 @@ Reasonix has a repair pipeline for DeepSeek-style tool-call failures:
 DeepSeekCode already supports OpenAI-compatible and Anthropic-compatible tool
 calls, same-turn batch tool calls, and repeat-call detection in the agent loop.
 It now has a systematic repair module before parser failures become hard model
-failures; the remaining work is live DeepSeek-backed calibration across more
-gateways and malformed-call edge cases.
+failures; the remaining work is recurring live DeepSeek-backed calibration
+across more gateways and malformed-call edge cases.
 
 Absorb:
 
@@ -143,7 +144,8 @@ DeepSeekCode already persists runtime events and usage records and exposes them
 through `deepseek stats`, `deepseek events replay`, `deepseek events diff`, and
 deterministic repair/cache dogfood evidence. The Release Matrix packaging job
 now gates and uploads those deterministic artifacts, and the live dogfood
-release gate now carries an MCP loop-surface category. The remaining work is
+release gate now carries an MCP loop-surface category and a seven-day live
+recency gate. The remaining work is the first real online MCP surface batch plus
 recurring live model-backed dogfood cadence across real gateways.
 
 Absorb:

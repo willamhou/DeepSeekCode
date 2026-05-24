@@ -37,6 +37,8 @@ const DEFAULT_LIVE_TARGET_RUNS: usize = 100;
 const DEFAULT_LIVE_TARGET_SUCCESS_RATE: f64 = 90.0;
 const DEFAULT_LIVE_PLAN_LIMIT: usize = 25;
 const DEFAULT_LIVE_RUN_LIMIT: usize = 4;
+const DEFAULT_LIVE_RECENT_DAYS: usize = 7;
+const SECONDS_PER_DAY: u64 = 86_400;
 const MODEL_TRANSPORT_OFFLINE: &str = "offline";
 const MODEL_TRANSPORT_ONLINE: &str = "online";
 const MODEL_TRANSPORT_UNKNOWN: &str = "unknown";
@@ -603,6 +605,7 @@ fn report_has_requirements(args: &DogfoodReportArgs) -> bool {
         || args.require_success_rate.is_some()
         || args.require_live_runs.is_some()
         || args.require_live_success_rate.is_some()
+        || args.require_live_recent_days.is_some()
         || args.require_external_write_fixtures.is_some()
         || args.require_recent_clean.is_some()
         || !args.require_categories.is_empty()
@@ -624,6 +627,14 @@ fn enforce_report_requirements(
 }
 
 fn report_requirement_failures(records: &[DogfoodRecord], args: &DogfoodReportArgs) -> Vec<String> {
+    report_requirement_failures_at(records, args, unix_now_secs().unwrap_or(u64::MAX))
+}
+
+fn report_requirement_failures_at(
+    records: &[DogfoodRecord],
+    args: &DogfoodReportArgs,
+    now_secs: u64,
+) -> Vec<String> {
     let mut failures = Vec::new();
     if let Some(min_runs) = args.require_min_runs {
         if records.len() < min_runs {
@@ -670,6 +681,9 @@ fn report_requirement_failures(records: &[DogfoodRecord], args: &DogfoodReportAr
             live_records.len(),
             min_success_percent,
         );
+    }
+    if let Some(max_age_days) = args.require_live_recent_days {
+        push_live_recency_failure(&mut failures, &live_records, max_age_days, now_secs);
     }
     if let Some(required) = args.require_external_write_fixtures {
         let successful_external_write_fixtures = records
@@ -725,6 +739,38 @@ fn report_requirement_failures(records: &[DogfoodRecord], args: &DogfoodReportAr
         }
     }
     failures
+}
+
+fn push_live_recency_failure(
+    failures: &mut Vec<String>,
+    live_records: &[&DogfoodRecord],
+    max_age_days: usize,
+    now_secs: u64,
+) {
+    let Some(latest) = live_records
+        .iter()
+        .map(|record| record.timestamp_secs)
+        .max()
+    else {
+        failures.push(format!(
+            "no model-backed live runs found for recent-days gate ({max_age_days} day(s))"
+        ));
+        return;
+    };
+    if latest > now_secs {
+        failures.push(format!(
+            "latest model-backed live run timestamp {latest} is in the future relative to {now_secs}"
+        ));
+        return;
+    }
+    let max_age_secs = (max_age_days as u64).saturating_mul(SECONDS_PER_DAY);
+    let age_secs = now_secs.saturating_sub(latest);
+    if age_secs > max_age_secs {
+        let age_days = age_secs as f64 / SECONDS_PER_DAY as f64;
+        failures.push(format!(
+            "latest model-backed live run is {age_days:.1} day(s) old, above required {max_age_days} day(s)"
+        ));
+    }
 }
 
 fn push_category_requirement_failure(
@@ -1209,6 +1255,9 @@ fn live_evidence_failures(
     {
         failures.push("post_run_report_command is missing live evidence gates".to_string());
     }
+    if !live_evidence_requires_live_recent_gate(root) {
+        failures.push("post_run_report_command is missing live recency gate".to_string());
+    }
     if args.require_loop_surface_gate {
         if !report_command.contains("--require-live-category mcp:") {
             failures
@@ -1441,6 +1490,10 @@ fn live_evidence_verification_json(
         JsonValue::Bool(report_gate_required),
     );
     out.insert(
+        "live_recent_gate_required".to_string(),
+        JsonValue::Bool(live_evidence_requires_live_recent_gate(root)),
+    );
+    out.insert(
         "loop_surface_case_present".to_string(),
         JsonValue::Bool(live_evidence_has_mcp_loop_surface_case(root)),
     );
@@ -1644,6 +1697,12 @@ fn live_evidence_report_gate_args(
         "require_live_success_rate",
         "evidence_gate",
     )?);
+    args.require_live_recent_days = live_evidence_u64(gate, "require_live_recent_days")
+        .map(|value| {
+            usize::try_from(value)
+                .map_err(|_| app_error("evidence_gate require_live_recent_days is too large"))
+        })
+        .transpose()?;
     let categories = gate
         .get("require_live_categories")
         .and_then(json_as_array)
@@ -1870,6 +1929,16 @@ fn live_evidence_requires_mcp_loop_surface_gate(root: &BTreeMap<String, JsonValu
             "mcp",
             MCP_LOOP_SURFACE_MIN_LIVE_RUNS,
         )
+}
+
+fn live_evidence_requires_live_recent_gate(root: &BTreeMap<String, JsonValue>) -> bool {
+    live_evidence_string(root, "post_run_report_command")
+        .is_some_and(|command| command.contains("--require-live-recent-days "))
+        && root
+            .get("evidence_gate")
+            .and_then(live_evidence_object)
+            .and_then(|gate| live_evidence_u64(gate, "require_live_recent_days"))
+            .is_some_and(|days| days > 0)
 }
 
 fn live_evidence_report_gate_has_category(
@@ -4203,10 +4272,11 @@ fn write_dogfood_json_artifact(path: &str, value: &JsonValue, label: &str) -> Ap
 fn live_report_gate_command(plan: &LivePlan) -> String {
     let report_limit = plan.target_live_runs.clamp(DEFAULT_REPORT_LIMIT, 500);
     let mut command = format!(
-        "deepseek dogfood report --limit {} --require-live-runs {} --require-live-success-rate {}",
+        "deepseek dogfood report --limit {} --require-live-runs {} --require-live-success-rate {} --require-live-recent-days {}",
         report_limit,
         plan.target_live_runs,
-        format_percent_command_arg(plan.target_live_success_rate)
+        format_percent_command_arg(plan.target_live_success_rate),
+        DEFAULT_LIVE_RECENT_DAYS
     );
     for category in &plan.category_plans {
         command.push_str(" --require-live-category ");
@@ -4250,6 +4320,10 @@ fn live_report_gate_json(plan: &LivePlan) -> JsonValue {
     root.insert(
         "require_live_success_rate".to_string(),
         JsonValue::Number(format!("{:.1}", plan.target_live_success_rate)),
+    );
+    root.insert(
+        "require_live_recent_days".to_string(),
+        JsonValue::Number(DEFAULT_LIVE_RECENT_DAYS.to_string()),
     );
     root.insert(
         "require_live_categories".to_string(),
@@ -5706,6 +5780,33 @@ mod tests {
     }
 
     #[test]
+    fn report_requirements_gate_live_recency() {
+        let now = 10 * SECONDS_PER_DAY;
+        let mut recent = test_record(
+            now - SECONDS_PER_DAY,
+            "write_validate",
+            DogfoodOutcome::Success,
+        );
+        recent.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
+        let recent_args = DogfoodReportArgs {
+            require_live_recent_days: Some(7),
+            ..DogfoodReportArgs::default()
+        };
+        assert!(report_requirement_failures_at(&[recent], &recent_args, now).is_empty());
+
+        let mut stale = test_record(
+            now - (8 * SECONDS_PER_DAY),
+            "write_validate",
+            DogfoodOutcome::Success,
+        );
+        stale.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
+        let failures = report_requirement_failures_at(&[stale], &recent_args, now);
+        assert!(failures
+            .iter()
+            .any(|failure| failure.contains("latest model-backed live run is 8.0 day(s) old")));
+    }
+
+    #[test]
     fn report_requirements_fail_on_missing_live_evidence() {
         let mut manual = test_record(8, "write_validate", DogfoodOutcome::Failed);
         manual.manual_intervention = true;
@@ -5860,7 +5961,7 @@ mod tests {
             "execute: deepseek dogfood live-run --manifest .dscode/benchmarks.txt --category write_validate --limit 1 --execute"
         ));
         assert!(text.contains(
-            "post_run_report_gate: deepseek dogfood report --limit 20 --require-live-runs 4 --require-live-success-rate 90 --require-live-category write_validate:2:90 --require-live-category recovery:1:90"
+            "post_run_report_gate: deepseek dogfood report --limit 20 --require-live-runs 4 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category write_validate:2:90 --require-live-category recovery:1:90"
         ));
         assert!(!text.contains("dogfood replay-benchmark"));
         assert!(!text.contains("seeded-write-validate,"));
@@ -5922,9 +6023,10 @@ mod tests {
             "\"live_run_execute_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --category pr_workflow --limit 1 --execute\""
         ));
         assert!(json.contains(
-            "\"post_run_report_command\":\"deepseek dogfood report --limit 20 --require-live-runs 1 --require-live-success-rate 90 --require-live-category pr_workflow:1:90\""
+            "\"post_run_report_command\":\"deepseek dogfood report --limit 20 --require-live-runs 1 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category pr_workflow:1:90\""
         ));
         assert!(json.contains("\"require_live_runs\":1"));
+        assert!(json.contains("\"require_live_recent_days\":7"));
         assert!(json.contains("\"require_live_categories\":[{\"category\":\"pr_workflow\",\"min_runs\":1,\"min_success_rate\":90.0}]"));
     }
 
@@ -5968,9 +6070,9 @@ mod tests {
             "\"execute_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --category write_validate --limit 1 --execute\""
         ));
         assert!(json.contains(
-            "\"post_run_report_command\":\"deepseek dogfood report --limit 100 --require-live-runs 100 --require-live-success-rate 90 --require-live-category write_validate:25:90\""
+            "\"post_run_report_command\":\"deepseek dogfood report --limit 100 --require-live-runs 100 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category write_validate:25:90\""
         ));
-        assert!(json.contains("\"evidence_gate\":{\"command\":\"deepseek dogfood report --limit 100 --require-live-runs 100 --require-live-success-rate 90 --require-live-category write_validate:25:90\""));
+        assert!(json.contains("\"evidence_gate\":{\"command\":\"deepseek dogfood report --limit 100 --require-live-runs 100 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category write_validate:25:90\""));
         assert!(json.contains("dogfood live-run --execute requires an online model transport"));
     }
 
@@ -6019,7 +6121,7 @@ mod tests {
             "\"execute_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --api-key-file '/tmp/deepseek dogfood.key' --evidence-out '/tmp/deepseek live evidence.json' --category write_validate --limit 1 --execute\""
         ));
         assert!(json.contains(
-            "\"post_run_report_command\":\"deepseek dogfood report --limit 100 --require-live-runs 100 --require-live-success-rate 90 --require-live-category write_validate:25:90\""
+            "\"post_run_report_command\":\"deepseek dogfood report --limit 100 --require-live-runs 100 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category write_validate:25:90\""
         ));
         assert!(!json.contains(secret));
     }
@@ -6028,9 +6130,18 @@ mod tests {
     fn live_run_evidence_summary_records_batch_delta_without_secret_value() {
         let root = temp_test_dir("live-evidence-summary");
         let ledger = root.join("ledger.jsonl");
-        let mut before_record = test_record(10, "write_validate", DogfoodOutcome::Success);
+        let now = unix_now_secs().unwrap_or(1_000_000);
+        let mut before_record = test_record(
+            now.saturating_sub(60),
+            "write_validate",
+            DogfoodOutcome::Success,
+        );
         before_record.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
-        let mut appended_record = test_record(11, "write_validate", DogfoodOutcome::Success);
+        let mut appended_record = test_record(
+            now.saturating_sub(30),
+            "write_validate",
+            DogfoodOutcome::Success,
+        );
         appended_record.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
         appended_record.duration_ms = 42;
         let before_records = vec![before_record];
@@ -6098,7 +6209,7 @@ mod tests {
         assert!(
             json.contains("\"benchmark_gate\":{\"error\":null,\"passed\":true,\"requested\":true}")
         );
-        assert!(json.contains("\"post_run_report_command\":\"deepseek dogfood report --limit 20 --require-live-runs 2 --require-live-success-rate 90 --require-live-category write_validate:2:90\""));
+        assert!(json.contains("\"post_run_report_command\":\"deepseek dogfood report --limit 20 --require-live-runs 2 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category write_validate:2:90\""));
         assert!(!json.contains(secret));
 
         let root_json = parse_root_object(&json).unwrap();
@@ -6241,6 +6352,9 @@ mod tests {
             .iter()
             .any(|failure| failure
                 .contains("evidence_gate is missing MCP loop-surface live category")));
+        assert!(failures.iter().any(
+            |failure| failure.contains("post_run_report_command is missing live recency gate")
+        ));
         assert!(failures
             .iter()
             .any(|failure| failure.contains("live evidence has no MCP loop-surface case")));
@@ -6258,6 +6372,7 @@ mod tests {
             &[],
         ));
         assert!(verification.contains("\"loop_surface_case_present\":false"));
+        assert!(verification.contains("\"live_recent_gate_required\":false"));
         assert!(verification.contains("\"mcp_dynamic_surface_case_present\":false"));
         assert!(verification.contains("\"mcp_resource_surface_case_present\":false"));
         assert!(verification.contains("\"loop_surface_gate_required\":false"));
@@ -6269,11 +6384,12 @@ mod tests {
                 "model_transport":"online",
                 "online_ready":true,
                 "appended_model_backed_records":2,
-                "post_run_report_command":"deepseek dogfood report --limit 20 --require-live-runs 1 --require-live-success-rate 90 --require-live-category mcp:1:90",
+                "post_run_report_command":"deepseek dogfood report --limit 20 --require-live-runs 1 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category mcp:1:90",
                 "evidence_gate":{
-                    "command":"deepseek dogfood report --limit 20 --require-live-runs 1 --require-live-success-rate 90 --require-live-category mcp:1:90",
+                    "command":"deepseek dogfood report --limit 20 --require-live-runs 1 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category mcp:1:90",
                     "require_live_runs":1,
                     "require_live_success_rate":90.0,
+                    "require_live_recent_days":7,
                     "require_live_categories":[{"category":"mcp","min_runs":1,"min_success_rate":90.0}]
                 },
                 "cases":[{
@@ -6314,11 +6430,12 @@ mod tests {
                 "model_transport":"online",
                 "online_ready":true,
                 "appended_model_backed_records":2,
-                "post_run_report_command":"deepseek dogfood report --limit 20 --require-live-runs 3 --require-live-success-rate 90 --require-live-category mcp:3:90",
+                "post_run_report_command":"deepseek dogfood report --limit 20 --require-live-runs 3 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category mcp:3:90",
                 "evidence_gate":{
-                    "command":"deepseek dogfood report --limit 20 --require-live-runs 3 --require-live-success-rate 90 --require-live-category mcp:3:90",
+                    "command":"deepseek dogfood report --limit 20 --require-live-runs 3 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category mcp:3:90",
                     "require_live_runs":3,
                     "require_live_success_rate":90.0,
+                    "require_live_recent_days":7,
                     "require_live_categories":[{"category":"mcp","min_runs":3,"min_success_rate":90.0}]
                 },
                 "cases":[{
@@ -6349,6 +6466,7 @@ mod tests {
             &[],
         ));
         assert!(verification.contains("\"loop_surface_case_present\":true"));
+        assert!(verification.contains("\"live_recent_gate_required\":true"));
         assert!(verification.contains("\"mcp_dynamic_surface_case_present\":true"));
         assert!(verification.contains("\"mcp_resource_surface_case_present\":true"));
         assert!(verification.contains("\"loop_surface_gate_required\":true"));

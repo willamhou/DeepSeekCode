@@ -57,9 +57,10 @@ Claude/Codex/DeepSeek-TUI gap.
   `deepseek.dogfood.live_evidence_verification.v1`.
 - `dogfood live-evidence --require-report-gate` reads the structured
   `evidence_gate` requirements and the ledger path from the evidence file, then
-  applies the same `dogfood report` live requirement logic without executing the
-  shell command string embedded for operator convenience. It also recomputes the
-  ledger fingerprint and fails on evidence/ledger mismatch.
+  applies the same `dogfood report` live requirement logic, including live
+  recency, without executing the shell command string embedded for operator
+  convenience. It also recomputes the ledger fingerprint and fails on
+  evidence/ledger mismatch.
 - The report-gate verifier also checks each appended case evidence row against
   the ledger by timestamp, outcome, model transport, and benchmark category, so
   a stale or tampered evidence file cannot pass only because aggregate live
@@ -87,8 +88,8 @@ Claude/Codex/DeepSeek-TUI gap.
 - Parser and unit coverage verify `dogfood live-evidence`, including the
   default online/completed/model-backed requirements and stricter appended-row
   failures.
-- Unit coverage verifies the structured report gate extraction and successful
-  ledger check from a live evidence summary.
+- Unit coverage verifies the structured report gate extraction, live recency,
+  and successful ledger check from a live evidence summary.
 - Unit coverage verifies tampered case timestamps fail ledger matching.
 - Unit coverage verifies tampered ledger fingerprints fail report-gate
   verification.

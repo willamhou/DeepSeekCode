@@ -39,8 +39,8 @@ to be visible and machine-checkable.
 - `--json` emits the same readiness checks as
   `deepseek.publish_status.v1` for CI and release scripts.
 - Public install readiness for GitHub Release, npm, Homebrew, and GHCR now
-  requires package materials and verified online dogfood evidence with MCP
-  dynamic/resource loop-surface coverage and gate.
+  requires package materials and verified recent online dogfood evidence with
+  MCP dynamic/resource loop-surface coverage and gate.
 - `docs/release.md` and `docs/install.md` document the default and strict
   release readiness flows.
 

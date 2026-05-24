@@ -39,9 +39,10 @@ dogfood 证据。
   中 `post_validation_passed=true`、`release_evidence_ready=true`。
 - PR #14 引入的 Linux/macOS CLI readiness gates 已在 hosted debug binary 上通过：
   https://github.com/willamhou/DeepSeekCode/actions/runs/26333425574
-- online dogfood release gate 已达到 100+ model-backed run 口径；当前 live plan 曾显示
-  `105` 条 online run、`99` 条 success，分类为 `write_validate 29/30`、
-  `recovery 23/25`、`pr_workflow 47/50`。
+- online dogfood release gate 已达到 100+ model-backed run 口径；当前 live plan 显示
+  `113` 条 online run、`105` 条 success，分类为 `write_validate 35/38`、
+  `recovery 23/25`、`pr_workflow 47/50`，新增 MCP surface 分类仍是 `0/3`。
+  默认 live report/evidence gate 现在还要求 7 天内的 model-backed run。
 - README 首屏已切换到真实交互式 2048 过程录屏：终端 SVG 展示 `deepseek chat`
   从空 repo 接收用户 prompt、写出 `2048.html`、完成 shell 校验并总结运行方式；配套
   GIF/MP4 展示同一次生成结果的浏览器试玩。旧 scripted 2048、TUI 和 edit/test SVG
@@ -133,8 +134,9 @@ dogfood 证据。
    会清晰处理 raise/disable runtime limit；auto escalation 已覆盖 repeated repair、
    malformed tool-call、tool-call storm、empty read/search、validation-after-edit 和
    repeated unproductive step signals，默认 live dogfood plan/report/evidence gate
-   现在也要求 MCP dynamic/resource loop-surface 覆盖与至少 3 条 `mcp` live
-   runs 的 gate，剩余工作是用真实 online runs 做 calibration；同回合 batch 中的本地
+   现在也要求 MCP dynamic/resource loop-surface 覆盖、至少 3 条 `mcp` live
+   runs 的 gate，以及 7 天 live recency gate，剩余工作是跑 3 条真实 online MCP
+   surface 样本并继续做 calibration；同回合 batch 中的本地
    read/search/git/project-map/data-validation 工具、常见 runtime query 工具，以及
    MCP inventory/prompt/resource 只读桥接工具现在会在无 hooks/permission/repeat 的情况下
    按连续 read-only chunk 并发，并保持结果顺序，tool result 会记录 `meta.parallel_*`

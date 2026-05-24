@@ -25,6 +25,7 @@ weaker than the Claude/Codex-style readiness bar.
 - `deepseek dogfood report` now supports fail-closed live gates:
   - `--require-live-runs <n>`;
   - `--require-live-success-rate <percent>`;
+  - `--require-live-recent-days <days>`;
   - `--require-live-category <category>:<min-runs>:<min-success-percent>`.
 - README, install docs, release docs, and the active parity plan use live gates
   in the release-readiness command.
@@ -39,6 +40,7 @@ weaker than the Claude/Codex-style readiness bar.
 ## Remaining
 
 This closes the auditability gap, not the evidence-volume gap. The product still
-needs actual online dogfood rows until the release command passes with 100+
-model-backed runs, 25+ `write_validate`, 25+ `recovery`, and 25+ `pr_workflow`
-model-backed category rows at or above 90% success.
+needs recurring actual online dogfood rows until the release command passes with
+100+ model-backed runs, a seven-day live recency gate, 25+ `write_validate`,
+25+ `recovery`, and 25+ `pr_workflow` model-backed category rows at or above
+90% success.

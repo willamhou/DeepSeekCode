@@ -132,8 +132,8 @@ the online batch to verify the model-backed rows and category thresholds. With
 `deepseek.dogfood.live_run_evidence.v1` JSON summary without storing the API key
 value. The summary includes a ledger file `fnv1a64` fingerprint. `dogfood
 live-evidence` verifies that summary as a fail-closed gate.
-`--require-report-gate` checks the structured live thresholds and ledger
-fingerprint against the ledger path from the evidence file.
+`--require-report-gate` checks the structured live thresholds, including live
+recency, and ledger fingerprint against the ledger path from the evidence file.
 `--require-loop-surface-gate` additionally requires MCP dynamic and resource
 loop-surface evidence plus a structured `evidence_gate` `mcp` live-category
 threshold of at least three runs.
@@ -147,6 +147,7 @@ deepseek dogfood report --limit 20 \
   --require-success-rate 90 \
   --require-live-runs 100 \
   --require-live-success-rate 90 \
+  --require-live-recent-days 7 \
   --require-recent-clean 20 \
   --require-external-write-fixtures 3 \
   --require-category write_validate:25:90 \
@@ -266,7 +267,7 @@ npm tarball，并在 tag run 且配置 `NPM_TOKEN` 时先发布平台包，再�
 正式发布前可以在下载 workflow artifacts 后运行
 `deepseek update publish-status --dist dist-assets --npm-dist npm-dist --live-evidence-verification .dscode/dogfood/live-evidence-verification.json --strict`
 检查 npm token、平台 tarball、Homebrew tap 配置、release `.sha256` 文件和带 MCP
-dynamic/resource loop-surface 覆盖与 gate 的已验证 online dogfood evidence 是否齐全；加 `--json` 会输出
+dynamic/resource loop-surface 覆盖与 gate 的近期已验证 online dogfood evidence 是否齐全；加 `--json` 会输出
 `deepseek.publish_status.v1`，便于 CI 或 release
 脚本消费。输出中的 `public_install` 会区分 source checkout、GitHub Release、
 npm、Homebrew、GHCR 和 Cargo registry 当前是 `source_available`、
@@ -322,7 +323,7 @@ Tag 发布时如果配置了 repository variable `HOMEBREW_TAP_REPOSITORY` 和 s
 `HOMEBREW_TAP_TOKEN`，Release Matrix 会在 GitHub Release assets 发布后自动渲染
 并推送 tap 仓库的 `Formula/deepseek.rb`。
 `deepseek update publish-status --dist <release-assets> --live-evidence-verification <verification-json> --strict`
-会把缺少 tap 变量、占位 checksum 或未验证 online dogfood evidence 识别为未
+会把缺少 tap 变量、占位 checksum 或未验证近期 online dogfood evidence 识别为未
 ready。
 
 ## 升级
