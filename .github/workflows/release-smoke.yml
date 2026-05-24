@@ -1,0 +1,67 @@
+name: Release Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the v prefix"
+        required: true
+        default: "0.1.2"
+      repository:
+        description: "Release asset repository"
+        required: true
+        default: "willamhou/DeepSeekCode"
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  release-smoke:
+    name: Release Smoke (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-latest
+          - name: macos-x64
+            os: macos-15-intel
+          - name: macos-arm64
+            os: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Smoke Operator
+        run: cargo build --locked --bin deepseek
+
+      - name: Print Download Plan
+        run: |
+          target/debug/deepseek update download-plan \
+            --version "${{ inputs.version }}" \
+            --repo "${{ inputs.repository }}" \
+            --json | tee "target/release-smoke-plan-${{ matrix.name }}.json"
+
+      - name: Run Release Smoke
+        run: |
+          target/debug/deepseek update release-smoke \
+            --version "${{ inputs.version }}" \
+            --repo "${{ inputs.repository }}" \
+            --out "target/release-smoke/${{ inputs.version }}-${{ matrix.name }}" \
+            --json | tee "target/release-smoke-${{ matrix.name }}.json"
+
+      - name: Upload Smoke Evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-smoke-${{ inputs.version }}-${{ matrix.name }}
+          path: |
+            target/release-smoke-plan-${{ matrix.name }}.json
+            target/release-smoke-${{ matrix.name }}.json
+            target/release-smoke/${{ inputs.version }}-${{ matrix.name }}/release-smoke-report.md
