@@ -15,6 +15,7 @@ const DEFAULT_LIMIT: usize = 500;
 struct StatsSummary {
     scope: String,
     thread_count: usize,
+    turn_count: usize,
     model_turns: usize,
     prompt_tokens: u64,
     completion_tokens: u64,
@@ -100,6 +101,9 @@ fn stats_summary(store: &RuntimeStore, args: &StatsArgs) -> AppResult<StatsSumma
     };
 
     for thread in threads {
+        summary.turn_count = summary
+            .turn_count
+            .saturating_add(store.list_turns(&thread.id)?.len());
         let events = store.read_events(&thread.id, 0)?;
         accumulate_prompt_layer_events(&mut summary, &events);
         for item in store.list_items(&thread.id, None)? {
@@ -371,6 +375,7 @@ fn render_stats_summary(summary: &StatsSummary) -> String {
     out.push_str("DeepSeekCode stats\n");
     out.push_str(&format!("scope: {}\n", summary.scope));
     out.push_str(&format!("threads: {}\n", summary.thread_count));
+    out.push_str(&format!("turns: {}\n", summary.turn_count));
     out.push_str(&format!("model_turns: {}\n", summary.model_turns));
     out.push_str(&format!("prompt_tokens: {}\n", summary.prompt_tokens));
     out.push_str(&format!(
@@ -482,6 +487,10 @@ fn stats_summary_to_json(summary: &StatsSummary) -> JsonValue {
             (
                 "thread_count".to_string(),
                 JsonValue::Number(summary.thread_count.to_string()),
+            ),
+            (
+                "turn_count".to_string(),
+                JsonValue::Number(summary.turn_count.to_string()),
             ),
             (
                 "model_turns".to_string(),
@@ -919,6 +928,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(summary.thread_count, 1);
+        assert_eq!(summary.turn_count, 1);
         assert_eq!(summary.model_turns, 1);
         assert_eq!(summary.prompt_tokens, 100);
         assert_eq!(summary.prompt_cache_hit_basis_points, 7000);
@@ -969,6 +979,7 @@ mod tests {
         let mut summary = StatsSummary {
             scope: "thread thread-1".to_string(),
             thread_count: 1,
+            turn_count: 3,
             model_turns: 2,
             prompt_cache_hit_basis_points: 7550,
             estimated_input_cost_microusd: 234,
@@ -998,6 +1009,7 @@ mod tests {
         );
         let rendered = render_stats_summary(&summary);
         assert!(rendered.contains("prompt_cache_hit_rate: 75.50%"));
+        assert!(rendered.contains("turns: 3"));
         assert!(rendered.contains("estimated_input_cost_usd: 0.000234"));
         assert!(rendered.contains("estimated_output_cost_usd: 0.001000"));
         assert!(rendered.contains("estimated_total_cost_usd: 0.001234"));
