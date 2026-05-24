@@ -138,6 +138,12 @@ if (args.release && placeholderShas > 0) {
 if (count(formula, /on_macos do/g) !== 1 || count(formula, /on_linux do/g) !== 1) {
   failures.push("formula must contain one macOS block and one Linux block");
 }
+if (!formula.includes("elsif Hardware::CPU.arm64?")) {
+  failures.push("Linux arm64 branch must require Hardware::CPU.arm64?");
+}
+if (formula.includes("elsif Hardware::CPU.arm?\n")) {
+  failures.push("Linux ARM branch must not use broad Hardware::CPU.arm?");
+}
 
 if (failures.length > 0) {
   fail(`Homebrew formula verification failed:\n${failures.join("\n")}`);

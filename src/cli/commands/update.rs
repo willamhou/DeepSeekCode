@@ -1548,7 +1548,7 @@ fn render_homebrew_formula(version: &str, repo: &str, shas: &HomebrewShas) -> Ap
     if Hardware::CPU.intel?
       url "https://github.com/{repo}/releases/download/{tag}/deepseek-linux-x64.tar.gz"
       sha256 "{linux_x64}"
-    elsif Hardware::CPU.arm?
+    elsif Hardware::CPU.arm64?
       url "https://github.com/{repo}/releases/download/{tag}/deepseek-linux-arm64.tar.gz"
       sha256 "{linux_arm64}"
     else
@@ -2241,6 +2241,8 @@ mod tests {
         assert!(formula.contains(&format!("sha256 \"{}\"", "b".repeat(64))));
         assert!(formula.contains(&format!("sha256 \"{}\"", "c".repeat(64))));
         assert!(formula.contains(&format!("sha256 \"{}\"", "d".repeat(64))));
+        assert!(formula.contains("elsif Hardware::CPU.arm64?"));
+        assert!(!formula.contains("elsif Hardware::CPU.arm?\n"));
     }
 
     #[test]

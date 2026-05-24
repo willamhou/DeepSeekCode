@@ -17,7 +17,7 @@ class Deepseek < Formula
     if Hardware::CPU.intel?
       url "https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.3/deepseek-linux-x64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-    elsif Hardware::CPU.arm?
+    elsif Hardware::CPU.arm64?
       url "https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.3/deepseek-linux-arm64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     else
