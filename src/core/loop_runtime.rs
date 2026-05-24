@@ -7,6 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 #[cfg(test)]
 use std::time::Duration;
+use std::time::Instant;
 
 use crate::config::types::AppConfig;
 use crate::core::context::TaskContext;
@@ -1292,7 +1293,10 @@ fn maybe_execute_parallel_safe_chunk<W: std::io::Write>(
         emit_tool_call(run_events, &call.tool_name, &call.event_input);
     }
 
+    let chunk_started = Instant::now();
     let outcomes = execute_prepared_parallel_safe_calls(prepared, policy, config);
+    let chunk_elapsed_ms = chunk_started.elapsed().as_millis();
+    let chunk_size = outcomes.len();
     for (call, result) in outcomes {
         check_cancelled(cancel_check)?;
         match result {
@@ -1335,7 +1339,11 @@ fn maybe_execute_parallel_safe_chunk<W: std::io::Write>(
                     ToolEvent {
                         tool_name: call.tool_name,
                         input: call.event_input,
-                        output: output.summary,
+                        output: append_parallel_dispatch_metadata(
+                            output.summary,
+                            chunk_size,
+                            chunk_elapsed_ms,
+                        ),
                         status: crate::model::protocol::ObservationStatus::Ok,
                     },
                 );
@@ -1374,7 +1382,11 @@ fn maybe_execute_parallel_safe_chunk<W: std::io::Write>(
                     ToolEvent {
                         tool_name: call.tool_name,
                         input: call.event_input,
-                        output: raw,
+                        output: append_parallel_dispatch_metadata(
+                            raw,
+                            chunk_size,
+                            chunk_elapsed_ms,
+                        ),
                         status: crate::model::protocol::ObservationStatus::Failed,
                     },
                 );
@@ -1383,6 +1395,17 @@ fn maybe_execute_parallel_safe_chunk<W: std::io::Write>(
     }
 
     Ok(Some(chunk_len))
+}
+
+fn append_parallel_dispatch_metadata(
+    mut output: String,
+    chunk_size: usize,
+    elapsed_ms: u128,
+) -> String {
+    output.push_str("\nmeta.parallel_dispatch=true");
+    output.push_str(&format!("\nmeta.parallel_chunk_size={chunk_size}"));
+    output.push_str(&format!("\nmeta.parallel_elapsed_ms={elapsed_ms}"));
+    output
 }
 
 fn execute_prepared_parallel_safe_calls(
@@ -3756,6 +3779,11 @@ mod cr1_regression_test {
         assert_eq!(result.tool_events.len(), 2);
         assert_eq!(result.tool_events[0].tool_name, "list_files");
         assert_eq!(result.tool_events[1].tool_name, "list_files");
+        for event in &result.tool_events {
+            assert!(event.output.contains("meta.parallel_dispatch=true"));
+            assert!(event.output.contains("meta.parallel_chunk_size=2"));
+            assert!(event.output.contains("meta.parallel_elapsed_ms="));
+        }
         assert!(
             max_parallel_test_probe(probe) >= 2,
             "expected at least two read-only tools in flight, max active was {}",

@@ -36,8 +36,9 @@ hardening gaps rather than architecture blockers:
   modes and clearer user override/raise-budget flows.
 - Parallel dispatch is deliberately conservative. Built-in local read tools and
   common runtime query tools now cover the initial and extended safe set;
-  read-only MCP/resource tools and performance telemetry should be added
-  incrementally after each surface proves side-effect free.
+  read-only MCP/resource tools should be added incrementally after each surface
+  proves side-effect free. Parallel chunk telemetry is recorded on tool result
+  events through `meta.parallel_*` lines.
 - Evidence surfaces exist locally, but the repair/cache command and
   prompt-layer deltas should become recurring release evidence alongside live
   model-backed dogfood runs.
@@ -456,7 +457,9 @@ play. The parallel-safe local read set is `list_files`, `list_dir`,
 `automation_read`, `pr_attempt_list`, and `pr_attempt_read`. Results are written
 back in the original model-call order, mixed read/write batches fall back to
 serial execution at write barriers, `DSCODE_TOOL_DISPATCH=serial` disables the
-path, and `DSCODE_PARALLEL_MAX` caps concurrency.
+path, and `DSCODE_PARALLEL_MAX` caps concurrency. Tool events from this path
+include `meta.parallel_dispatch`, `meta.parallel_chunk_size`, and
+`meta.parallel_elapsed_ms` telemetry.
 
 Deliver:
 
@@ -466,7 +469,8 @@ Deliver:
 - output-order preservation; landed for observations and tool events;
 - serial fallback; landed for writes, shell, approval/user-input, hooks, repeats,
   side-effect MCP calls, and `DSCODE_TOOL_DISPATCH=serial`;
-- cancellation tests; landed for pre-dispatch cancellation.
+- cancellation tests; landed for pre-dispatch cancellation;
+- parallel chunk telemetry; landed on tool result events.
 
 Reason: this speeds up exploration without changing write safety.
 

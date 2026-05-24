@@ -129,7 +129,8 @@ dogfood 证据。
    durable usage 恢复已用成本，`deepseek config budget off` 会清掉 runtime limit；同回合
    batch 中的本地 read/search/git/project-map/data-validation 工具和常见 runtime query
    工具现在会在无 hooks/permission/repeat 的情况下按连续 read-only chunk 并发，并保持
-   结果顺序，写入、shell、MCP side-effect 和审批路径仍是串行 barrier；`deepseek
+   结果顺序，tool result 会记录 `meta.parallel_*` telemetry，写入、shell、MCP
+   side-effect 和审批路径仍是串行 barrier；`deepseek
    events replay <thread>` 和 `deepseek events diff <left> <right>` 初版也已接入
    runtime events/items/usage，可输出 text 或 JSON 证据；`deepseek dogfood
    repair-cache-evidence --json` 已补齐确定性的 before/after repair/cache 证据。

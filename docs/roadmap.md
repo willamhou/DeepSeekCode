@@ -95,9 +95,9 @@ npm remains useful for Node-oriented users but is not the primary blocker.
   read/search/git/project-map/data-validation tools plus common runtime query
   tools such as `task_list`, `task_read`, `agent_list`, `agent_result`,
   `automation_list`, and `automation_read`. They run as ordered read-only chunks
-  when hooks/permission prompts are not active. Writes, shell commands,
-  approvals, side-effect MCP calls, and repeated-call recovery remain serial
-  barriers.
+  when hooks/permission prompts are not active and record `meta.parallel_*`
+  telemetry on tool results. Writes, shell commands, approvals, side-effect MCP
+  calls, and repeated-call recovery remain serial barriers.
 - Treat this as product hardening rather than a blocker for the already
   established Linux/macOS CLI milestone.
 
