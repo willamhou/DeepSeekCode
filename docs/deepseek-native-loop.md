@@ -131,8 +131,9 @@ cache/cost behavior easy to inspect.
 
 DeepSeekCode already persists runtime events and usage records and exposes them
 through `deepseek stats`, `deepseek events replay`, `deepseek events diff`, and
-deterministic repair/cache dogfood evidence. The remaining work is making that
-evidence recurring in release operations alongside live dogfood runs.
+deterministic repair/cache dogfood evidence. The Release Matrix packaging job
+now gates and uploads those deterministic artifacts; the remaining work is live
+model-backed dogfood cadence across real gateways and MCP/resource surfaces.
 
 Absorb:
 
