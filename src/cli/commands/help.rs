@@ -312,6 +312,9 @@ fn dogfood_help(topic: Option<&str>) -> &'static str {
         Some("external-fixture") | Some("external-write-fixture") => {
             dogfood_external_fixture_help()
         }
+        Some("external-evidence")
+        | Some("external-fixture-evidence")
+        | Some("verify-external-fixture-evidence") => dogfood_external_evidence_help(),
         Some("repair-cache-evidence") | Some("repair-evidence") => {
             dogfood_repair_cache_evidence_help()
         }
@@ -329,6 +332,7 @@ fn dogfood_help(topic: Option<&str>) -> &'static str {
             "  deepseek dogfood run \"<task>\"\n",
             "  deepseek dogfood run --from-benchmark <case> [--manifest <path>]\n",
             "  deepseek dogfood external-fixture --workdir <path> \"<task>\"\n",
+            "  deepseek dogfood external-evidence --file <path> [--json]\n",
             "  deepseek dogfood repair-cache-evidence [--out <path>] [--json]\n",
             "  deepseek dogfood replay-benchmark [--manifest <path>] [--category <name>] [--limit <n>]\n",
             "  deepseek dogfood live-plan [--limit <n>] [--json]\n",
@@ -342,6 +346,8 @@ fn dogfood_help(topic: Option<&str>) -> &'static str {
             "gates. Normal product use is `deepseek`, `deepseek tui`, or `deepseek run`.\n",
             "\n",
             "More help:\n",
+            "  deepseek help dogfood external-fixture\n",
+            "  deepseek help dogfood external-evidence\n",
             "  deepseek help dogfood repair-cache-evidence\n",
             "  deepseek help dogfood replay-benchmark\n",
             "  deepseek help dogfood live-plan\n",
@@ -376,6 +382,20 @@ fn dogfood_external_fixture_help() -> &'static str {
         "`--allow-offline` is only for rehearsal runs that will not satisfy release gates.\n",
         "`--evidence-out` writes a JSON summary with appended external-fixture rows and\n",
         "the dogfood ledger fingerprint for release evidence upload."
+    )
+}
+
+fn dogfood_external_evidence_help() -> &'static str {
+    concat!(
+        "DeepSeekCode dogfood external-evidence\n",
+        "\n",
+        "Usage:\n",
+        "  deepseek dogfood external-evidence --file <path> [--out <path>] [--require-successful-external-fixtures <n>] [--allow-incomplete] [--allow-offline] [--allow-ledger-mismatch] [--json]\n",
+        "\n",
+        "Verifies a `deepseek.dogfood.external_fixture_evidence.v1` summary from an\n",
+        "external fixture run. Defaults fail closed: completed, online, at least one\n",
+        "successful external write fixture, and matching current dogfood ledger\n",
+        "fingerprint."
     )
 }
 
@@ -505,6 +525,15 @@ mod tests {
         assert!(help.contains("--require-external-write-fixtures <n>"));
         assert!(help.contains("--require-recent-clean <n>"));
         assert!(help.contains("--require-live-category"));
+    }
+
+    #[test]
+    fn dogfood_external_evidence_help_documents_release_verifier() {
+        let topics = vec!["dogfood".to_string(), "external-evidence".to_string()];
+        let help = render_help(&topics);
+        assert!(help.contains("dogfood external-evidence --file <path>"));
+        assert!(help.contains("--require-successful-external-fixtures <n>"));
+        assert!(help.contains("--allow-ledger-mismatch"));
     }
 
     #[test]
