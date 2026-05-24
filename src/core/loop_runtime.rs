@@ -95,6 +95,12 @@ pub struct ModelRouteEvent {
     pub escalated: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolRepairEvent {
+    pub kind: String,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RunResult {
     pub final_message: String,
@@ -102,6 +108,7 @@ pub struct RunResult {
     pub usage: crate::model::protocol::TokenUsage,
     pub prompt_layers: Vec<PromptLayerSnapshot>,
     pub model_routes: Vec<ModelRouteEvent>,
+    pub tool_repairs: Vec<ToolRepairEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -451,6 +458,7 @@ impl AgentLoop {
         let mut last_message = String::new();
         let mut tool_events: Vec<ToolEvent> = Vec::new();
         let mut model_route_events: Vec<ModelRouteEvent> = Vec::new();
+        let mut tool_repair_events: Vec<ToolRepairEvent> = Vec::new();
         let mut total_usage = crate::model::protocol::TokenUsage::default();
         let session_budget_microusd = session_budget
             .map(|budget| budget.budget_microusd)
@@ -557,41 +565,43 @@ impl AgentLoop {
                 let mut capture = ReasoningCaptureEvents::new(events);
                 let outcome =
                     model_respond_with_cancel(client, request, &mut capture, cancel_check.as_ref());
-                let (reasoning, routes) = capture.into_parts();
-                outcome.map(|outcome| (outcome.0, outcome.1, reasoning, routes))
+                let (reasoning, routes, repairs) = capture.into_parts();
+                outcome.map(|outcome| (outcome.0, outcome.1, reasoning, routes, repairs))
             } else if let Some(renderer) = renderer.as_mut() {
                 let mut capture = ReasoningCaptureEvents::new(renderer);
                 let outcome =
                     model_respond_with_cancel(client, request, &mut capture, cancel_check.as_ref());
-                let (reasoning, routes) = capture.into_parts();
-                outcome.map(|outcome| (outcome.0, outcome.1, reasoning, routes))
+                let (reasoning, routes, repairs) = capture.into_parts();
+                outcome.map(|outcome| (outcome.0, outcome.1, reasoning, routes, repairs))
             } else {
                 let mut capture = ReasoningCaptureEvents::new(&mut noop_events);
                 let outcome =
                     model_respond_with_cancel(client, request, &mut capture, cancel_check.as_ref());
-                let (reasoning, routes) = capture.into_parts();
-                outcome.map(|outcome| (outcome.0, outcome.1, reasoning, routes))
+                let (reasoning, routes, repairs) = capture.into_parts();
+                outcome.map(|outcome| (outcome.0, outcome.1, reasoning, routes, repairs))
             };
-            let (response, step_usage, step_reasoning, step_model_routes) = match model_outcome {
-                Ok(outcome) => outcome,
-                Err(error) if is_recoverable_model_tool_call_parse_error(error.as_ref()) => {
-                    let observation = model_tool_call_parse_failure_observation(error.as_ref());
-                    if let Some(renderer) = renderer.as_mut() {
-                        renderer.paint_tool_result(
-                            crate::ui::stream::ToolResultKind::Failed,
-                            "model",
-                            "tool-call-parse",
-                            &observation,
-                        );
+            let (response, step_usage, step_reasoning, step_model_routes, step_tool_repairs) =
+                match model_outcome {
+                    Ok(outcome) => outcome,
+                    Err(error) if is_recoverable_model_tool_call_parse_error(error.as_ref()) => {
+                        let observation = model_tool_call_parse_failure_observation(error.as_ref());
+                        if let Some(renderer) = renderer.as_mut() {
+                            renderer.paint_tool_result(
+                                crate::ui::stream::ToolResultKind::Failed,
+                                "model",
+                                "tool-call-parse",
+                                &observation,
+                            );
+                        }
+                        observations.push(Observation::failed("model", observation.clone()));
+                        last_message = observation.clone();
+                        recent_steps_log.push(format!("model response failed: {observation}"));
+                        continue;
                     }
-                    observations.push(Observation::failed("model", observation.clone()));
-                    last_message = observation.clone();
-                    recent_steps_log.push(format!("model response failed: {observation}"));
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
+                    Err(error) => return Err(error),
+                };
             model_route_events.extend(step_model_routes);
+            tool_repair_events.extend(step_tool_repairs);
             if let Some(usage) = step_usage {
                 if let Some(cost) = crate::core::runtime::estimate_token_usage_cost_microusd(
                     &self.config.model.model,
@@ -1062,6 +1072,7 @@ impl AgentLoop {
             usage: total_usage,
             prompt_layers: prompt_layer_snapshots,
             model_routes: model_route_events,
+            tool_repairs: tool_repair_events,
         })
     }
 }
@@ -1070,6 +1081,7 @@ struct ReasoningCaptureEvents<'a> {
     inner: &'a mut dyn StreamEvents,
     reasoning: String,
     model_routes: Vec<ModelRouteEvent>,
+    tool_repairs: Vec<ToolRepairEvent>,
 }
 
 impl<'a> ReasoningCaptureEvents<'a> {
@@ -1078,11 +1090,12 @@ impl<'a> ReasoningCaptureEvents<'a> {
             inner,
             reasoning: String::new(),
             model_routes: Vec::new(),
+            tool_repairs: Vec::new(),
         }
     }
 
-    fn into_parts(self) -> (String, Vec<ModelRouteEvent>) {
-        (self.reasoning, self.model_routes)
+    fn into_parts(self) -> (String, Vec<ModelRouteEvent>, Vec<ToolRepairEvent>) {
+        (self.reasoning, self.model_routes, self.tool_repairs)
     }
 }
 
@@ -1118,6 +1131,10 @@ impl StreamEvents for ReasoningCaptureEvents<'_> {
     }
 
     fn on_tool_repair(&mut self, kind: &str, detail: &str) {
+        self.tool_repairs.push(ToolRepairEvent {
+            kind: kind.to_string(),
+            detail: detail.to_string(),
+        });
         self.inner.on_tool_repair(kind, detail);
     }
 
@@ -3142,6 +3159,7 @@ mod cr1_regression_test {
     #[derive(Default)]
     struct CapturingStreamEvents {
         routes: Vec<ModelRouteEvent>,
+        repairs: Vec<ToolRepairEvent>,
         budget_warnings: Vec<(u64, u64)>,
     }
 
@@ -3163,17 +3181,25 @@ mod cr1_regression_test {
             self.budget_warnings.push((used_microusd, budget_microusd));
         }
 
+        fn on_tool_repair(&mut self, kind: &str, detail: &str) {
+            self.repairs.push(ToolRepairEvent {
+                kind: kind.to_string(),
+                detail: detail.to_string(),
+            });
+        }
+
         fn on_tool_call(&mut self, _name: &str, _input: &BTreeMap<String, String>) {}
     }
 
     #[test]
-    fn reasoning_capture_forwards_model_policy_events_and_captures_routes() {
+    fn reasoning_capture_forwards_model_policy_events_and_captures_repairs() {
         let mut sink = CapturingStreamEvents::default();
         let mut capture = ReasoningCaptureEvents::new(&mut sink);
 
         capture.on_model_route("auto", "deepseek-v4-pro", "repeated repair signals", true);
         capture.on_model_budget_warning(800, 1000);
-        let (_reasoning, routes) = capture.into_parts();
+        capture.on_tool_repair("truncated-json", "repaired truncated tool arguments JSON");
+        let (_reasoning, routes, repairs) = capture.into_parts();
 
         assert_eq!(
             routes,
@@ -3185,6 +3211,14 @@ mod cr1_regression_test {
             }]
         );
         assert_eq!(sink.routes, routes);
+        assert_eq!(
+            repairs,
+            vec![ToolRepairEvent {
+                kind: "truncated-json".to_string(),
+                detail: "repaired truncated tool arguments JSON".to_string(),
+            }]
+        );
+        assert_eq!(sink.repairs, repairs);
         assert_eq!(sink.budget_warnings, vec![(800, 1000)]);
     }
 

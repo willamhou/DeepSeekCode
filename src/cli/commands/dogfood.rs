@@ -7100,6 +7100,7 @@ mod tests {
             usage: TokenUsage::default(),
             prompt_layers: Vec::new(),
             model_routes: Vec::new(),
+            tool_repairs: Vec::new(),
         };
         let args = DogfoodRunArgs {
             task: "debug parser".to_string(),
@@ -7157,6 +7158,7 @@ mod tests {
             usage: TokenUsage::default(),
             prompt_layers: Vec::new(),
             model_routes: Vec::new(),
+            tool_repairs: Vec::new(),
         };
         let args = DogfoodRunArgs {
             task: "Use generic mcp_call; if denied, inspect configured MCP tools".to_string(),
@@ -7197,6 +7199,7 @@ mod tests {
             usage: TokenUsage::default(),
             prompt_layers: Vec::new(),
             model_routes: Vec::new(),
+            tool_repairs: Vec::new(),
         };
         let args = DogfoodRunArgs {
             task: "replace `a - b` with `a + b` in src/lib.rs and validate with cargo test"
@@ -7249,6 +7252,7 @@ mod tests {
             usage: TokenUsage::default(),
             prompt_layers: Vec::new(),
             model_routes: Vec::new(),
+        tool_repairs: Vec::new(),
         };
         let args = DogfoodRunArgs {
             task: "replace `a - b` with `a * b` in src/lib.rs and validate with cargo test"
@@ -7331,6 +7335,7 @@ mod tests {
             usage: TokenUsage::default(),
             prompt_layers: Vec::new(),
             model_routes: Vec::new(),
+        tool_repairs: Vec::new(),
         };
         let args = DogfoodRunArgs {
             task: "replace `a - b` with `a * b` in src/math_ops.py and validate with pytest until the tests pass"
@@ -7395,6 +7400,7 @@ mod tests {
             usage: TokenUsage::default(),
             prompt_layers: Vec::new(),
             model_routes: Vec::new(),
+            tool_repairs: Vec::new(),
         };
         let args = DogfoodRunArgs {
             task: "replace `a - b` with `a + b` in src/lib.rs and validate with cargo test"
@@ -7447,6 +7453,7 @@ mod tests {
             usage: TokenUsage::default(),
             prompt_layers: Vec::new(),
             model_routes: Vec::new(),
+        tool_repairs: Vec::new(),
         };
         let args = DogfoodRunArgs {
             task: "investigate why npm test fails in the JavaScript CLI and inspect the failing test file before retrying"

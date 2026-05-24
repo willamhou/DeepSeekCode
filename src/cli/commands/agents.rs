@@ -11674,6 +11674,7 @@ mod tests {
                 estimated_tokens: 3,
             }],
             model_routes: Vec::new(),
+            tool_repairs: Vec::new(),
         };
 
         let assistant_turn_id =

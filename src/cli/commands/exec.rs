@@ -300,6 +300,13 @@ fn record_exec_runtime(
             prompt_layers_event_payload(&assistant.id, &usage.id, &result.prompt_layers),
         )?;
     }
+    for repair in &result.tool_repairs {
+        store.append_thread_event(
+            &thread.id,
+            "tool_call_repair",
+            tool_repair_event(&repair.kind, &repair.detail),
+        )?;
+    }
     for route in &result.model_routes {
         store.append_thread_event(
             &thread.id,
@@ -728,6 +735,7 @@ mod tests {
             usage: TokenUsage::new(12, 3),
             prompt_layers: Vec::new(),
             model_routes: Vec::new(),
+            tool_repairs: Vec::new(),
         };
 
         let call = json_value_to_string(&tool_call_parts_event(
@@ -779,6 +787,10 @@ mod tests {
                 model: "deepseek-v4-pro".to_string(),
                 reason: "repeated repair signals".to_string(),
                 escalated: true,
+            }],
+            tool_repairs: vec![crate::core::loop_runtime::ToolRepairEvent {
+                kind: "truncated-json".to_string(),
+                detail: "repaired truncated tool arguments JSON".to_string(),
             }],
         };
 
@@ -832,16 +844,18 @@ mod tests {
         assert_eq!(tasks[0].kind, "exec");
         assert_eq!(tasks[0].status, "completed");
         let events = store.read_events(&threads[0].id, 0).unwrap();
-        assert_eq!(events.len(), 9);
+        assert_eq!(events.len(), 10);
         assert_eq!(events[2].kind, "item_recorded");
         assert_eq!(events[4].kind, "item_recorded");
         assert_eq!(events[5].kind, "usage_recorded");
         assert_eq!(events[6].kind, "prompt_layers_recorded");
         assert!(json_value_to_string(&events[6].payload).contains(&usage[0].id));
-        assert_eq!(events[7].kind, "model_route");
-        assert!(json_value_to_string(&events[7].payload).contains(r#""preset":"auto""#));
-        assert!(json_value_to_string(&events[7].payload).contains(r#""escalated":true"#));
-        assert_eq!(events[8].kind, "task_recorded");
+        assert_eq!(events[7].kind, "tool_call_repair");
+        assert!(json_value_to_string(&events[7].payload).contains(r#""kind":"truncated-json""#));
+        assert_eq!(events[8].kind, "model_route");
+        assert!(json_value_to_string(&events[8].payload).contains(r#""preset":"auto""#));
+        assert!(json_value_to_string(&events[8].payload).contains(r#""escalated":true"#));
+        assert_eq!(events[9].kind, "task_recorded");
     }
 
     #[test]

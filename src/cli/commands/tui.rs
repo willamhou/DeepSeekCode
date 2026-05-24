@@ -13579,6 +13579,7 @@ shell_allowlist = ["git diff"]
                 estimated_tokens: 3,
             }],
             model_routes: Vec::new(),
+            tool_repairs: Vec::new(),
         };
 
         record_tui_agent_result(&store, &thread.id, "deepseek-coder", &result).unwrap();
@@ -13908,6 +13909,7 @@ shell_allowlist = ["git diff"]
             usage,
             prompt_layers: Vec::new(),
             model_routes: Vec::new(),
+            tool_repairs: Vec::new(),
         };
 
         record_tui_agent_result_into(

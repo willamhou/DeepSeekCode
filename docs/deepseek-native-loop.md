@@ -401,7 +401,8 @@ Deliver:
 - failed repair surfaced as a model-facing `tool_call_parse_failed`
   observation instead of a hard loop failure; landed;
 - repair runtime events; landed as structured `tool_call_repair` events,
-  runtime stream items, and `exec --json` repair notices;
+  runtime stream items, durable `exec` runtime events, and `exec --json` repair
+  notices;
 - unit tests for malformed JSON, truncated JSON, scavenged calls, and unknown
   tool rejection; landed.
 
