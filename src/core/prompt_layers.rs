@@ -33,12 +33,18 @@ pub fn prompt_layers_for_request(step: usize, request: &ModelRequest) -> PromptL
         &workspace_profile_text(request),
         true,
     );
-    push_layer(&mut layers, "user_task", &request.task, true);
+    push_layer(
+        &mut layers,
+        "task_context",
+        &task_context_text(request),
+        false,
+    );
+    push_layer(&mut layers, "user_task", &request.task, false);
     push_layer(
         &mut layers,
         "media_inputs",
         &media_inputs_text(request),
-        true,
+        false,
     );
     push_layer(&mut layers, "active_todos", &todos_text(request), false);
     push_layer(
@@ -146,16 +152,21 @@ fn workspace_profile_text(request: &ModelRequest) -> String {
         text.push_str("\nhints=");
         text.push_str(&request.profile_hints.join("\n"));
     }
+    text
+}
+
+fn task_context_text(request: &ModelRequest) -> String {
+    let mut text = String::new();
     if let Some(primary_file) = request.primary_file.as_deref() {
-        text.push_str("\nprimary_file=");
+        text.push_str("primary_file=");
         text.push_str(primary_file);
     }
     if let Some(command) = request.suggested_test_command.as_deref() {
-        text.push_str("\nsuggested_test_command=");
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str("suggested_test_command=");
         text.push_str(command);
-    }
-    if request.planning_mode {
-        text.push_str("\nplanning_mode=true");
     }
     text
 }
@@ -376,7 +387,7 @@ pub fn prompt_layers_event_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::protocol::ModelRequest;
+    use crate::model::protocol::{ImageInput, ModelRequest};
     use crate::util::json::json_as_string;
 
     #[test]
@@ -401,7 +412,11 @@ mod tests {
             todos: Vec::new(),
             planning_mode: true,
             recent_steps: vec!["assistant planned".to_string()],
-            image_inputs: Vec::new(),
+            image_inputs: vec![ImageInput {
+                path: "diagram.png".to_string(),
+                media_type: "image/png".to_string(),
+                data_base64: "AAAA".to_string(),
+            }],
         };
 
         let snapshot = prompt_layers_for_request(1, &request);
@@ -414,6 +429,69 @@ mod tests {
             .layers
             .iter()
             .any(|layer| layer.name == "append_only_turns" && !layer.cache_stable));
+        assert!(snapshot
+            .layers
+            .iter()
+            .any(|layer| layer.name == "task_context" && !layer.cache_stable));
+        assert!(snapshot
+            .layers
+            .iter()
+            .any(|layer| layer.name == "user_task" && !layer.cache_stable));
+        assert!(snapshot
+            .layers
+            .iter()
+            .any(|layer| layer.name == "media_inputs" && !layer.cache_stable));
+    }
+
+    #[test]
+    fn volatile_task_context_changes_do_not_break_stable_prefix() {
+        let first = ModelRequest {
+            system_prompt: "system".to_string(),
+            task: "inspect first task".to_string(),
+            profile_name: "rust".to_string(),
+            profile_hints: vec!["hint".to_string()],
+            primary_file: Some("src/lib.rs".to_string()),
+            suggested_test_command: Some("cargo test".to_string()),
+            available_tools: vec!["read_file".to_string()],
+            observations: Vec::new(),
+            todos: Vec::new(),
+            planning_mode: false,
+            recent_steps: Vec::new(),
+            image_inputs: vec![ImageInput {
+                path: "first.png".to_string(),
+                media_type: "image/png".to_string(),
+                data_base64: "AAAA".to_string(),
+            }],
+        };
+        let mut second = first.clone();
+        second.task = "inspect second task".to_string();
+        second.primary_file = Some("src/main.rs".to_string());
+        second.suggested_test_command = Some("cargo test --lib".to_string());
+        second.image_inputs = vec![ImageInput {
+            path: "second.png".to_string(),
+            media_type: "image/png".to_string(),
+            data_base64: "BBBB".to_string(),
+        }];
+
+        let first_snapshot = prompt_layers_for_request(1, &first);
+        let second_snapshot = prompt_layers_for_request(2, &second);
+        let mut stable_hash_changes = 0;
+        for first_layer in first_snapshot
+            .layers
+            .iter()
+            .filter(|layer| layer.cache_stable)
+        {
+            let second_layer = second_snapshot
+                .layers
+                .iter()
+                .find(|layer| layer.name == first_layer.name)
+                .expect("stable layer should still be present");
+            if first_layer.text_sha256 != second_layer.text_sha256 {
+                stable_hash_changes += 1;
+            }
+        }
+
+        assert_eq!(stable_hash_changes, 0);
     }
 
     #[test]

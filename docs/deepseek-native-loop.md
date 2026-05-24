@@ -169,8 +169,9 @@ Proposed internal shape:
 
 ```text
 PromptLayer {
-  name: system_static | workspace_instructions | user_memory | tool_catalog |
-        session_summary | append_only_turns | volatile_scratch
+  name: system_static | workspace_profile | tool_catalog | task_context |
+        user_task | media_inputs | active_todos | append_only_turns |
+        volatile_scratch
   text_sha256: string
   bytes: number
   estimated_tokens: number
@@ -412,11 +413,17 @@ almost-correct tool calls.
 
 ### Phase 2: Prompt Layer Diagnostics
 
-Status on 2026-05-24: initial prompt-layer diagnostics landed. DeepSeekCode now
+Status on 2026-05-25: initial prompt-layer diagnostics landed. DeepSeekCode now
 derives named prompt layers with SHA-256 hashes, byte counts, token estimates,
 and cache-stability flags for every agent-loop model request. `exec`,
 TUI-started agent turns, and runtime daemon task turns persist
 `prompt_layers_recorded` events linked to the corresponding usage record.
+Cache-stable layers are limited to the prompt prefix that should remain stable
+across user turns when config/profile inputs do not change, such as
+`system_static`, `tool_catalog`, and stable workspace profile hints; volatile
+per-turn inputs such as `task_context`, `user_task`, `media_inputs`,
+`active_todos`, `append_only_turns`, and `volatile_scratch` are not counted
+against the prefix-stability gate.
 `/cache inspect` surfaces active-thread prompt-layer snapshot counts, latest
 digest, latest token estimate, and layer names when those events exist, and
 `deepseek stats` aggregates cache, cost, model split, repair, suppression, and
