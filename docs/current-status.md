@@ -52,6 +52,9 @@ dogfood 证据。
   https://github.com/willamhou/DeepSeekCode/actions/runs/26335387193
 - PR #19 增加 `deepseek update release-smoke`，用于发布二进制复验，并通过 CI：
   https://github.com/willamhou/DeepSeekCode/actions/runs/26348829744
+- 外部 write-fixture 生成器已扩展为 Python、Rust、Node 三个 disposable repo 样本；
+  CI 会 smoke scaffold。Node task-report 和 Rust order multi-file 样本也已记录
+  online model-backed evidence，Python invoice 样本仍是 canonical release path。
 
 ## 当前能力概览
 

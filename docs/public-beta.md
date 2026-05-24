@@ -74,7 +74,10 @@ The strongest current proof points are:
 - CI-smoked TUI entrypoints and service/shell fixtures;
 - `deepseek update release-smoke --version 0.1.1 --json` for release binary
   verification on the current platform;
-- online multi-file external fixture evidence recorded through dogfood tooling.
+- online Python, Rust, and Node external fixture evidence recorded through
+  dogfood tooling.
+- reusable Python, Rust, and Node external fixture scaffolds for refreshing or
+  extending model-backed evidence when needed.
 
 Use [docs/current-status.md](./current-status.md) for the exact state and
 [docs/dogfood-evidence.md](./dogfood-evidence.md) for evidence commands.
@@ -86,7 +89,8 @@ Keep these caveats visible when promoting the project:
 - Homebrew publishing is blocked on tap credentials.
 - npm registry publishing is product-hardening work, not the primary install
   path yet.
-- More external repo fixtures would make the evidence base stronger.
+- More online model-backed runs against larger external fixtures would make the
+  evidence base stronger.
 - Hosted IDE evidence and broader Windows service proof are outside the current
   Linux/macOS local CLI milestone.
 - Rich GIF/MP4 launch media can improve conversion, but the committed SVG demo

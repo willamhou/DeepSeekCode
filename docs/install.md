@@ -79,15 +79,15 @@ deepseek dogfood run --from-benchmark fixture-retry-write-validate-python-mini -
 deepseek dogfood report --limit 5
 ```
 
-外部 write-fixture 证据需要当前 checkout 之外的 disposable git 仓库。先 dry-run
-检查，真实运行会复制到 isolated workdir，并在 dogfood report 里计入
+外部 write-fixture 证据需要当前 checkout 之外的 disposable git 仓库。生成器目前支持
+Python、Rust 和 Node 样本；先 dry-run 检查，真实运行会复制到 isolated workdir，并在 dogfood report 里计入
 `external-write-fixture`。真实 evidence 还会从 task 里的 `validate with ...`
 抽取后置验证命令，在 isolated workdir 中执行，并要求
 `post_validation_passed=true` 才能通过 `dogfood external-evidence`：
 
 ```bash
 fixture_dir=/tmp/deepseek-external-fixtures/python-invoice-multifile
-scripts/create-multifile-external-fixture.sh "$fixture_dir"
+scripts/create-multifile-external-fixture.sh "$fixture_dir" python-invoice-multifile --force
 task='replace `return amount - discount` with `return max(amount - discount, 0.0)` in src/invoice_math/pricing.py and replace `Invoice total` with `Final total` in src/invoice_math/summary.py, validate with python3 -m unittest discover -s tests'
 deepseek dogfood external-fixture --workdir "$fixture_dir" --dry-run "$task"
 deepseek dogfood external-fixture --workdir "$fixture_dir" \

@@ -1,6 +1,6 @@
 # Roadmap
 
-Last updated: 2026-05-23
+Last updated: 2026-05-24
 
 This page is the current product roadmap. Older phase-by-phase execution notes
 live in `docs/superpowers/` and in git history; those historical notes are useful
@@ -21,8 +21,9 @@ DeepSeekCode is now usable for Linux/macOS dogfooding and repository work:
   repeatable gates;
 - PR #16 full CI passed Linux, macOS, and Windows:
   https://github.com/willamhou/DeepSeekCode/actions/runs/26334525472
-- verified online multi-file external fixture evidence is tracked under
-  `.dscode/dogfood/external-fixture-python-invoice-multifile-verification.json`.
+- verified online multi-file external fixture evidence is tracked for the
+  Python invoice, Rust order, and Node task-report samples under
+  `.dscode/dogfood/`.
 
 The Linux/macOS local code-agent CLI milestone is effectively established. The
 remaining work is mostly release hardening, external evidence depth, publishing,
@@ -57,10 +58,12 @@ it is the most natural install path for macOS users.
 
 ### 3. More External Model-Backed Samples
 
-- Keep the Python invoice multi-file fixture as the canonical tracked sample.
-- Add one or two more disposable external repo samples only when they cover new
-  behavior, such as multi-step recovery, larger diffs, or non-Python/Rust/JS
-  workflows.
+- Keep the Python invoice multi-file fixture as the canonical tracked release
+  evidence sample.
+- Keep the reusable fixture catalog healthy: `python-invoice-multifile`,
+  `rust-order-multifile`, and `node-task-report` are now scaffold-smoked in CI.
+- Refresh Rust and Node online model-backed evidence when release questions need
+  non-Python proof.
 - Require `dogfood external-evidence` verification with
   `post_validation_passed=true` for every sample counted as release evidence.
 
