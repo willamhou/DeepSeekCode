@@ -97,8 +97,9 @@ npm remains useful for Node-oriented users but is not the primary blocker.
   Auto escalation now has explicit local triggers for repeated repair signals,
   malformed tool calls, tool-call storms, empty read/search loops,
   validation-after-edit failures, and repeated unproductive steps. The default
-  live dogfood plan/report/evidence gate now also requires MCP loop-surface
-  coverage; remaining work is live dogfood calibration with real online runs.
+  live dogfood plan/report/evidence gate now also requires MCP dynamic/resource
+  loop-surface coverage and an `mcp` live gate of at least three runs; remaining
+  work is live dogfood calibration with real online runs.
   Non-recoverable malformed tool-call parse failures are now loop-recoverable:
   they become failed `model` observations with `tool_call_parse_failed` context
   for the next model turn instead of hard-ending the run.

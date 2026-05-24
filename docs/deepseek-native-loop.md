@@ -33,7 +33,8 @@ hardening gaps rather than architecture blockers:
   live DeepSeek-backed examples across real gateways before treating it as
   mature. The default live dogfood plan now includes an MCP loop-surface target,
   and `live-evidence --require-loop-surface-gate` fails closed unless evidence
-  includes MCP resource/dynamic surface coverage.
+  includes MCP dynamic/resource surface coverage plus an `mcp` live gate of at
+  least three runs.
 - Model presets and session budgets work, including explicit budget raise/off
   flows. Auto-escalation now covers repeated repair, malformed tool-call,
   tool-call storm, empty read/search, validation-after-edit, and unproductive
@@ -47,8 +48,9 @@ hardening gaps rather than architecture blockers:
 - Deterministic repair/cache evidence and prompt-prefix stability now run in
   the release matrix and are uploaded as loop evidence artifacts. The remaining
   evidence gap is recurring live model-backed dogfood across real gateways; the
-  local live plan/report/evidence gates now explicitly require the MCP
-  loop-surface category.
+  local live plan/report/evidence gates now explicitly require MCP
+  dynamic/resource loop-surface coverage and an `mcp` live gate of at least
+  three runs.
 
 ## What To Absorb
 

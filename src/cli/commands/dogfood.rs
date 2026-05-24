@@ -40,6 +40,7 @@ const DEFAULT_LIVE_RUN_LIMIT: usize = 4;
 const MODEL_TRANSPORT_OFFLINE: &str = "offline";
 const MODEL_TRANSPORT_ONLINE: &str = "online";
 const MODEL_TRANSPORT_UNKNOWN: &str = "unknown";
+const MCP_LOOP_SURFACE_MIN_LIVE_RUNS: u64 = 3;
 const LIVE_PLAN_TARGET_CATEGORIES: &[(&str, usize, f64)] = &[
     ("write_validate", 25, 90.0),
     ("recovery", 25, 90.0),
@@ -1216,8 +1217,23 @@ fn live_evidence_failures(
         if !live_evidence_report_gate_has_category(root, "mcp") {
             failures.push("evidence_gate is missing MCP loop-surface live category".to_string());
         }
+        if !live_evidence_report_gate_category_min_runs_at_least(
+            root,
+            "mcp",
+            MCP_LOOP_SURFACE_MIN_LIVE_RUNS,
+        ) {
+            failures.push(format!(
+                "evidence_gate MCP loop-surface live category requires fewer than {MCP_LOOP_SURFACE_MIN_LIVE_RUNS} run(s)"
+            ));
+        }
         if !live_evidence_has_mcp_loop_surface_case(root) {
             failures.push("live evidence has no MCP loop-surface case".to_string());
+        }
+        if !live_evidence_has_mcp_loop_surface_kind(root, "dynamic") {
+            failures.push("live evidence has no MCP dynamic loop-surface case".to_string());
+        }
+        if !live_evidence_has_mcp_loop_surface_kind(root, "resource") {
+            failures.push("live evidence has no MCP resource loop-surface case".to_string());
         }
     }
     failures
@@ -1427,6 +1443,14 @@ fn live_evidence_verification_json(
     out.insert(
         "loop_surface_case_present".to_string(),
         JsonValue::Bool(live_evidence_has_mcp_loop_surface_case(root)),
+    );
+    out.insert(
+        "mcp_dynamic_surface_case_present".to_string(),
+        JsonValue::Bool(live_evidence_has_mcp_loop_surface_kind(root, "dynamic")),
+    );
+    out.insert(
+        "mcp_resource_surface_case_present".to_string(),
+        JsonValue::Bool(live_evidence_has_mcp_loop_surface_kind(root, "resource")),
     );
     out.insert(
         "loop_surface_gate_required".to_string(),
@@ -1818,25 +1842,68 @@ fn live_evidence_has_mcp_loop_surface_case(root: &BTreeMap<String, JsonValue>) -
         .unwrap_or(false)
 }
 
+fn live_evidence_has_mcp_loop_surface_kind(
+    root: &BTreeMap<String, JsonValue>,
+    surface: &str,
+) -> bool {
+    live_evidence_cases(root)
+        .map(|cases| {
+            cases.iter().filter_map(live_evidence_object).any(|case| {
+                live_evidence_string(case, "benchmark_category") == Some("mcp")
+                    && live_evidence_mcp_loop_surface(case) == Some(surface)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn live_evidence_mcp_loop_surface(case: &BTreeMap<String, JsonValue>) -> Option<&'static str> {
+    live_evidence_string(case, "mcp_loop_surface")
+        .and_then(mcp_loop_surface_from_str)
+        .or_else(|| live_evidence_string(case, "name").and_then(mcp_loop_surface_from_case_name))
+}
+
 fn live_evidence_requires_mcp_loop_surface_gate(root: &BTreeMap<String, JsonValue>) -> bool {
     live_evidence_string(root, "post_run_report_command")
         .is_some_and(|command| command.contains("--require-live-category mcp:"))
-        && live_evidence_report_gate_has_category(root, "mcp")
+        && live_evidence_report_gate_category_min_runs_at_least(
+            root,
+            "mcp",
+            MCP_LOOP_SURFACE_MIN_LIVE_RUNS,
+        )
 }
 
 fn live_evidence_report_gate_has_category(
     root: &BTreeMap<String, JsonValue>,
     category: &str,
 ) -> bool {
+    live_evidence_report_gate_category_min_runs(root, category).is_some()
+}
+
+fn live_evidence_report_gate_category_min_runs_at_least(
+    root: &BTreeMap<String, JsonValue>,
+    category: &str,
+    min_runs: u64,
+) -> bool {
+    live_evidence_report_gate_category_min_runs(root, category).is_some_and(|runs| runs >= min_runs)
+}
+
+fn live_evidence_report_gate_category_min_runs(
+    root: &BTreeMap<String, JsonValue>,
+    category: &str,
+) -> Option<u64> {
     root.get("evidence_gate")
         .and_then(live_evidence_object)
         .and_then(|gate| gate.get("require_live_categories"))
         .and_then(json_as_array)
-        .is_some_and(|categories| {
+        .and_then(|categories| {
             categories
                 .iter()
                 .filter_map(live_evidence_object)
-                .any(|entry| live_evidence_string(entry, "category") == Some(category))
+                .find_map(|entry| {
+                    (live_evidence_string(entry, "category") == Some(category))
+                        .then(|| live_evidence_u64(entry, "min_runs"))
+                        .flatten()
+                })
         })
 }
 
@@ -3645,6 +3712,16 @@ fn live_run_case_evidence_json(
     );
     root.insert("name".to_string(), JsonValue::String(case.name.clone()));
     root.insert(
+        "mcp_loop_surface".to_string(),
+        if case.category == "mcp" {
+            mcp_loop_surface_from_case_name(&case.name)
+                .map(|surface| JsonValue::String(surface.to_string()))
+                .unwrap_or(JsonValue::Null)
+        } else {
+            JsonValue::Null
+        },
+    );
+    root.insert(
         "ledger_records_appended".to_string(),
         JsonValue::Number(appended_records.len().to_string()),
     );
@@ -3718,6 +3795,25 @@ fn live_run_case_evidence_json(
     }
 
     JsonValue::Object(root)
+}
+
+fn mcp_loop_surface_from_case_name(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("mcp-dynamic") {
+        Some("dynamic")
+    } else if lower.contains("mcp-resource") {
+        Some("resource")
+    } else {
+        None
+    }
+}
+
+fn mcp_loop_surface_from_str(value: &str) -> Option<&'static str> {
+    match value {
+        "dynamic" => Some("dynamic"),
+        "resource" => Some("resource"),
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6083,6 +6179,33 @@ mod tests {
     }
 
     #[test]
+    fn live_run_case_evidence_marks_mcp_loop_surface_from_case_name() {
+        let mut dynamic_record = test_record(20, "mcp", DogfoodOutcome::Success);
+        dynamic_record.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
+        let dynamic = json_value_to_string(&live_run_case_evidence_json(
+            &LiveRunCase {
+                category: "mcp".to_string(),
+                name: "fixture-mcp-dynamic-readme".to_string(),
+            },
+            &[dynamic_record],
+            None,
+        ));
+        assert!(dynamic.contains("\"mcp_loop_surface\":\"dynamic\""));
+
+        let mut resource_record = test_record(21, "mcp", DogfoodOutcome::Success);
+        resource_record.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
+        let resource = json_value_to_string(&live_run_case_evidence_json(
+            &LiveRunCase {
+                category: "mcp".to_string(),
+                name: "fixture-mcp-resource-workspace".to_string(),
+            },
+            &[resource_record],
+            None,
+        ));
+        assert!(resource.contains("\"mcp_loop_surface\":\"resource\""));
+    }
+
+    #[test]
     fn live_evidence_requires_mcp_loop_surface_gate_when_requested() {
         let missing_root = parse_root_object(
             r#"{
@@ -6121,6 +6244,12 @@ mod tests {
         assert!(failures
             .iter()
             .any(|failure| failure.contains("live evidence has no MCP loop-surface case")));
+        assert!(failures
+            .iter()
+            .any(|failure| failure.contains("MCP dynamic loop-surface case")));
+        assert!(failures
+            .iter()
+            .any(|failure| failure.contains("MCP resource loop-surface case")));
         let verification = json_value_to_string(&live_evidence_verification_json(
             "live-evidence.json",
             &missing_root,
@@ -6129,15 +6258,17 @@ mod tests {
             &[],
         ));
         assert!(verification.contains("\"loop_surface_case_present\":false"));
+        assert!(verification.contains("\"mcp_dynamic_surface_case_present\":false"));
+        assert!(verification.contains("\"mcp_resource_surface_case_present\":false"));
         assert!(verification.contains("\"loop_surface_gate_required\":false"));
 
-        let passing_root = parse_root_object(
+        let weak_gate_root = parse_root_object(
             r#"{
                 "kind":"deepseek.dogfood.live_run_evidence.v1",
                 "completed":true,
                 "model_transport":"online",
                 "online_ready":true,
-                "appended_model_backed_records":1,
+                "appended_model_backed_records":2,
                 "post_run_report_command":"deepseek dogfood report --limit 20 --require-live-runs 1 --require-live-success-rate 90 --require-live-category mcp:1:90",
                 "evidence_gate":{
                     "command":"deepseek dogfood report --limit 20 --require-live-runs 1 --require-live-success-rate 90 --require-live-category mcp:1:90",
@@ -6146,6 +6277,60 @@ mod tests {
                     "require_live_categories":[{"category":"mcp","min_runs":1,"min_success_rate":90.0}]
                 },
                 "cases":[{
+                    "name":"fixture-mcp-dynamic-readme",
+                    "mcp_loop_surface":"dynamic",
+                    "ledger_records_appended":1,
+                    "model_backed":true,
+                    "error":null,
+                    "benchmark_category":"mcp"
+                },{
+                    "name":"fixture-mcp-resource-workspace",
+                    "mcp_loop_surface":"resource",
+                    "ledger_records_appended":1,
+                    "model_backed":true,
+                    "error":null,
+                    "benchmark_category":"mcp"
+                }]
+            }"#,
+        )
+        .unwrap();
+        let weak_gate_failures = live_evidence_failures(&weak_gate_root, &args);
+        assert!(weak_gate_failures
+            .iter()
+            .any(|failure| failure.contains("fewer than 3 run(s)")));
+        let weak_verification = json_value_to_string(&live_evidence_verification_json(
+            "live-evidence.json",
+            &weak_gate_root,
+            &weak_gate_failures,
+            false,
+            &[],
+        ));
+        assert!(weak_verification.contains("\"loop_surface_gate_required\":false"));
+
+        let passing_root = parse_root_object(
+            r#"{
+                "kind":"deepseek.dogfood.live_run_evidence.v1",
+                "completed":true,
+                "model_transport":"online",
+                "online_ready":true,
+                "appended_model_backed_records":2,
+                "post_run_report_command":"deepseek dogfood report --limit 20 --require-live-runs 3 --require-live-success-rate 90 --require-live-category mcp:3:90",
+                "evidence_gate":{
+                    "command":"deepseek dogfood report --limit 20 --require-live-runs 3 --require-live-success-rate 90 --require-live-category mcp:3:90",
+                    "require_live_runs":3,
+                    "require_live_success_rate":90.0,
+                    "require_live_categories":[{"category":"mcp","min_runs":3,"min_success_rate":90.0}]
+                },
+                "cases":[{
+                    "name":"fixture-mcp-dynamic-readme",
+                    "mcp_loop_surface":"dynamic",
+                    "ledger_records_appended":1,
+                    "model_backed":true,
+                    "error":null,
+                    "benchmark_category":"mcp"
+                },{
+                    "name":"fixture-mcp-resource-workspace",
+                    "mcp_loop_surface":"resource",
                     "ledger_records_appended":1,
                     "model_backed":true,
                     "error":null,
@@ -6164,6 +6349,8 @@ mod tests {
             &[],
         ));
         assert!(verification.contains("\"loop_surface_case_present\":true"));
+        assert!(verification.contains("\"mcp_dynamic_surface_case_present\":true"));
+        assert!(verification.contains("\"mcp_resource_surface_case_present\":true"));
         assert!(verification.contains("\"loop_surface_gate_required\":true"));
     }
 

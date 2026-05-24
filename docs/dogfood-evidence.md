@@ -125,7 +125,8 @@ temporary file outside the repository:
 printf '%s\n' '<deepseek-api-key>' > /tmp/deepseek-live.key
 chmod 600 /tmp/deepseek-live.key
 deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key \
-  --limit 4 \
+  --category mcp \
+  --limit 3 \
   --evidence-out .dscode/dogfood/live-evidence.json \
   --execute
 deepseek dogfood live-evidence --file .dscode/dogfood/live-evidence.json \
@@ -138,8 +139,8 @@ rm -f /tmp/deepseek-live.key
 `live-evidence --require-report-gate` verifies the structured gate, rechecks the
 ledger fingerprint from the evidence file, and matches appended case evidence
 back to current ledger rows. `--require-loop-surface-gate` additionally fails
-unless the evidence includes an MCP loop-surface case and the structured
-`evidence_gate` requires `mcp` live evidence.
+unless the evidence includes MCP dynamic and resource loop-surface cases and the
+structured `evidence_gate` requires at least three `mcp` live runs.
 
 ## Release Evidence Gate
 

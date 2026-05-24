@@ -115,10 +115,10 @@ deepseek dogfood external-evidence \
   --require-successful-external-fixtures 1
 deepseek dogfood report --limit 10
 deepseek dogfood live-plan --limit 10
-deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 4 --json
-deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 4
+deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --category mcp --limit 3 --json
+deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --category mcp --limit 3
 # Add --execute only when you intend to spend online model calls:
-deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --limit 4 \
+deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --category mcp --limit 3 \
   --evidence-out .dscode/dogfood/live-evidence.json --execute
 deepseek dogfood live-evidence --file .dscode/dogfood/live-evidence.json \
   --out .dscode/dogfood/live-evidence-verification.json \
@@ -134,8 +134,9 @@ value. The summary includes a ledger file `fnv1a64` fingerprint. `dogfood
 live-evidence` verifies that summary as a fail-closed gate.
 `--require-report-gate` checks the structured live thresholds and ledger
 fingerprint against the ledger path from the evidence file.
-`--require-loop-surface-gate` additionally requires MCP loop-surface evidence
-and a structured `evidence_gate` `mcp` live-category threshold.
+`--require-loop-surface-gate` additionally requires MCP dynamic and resource
+loop-surface evidence plus a structured `evidence_gate` `mcp` live-category
+threshold of at least three runs.
 Use `--out` to persist the verification JSON for release evidence upload.
 
 严格发布检查可以让 report 根据证据阈值 fail closed：
@@ -265,7 +266,7 @@ npm tarball，并在 tag run 且配置 `NPM_TOKEN` 时先发布平台包，再�
 正式发布前可以在下载 workflow artifacts 后运行
 `deepseek update publish-status --dist dist-assets --npm-dist npm-dist --live-evidence-verification .dscode/dogfood/live-evidence-verification.json --strict`
 检查 npm token、平台 tarball、Homebrew tap 配置、release `.sha256` 文件和带 MCP
-loop-surface 覆盖与 gate 的已验证 online dogfood evidence 是否齐全；加 `--json` 会输出
+dynamic/resource loop-surface 覆盖与 gate 的已验证 online dogfood evidence 是否齐全；加 `--json` 会输出
 `deepseek.publish_status.v1`，便于 CI 或 release
 脚本消费。输出中的 `public_install` 会区分 source checkout、GitHub Release、
 npm、Homebrew、GHCR 和 Cargo registry 当前是 `source_available`、

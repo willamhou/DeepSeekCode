@@ -133,7 +133,8 @@ dogfood 证据。
    会清晰处理 raise/disable runtime limit；auto escalation 已覆盖 repeated repair、
    malformed tool-call、tool-call storm、empty read/search、validation-after-edit 和
    repeated unproductive step signals，默认 live dogfood plan/report/evidence gate
-   现在也要求 MCP loop-surface 覆盖，剩余工作是用真实 online runs 做 calibration；同回合 batch 中的本地
+   现在也要求 MCP dynamic/resource loop-surface 覆盖与至少 3 条 `mcp` live
+   runs 的 gate，剩余工作是用真实 online runs 做 calibration；同回合 batch 中的本地
    read/search/git/project-map/data-validation 工具、常见 runtime query 工具，以及
    MCP inventory/prompt/resource 只读桥接工具现在会在无 hooks/permission/repeat 的情况下
    按连续 read-only chunk 并发，并保持结果顺序，tool result 会记录 `meta.parallel_*`
