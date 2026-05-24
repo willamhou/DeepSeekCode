@@ -4742,7 +4742,7 @@ fn openai_tool_assembly_to_request(
     let (arguments, repair_note) = if assembly.arguments.trim().is_empty() {
         (BTreeMap::new(), None)
     } else {
-        parse_tool_arguments_with_repair(&assembly.arguments)?
+        parse_tool_arguments_with_repair(&assembly.arguments).map_err(tool_call_parse_failed)?
     };
     let arguments = re_nest_tool_args_for_tool(&tool_name, arguments, schema_flattening);
     Ok((
@@ -5290,7 +5290,8 @@ fn parse_anthropic_stream_inner<R: BufRead>(
         let (arguments, repair_note) = if assembly.partial_json.trim().is_empty() {
             (std::collections::BTreeMap::new(), None)
         } else {
-            parse_tool_arguments_with_repair(&assembly.partial_json)?
+            parse_tool_arguments_with_repair(&assembly.partial_json)
+                .map_err(tool_call_parse_failed)?
         };
         let arguments = re_nest_tool_args_for_tool(&name, arguments, schema_flattening);
         if let Some(note) = repair_note {
@@ -5633,7 +5634,13 @@ fn json_object_to_string_args(value: &JsonValue) -> AppResult<BTreeMap<String, S
 }
 
 fn parse_tool_arguments(input: &str) -> AppResult<BTreeMap<String, String>> {
-    parse_tool_arguments_with_repair(input).map(|(args, _note)| args)
+    parse_tool_arguments_with_repair(input)
+        .map(|(args, _note)| args)
+        .map_err(tool_call_parse_failed)
+}
+
+fn tool_call_parse_failed(error: Box<dyn std::error::Error>) -> Box<dyn std::error::Error> {
+    tool_failure(format!("tool_call_parse_failed: {error}"))
 }
 
 fn derive_search_query(task: &str) -> Option<String> {

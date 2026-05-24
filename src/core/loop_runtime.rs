@@ -541,38 +541,44 @@ impl AgentLoop {
             if let Some(renderer) = renderer.as_mut() {
                 renderer.paint_step_divider(step + 1);
             }
-            let (response, step_usage, step_reasoning) =
-                if let Some(events) = stream_events.as_deref_mut() {
-                    let mut capture = ReasoningCaptureEvents::new(events);
-                    let outcome = model_respond_with_cancel(
-                        client,
-                        request,
-                        &mut capture,
-                        cancel_check.as_ref(),
-                    )?;
-                    let reasoning = capture.into_reasoning();
-                    (outcome.0, outcome.1, reasoning)
-                } else if let Some(renderer) = renderer.as_mut() {
-                    let mut capture = ReasoningCaptureEvents::new(renderer);
-                    let outcome = model_respond_with_cancel(
-                        client,
-                        request,
-                        &mut capture,
-                        cancel_check.as_ref(),
-                    )?;
-                    let reasoning = capture.into_reasoning();
-                    (outcome.0, outcome.1, reasoning)
-                } else {
-                    let mut capture = ReasoningCaptureEvents::new(&mut noop_events);
-                    let outcome = model_respond_with_cancel(
-                        client,
-                        request,
-                        &mut capture,
-                        cancel_check.as_ref(),
-                    )?;
-                    let reasoning = capture.into_reasoning();
-                    (outcome.0, outcome.1, reasoning)
-                };
+            let model_outcome = if let Some(events) = stream_events.as_deref_mut() {
+                let mut capture = ReasoningCaptureEvents::new(events);
+                let outcome =
+                    model_respond_with_cancel(client, request, &mut capture, cancel_check.as_ref());
+                let reasoning = capture.into_reasoning();
+                outcome.map(|outcome| (outcome.0, outcome.1, reasoning))
+            } else if let Some(renderer) = renderer.as_mut() {
+                let mut capture = ReasoningCaptureEvents::new(renderer);
+                let outcome =
+                    model_respond_with_cancel(client, request, &mut capture, cancel_check.as_ref());
+                let reasoning = capture.into_reasoning();
+                outcome.map(|outcome| (outcome.0, outcome.1, reasoning))
+            } else {
+                let mut capture = ReasoningCaptureEvents::new(&mut noop_events);
+                let outcome =
+                    model_respond_with_cancel(client, request, &mut capture, cancel_check.as_ref());
+                let reasoning = capture.into_reasoning();
+                outcome.map(|outcome| (outcome.0, outcome.1, reasoning))
+            };
+            let (response, step_usage, step_reasoning) = match model_outcome {
+                Ok(outcome) => outcome,
+                Err(error) if is_recoverable_model_tool_call_parse_error(error.as_ref()) => {
+                    let observation = model_tool_call_parse_failure_observation(error.as_ref());
+                    if let Some(renderer) = renderer.as_mut() {
+                        renderer.paint_tool_result(
+                            crate::ui::stream::ToolResultKind::Failed,
+                            "model",
+                            "tool-call-parse",
+                            &observation,
+                        );
+                    }
+                    observations.push(Observation::failed("model", observation.clone()));
+                    last_message = observation.clone();
+                    recent_steps_log.push(format!("model response failed: {observation}"));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if let Some(usage) = step_usage {
                 if let Some(cost) = crate::core::runtime::estimate_token_usage_cost_microusd(
                     &self.config.model.model,
@@ -1201,6 +1207,20 @@ fn model_respond_with_cancel<C: ModelClient>(
     } else {
         client.respond_with_cancel(request, events, None)
     }
+}
+
+fn is_recoverable_model_tool_call_parse_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("tool_call_parse_failed")
+}
+
+fn model_tool_call_parse_failure_observation(error: &(dyn std::error::Error + 'static)) -> String {
+    format!(
+        "{}; previous model response contained malformed tool arguments that could not be repaired. Retry with valid tool JSON or choose a different strategy.",
+        error
+    )
 }
 
 fn execute_tool_with_cancel(
@@ -3511,6 +3531,76 @@ mod cr1_regression_test {
                 None,
             ))
         }
+    }
+
+    struct RecoverableModelErrorClient {
+        captured_observations: RefCell<Vec<Vec<crate::model::protocol::Observation>>>,
+        calls: RefCell<usize>,
+    }
+
+    impl ModelClient for RecoverableModelErrorClient {
+        fn respond(
+            &self,
+            input: ModelRequest,
+            _events: &mut dyn StreamEvents,
+        ) -> crate::error::AppResult<(ModelResponse, Option<TokenUsage>)> {
+            self.captured_observations
+                .borrow_mut()
+                .push(input.observations.clone());
+            let call = *self.calls.borrow();
+            *self.calls.borrow_mut() = call + 1;
+            if call == 0 {
+                return Err(crate::error::tool_failure(
+                    "tool_call_parse_failed: expected JSON object",
+                ));
+            }
+            Ok((
+                ModelResponse {
+                    message: "recovered after model observation".to_string(),
+                    action: ModelAction::Finish,
+                },
+                None,
+            ))
+        }
+    }
+
+    #[test]
+    fn run_with_client_recovers_tool_call_parse_failure_as_model_observation() {
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("dummy".to_string(), None);
+        let client = RecoverableModelErrorClient {
+            captured_observations: RefCell::new(Vec::new()),
+            calls: RefCell::new(0),
+        };
+
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 2,
+                    initial_observations: Vec::new(),
+                    todos: Rc::new(RefCell::new(TodoList::default())),
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(result.final_message, "recovered after model observation");
+        let captures = client.captured_observations.borrow();
+        let step2_obs = captures
+            .get(1)
+            .expect("second model call should receive the failed model observation");
+        let model_observation = step2_obs
+            .iter()
+            .find(|observation| observation.tool_name == "model")
+            .expect("expected model parse failure observation");
+        assert!(model_observation.is_failure());
+        assert!(model_observation.summary.contains("tool_call_parse_failed"));
+        assert!(model_observation
+            .summary
+            .contains("malformed tool arguments"));
     }
 
     #[test]

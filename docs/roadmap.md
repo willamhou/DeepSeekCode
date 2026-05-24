@@ -97,6 +97,9 @@ npm remains useful for Node-oriented users but is not the primary blocker.
   malformed tool calls, tool-call storms, empty read/search loops,
   validation-after-edit failures, and repeated unproductive steps; remaining
   work is live dogfood calibration.
+  Non-recoverable malformed tool-call parse failures are now loop-recoverable:
+  they become failed `model` observations with `tool_call_parse_failed` context
+  for the next model turn instead of hard-ending the run.
   The repair/cache evidence command now records comparable before/after runtime
   threads with cache-hit deltas and replay/diff/stats commands.
 - Parallel-safe read dispatch has landed for same-turn batches across local

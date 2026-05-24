@@ -28,9 +28,10 @@ hardening gaps rather than architecture blockers:
   compaction thresholds, and per-layer trend analysis are recorded. `deepseek
   stats --require-prefix-stable` can fail CI/dogfood checks when prompt-layer
   evidence is missing or stable prompt-prefix layers change hash.
-- Tool-call repair has deterministic coverage, but it needs more live
-  DeepSeek-backed examples across real gateways, dynamic MCP schemas, and
-  non-recoverable malformed-call recovery paths before treating it as mature.
+- Tool-call repair has deterministic coverage, including model-facing failed
+  observations for malformed calls that cannot be repaired, but it needs more
+  live DeepSeek-backed examples across real gateways and dynamic MCP schemas
+  before treating it as mature.
 - Model presets and session budgets work, including explicit budget raise/off
   flows. Auto-escalation now covers repeated repair, malformed tool-call,
   tool-call storm, empty read/search, validation-after-edit, and unproductive
@@ -369,16 +370,20 @@ calls from assistant reasoning/text when formal provider tool calls are absent,
 rejects unknown tool names, rejects trailing JSON garbage in repaired tool
 arguments, flattens nested object tool schemas behind
 `model.tool_schema_flattening = "auto"` and re-nests flat arguments before tool
-dispatch, emits visible repair notes, persists structured `tool_call_repair`
-runtime events, and surfaces repair evidence in the TUI/runtime stream. Storm
-detection is now mutating-aware: read-only calls get one warning retry, while
-mutating or unknown calls are suppressed before the second identical execution.
+  dispatch, converts non-recoverable malformed tool-call parse failures into
+  model-facing failed observations for the next loop step, emits visible repair
+  notes, persists structured `tool_call_repair` runtime events, and surfaces
+  repair evidence in the TUI/runtime stream. Storm detection is now
+  mutating-aware: read-only calls get one warning retry, while mutating or
+  unknown calls are suppressed before the second identical execution.
 
 Deliver:
 
 - `tool_repair` module; landed;
 - truncation repair and scavenge for known tool names; landed;
 - schema flatten/re-nest behind `model.tool_schema_flattening=auto`; landed;
+- failed repair surfaced as a model-facing `tool_call_parse_failed`
+  observation instead of a hard loop failure; landed;
 - repair runtime events; landed as structured `tool_call_repair` events,
   runtime stream items, and `exec --json` repair notices;
 - unit tests for malformed JSON, truncated JSON, scavenged calls, and unknown
