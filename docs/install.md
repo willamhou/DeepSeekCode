@@ -263,8 +263,9 @@ npm tarball，并在 tag run 且配置 `NPM_TOKEN` 时先发布平台包，再�
 包。
 正式发布前可以在下载 workflow artifacts 后运行
 `deepseek update publish-status --dist dist-assets --npm-dist npm-dist --live-evidence-verification .dscode/dogfood/live-evidence-verification.json --strict`
-检查 npm token、平台 tarball、Homebrew tap 配置、release `.sha256` 文件和已验证 online dogfood evidence 是否
-齐全；加 `--json` 会输出 `deepseek.publish_status.v1`，便于 CI 或 release
+检查 npm token、平台 tarball、Homebrew tap 配置、release `.sha256` 文件和带 MCP
+loop-surface 覆盖的已验证 online dogfood evidence 是否齐全；加 `--json` 会输出
+`deepseek.publish_status.v1`，便于 CI 或 release
 脚本消费。输出中的 `public_install` 会区分 source checkout、GitHub Release、
 npm、Homebrew、GHCR 和 Cargo registry 当前是 `source_available`、
 `ready_to_publish`、`requires_publish` 还是 `source_only_policy`。`v0.1.3` 的

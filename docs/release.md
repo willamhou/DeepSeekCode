@@ -328,7 +328,7 @@ deepseek update publish-status \
 `--strict` fails when `NPM_TOKEN`/`NODE_AUTH_TOKEN`,
 `HOMEBREW_TAP_REPOSITORY`, `HOMEBREW_TAP_TOKEN`, platform release archives,
 non-placeholder `.sha256` files, platform npm package tarballs, or verified
-online dogfood live evidence are missing.
+online dogfood live evidence with MCP loop-surface coverage are missing.
 The text and JSON output also include a `public_install` audit for source
 checkout, GitHub Release, npm, Homebrew, GHCR, and Cargo registry policy. Treat
 `ready_to_publish` as local readiness only: do not advertise npm, Homebrew,

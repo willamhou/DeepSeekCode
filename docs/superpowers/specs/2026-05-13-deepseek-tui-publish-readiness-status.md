@@ -29,7 +29,7 @@ to be visible and machine-checkable.
   - platform npm tarball availability when `--npm-dist` is provided
   - platform release archive and non-placeholder checksum availability when
     `--dist` is provided
-  - live dogfood evidence verification when
+  - live dogfood evidence verification with MCP loop-surface coverage when
     `--live-evidence-verification <path>` or `--live-evidence <path>` is
     provided
   - Homebrew formula template version
@@ -38,7 +38,8 @@ to be visible and machine-checkable.
 - `--json` emits the same readiness checks as
   `deepseek.publish_status.v1` for CI and release scripts.
 - Public install readiness for GitHub Release, npm, Homebrew, and GHCR now
-  requires both package materials and verified online dogfood evidence.
+  requires package materials and verified online dogfood evidence with MCP
+  loop-surface coverage.
 - `docs/release.md` and `docs/install.md` document the default and strict
   release readiness flows.
 
