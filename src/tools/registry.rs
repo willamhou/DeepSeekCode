@@ -551,6 +551,10 @@ fn dynamic_mcp_tool_is_read_only(name: &str) -> bool {
     let Some((_server, remote_tool)) = rest.split_once("__") else {
         return false;
     };
+    mcp_remote_tool_is_read_only(remote_tool)
+}
+
+pub(crate) fn mcp_remote_tool_is_read_only(remote_tool: &str) -> bool {
     matches!(
         remote_tool,
         "list_files"

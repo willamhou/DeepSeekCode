@@ -27,7 +27,9 @@ use crate::model::protocol::{
 use crate::skills::registry::SkillRegistry;
 use crate::skills::resolver::{resolve_skill, SkillResolution};
 use crate::skills::schema::SkillSpec;
-use crate::tools::registry::{tool_metadata_for_name, ExecutionPolicy};
+use crate::tools::registry::{
+    mcp_remote_tool_is_read_only, tool_metadata_for_name, ExecutionPolicy,
+};
 use crate::ui::render::print_banner;
 use crate::ui::stream::StreamEvents;
 use crate::util::cancel::CancellationCheck;
@@ -628,31 +630,50 @@ impl AgentLoop {
                 }
 
                 let ToolCallRequest {
-                    tool_name,
+                    mut tool_name,
                     mut input,
                 } = tool_calls[tool_call_index].clone();
                 tool_call_index += 1;
                 check_cancelled(cancel_check.as_ref())?;
-                let event_input = input.args.clone();
-                emit_tool_call(run_events.as_ref(), &tool_name, &event_input);
-
-                // Phase 10c-2: compute fingerprint and check window BEFORE executing.
-                let fingerprint = tool_call_fingerprint(&tool_name, &event_input);
-                let same_count_in_window = recent_call_fingerprints
+                let mut event_input = input.args.clone();
+                let mut fingerprint = tool_call_fingerprint(&tool_name, &event_input);
+                let mut same_count_in_window = recent_call_fingerprints
                     .iter()
                     .rev()
                     .take(REPEAT_WINDOW)
                     .filter(|fp| **fp == fingerprint)
                     .count();
+                if let Some(rewritten) = maybe_rewrite_repeated_mcp_resource_list_call(
+                    &tool_name,
+                    &event_input,
+                    same_count_in_window,
+                    &observations,
+                    &available_tools,
+                ) {
+                    tool_name = rewritten.tool_name;
+                    input = rewritten.input;
+                    event_input = input.args.clone();
+                    fingerprint = tool_call_fingerprint(&tool_name, &event_input);
+                    same_count_in_window = recent_call_fingerprints
+                        .iter()
+                        .rev()
+                        .take(REPEAT_WINDOW)
+                        .filter(|fp| **fp == fingerprint)
+                        .count();
+                }
+                emit_tool_call(run_events.as_ref(), &tool_name, &event_input);
+
+                // Phase 10c-2: compute fingerprint and check window BEFORE executing.
                 recent_call_fingerprints.push(fingerprint.clone());
                 // Trim to keep memory bounded over long runs (only the last
                 // REPEAT_WINDOW are ever read).
                 trim_recent_call_fingerprints(&mut recent_call_fingerprints, REPEAT_WINDOW);
 
-                let repeat_threshold = repeat_short_circuit_threshold(&tool_name);
+                let repeat_threshold = repeat_short_circuit_threshold(&tool_name, &event_input);
                 if same_count_in_window >= repeat_threshold {
                     let stuck_msg = repeat_short_circuit_message(
                         &tool_name,
+                        &event_input,
                         same_count_in_window + 1,
                         REPEAT_WINDOW,
                     );
@@ -1150,16 +1171,91 @@ fn trim_recent_call_fingerprints(fingerprints: &mut Vec<String>, keep: usize) {
     }
 }
 
-fn repeat_short_circuit_threshold(tool_name: &str) -> usize {
-    if is_read_only_repeat_tool(tool_name) {
+fn maybe_rewrite_repeated_mcp_resource_list_call(
+    tool_name: &str,
+    event_input: &BTreeMap<String, String>,
+    same_count_in_window: usize,
+    observations: &[Observation],
+    available_tools: &[String],
+) -> Option<ToolCallRequest> {
+    if tool_name != "mcp_list_resources"
+        || same_count_in_window == 0
+        || !available_tools
+            .iter()
+            .any(|tool| tool == "mcp_read_resource")
+    {
+        return None;
+    }
+    let uri = latest_mcp_resource_uri_from_observations(observations)?;
+    let server = event_input
+        .get("server")
+        .cloned()
+        .or_else(|| latest_mcp_resource_server_from_observations(observations))?;
+    Some(ToolCallRequest {
+        tool_name: "mcp_read_resource".to_string(),
+        input: crate::tools::types::ToolInput::new()
+            .with_arg("server", server)
+            .with_arg("uri", uri),
+    })
+}
+
+fn latest_mcp_resource_uri_from_observations(observations: &[Observation]) -> Option<String> {
+    observations
+        .iter()
+        .rev()
+        .filter(|observation| {
+            observation.tool_name == "mcp_list_resources" && !observation.is_failure()
+        })
+        .flat_map(|observation| observation.summary.lines())
+        .find_map(|line| {
+            let uri = line.trim().strip_prefix("uri:")?.trim();
+            if uri.is_empty() {
+                None
+            } else {
+                Some(uri.to_string())
+            }
+        })
+}
+
+fn latest_mcp_resource_server_from_observations(observations: &[Observation]) -> Option<String> {
+    observations
+        .iter()
+        .rev()
+        .filter(|observation| {
+            observation.tool_name == "mcp_list_resources" && !observation.is_failure()
+        })
+        .flat_map(|observation| observation.summary.lines())
+        .find_map(|line| {
+            let trimmed = line.trim();
+            let rest = trimmed.strip_prefix("- ")?;
+            let (server, _) = rest.split_once(" [")?;
+            let server = server.trim();
+            if server.is_empty() {
+                None
+            } else {
+                Some(server.to_string())
+            }
+        })
+}
+
+fn repeat_short_circuit_threshold(
+    tool_name: &str,
+    event_input: &BTreeMap<String, String>,
+) -> usize {
+    if is_read_only_repeat_tool(tool_name, event_input) {
         2
     } else {
         1
     }
 }
 
-fn repeat_short_circuit_message(tool_name: &str, count: usize, window: usize) -> String {
-    if is_read_only_repeat_tool(tool_name) {
+fn repeat_short_circuit_message(
+    tool_name: &str,
+    event_input: &BTreeMap<String, String>,
+    count: usize,
+    window: usize,
+) -> String {
+    if is_read_only_repeat_tool(tool_name, event_input) {
         format!(
             "repeated identical tool call detected: '{tool_name}' invoked {count} times in last {window} steps with same args. Break out of stuck loop and try a different path, arguments, or strategy."
         )
@@ -1170,7 +1266,12 @@ fn repeat_short_circuit_message(tool_name: &str, count: usize, window: usize) ->
     }
 }
 
-fn is_read_only_repeat_tool(tool_name: &str) -> bool {
+fn is_read_only_repeat_tool(tool_name: &str, event_input: &BTreeMap<String, String>) -> bool {
+    if tool_name == "mcp_call" {
+        return event_input
+            .get("tool")
+            .is_some_and(|remote_tool| mcp_remote_tool_is_read_only(remote_tool));
+    }
     tool_metadata_for_name(tool_name).read_only
 }
 
@@ -3682,15 +3783,68 @@ mod cr1_regression_test {
 
     #[test]
     fn repeat_detection_classifies_known_read_only_and_unknown_tools() {
-        assert_eq!(super::repeat_short_circuit_threshold("list_files"), 2);
-        assert_eq!(super::repeat_short_circuit_threshold("read_file"), 2);
-        assert_eq!(super::repeat_short_circuit_threshold("todo_add"), 1);
-        assert_eq!(super::repeat_short_circuit_threshold("write_file"), 1);
+        let empty = BTreeMap::new();
         assert_eq!(
-            super::repeat_short_circuit_threshold("mcp__stdio-self__read_file"),
+            super::repeat_short_circuit_threshold("list_files", &empty),
             2
         );
-        assert_eq!(super::repeat_short_circuit_threshold("mcp__fake__write"), 1);
+        assert_eq!(
+            super::repeat_short_circuit_threshold("read_file", &empty),
+            2
+        );
+        assert_eq!(super::repeat_short_circuit_threshold("todo_add", &empty), 1);
+        assert_eq!(
+            super::repeat_short_circuit_threshold("write_file", &empty),
+            1
+        );
+        assert_eq!(
+            super::repeat_short_circuit_threshold("mcp__stdio-self__read_file", &empty),
+            2
+        );
+        assert_eq!(
+            super::repeat_short_circuit_threshold("mcp__fake__write", &empty),
+            1
+        );
+        assert_eq!(
+            super::repeat_short_circuit_threshold(
+                "mcp_call",
+                &BTreeMap::from([("tool".to_string(), "read_file".to_string())])
+            ),
+            2
+        );
+        assert_eq!(
+            super::repeat_short_circuit_threshold(
+                "mcp_call",
+                &BTreeMap::from([("tool".to_string(), "write_file".to_string())])
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn repeated_mcp_resource_list_rewrites_to_read_resource_when_uri_is_known() {
+        let observations = vec![crate::model::protocol::Observation::ok(
+            "mcp_list_resources",
+            "MCP remote resources:\n- stdio-self [stdio]: 1 resource(s)\n  - workspace (application/json): Current workspace\n    uri: file:///tmp/deepseek-workspace\n",
+        )];
+        let rewritten = super::maybe_rewrite_repeated_mcp_resource_list_call(
+            "mcp_list_resources",
+            &BTreeMap::from([("server".to_string(), "stdio-self".to_string())]),
+            1,
+            &observations,
+            &[
+                "mcp_list_resources".to_string(),
+                "mcp_read_resource".to_string(),
+            ],
+        )
+        .expect("repeated resource listing should be rewritten");
+
+        assert_eq!(rewritten.tool_name, "mcp_read_resource");
+        assert_eq!(rewritten.input.get("server"), Some("stdio-self"));
+        assert_eq!(
+            rewritten.input.get("uri"),
+            Some("file:///tmp/deepseek-workspace")
+        );
     }
 
     struct ScriptedActionsClient {

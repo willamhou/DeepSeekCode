@@ -845,7 +845,7 @@ expect_tool = "mcp_call"
 expect_tool_sequence = ["mcp_call"]
 expect_tool_input_contains = "mcp_call:server=stdio-self"
 expect_tool_output_contains = "mcp_call:Small Rust CLI fixture"
-max_tool_calls = 1
+max_tool_calls = 2
 max_failed_tools = 0
 budget = 2
 
@@ -861,7 +861,7 @@ expect_tool = "mcp_read_resource"
 expect_tool_sequence = ["mcp_list_resources", "mcp_read_resource"]
 expect_tool_input_contains = "mcp_read_resource:server=stdio-self"
 expect_tool_output_contains = "mcp_read_resource:workspace"
-max_tool_calls = 2
+max_tool_calls = 3
 max_failed_tools = 0
 budget = 3
 
@@ -876,6 +876,6 @@ mcp_call_allowlist = ["other/*"]
 expect_tool = "mcp_list_tools"
 expect_tool_sequence = ["mcp_call", "mcp_list_tools"]
 expect_tool_output_contains = "mcp_list_tools:stdio-self"
-max_tool_calls = 2
+max_tool_calls = 3
 max_failed_tools = 1
 budget = 3

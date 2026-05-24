@@ -981,7 +981,7 @@ fn live_run_command(
                 outcome,
             } = execution;
             let timestamp_secs = unix_now_secs()?;
-            let dogfood_args = DogfoodRunArgs {
+            let mut dogfood_args = DogfoodRunArgs {
                 task: task.clone(),
                 from_benchmark: Some(case.name.clone()),
                 benchmark_manifest: Some(manifest_path.display().to_string()),
@@ -995,17 +995,20 @@ fn live_run_command(
                 notes: notes.clone(),
             };
             let mut record = match outcome {
-                BenchmarkDogfoodCaseOutcome::Passed(result) => DogfoodRecord::from_result(
-                    timestamp_secs,
-                    duration_ms,
-                    config.model.model.clone(),
-                    model_transport,
-                    workdir.clone(),
-                    budget,
-                    &dogfood_args,
-                    false,
-                    &result,
-                ),
+                BenchmarkDogfoodCaseOutcome::Passed(result) => {
+                    dogfood_args.outcome = Some(DogfoodOutcome::Success);
+                    DogfoodRecord::from_result(
+                        timestamp_secs,
+                        duration_ms,
+                        config.model.model.clone(),
+                        model_transport,
+                        workdir.clone(),
+                        budget,
+                        &dogfood_args,
+                        false,
+                        &result,
+                    )
+                }
                 BenchmarkDogfoodCaseOutcome::EvaluationFailed { result, failures } => {
                     let message = format!("benchmark assertions failed: {}", failures.join("; "));
                     run_error = Some(message.clone());
@@ -7130,6 +7133,58 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("dispatch_subagent:failed"));
+    }
+
+    #[test]
+    fn from_result_honors_explicit_success_outcome_with_failed_tool() {
+        let result = RunResult {
+            final_message: "policy blocker inspected".to_string(),
+            tool_events: vec![
+                ToolEvent {
+                    tool_name: "mcp_call".to_string(),
+                    input: BTreeMap::new(),
+                    output: "mcp tool call blocked by policy allowlist".to_string(),
+                    status: ObservationStatus::Failed,
+                },
+                ToolEvent {
+                    tool_name: "mcp_list_tools".to_string(),
+                    input: BTreeMap::new(),
+                    output: "stdio-self/read_file".to_string(),
+                    status: ObservationStatus::Ok,
+                },
+            ],
+            usage: TokenUsage::default(),
+            prompt_layers: Vec::new(),
+        };
+        let args = DogfoodRunArgs {
+            task: "Use generic mcp_call; if denied, inspect configured MCP tools".to_string(),
+            from_benchmark: Some("fixture-mcp-allowlist-deny-recovery".to_string()),
+            benchmark_manifest: Some(".dscode/benchmarks.txt".to_string()),
+            skill: None,
+            budget: Some(3),
+            workdir: None,
+            isolate_workdir: false,
+            outcome: Some(DogfoodOutcome::Success),
+            manual_intervention: false,
+            benchmark_gate: false,
+            notes: None,
+        };
+
+        let record = DogfoodRecord::from_result(
+            1,
+            10,
+            "deepseek-v4-pro".to_string(),
+            MODEL_TRANSPORT_ONLINE,
+            ".".to_string(),
+            3,
+            &args,
+            false,
+            &result,
+        );
+
+        assert!(matches!(record.outcome, DogfoodOutcome::Success));
+        assert_eq!(record.failed_tool_calls, 1);
+        assert_eq!(record.tool_trace, "mcp_call -> mcp_list_tools");
     }
 
     #[test]

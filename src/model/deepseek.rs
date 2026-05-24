@@ -1698,14 +1698,14 @@ fn parse_anthropic_translation_response(raw: &str) -> AppResult<String> {
 
 fn build_openai_tool_system_prompt(base: &str) -> String {
     format!(
-        "{}\nUse the provided tools when a tool is needed. If no tool is needed, reply with a short plain-text summary.",
+        "{}\nUse the provided tools when a tool is needed. If no tool is needed, reply with a short plain-text summary.\nFor single-purpose MCP tasks, call the requested MCP tool directly; do not start with todo_write. If the task asks for a dynamic MCP tool, use the matching `mcp__server__tool` tool. If the task explicitly asks for generic `mcp_call`, call `mcp_call` directly with the named server and remote tool. Do not call `mcp_list_tools` first unless the server, remote tool, or argument schema is unknown, or you are recovering from an MCP policy denial. For MCP resource tasks, call `mcp_list_resources` once, then call `mcp_read_resource` with the listed URI instead of listing again.",
         base
     )
 }
 
 fn build_anthropic_tool_system_prompt(base: &str) -> String {
     format!(
-        "{}\nUse the provided tools when a tool is needed. If no tool is needed, reply with a short plain-text summary.",
+        "{}\nUse the provided tools when a tool is needed. If no tool is needed, reply with a short plain-text summary.\nFor single-purpose MCP tasks, call the requested MCP tool directly; do not start with todo_write. If the task asks for a dynamic MCP tool, use the matching `mcp__server__tool` tool. If the task explicitly asks for generic `mcp_call`, call `mcp_call` directly with the named server and remote tool. Do not call `mcp_list_tools` first unless the server, remote tool, or argument schema is unknown, or you are recovering from an MCP policy denial. For MCP resource tasks, call `mcp_list_resources` once, then call `mcp_read_resource` with the listed URI instead of listing again.",
         base
     )
 }
@@ -3986,9 +3986,12 @@ fn dynamic_mcp_tool_spec(name: &str) -> Option<ToolSpec> {
             {
                 return Some(ToolSpec {
                     name: Cow::Owned(name.to_string()),
-                    description: Cow::Owned(schema.description.unwrap_or_else(|| {
-                        format!("Call the configured MCP remote tool `{name}` directly.")
-                    })),
+                    description: Cow::Owned(format!(
+                        "Dynamic MCP tool `{name}`. Call this tool directly when the task asks for a dynamic MCP tool; do not use mcp_call for this target. {}",
+                        schema.description.unwrap_or_else(|| {
+                            format!("Call the configured MCP remote tool `{name}` directly.")
+                        })
+                    )),
                     properties_json: Cow::Owned(properties_json),
                     required_json: Cow::Owned(required_json),
                     schema_transform: ToolSchemaTransform::default(),
@@ -3999,7 +4002,7 @@ fn dynamic_mcp_tool_spec(name: &str) -> Option<ToolSpec> {
     Some(ToolSpec {
         name: Cow::Owned(name.to_string()),
         description: Cow::Owned(format!(
-            "Call the configured MCP remote tool `{name}` directly. Use mcp_list_tools first if you need its input schema."
+            "Call the configured MCP remote tool `{name}` directly. Prefer this dynamic tool when the task asks for a dynamic MCP tool. Use mcp_list_tools only when the input schema is unknown."
         )),
         properties_json: Cow::Borrowed(
             r#"{"arguments":{"type":"string","description":"JSON object string containing remote tool arguments, for example {\"path\":\"README.md\"}. Use {} when the remote tool takes no arguments."}}"#,
@@ -4707,13 +4710,13 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
     },
     StaticToolSpec {
         name: "mcp_list_tools",
-        description: "List tools exposed by configured stdio, HTTP, or SSE MCP servers. Use before mcp_call or dynamic mcp__server__tool calls when you need the remote tool schema.",
+        description: "List tools exposed by configured stdio, HTTP, or SSE MCP servers. Use when the server, remote tool, or argument schema is unknown, or after an MCP policy denial. If the task explicitly asks for generic mcp_call and names the server and tool, call mcp_call directly instead of listing first.",
         properties_json: r#"{"server":{"type":"string","description":"Optional MCP server name. Omit to list enabled stdio, HTTP, or SSE MCP servers."}}"#,
         required_json: r#"[]"#,
     },
     StaticToolSpec {
         name: "mcp_call",
-        description: "Call a configured stdio, HTTP, or SSE MCP server tool with JSON object arguments.",
+        description: "Call a configured stdio, HTTP, or SSE MCP server tool with JSON object arguments. Use directly when the task explicitly asks for generic mcp_call and names a server/tool target such as stdio-self/read_file; no prior mcp_list_tools call is needed when arguments are known.",
         properties_json: r#"{"server":{"type":"string","description":"MCP server name from the project or user MCP config."},"tool":{"type":"string","description":"Remote MCP tool name to call."},"arguments":{"type":"string","description":"JSON object string containing tool arguments, for example {\"path\":\"README.md\"}."}}"#,
         required_json: r#"["server","tool"]"#,
     },
@@ -4731,13 +4734,13 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
     },
     StaticToolSpec {
         name: "mcp_list_resources",
-        description: "List read-only resources exposed by configured stdio, HTTP, or SSE MCP servers.",
+        description: "List read-only resources exposed by configured stdio, HTTP, or SSE MCP servers. For resource read tasks, call this once, then call mcp_read_resource with the listed URI.",
         properties_json: r#"{"server":{"type":"string","description":"Optional MCP server name. Omit to list enabled stdio, HTTP, or SSE MCP servers."}}"#,
         required_json: r#"[]"#,
     },
     StaticToolSpec {
         name: "mcp_read_resource",
-        description: "Read a resource from a configured stdio, HTTP, or SSE MCP server by URI.",
+        description: "Read a resource from a configured stdio, HTTP, or SSE MCP server by URI. Use the URI returned by mcp_list_resources; do not list resources again when a URI is already visible.",
         properties_json: r#"{"server":{"type":"string","description":"MCP server name from the project or user MCP config."},"uri":{"type":"string","description":"Resource URI returned by mcp_list_resources."}}"#,
         required_json: r#"["server","uri"]"#,
     },
@@ -5947,7 +5950,8 @@ fn is_supported_quote_delimiter(bytes: &[u8], index: usize, byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        anthropic_tool_fields, api_flavor, build_anthropic_tools, build_openai_tools,
+        anthropic_tool_fields, api_flavor, build_anthropic_tool_system_prompt,
+        build_anthropic_tools, build_openai_tool_system_prompt, build_openai_tools,
         build_openai_tools_with_schema_mode, child_files_from_summary, derive_edit_request,
         derive_edit_requests, derive_github_pr_context_request, derive_search_query,
         last_patched_file_path, next_pending_edit_request, openai_tool_fields,
@@ -6825,6 +6829,8 @@ mod tests {
         assert!(openai.contains("\"prompt\""));
         assert!(openai.contains("\"uri\""));
         assert!(openai.contains("stdio, HTTP, or SSE MCP servers"));
+        assert!(openai.contains("call mcp_call directly"));
+        assert!(openai.contains("no prior mcp_list_tools call is needed"));
 
         let anthropic = build_anthropic_tools(&[
             "mcp_list_tools".to_string(),
@@ -6844,6 +6850,18 @@ mod tests {
         assert!(anthropic.contains("\"name\":\"mcp_list_resource_templates\""));
         assert!(anthropic.contains("\"input_schema\""));
         assert!(anthropic.contains("stdio, HTTP, or SSE MCP server tool"));
+    }
+
+    #[test]
+    fn online_tool_system_prompt_routes_known_mcp_call_directly() {
+        let openai = build_openai_tool_system_prompt("base");
+        let anthropic = build_anthropic_tool_system_prompt("base");
+
+        for prompt in [openai, anthropic] {
+            assert!(prompt.contains("call `mcp_call` directly"));
+            assert!(prompt.contains("Do not call `mcp_list_tools` first"));
+            assert!(prompt.contains("recovering from an MCP policy denial"));
+        }
     }
 
     #[test]
@@ -6868,6 +6886,8 @@ mod tests {
         let tools = build_openai_tools(&["mcp__schema__read_file".to_string()]);
 
         assert!(tools.contains("\"name\":\"mcp__schema__read_file\""));
+        assert!(tools.contains("Dynamic MCP tool"));
+        assert!(tools.contains("do not use mcp_call for this target"));
         assert!(tools.contains("Read a file through MCP"));
         assert!(tools.contains("\"path\""));
         assert!(tools.contains("\"required\":[\"path\"]"));
