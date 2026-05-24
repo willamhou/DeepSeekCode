@@ -25,18 +25,20 @@ hardening gaps rather than architecture blockers:
 
 - Cache-first behavior is observable but not yet policy-complete. Prompt-layer
   hashes, token estimates, and cache hit/miss usage are recorded, but
-  cache-safe compaction thresholds, prefix-stability regression gates, and
-  per-layer trend analysis still need product hardening.
+  cache-safe compaction thresholds and automated prefix-stability regression
+  gates still need product hardening. Per-layer trend analysis is now visible in
+  `deepseek stats` through token deltas, hash-change counts, and
+  cache-stable-layer hash-change totals.
 - Tool-call repair has deterministic coverage, but it needs more live
   DeepSeek-backed examples across real gateways, dynamic MCP schemas, and
   non-recoverable malformed-call recovery paths before treating it as mature.
 - Model presets and session budgets work, but auto-escalation remains an
   initial heuristic. It still needs dogfood calibration against real failure
   modes and clearer user override/raise-budget flows.
-- Parallel dispatch is deliberately narrow. Only the initial built-in read
-  tools opt in; read-only MCP/resource tools, runtime queries, and performance
-  telemetry should be added incrementally after each surface proves side-effect
-  free.
+- Parallel dispatch is deliberately conservative. Built-in local read tools and
+  common runtime query tools now cover the initial and extended safe set;
+  read-only MCP/resource tools and performance telemetry should be added
+  incrementally after each surface proves side-effect free.
 - Evidence surfaces exist locally, but the repair/cache command and
   prompt-layer deltas should become recurring release evidence alongside live
   model-backed dogfood runs.
@@ -328,7 +330,9 @@ Minimum `stats` output:
 - prompt cache hit/miss tokens and hit rate;
 - input/output/total estimated cost;
 - current preset/model split;
-- repair count and repeated-tool suppressions once those events exist.
+- repair count and repeated-tool suppressions once those events exist;
+- per-layer prompt trend output for token deltas, hash changes, and
+  cache-stable-layer hash-change totals.
 
 Minimum `diff` output:
 
@@ -386,7 +390,9 @@ TUI-started agent turns, and runtime daemon task turns persist
 `/cache inspect` surfaces active-thread prompt-layer snapshot counts, latest
 digest, latest token estimate, and layer names when those events exist, and
 `deepseek stats` aggregates cache, cost, model split, repair, suppression, and
-prompt-layer evidence.
+prompt-layer evidence. Stats also reports per-layer trend lines/JSON for
+snapshot count, first/latest/max estimated tokens, token delta, hash-change
+count, latest hash, and cache-stable-layer hash-change totals.
 
 Deliver:
 
@@ -394,7 +400,8 @@ Deliver:
 - runtime usage linkage to prompt-layer metadata for exec, TUI, and daemon task
   turns; landed;
 - `/cache inspect` enhancement; landed;
-- `deepseek stats` MVP; landed.
+- `deepseek stats` MVP; landed;
+- per-layer prompt trend output and cache-stable hash-change totals; landed.
 
 Reason: it turns existing cache telemetry into actionable cache-first behavior.
 
@@ -434,16 +441,21 @@ Status on 2026-05-24: initial parallel-safe read dispatch landed. The tool
 registry now exposes conservative `read_only` and `parallel_safe` metadata.
 The agent loop splits same-turn batches into contiguous safe chunks and runs
 only opt-in read tools concurrently when hooks and permission prompts are not in
-play. The initial parallel-safe set is `list_files`, `list_dir`, `read_file`,
-`search_text`, `git_status`, and `git_diff`. Results are written back in the
-original model-call order, mixed read/write batches fall back to serial
-execution at write barriers, `DSCODE_TOOL_DISPATCH=serial` disables the path,
-and `DSCODE_PARALLEL_MAX` caps concurrency.
+play. The parallel-safe local read set is `list_files`, `list_dir`,
+`read_file`, `retrieve_tool_result`, `search_text`, `grep_files`,
+`file_search`, `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame`,
+`project_map`, and `validate_data`; common runtime query tools include
+`task_list`, `task_read`, `agent_list`, `agent_result`, `automation_list`,
+`automation_read`, `pr_attempt_list`, and `pr_attempt_read`. Results are written
+back in the original model-call order, mixed read/write batches fall back to
+serial execution at write barriers, `DSCODE_TOOL_DISPATCH=serial` disables the
+path, and `DSCODE_PARALLEL_MAX` caps concurrency.
 
 Deliver:
 
 - tool metadata; landed for registry read-only and parallel-safe flags;
-- same-turn read-only parallel chunks; landed for the initial opt-in tool set;
+- same-turn read-only parallel chunks; landed for the initial and extended local
+  opt-in tool set;
 - output-order preservation; landed for observations and tool events;
 - serial fallback; landed for writes, shell, approval/user-input, hooks, repeats,
   side-effect MCP calls, and `DSCODE_TOOL_DISPATCH=serial`;

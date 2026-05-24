@@ -604,6 +604,7 @@ impl AgentLoop {
                     &tool_calls[tool_call_index..],
                     &registry,
                     &policy,
+                    &self.config,
                     self.config.hooks.enabled,
                     &available_tools,
                     primary_file.as_deref(),
@@ -1228,6 +1229,7 @@ fn maybe_execute_parallel_safe_chunk<W: std::io::Write>(
     calls: &[ToolCallRequest],
     registry: &crate::tools::registry::ToolRegistry,
     policy: &ExecutionPolicy,
+    config: &crate::config::types::AppConfig,
     hooks_enabled: bool,
     available_tools: &[String],
     primary_file: Option<&str>,
@@ -1290,7 +1292,7 @@ fn maybe_execute_parallel_safe_chunk<W: std::io::Write>(
         emit_tool_call(run_events, &call.tool_name, &call.event_input);
     }
 
-    let outcomes = execute_prepared_parallel_safe_calls(prepared, policy);
+    let outcomes = execute_prepared_parallel_safe_calls(prepared, policy, config);
     for (call, result) in outcomes {
         check_cancelled(cancel_check)?;
         match result {
@@ -1386,6 +1388,7 @@ fn maybe_execute_parallel_safe_chunk<W: std::io::Write>(
 fn execute_prepared_parallel_safe_calls(
     calls: Vec<PreparedParallelToolCall>,
     policy: &ExecutionPolicy,
+    config: &crate::config::types::AppConfig,
 ) -> Vec<(
     PreparedParallelToolCall,
     Result<crate::tools::types::ToolOutput, String>,
@@ -1395,12 +1398,14 @@ fn execute_prepared_parallel_safe_calls(
         for call in calls {
             let fallback = call.clone();
             let worker_policy = policy.clone();
+            let worker_config = config.clone();
             let handle = scope.spawn(move || {
                 parallel_test_probe(&call.input);
                 let result = crate::tools::registry::execute_parallel_safe_tool(
                     &call.tool_name,
                     call.input.clone(),
                     &worker_policy,
+                    &worker_config,
                 )
                 .map_err(|error| error.to_string());
                 (call, result)
@@ -3754,6 +3759,156 @@ mod cr1_regression_test {
         assert!(
             max_parallel_test_probe(probe) >= 2,
             "expected at least two read-only tools in flight, max active was {}",
+            max_parallel_test_probe(probe)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_with_client_parallelizes_extended_local_read_tool_chunk() {
+        let _env = EnvRestore::set(&[
+            ("DSCODE_TOOL_DISPATCH", "auto"),
+            ("DSCODE_PARALLEL_MAX", "4"),
+        ]);
+        let probe = "parallel_extended_read_chunk";
+        reset_parallel_test_probe(probe);
+        let root = unique_tmp("parallel_extended_read_chunk");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn add() {}\n").unwrap();
+        let root_arg = root.display().to_string();
+
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("inspect project map and file names".to_string(), None);
+        let client = ScriptedActionsClient {
+            captured_observations: RefCell::new(Vec::new()),
+            actions: vec![
+                ModelAction::CallTools(vec![
+                    ToolCallRequest {
+                        tool_name: "project_map".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("path", &root_arg)
+                            .with_arg("_parallel_test_probe", probe)
+                            .with_arg("_parallel_test_delay_ms", "80"),
+                    },
+                    ToolCallRequest {
+                        tool_name: "file_search".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("path", &root_arg)
+                            .with_arg("query", "lib")
+                            .with_arg("_parallel_test_probe", probe)
+                            .with_arg("_parallel_test_delay_ms", "80"),
+                    },
+                ]),
+                ModelAction::Finish,
+            ],
+            calls: RefCell::new(0),
+        };
+
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 2,
+                    emit_progress: false,
+                    persist_session: false,
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(result.tool_events.len(), 2);
+        assert_eq!(result.tool_events[0].tool_name, "project_map");
+        assert_eq!(result.tool_events[1].tool_name, "file_search");
+        assert!(
+            max_parallel_test_probe(probe) >= 2,
+            "expected extended read-only tools in flight, max active was {}",
+            max_parallel_test_probe(probe)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_with_client_parallelizes_runtime_query_tool_chunk() {
+        let _env = EnvRestore::set(&[
+            ("DSCODE_TOOL_DISPATCH", "auto"),
+            ("DSCODE_PARALLEL_MAX", "4"),
+        ]);
+        let probe = "parallel_runtime_query_chunk";
+        reset_parallel_test_probe(probe);
+        let root = unique_tmp("parallel_runtime_query_chunk");
+        let mut cfg = crate::config::types::AppConfig::default();
+        cfg.workspace.config_dir = root.join(".dscode").display().to_string();
+        let store = crate::core::runtime::RuntimeStore::new(root.join(".dscode/runtime"));
+        let session = store
+            .create_session("Runtime".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Runtime".to_string(),
+                ".".to_string(),
+                "deepseek-v4-flash".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let task = store
+            .create_task(
+                Some(&session.id),
+                Some(&thread.id),
+                None,
+                "agent".to_string(),
+                "pending".to_string(),
+                "inspect runtime".to_string(),
+            )
+            .unwrap();
+
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("inspect runtime records".to_string(), None);
+        let client = ScriptedActionsClient {
+            captured_observations: RefCell::new(Vec::new()),
+            actions: vec![
+                ModelAction::CallTools(vec![
+                    ToolCallRequest {
+                        tool_name: "task_list".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("thread_id", &thread.id)
+                            .with_arg("_parallel_test_probe", probe)
+                            .with_arg("_parallel_test_delay_ms", "80"),
+                    },
+                    ToolCallRequest {
+                        tool_name: "task_read".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("id", &task.id)
+                            .with_arg("_parallel_test_probe", probe)
+                            .with_arg("_parallel_test_delay_ms", "80"),
+                    },
+                ]),
+                ModelAction::Finish,
+            ],
+            calls: RefCell::new(0),
+        };
+
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 2,
+                    emit_progress: false,
+                    persist_session: false,
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(result.tool_events.len(), 2);
+        assert_eq!(result.tool_events[0].tool_name, "task_list");
+        assert_eq!(result.tool_events[1].tool_name, "task_read");
+        assert!(
+            max_parallel_test_probe(probe) >= 2,
+            "expected runtime query tools in flight, max active was {}",
             max_parallel_test_probe(probe)
         );
         let _ = std::fs::remove_dir_all(root);

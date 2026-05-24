@@ -32,6 +32,20 @@ struct StatsSummary {
     prompt_layer_snapshot_count: u64,
     latest_prompt_layer_estimated_tokens: u64,
     latest_prompt_layer_digest: Option<String>,
+    prompt_layer_cache_stable_hash_changes: u64,
+    prompt_layer_trends: BTreeMap<String, PromptLayerTrend>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PromptLayerTrend {
+    cache_stable: bool,
+    snapshot_count: u64,
+    first_estimated_tokens: u64,
+    latest_estimated_tokens: u64,
+    max_estimated_tokens: u64,
+    hash_changes: u64,
+    previous_hash: Option<String>,
+    latest_hash: Option<String>,
 }
 
 pub fn run(args: StatsArgs) -> AppResult<()> {
@@ -188,6 +202,64 @@ fn accumulate_prompt_layer_events(summary: &mut StatsSummary, events: &[RuntimeE
                 summary.latest_prompt_layer_estimated_tokens = tokens;
             }
         }
+        for snapshot in snapshots {
+            accumulate_prompt_layer_trends(summary, snapshot);
+        }
+    }
+}
+
+fn accumulate_prompt_layer_trends(summary: &mut StatsSummary, snapshot: &JsonValue) {
+    let Some(root) = json_as_object(snapshot) else {
+        return;
+    };
+    let Some(layers) = root.get("layers").and_then(json_as_array) else {
+        return;
+    };
+    for layer in layers {
+        let Some(layer) = json_as_object(layer) else {
+            continue;
+        };
+        let Some(name) = layer.get("name").and_then(json_as_string) else {
+            continue;
+        };
+        let tokens = layer
+            .get("estimated_tokens")
+            .and_then(json_u64)
+            .unwrap_or_default();
+        let cache_stable = layer
+            .get("cache_stable")
+            .and_then(json_bool)
+            .unwrap_or(false);
+        let hash = layer
+            .get("text_sha256")
+            .and_then(json_as_string)
+            .map(str::to_string);
+        let trend = summary
+            .prompt_layer_trends
+            .entry(name.to_string())
+            .or_default();
+        if trend.snapshot_count == 0 {
+            trend.first_estimated_tokens = tokens;
+        }
+        trend.snapshot_count = trend.snapshot_count.saturating_add(1);
+        trend.latest_estimated_tokens = tokens;
+        trend.max_estimated_tokens = trend.max_estimated_tokens.max(tokens);
+        trend.cache_stable = cache_stable;
+
+        if let (Some(previous), Some(current)) = (trend.previous_hash.as_deref(), hash.as_deref()) {
+            if previous != current {
+                trend.hash_changes = trend.hash_changes.saturating_add(1);
+                if cache_stable {
+                    summary.prompt_layer_cache_stable_hash_changes = summary
+                        .prompt_layer_cache_stable_hash_changes
+                        .saturating_add(1);
+                }
+            }
+        }
+        if hash.is_some() {
+            trend.previous_hash = hash.clone();
+            trend.latest_hash = hash;
+        }
     }
 }
 
@@ -250,6 +322,25 @@ fn render_stats_summary(summary: &StatsSummary) -> String {
     ));
     if let Some(digest) = summary.latest_prompt_layer_digest.as_deref() {
         out.push_str(&format!("latest_prompt_layer_digest: {digest}\n"));
+    }
+    out.push_str(&format!(
+        "prompt_layer_cache_stable_hash_changes: {}\n",
+        summary.prompt_layer_cache_stable_hash_changes
+    ));
+    if !summary.prompt_layer_trends.is_empty() {
+        out.push_str("prompt_layer_trends:\n");
+        for (name, trend) in &summary.prompt_layer_trends {
+            out.push_str(&format!(
+                "- {name}: snapshots={} tokens={}->{} delta={} max={} hash_changes={} cache_stable={}\n",
+                trend.snapshot_count,
+                trend.first_estimated_tokens,
+                trend.latest_estimated_tokens,
+                signed_token_delta(trend),
+                trend.max_estimated_tokens,
+                trend.hash_changes,
+                trend.cache_stable
+            ));
+        }
     }
     if !summary.model_counts.is_empty() {
         out.push_str("models:\n");
@@ -344,6 +435,14 @@ fn stats_summary_to_json(summary: &StatsSummary) -> JsonValue {
                     .unwrap_or(JsonValue::Null),
             ),
             (
+                "prompt_layer_cache_stable_hash_changes".to_string(),
+                JsonValue::Number(summary.prompt_layer_cache_stable_hash_changes.to_string()),
+            ),
+            (
+                "prompt_layer_trends".to_string(),
+                prompt_layer_trends_to_json(&summary.prompt_layer_trends),
+            ),
+            (
                 "models".to_string(),
                 JsonValue::Object(
                     summary
@@ -359,6 +458,63 @@ fn stats_summary_to_json(summary: &StatsSummary) -> JsonValue {
     )
 }
 
+fn prompt_layer_trends_to_json(trends: &BTreeMap<String, PromptLayerTrend>) -> JsonValue {
+    JsonValue::Array(
+        trends
+            .iter()
+            .map(|(name, trend)| {
+                JsonValue::Object(
+                    [
+                        ("name".to_string(), JsonValue::String(name.clone())),
+                        (
+                            "cache_stable".to_string(),
+                            JsonValue::Bool(trend.cache_stable),
+                        ),
+                        (
+                            "snapshot_count".to_string(),
+                            JsonValue::Number(trend.snapshot_count.to_string()),
+                        ),
+                        (
+                            "first_estimated_tokens".to_string(),
+                            JsonValue::Number(trend.first_estimated_tokens.to_string()),
+                        ),
+                        (
+                            "latest_estimated_tokens".to_string(),
+                            JsonValue::Number(trend.latest_estimated_tokens.to_string()),
+                        ),
+                        (
+                            "max_estimated_tokens".to_string(),
+                            JsonValue::Number(trend.max_estimated_tokens.to_string()),
+                        ),
+                        (
+                            "token_delta".to_string(),
+                            JsonValue::Number(signed_token_delta(trend).to_string()),
+                        ),
+                        (
+                            "hash_changes".to_string(),
+                            JsonValue::Number(trend.hash_changes.to_string()),
+                        ),
+                        (
+                            "latest_hash".to_string(),
+                            trend
+                                .latest_hash
+                                .as_ref()
+                                .map(|value| JsonValue::String(value.clone()))
+                                .unwrap_or(JsonValue::Null),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn signed_token_delta(trend: &PromptLayerTrend) -> i128 {
+    i128::from(trend.latest_estimated_tokens) - i128::from(trend.first_estimated_tokens)
+}
+
 fn basis_points_percent(value: u64) -> String {
     format!("{}.{:02}%", value / 100, value % 100)
 }
@@ -370,6 +526,13 @@ fn microusd_decimal(value: u64) -> String {
 fn json_u64(value: &JsonValue) -> Option<u64> {
     match value {
         JsonValue::Number(raw) => raw.parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn json_bool(value: &JsonValue) -> Option<bool> {
+    match value {
+        JsonValue::Bool(value) => Some(*value),
         _ => None,
     }
 }
@@ -433,10 +596,84 @@ mod tests {
                     ("digest", JsonValue::String("abc123".to_string())),
                     (
                         "snapshots",
-                        json_array(vec![json_object([(
-                            "estimated_tokens",
-                            JsonValue::Number("88".to_string()),
-                        )])]),
+                        json_array(vec![
+                            json_object([
+                                ("estimated_tokens", JsonValue::Number("80".to_string())),
+                                (
+                                    "layers",
+                                    json_array(vec![
+                                        json_object([
+                                            (
+                                                "name",
+                                                JsonValue::String("system_static".to_string()),
+                                            ),
+                                            (
+                                                "text_sha256",
+                                                JsonValue::String("stable-a".to_string()),
+                                            ),
+                                            (
+                                                "estimated_tokens",
+                                                JsonValue::Number("50".to_string()),
+                                            ),
+                                            ("cache_stable", JsonValue::Bool(true)),
+                                        ]),
+                                        json_object([
+                                            (
+                                                "name",
+                                                JsonValue::String("append_only_turns".to_string()),
+                                            ),
+                                            (
+                                                "text_sha256",
+                                                JsonValue::String("turns-a".to_string()),
+                                            ),
+                                            (
+                                                "estimated_tokens",
+                                                JsonValue::Number("30".to_string()),
+                                            ),
+                                            ("cache_stable", JsonValue::Bool(false)),
+                                        ]),
+                                    ]),
+                                ),
+                            ]),
+                            json_object([
+                                ("estimated_tokens", JsonValue::Number("88".to_string())),
+                                (
+                                    "layers",
+                                    json_array(vec![
+                                        json_object([
+                                            (
+                                                "name",
+                                                JsonValue::String("system_static".to_string()),
+                                            ),
+                                            (
+                                                "text_sha256",
+                                                JsonValue::String("stable-b".to_string()),
+                                            ),
+                                            (
+                                                "estimated_tokens",
+                                                JsonValue::Number("52".to_string()),
+                                            ),
+                                            ("cache_stable", JsonValue::Bool(true)),
+                                        ]),
+                                        json_object([
+                                            (
+                                                "name",
+                                                JsonValue::String("append_only_turns".to_string()),
+                                            ),
+                                            (
+                                                "text_sha256",
+                                                JsonValue::String("turns-b".to_string()),
+                                            ),
+                                            (
+                                                "estimated_tokens",
+                                                JsonValue::Number("36".to_string()),
+                                            ),
+                                            ("cache_stable", JsonValue::Bool(false)),
+                                        ]),
+                                    ]),
+                                ),
+                            ]),
+                        ]),
                     ),
                 ]),
             )
@@ -476,12 +713,26 @@ mod tests {
         assert_eq!(summary.prompt_cache_hit_basis_points, 7000);
         assert_eq!(summary.repair_count, 1);
         assert_eq!(summary.repeated_tool_suppressions, 1);
-        assert_eq!(summary.prompt_layer_snapshot_count, 1);
+        assert_eq!(summary.prompt_layer_snapshot_count, 2);
         assert_eq!(summary.latest_prompt_layer_estimated_tokens, 88);
         assert_eq!(
             summary.latest_prompt_layer_digest.as_deref(),
             Some("abc123")
         );
+        assert_eq!(summary.prompt_layer_cache_stable_hash_changes, 1);
+        let system = summary
+            .prompt_layer_trends
+            .get("system_static")
+            .expect("expected system_static trend");
+        assert_eq!(system.snapshot_count, 2);
+        assert_eq!(system.hash_changes, 1);
+        assert_eq!(signed_token_delta(system), 2);
+        let turns = summary
+            .prompt_layer_trends
+            .get("append_only_turns")
+            .expect("expected append_only_turns trend");
+        assert_eq!(turns.hash_changes, 1);
+        assert!(!turns.cache_stable);
     }
 
     #[test]
@@ -500,6 +751,7 @@ mod tests {
         let rendered = render_stats_summary(&summary);
         assert!(rendered.contains("prompt_cache_hit_rate: 75.50%"));
         assert!(rendered.contains("estimated_cost_usd: 0.001234"));
+        assert!(rendered.contains("prompt_layer_cache_stable_hash_changes: 0"));
         assert!(rendered.contains("- deepseek-v4-flash: 2"));
     }
 

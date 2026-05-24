@@ -484,6 +484,8 @@ pub fn tool_metadata_for_name(name: &str) -> ToolMetadata {
             | "agent_list"
             | "pr_attempt_list"
             | "pr_attempt_read"
+            | "automation_list"
+            | "automation_read"
             | "exec_shell_wait"
             | "exec_shell_wait_once"
             | "task_shell_wait"
@@ -506,7 +508,28 @@ pub fn tool_metadata_for_name(name: &str) -> ToolMetadata {
     );
     let parallel_safe = matches!(
         name,
-        "list_files" | "list_dir" | "read_file" | "search_text" | "git_status" | "git_diff"
+        "list_files"
+            | "list_dir"
+            | "read_file"
+            | "retrieve_tool_result"
+            | "search_text"
+            | "grep_files"
+            | "file_search"
+            | "git_status"
+            | "git_diff"
+            | "git_log"
+            | "git_show"
+            | "git_blame"
+            | "project_map"
+            | "validate_data"
+            | "task_list"
+            | "task_read"
+            | "agent_result"
+            | "agent_list"
+            | "pr_attempt_list"
+            | "pr_attempt_read"
+            | "automation_list"
+            | "automation_read"
     );
     ToolMetadata {
         read_only,
@@ -519,6 +542,7 @@ pub fn execute_parallel_safe_tool(
     name: &str,
     input: ToolInput,
     policy: &ExecutionPolicy,
+    config: &AppConfig,
 ) -> AppResult<ToolOutput> {
     if !policy.allows_tool(name) {
         return Err(policy_denied(format!("tool blocked by policy: {name}")));
@@ -530,9 +554,25 @@ pub fn execute_parallel_safe_tool(
         "list_files" => ListFilesTool.execute(input),
         "list_dir" => ListDirTool.execute(input),
         "read_file" => ReadFileTool.execute(input),
+        "retrieve_tool_result" => RetrieveToolResultTool.execute(input),
         "search_text" => SearchTextTool.execute(input),
+        "grep_files" => GrepFilesTool.execute(input),
+        "file_search" => FileSearchTool.execute(input),
         "git_status" => GitStatusTool.execute(input),
         "git_diff" => GitDiffTool.execute(input),
+        "git_log" => GitLogTool.execute(input),
+        "git_show" => GitShowTool.execute(input),
+        "git_blame" => GitBlameTool.execute(input),
+        "project_map" => ProjectMapTool.execute(input),
+        "validate_data" => ValidateDataTool.execute(input),
+        "task_list" => TaskListTool::new(config).execute(input),
+        "task_read" => TaskReadTool::new(config).execute(input),
+        "agent_result" => AgentResultTool::new(config).execute(input),
+        "agent_list" => AgentListTool::new(config).execute(input),
+        "pr_attempt_list" => PrAttemptListTool::new(config).execute(input),
+        "pr_attempt_read" => PrAttemptReadTool::new(config).execute(input),
+        "automation_list" => AutomationListTool::new(config).execute(input),
+        "automation_read" => AutomationReadTool::new(config).execute(input),
         _ => Err(app_error(format!(
             "parallel-safe tool executor missing implementation for {name}"
         ))),
@@ -1325,10 +1365,28 @@ done
 
         assert!(registry.metadata("read_file").read_only);
         assert!(registry.metadata("read_file").parallel_safe);
+        assert!(registry.metadata("retrieve_tool_result").parallel_safe);
         assert!(registry.metadata("list_files").parallel_safe);
         assert!(registry.metadata("search_text").parallel_safe);
         assert!(registry.metadata("git_status").parallel_safe);
         assert!(registry.metadata("git_diff").parallel_safe);
+        assert!(registry.metadata("grep_files").parallel_safe);
+        assert!(registry.metadata("file_search").parallel_safe);
+        assert!(registry.metadata("project_map").parallel_safe);
+        assert!(registry.metadata("git_log").parallel_safe);
+        assert!(registry.metadata("git_show").parallel_safe);
+        assert!(registry.metadata("git_blame").parallel_safe);
+        assert!(registry.metadata("validate_data").parallel_safe);
+        assert!(registry.metadata("task_list").read_only);
+        assert!(registry.metadata("task_list").parallel_safe);
+        assert!(registry.metadata("task_read").parallel_safe);
+        assert!(registry.metadata("agent_list").parallel_safe);
+        assert!(registry.metadata("agent_result").parallel_safe);
+        assert!(registry.metadata("pr_attempt_list").parallel_safe);
+        assert!(registry.metadata("pr_attempt_read").parallel_safe);
+        assert!(registry.metadata("automation_list").read_only);
+        assert!(registry.metadata("automation_list").parallel_safe);
+        assert!(registry.metadata("automation_read").parallel_safe);
 
         assert!(!registry.metadata("todo_add").read_only);
         assert!(!registry.metadata("todo_add").parallel_safe);
@@ -1336,6 +1394,225 @@ done
         assert!(!registry.metadata("apply_patch").parallel_safe);
         assert!(registry.metadata("mcp_read_resource").read_only);
         assert!(!registry.metadata("mcp_read_resource").parallel_safe);
+    }
+
+    #[test]
+    fn execute_parallel_safe_tool_runs_extended_local_read_tools() {
+        let root = temp_root("parallel-safe-extended");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn add() {}\n").unwrap();
+        std::fs::write(root.join("config.json"), "{\"ok\":true}\n").unwrap();
+        let config = AppConfig::default();
+        let policy = ExecutionPolicy::new(&ApprovalConfig::default(), None);
+
+        let grep = execute_parallel_safe_tool(
+            "grep_files",
+            ToolInput::new()
+                .with_arg("root", root.display().to_string())
+                .with_arg("pattern", "add"),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(grep.summary.contains("src/lib.rs"));
+
+        let search = execute_parallel_safe_tool(
+            "file_search",
+            ToolInput::new()
+                .with_arg("path", root.display().to_string())
+                .with_arg("query", "lib"),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(search.summary.contains("src/lib.rs"));
+
+        let map = execute_parallel_safe_tool(
+            "project_map",
+            ToolInput::new().with_arg("path", root.display().to_string()),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(map.summary.contains("src/lib.rs"));
+
+        let validate = execute_parallel_safe_tool(
+            "validate_data",
+            ToolInput::new().with_arg("path", root.join("config.json").display().to_string()),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(validate.summary.contains("valid: true"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn execute_parallel_safe_tool_runs_runtime_query_reads() {
+        let root = temp_root("parallel-safe-runtime");
+        let mut config = AppConfig::default();
+        config.workspace.config_dir = root.join(".dscode").display().to_string();
+        let store = crate::core::runtime::RuntimeStore::new(root.join(".dscode/runtime"));
+        let session = store
+            .create_session("Runtime".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Runtime".to_string(),
+                ".".to_string(),
+                "deepseek-v4-flash".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let task = store
+            .create_task(
+                Some(&session.id),
+                Some(&thread.id),
+                None,
+                "subagent".to_string(),
+                "pending".to_string(),
+                "inspect runtime".to_string(),
+            )
+            .unwrap();
+        let automation = store
+            .create_automation(
+                Some(&session.id),
+                Some(&thread.id),
+                "daily".to_string(),
+                "active".to_string(),
+                "manual".to_string(),
+                "inspect".to_string(),
+                None,
+                None,
+            )
+            .unwrap();
+        let policy = ExecutionPolicy::new(&ApprovalConfig::default(), None);
+
+        let task_list = execute_parallel_safe_tool(
+            "task_list",
+            ToolInput::new().with_arg("thread_id", &thread.id),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(task_list.summary.contains("inspect runtime"));
+
+        let task_read = execute_parallel_safe_tool(
+            "task_read",
+            ToolInput::new().with_arg("id", &task.id),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(task_read.summary.contains(&task.id));
+
+        let agent_list =
+            execute_parallel_safe_tool("agent_list", ToolInput::new(), &policy, &config).unwrap();
+        assert!(agent_list.summary.contains("inspect runtime"));
+
+        let agent_result = execute_parallel_safe_tool(
+            "agent_result",
+            ToolInput::new().with_arg("id", &task.id),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(agent_result.summary.contains(&task.id));
+
+        let automation_list = execute_parallel_safe_tool(
+            "automation_list",
+            ToolInput::new().with_arg("thread_id", &thread.id),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(automation_list.summary.contains("daily"));
+
+        let automation_read = execute_parallel_safe_tool(
+            "automation_read",
+            ToolInput::new().with_arg("id", &automation.id),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(automation_read.summary.contains(&automation.id));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn execute_parallel_safe_tool_runs_git_history_reads() {
+        let root = temp_root("parallel-safe-git");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("demo.txt"), "hello\n").unwrap();
+        assert!(std::process::Command::new("git")
+            .arg("init")
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["add", "demo.txt"])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=DeepSeek Test",
+                "-c",
+                "user.email=deepseek@example.com",
+                "commit",
+                "-m",
+                "initial",
+            ])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        let cwd = root.display().to_string();
+        let config = AppConfig::default();
+        let policy = ExecutionPolicy::new(&ApprovalConfig::default(), None);
+
+        let log = execute_parallel_safe_tool(
+            "git_log",
+            ToolInput::new()
+                .with_arg("cwd", &cwd)
+                .with_arg("limit", "1"),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(log.summary.contains("initial"));
+
+        let show = execute_parallel_safe_tool(
+            "git_show",
+            ToolInput::new()
+                .with_arg("cwd", &cwd)
+                .with_arg("ref", "HEAD")
+                .with_arg("path", "demo.txt"),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(show.summary.contains("demo.txt"));
+
+        let blame = execute_parallel_safe_tool(
+            "git_blame",
+            ToolInput::new()
+                .with_arg("cwd", &cwd)
+                .with_arg("path", "demo.txt")
+                .with_arg("limit", "1"),
+            &policy,
+            &config,
+        )
+        .unwrap();
+        assert!(blame.summary.contains("hello"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

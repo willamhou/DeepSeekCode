@@ -119,14 +119,15 @@ dogfood 证据。
    支持 `model.tool_schema_flattening = "auto"` 下的 schema flatten/re-nest，并在
    TUI runtime/`exec --json` 中留下 repair 证据；重复工具调用守卫已区分只读和写状态工具，
    prompt-layer diagnostics 与 `deepseek stats` MVP 也已接入 exec、TUI 和 runtime daemon
-   turns；`model.preset = "auto" | "flash" | "pro"`、`deepseek config preset`、
+   turns，并可展示 per-layer token/hash trend 与 cache-stable hash-change totals；
+   `model.preset = "auto" | "flash" | "pro"`、`deepseek config preset`、
    `run/exec --preset`、`--pro-next`、TUI `/pro` 和
    `model.session_budget_microusd` 的 80% warning / 100% refusal 初版也已落地，runtime
    session/thread records 会同步 `session_budget_microusd`，在 TUI/daemon 进程重启后用
    durable usage 恢复已用成本，`deepseek config budget off` 会清掉 runtime limit；同回合
-   batch 中的 `list_files`、`list_dir`、`read_file`、`search_text`、`git_status`、
-   `git_diff` 现在会在无 hooks/permission/repeat 的情况下按连续 read-only chunk 并发，
-   并保持结果顺序，写入、shell、MCP side-effect 和审批路径仍是串行 barrier；`deepseek
+   batch 中的本地 read/search/git/project-map/data-validation 工具和常见 runtime query
+   工具现在会在无 hooks/permission/repeat 的情况下按连续 read-only chunk 并发，并保持
+   结果顺序，写入、shell、MCP side-effect 和审批路径仍是串行 barrier；`deepseek
    events replay <thread>` 和 `deepseek events diff <left> <right>` 初版也已接入
    runtime events/items/usage，可输出 text 或 JSON 证据；`deepseek dogfood
    repair-cache-evidence --json` 已补齐确定性的 before/after repair/cache 证据。

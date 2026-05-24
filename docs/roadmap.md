@@ -79,8 +79,8 @@ npm remains useful for Node-oriented users but is not the primary blocker.
   they appear in dogfood runs.
 - Prompt-layer hash diagnostics, `deepseek stats`, and `deepseek events
   replay|diff` MVPs have landed for runtime evidence. Cache, cost, repair,
-  suppression, tool-call, failed-tool, and event-kind deltas can now be
-  inspected without reading raw runtime JSON.
+  suppression, tool-call, failed-tool, event-kind deltas, and per-layer prompt
+  token/hash trends can now be inspected without reading raw runtime JSON.
 - Model presets and first-pass budget controls have landed:
   `model.preset = "auto" | "flash" | "pro"`, `deepseek config preset`,
   `run/exec --preset`, `--pro-next`, TUI `/pro`, visible auto-to-Pro
@@ -88,11 +88,13 @@ npm remains useful for Node-oriented users but is not the primary blocker.
   cross-process runtime budget metadata. The repair/cache evidence command now
   records comparable before/after runtime threads with cache-hit deltas and
   replay/diff/stats commands.
-- Initial parallel-safe read dispatch has landed for same-turn batches:
-  `list_files`, `list_dir`, `read_file`, `search_text`, `git_status`, and
-  `git_diff` can run as ordered read-only chunks when hooks/permission prompts
-  are not active. Writes, shell commands, approvals, side-effect MCP calls, and
-  repeated-call recovery remain serial barriers.
+- Parallel-safe read dispatch has landed for same-turn batches across local
+  read/search/git/project-map/data-validation tools plus common runtime query
+  tools such as `task_list`, `task_read`, `agent_list`, `agent_result`,
+  `automation_list`, and `automation_read`. They run as ordered read-only chunks
+  when hooks/permission prompts are not active. Writes, shell commands,
+  approvals, side-effect MCP calls, and repeated-call recovery remain serial
+  barriers.
 - Treat this as product hardening rather than a blocker for the already
   established Linux/macOS CLI milestone.
 
