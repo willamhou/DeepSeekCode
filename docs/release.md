@@ -340,9 +340,18 @@ Verify downloaded release artifacts with:
 ```bash
 deepseek update download-plan --version <version>
 deepseek update download-plan --version <version> --json
+deepseek update release-smoke --version <version>
+deepseek update release-smoke --version <version> --json
 gh attestation verify deepseek-macos-arm64.tar.gz --repo <owner>/<repo>
 gh attestation verify deepseek-macos-arm64.tar.gz.sha256 --repo <owner>/<repo>
 ```
+
+`release-smoke` is the operator shortcut for current-platform release-binary
+evidence: it downloads the archive and `.sha256`, verifies the checksum,
+extracts the `deepseek` binary, and runs the same install verifier used by
+`deepseek update verify-install`. It only executes binaries for the current
+platform, so Linux arm64 hosts still need an x64 runner until Linux arm64
+release assets exist.
 
 If GitHub release downloads are slow or blocked for an operator, mirror the
 release archive and `.sha256` files to a private/static asset host and point the

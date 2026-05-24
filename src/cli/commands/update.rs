@@ -1,16 +1,18 @@
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use crate::cli::app::{
     UpdateAction, UpdateArgs, UpdateDownloadPlanArgs, UpdateHomebrewFormulaArgs,
-    UpdateInstallPackageArgs, UpdatePackageArgs, UpdatePublishStatusArgs, UpdateRollbackArgs,
-    UpdateVerifyInstallArgs,
+    UpdateInstallPackageArgs, UpdatePackageArgs, UpdatePublishStatusArgs, UpdateReleaseSmokeArgs,
+    UpdateRollbackArgs, UpdateVerifyInstallArgs,
 };
 use crate::error::{app_error, AppResult};
 use crate::util::json::{json_as_string, json_as_u64, json_escape, parse_root_object, JsonValue};
 
 const DEFAULT_RELEASE_DIR: &str = "target/deepseek-release";
+const DEFAULT_RELEASE_SMOKE_DIR: &str = "target/release-smoke";
 const DEFAULT_ROLLBACK_DIR: &str = ".local/bin/deepseek-rollback";
 const DEFAULT_RELEASE_REPO: &str = "willamhou/DeepSeekCode";
 const RELEASE_BASE_URL_ENV: &str = "DSCODE_RELEASE_BASE_URL";
@@ -26,6 +28,7 @@ pub fn run(args: UpdateArgs) -> AppResult<()> {
         UpdateAction::HomebrewFormula(formula_args) => run_homebrew_formula(formula_args),
         UpdateAction::PublishStatus(status_args) => run_publish_status(status_args),
         UpdateAction::DownloadPlan(plan_args) => run_download_plan(plan_args),
+        UpdateAction::ReleaseSmoke(smoke_args) => run_release_smoke(smoke_args),
     }
 }
 
@@ -49,6 +52,7 @@ fn run_status(args: UpdateArgs) -> AppResult<()> {
     println!("  install_verify: deepseek update verify-install --bin <path-to-deepseek>");
     println!("  homebrew_formula: deepseek update homebrew-formula --dist <release-sha-dir>");
     println!("  publish_status: deepseek update publish-status --dist <release-asset-dir> --npm-dist <npm-artifact-dir> --live-evidence-verification <verification-json>");
+    println!("  release_smoke: deepseek update release-smoke --version <version>");
     if args.check {
         println!("  check: update command is available");
     } else {
@@ -256,6 +260,308 @@ fn run_download_plan(args: &UpdateDownloadPlanArgs) -> AppResult<()> {
     Ok(())
 }
 
+fn run_release_smoke(args: &UpdateReleaseSmokeArgs) -> AppResult<()> {
+    let plan = build_release_download_plan(
+        &UpdateDownloadPlanArgs {
+            version: args.version.clone(),
+            repo: args.repo.clone(),
+            base_url: args.base_url.clone(),
+            platform: args.platform.clone(),
+            json: false,
+        },
+        &env_value,
+    )?;
+    let report = run_release_smoke_plan(args, plan)?;
+
+    if args.json {
+        println!("{}", render_release_smoke_json(&report));
+    } else {
+        println!("DeepSeekCode release smoke");
+        println!("  version: {}", report.plan.version);
+        println!("  repository: {}", report.plan.repo);
+        println!("  platform: {}", report.plan.platform);
+        println!("  output: {}", report.out_dir.display());
+        println!("  archive: {}", report.archive.display());
+        println!("  checksum: {}", report.checksum.display());
+        println!("  sha256: {}", report.sha256);
+        println!("  extract_dir: {}", report.extract_dir.display());
+        println!("  binary: {}", report.binary.display());
+        println!("  verify_workdir: {}", report.verify.workdir.display());
+        println!("  verify_report: {}", report.verify_report.display());
+        for step in &report.verify.steps {
+            println!("  {}: ok", step.name);
+        }
+        if report.verify_workdir_kept {
+            println!("  cleanup: kept verifier workdir");
+        } else {
+            println!("  cleanup: removed verifier workdir");
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct ReleaseSmokeReport {
+    plan: ReleaseDownloadPlan,
+    out_dir: PathBuf,
+    archive: PathBuf,
+    checksum: PathBuf,
+    sha256: String,
+    extract_dir: PathBuf,
+    binary: PathBuf,
+    verify: InstallVerifyReport,
+    verify_report: PathBuf,
+    verify_workdir_kept: bool,
+}
+
+fn run_release_smoke_plan(
+    args: &UpdateReleaseSmokeArgs,
+    plan: ReleaseDownloadPlan,
+) -> AppResult<ReleaseSmokeReport> {
+    let current = current_release_platform();
+    if plan.platform != current {
+        return Err(app_error(format!(
+            "release-smoke can only execute the current platform binary ({current}); got {}",
+            plan.platform
+        )));
+    }
+
+    let out_dir = release_smoke_out_dir(args.out.as_deref(), &plan);
+    let download_dir = out_dir.join("downloads");
+    let extract_dir = out_dir.join("extract");
+    let verify_workdir = out_dir.join("verify-workdir");
+    std::fs::create_dir_all(&download_dir)?;
+    reset_dir(&extract_dir)?;
+    reset_dir(&verify_workdir)?;
+
+    let archive = download_dir.join(&plan.archive);
+    let checksum = download_dir.join(&plan.checksum);
+    download_release_file(&plan.archive_url, &archive)?;
+    download_release_file(&plan.checksum_url, &checksum)?;
+
+    let expected_sha = read_sha256_file(&checksum)?;
+    let actual_sha = sha256_file(&archive)?;
+    if actual_sha != expected_sha {
+        return Err(app_error(format!(
+            "release archive checksum mismatch for {}: expected {}, got {}",
+            archive.display(),
+            expected_sha,
+            actual_sha
+        )));
+    }
+
+    extract_release_archive(&archive, &extract_dir)?;
+    let binary = find_extracted_binary(&extract_dir, &plan.platform)?;
+    ensure_executable(&binary)?;
+    let verify = verify_install(&binary, &verify_workdir)?;
+    let verify_report = out_dir.join("release-smoke-report.md");
+    if verify.report.is_file() {
+        std::fs::copy(&verify.report, &verify_report)?;
+    }
+    if !args.keep_workdir {
+        std::fs::remove_dir_all(&verify_workdir)?;
+    }
+
+    Ok(ReleaseSmokeReport {
+        plan,
+        out_dir,
+        archive,
+        checksum,
+        sha256: actual_sha,
+        extract_dir,
+        binary,
+        verify,
+        verify_report,
+        verify_workdir_kept: args.keep_workdir,
+    })
+}
+
+fn release_smoke_out_dir(out: Option<&str>, plan: &ReleaseDownloadPlan) -> PathBuf {
+    out.map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(DEFAULT_RELEASE_SMOKE_DIR).join(format!("{}-{}", plan.version, plan.platform))
+    })
+}
+
+fn download_release_file(url: &str, path: &Path) -> AppResult<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let output = Command::new("curl")
+        .args(["-fL", "--retry", "3", "--connect-timeout", "15", "-o"])
+        .arg(path)
+        .arg(url)
+        .output()
+        .map_err(|error| app_error(format!("could not run curl to download {url}: {error}")))?;
+    if !output.status.success() {
+        return Err(app_error(format!(
+            "curl failed while downloading {} to {}: {}",
+            url,
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> AppResult<String> {
+    match sha256_file_with("sha256sum", &[], path) {
+        Ok(sha) => Ok(sha),
+        Err(first_error) => match sha256_file_with("shasum", &["-a", "256"], path) {
+            Ok(sha) => Ok(sha),
+            Err(second_error) => Err(app_error(format!(
+                "failed to compute sha256 for {} with sha256sum ({}) or shasum ({})",
+                path.display(),
+                first_error,
+                second_error
+            ))),
+        },
+    }
+}
+
+fn sha256_file_with(command: &str, args: &[&str], path: &Path) -> AppResult<String> {
+    let output = Command::new(command)
+        .args(args)
+        .arg(path)
+        .output()
+        .map_err(|error| app_error(error.to_string()))?;
+    if !output.status.success() {
+        return Err(app_error(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let sha = stdout
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| app_error(format!("{command} returned empty output")))?;
+    if sha.len() == 64 && sha.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Ok(sha.to_ascii_lowercase())
+    } else {
+        Err(app_error(format!(
+            "{command} returned invalid sha256 output: {}",
+            stdout.trim()
+        )))
+    }
+}
+
+fn extract_release_archive(archive: &Path, extract_dir: &Path) -> AppResult<()> {
+    std::fs::create_dir_all(extract_dir)?;
+    let name = archive
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if name.ends_with(".tar.gz") {
+        let file = File::open(archive)?;
+        let decoder = flate2::read::GzDecoder::new(file);
+        let mut tar = tar::Archive::new(decoder);
+        tar.unpack(extract_dir)?;
+        return Ok(());
+    }
+    if name.ends_with(".zip") {
+        let file = File::open(archive)?;
+        let mut zip = zip::ZipArchive::new(file)?;
+        for index in 0..zip.len() {
+            let mut item = zip.by_index(index)?;
+            let Some(enclosed) = item.enclosed_name().map(PathBuf::from) else {
+                return Err(app_error(format!(
+                    "zip archive contains unsafe path: {}",
+                    item.name()
+                )));
+            };
+            let output = extract_dir.join(enclosed);
+            if item.is_dir() {
+                std::fs::create_dir_all(&output)?;
+            } else {
+                if let Some(parent) = output.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut output_file = File::create(&output)?;
+                std::io::copy(&mut item, &mut output_file)?;
+            }
+        }
+        return Ok(());
+    }
+    Err(app_error(format!(
+        "unsupported release archive format: {}",
+        archive.display()
+    )))
+}
+
+fn find_extracted_binary(root: &Path, platform: &str) -> AppResult<PathBuf> {
+    let binary = if platform == "windows-x64" {
+        "deepseek.exe"
+    } else {
+        "deepseek"
+    };
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        for entry in std::fs::read_dir(&path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().and_then(|name| name.to_str()) == Some(binary) {
+                return Ok(path);
+            }
+        }
+    }
+    Err(app_error(format!(
+        "release archive did not contain {binary} under {}",
+        root.display()
+    )))
+}
+
+fn reset_dir(path: &Path) -> AppResult<()> {
+    if path.exists() {
+        std::fs::remove_dir_all(path)?;
+    }
+    std::fs::create_dir_all(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_executable(path: &Path) -> AppResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_mode(permissions.mode() | 0o755);
+    std::fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_executable(_path: &Path) -> AppResult<()> {
+    Ok(())
+}
+
+fn render_release_smoke_json(report: &ReleaseSmokeReport) -> String {
+    let steps = report
+        .verify
+        .steps
+        .iter()
+        .map(|step| format!("\"{}\"", json_escape(step.name)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"kind\":\"deepseek.release_smoke.v1\",\"version\":\"{}\",\"repository\":\"{}\",\"platform\":\"{}\",\"archive_url\":\"{}\",\"checksum_url\":\"{}\",\"archive\":\"{}\",\"checksum\":\"{}\",\"sha256\":\"{}\",\"extract_dir\":\"{}\",\"binary\":\"{}\",\"verify_workdir\":\"{}\",\"verify_report\":\"{}\",\"verify_workdir_kept\":{},\"steps\":[{}]}}",
+        json_escape(&report.plan.version),
+        json_escape(&report.plan.repo),
+        json_escape(&report.plan.platform),
+        json_escape(&report.plan.archive_url),
+        json_escape(&report.plan.checksum_url),
+        json_escape(&report.archive.display().to_string()),
+        json_escape(&report.checksum.display().to_string()),
+        json_escape(&report.sha256),
+        json_escape(&report.extract_dir.display().to_string()),
+        json_escape(&report.binary.display().to_string()),
+        json_escape(&report.verify.workdir.display().to_string()),
+        json_escape(&report.verify_report.display().to_string()),
+        report.verify_workdir_kept,
+        steps
+    )
+}
+
 fn render_publish_status_json(report: &PublishStatusReport, strict: bool) -> String {
     let checks = report
         .checks
@@ -397,6 +703,7 @@ fn normalize_release_version(version: &str) -> AppResult<String> {
 fn current_release_platform() -> String {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => "linux-x64",
+        ("linux", "aarch64") => "linux-arm64",
         ("macos", "x86_64") => "macos-x64",
         ("macos", "aarch64") => "macos-arm64",
         ("windows", "x86_64") => "windows-x64",
@@ -1811,6 +2118,77 @@ mod tests {
         assert!(json.contains("\"platform\":\"macos-arm64\""));
         assert!(json.contains("deepseek-macos-arm64.tar.gz.sha256"));
         assert!(json.contains("https://mirror.example/v0.1.1/deepseek-macos-arm64.tar.gz"));
+    }
+
+    #[test]
+    fn release_smoke_out_dir_defaults_to_version_and_platform() {
+        let plan = build_release_download_plan(
+            &UpdateDownloadPlanArgs {
+                version: Some("v1.2.3".to_string()),
+                platform: Some("linux-x64".to_string()),
+                ..UpdateDownloadPlanArgs::default()
+            },
+            &|_| None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            release_smoke_out_dir(None, &plan),
+            PathBuf::from("target/release-smoke/1.2.3-linux-x64")
+        );
+        assert_eq!(
+            release_smoke_out_dir(Some("target/custom-smoke"), &plan),
+            PathBuf::from("target/custom-smoke")
+        );
+    }
+
+    #[test]
+    fn find_extracted_binary_finds_nested_binary() {
+        let root = temp_root("release-smoke-binary");
+        let nested = root.join("deepseek-1.2.3-linux-x64");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("deepseek"), "#!/bin/sh\n").unwrap();
+
+        let found = find_extracted_binary(&root, "linux-x64").unwrap();
+
+        assert_eq!(found, nested.join("deepseek"));
+    }
+
+    #[test]
+    fn render_release_smoke_json_lists_verify_steps() {
+        let plan = build_release_download_plan(
+            &UpdateDownloadPlanArgs {
+                version: Some("v1.2.3".to_string()),
+                repo: Some("example/deepseek".to_string()),
+                platform: Some("linux-x64".to_string()),
+                ..UpdateDownloadPlanArgs::default()
+            },
+            &|_| None,
+        )
+        .unwrap();
+        let report = ReleaseSmokeReport {
+            plan,
+            out_dir: PathBuf::from("target/release-smoke/1.2.3-linux-x64"),
+            archive: PathBuf::from("downloads/deepseek-linux-x64.tar.gz"),
+            checksum: PathBuf::from("downloads/deepseek-linux-x64.tar.gz.sha256"),
+            sha256: "a".repeat(64),
+            extract_dir: PathBuf::from("extract"),
+            binary: PathBuf::from("extract/deepseek"),
+            verify: InstallVerifyReport {
+                binary: PathBuf::from("extract/deepseek"),
+                workdir: PathBuf::from("verify-workdir"),
+                report: PathBuf::from("verify-workdir/install-verify-report.md"),
+                steps: vec![VerifyStep { name: "version" }],
+            },
+            verify_report: PathBuf::from("release-smoke-report.md"),
+            verify_workdir_kept: false,
+        };
+        let json = render_release_smoke_json(&report);
+
+        assert!(json.contains("\"kind\":\"deepseek.release_smoke.v1\""));
+        assert!(json.contains("\"repository\":\"example/deepseek\""));
+        assert!(json.contains("\"steps\":[\"version\"]"));
+        assert!(json.contains(&"a".repeat(64)));
     }
 
     #[test]

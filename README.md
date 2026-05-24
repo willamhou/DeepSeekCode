@@ -196,6 +196,7 @@ deepseek update publish-status --dist dist-assets --npm-dist npm-dist \
   --live-evidence-verification .dscode/dogfood/live-evidence-verification.json \
   --strict
 deepseek update publish-status --json
+deepseek update release-smoke --version 0.1.1 --json
 deepseek agents service-doctor --kind all --workdir "$PWD" --bin "$(command -v deepseek)" --json
 mkdir -p /tmp/dsc-smk
 deepseek agents service-smoke --workdir /tmp/dsc-smk --bin "$(command -v deepseek)" --json
