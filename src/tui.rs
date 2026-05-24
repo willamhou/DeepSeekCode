@@ -1147,6 +1147,10 @@ pub enum TuiModelCommand {
     List,
     Set { model: String },
     Preset { preset: String },
+    BudgetShow,
+    BudgetSet { microusd: u64 },
+    BudgetRaise { microusd: u64 },
+    BudgetOff,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2118,16 +2122,14 @@ fn parse_tui_theme_command(line: &str) -> Option<Result<TuiThemeCommand, String>
 
 fn parse_tui_model_command(line: &str) -> Option<Result<TuiModelCommand, String>> {
     let trimmed = line.trim();
+    let usage = "usage: model [pick|show|list|preset <auto|flash|pro>|budget <show|off|MICROUSD|raise MICROUSD|+MICROUSD>|name], models, /model [pick|show|list|preset <auto|flash|pro>|budget <show|off|MICROUSD|raise MICROUSD|+MICROUSD>|name], or /models";
     if let Some(rest) = strip_tui_command_prefix(trimmed, "/models")
         .or_else(|| strip_tui_command_prefix(trimmed, "models"))
     {
         return if rest.trim().is_empty() {
             Some(Ok(TuiModelCommand::List))
         } else {
-            Some(Err(
-                "usage: model [pick|show|list|preset <auto|flash|pro>|name], models, /model [pick|show|list|preset <auto|flash|pro>|name], or /models"
-                    .to_string(),
-            ))
+            Some(Err(usage.to_string()))
         };
     }
     let rest = strip_tui_command_prefix(trimmed, "/model")
@@ -2140,14 +2142,42 @@ fn parse_tui_model_command(line: &str) -> Option<Result<TuiModelCommand, String>
         ["preset", preset] if !preset.starts_with('-') => Some(Ok(TuiModelCommand::Preset {
             preset: (*preset).to_string(),
         })),
+        ["budget"] | ["budget", "show" | "status"] => Some(Ok(TuiModelCommand::BudgetShow)),
+        ["budget", "off" | "disable" | "disabled" | "0"] => Some(Ok(TuiModelCommand::BudgetOff)),
+        ["budget", value] if value.starts_with('+') => Some(
+            parse_tui_positive_microusd(
+                value.strip_prefix('+').unwrap_or(value),
+                "model budget +MICROUSD",
+            )
+            .map(|microusd| TuiModelCommand::BudgetRaise { microusd }),
+        ),
+        ["budget", "raise" | "add", value] => Some(
+            parse_tui_positive_microusd(value, "model budget raise")
+                .map(|microusd| TuiModelCommand::BudgetRaise { microusd }),
+        ),
+        ["budget", value] if !value.starts_with('-') => Some(
+            value
+                .parse::<u64>()
+                .map(|microusd| TuiModelCommand::BudgetSet { microusd })
+                .map_err(|_| {
+                    "model budget expects MICROUSD, off, raise MICROUSD, or +MICROUSD".to_string()
+                }),
+        ),
         [model] if !model.starts_with('-') => Some(Ok(TuiModelCommand::Set {
             model: (*model).to_string(),
         })),
-        _ => Some(Err(
-            "usage: model [pick|show|list|preset <auto|flash|pro>|name], models, /model [pick|show|list|preset <auto|flash|pro>|name], or /models"
-                .to_string(),
-        )),
+        _ => Some(Err(usage.to_string())),
     }
+}
+
+fn parse_tui_positive_microusd(raw: &str, context: &str) -> Result<u64, String> {
+    let value = raw
+        .parse::<u64>()
+        .map_err(|_| format!("{context} expects a positive MICROUSD value"))?;
+    if value == 0 {
+        return Err(format!("{context} expects a positive MICROUSD value"));
+    }
+    Ok(value)
 }
 
 fn parse_tui_pro_command(line: &str) -> Option<Result<TuiProCommand, String>> {
@@ -4141,6 +4171,9 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "model preset auto",
     "model preset flash",
     "model preset pro",
+    "model budget show",
+    "model budget off",
+    "model budget raise 1000",
     "model auto",
     "pro",
     "pro off",
@@ -4509,6 +4542,9 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/model preset auto",
     "/model preset flash",
     "/model preset pro",
+    "/model budget show",
+    "/model budget off",
+    "/model budget raise 1000",
     "/model auto",
     "/pro",
     "/pro off",
@@ -22747,6 +22783,24 @@ model.model = "deepseek-v4-pro"
                 command: TuiModelCommand::Set {
                     model: "auto".to_string(),
                 },
+            }]
+        );
+
+        run_palette_command(&mut app, "model budget raise 1000");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Model {
+                workspace: "/tmp/deepseek-model".to_string(),
+                command: TuiModelCommand::BudgetRaise { microusd: 1000 },
+            }]
+        );
+
+        run_palette_command(&mut app, "/model budget off");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Model {
+                workspace: "/tmp/deepseek-model".to_string(),
+                command: TuiModelCommand::BudgetOff,
             }]
         );
 

@@ -475,7 +475,7 @@ impl AgentLoop {
             if session_budget_microusd > 0 {
                 if estimated_session_cost_microusd >= session_budget_microusd {
                     return Err(app_error(format!(
-                        "session budget exhausted: {estimated_session_cost_microusd}/{session_budget_microusd} microusd used; raise model.session_budget_microusd or set it to 0 to disable"
+                        "session budget exhausted: {estimated_session_cost_microusd}/{session_budget_microusd} microusd used; run `deepseek config budget raise <MICROUSD>` to raise it or `deepseek config budget off` to disable"
                     )));
                 }
                 if !session_budget_warned

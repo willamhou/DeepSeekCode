@@ -127,8 +127,10 @@ dogfood 证据。
    `run/exec --preset`、`--pro-next`、TUI `/pro` 和
    `model.session_budget_microusd` 的 80% warning / 100% refusal 初版也已落地，runtime
    session/thread records 会同步 `session_budget_microusd`，在 TUI/daemon 进程重启后用
-   durable usage 恢复已用成本，`deepseek config budget off` 会清掉 runtime limit；同回合
-   batch 中的本地 read/search/git/project-map/data-validation 工具和常见 runtime query
+   durable usage 恢复已用成本，`deepseek config budget raise <MICROUSD>`、`deepseek
+   config budget +<MICROUSD>`、`deepseek config budget off` 和 TUI `model budget ...`
+   会清晰处理 raise/disable runtime limit；同回合 batch 中的本地
+   read/search/git/project-map/data-validation 工具和常见 runtime query
    工具现在会在无 hooks/permission/repeat 的情况下按连续 read-only chunk 并发，并保持
    结果顺序，tool result 会记录 `meta.parallel_*` telemetry，写入、shell、MCP
    side-effect 和审批路径仍是串行 barrier；`deepseek

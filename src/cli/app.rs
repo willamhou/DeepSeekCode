@@ -1426,6 +1426,7 @@ pub enum ConfigPresetAction {
 pub enum ConfigBudgetAction {
     Show,
     SetMicrousd(u64),
+    RaiseMicrousd(u64),
 }
 
 #[derive(Debug, Default)]
@@ -2504,7 +2505,7 @@ fn parse_config_args(args: Vec<String>) -> Result<ConfigArgs, String> {
             }
             other => {
                 return Err(format!(
-                    "unknown config argument `{other}`; expected init|auth [ENV] --stdin|model [show|list|MODEL]|provider [show|list|NAME [MODEL]]|preset [show|auto|flash|pro]|budget [show|off|MICROUSD]|network allow|network deny|--force|--print-default"
+                    "unknown config argument `{other}`; expected init|auth [ENV] --stdin|model [show|list|MODEL]|provider [show|list|NAME [MODEL]]|preset [show|auto|flash|pro]|budget [show|off|MICROUSD|raise MICROUSD|+MICROUSD]|network allow|network deny|--force|--print-default"
                 ));
             }
         }
@@ -2626,17 +2627,43 @@ fn parse_config_budget_action(args: &[String]) -> Result<ConfigBudgetAction, Str
         [value] if matches!(value.as_str(), "off" | "disable" | "disabled" | "0") => {
             Ok(ConfigBudgetAction::SetMicrousd(0))
         }
+        [value] if value.starts_with('+') => {
+            let delta = parse_positive_budget_microusd(
+                value.strip_prefix('+').unwrap_or(value),
+                "config budget +MICROUSD",
+            )?;
+            Ok(ConfigBudgetAction::RaiseMicrousd(delta))
+        }
+        [verb, value] if matches!(verb.as_str(), "raise" | "add") => {
+            let delta = parse_positive_budget_microusd(value, "config budget raise")?;
+            Ok(ConfigBudgetAction::RaiseMicrousd(delta))
+        }
         [value] if !value.starts_with('-') => {
             let budget = value
                 .parse::<u64>()
-                .map_err(|_| "config budget expects MICROUSD or off".to_string())?;
+                .map_err(|_| {
+                    "config budget expects MICROUSD, off, raise MICROUSD, or +MICROUSD"
+                        .to_string()
+                })?;
             Ok(ConfigBudgetAction::SetMicrousd(budget))
         }
         [value] => Err(format!(
-            "unknown config budget argument `{value}`; expected show|off|MICROUSD"
+            "unknown config budget argument `{value}`; expected show|off|MICROUSD|raise MICROUSD|+MICROUSD"
         )),
-        _ => Err("config budget accepts at most one argument: show|off|MICROUSD".to_string()),
+        _ => Err(
+            "config budget accepts show|off|MICROUSD|raise MICROUSD|+MICROUSD".to_string(),
+        ),
     }
+}
+
+fn parse_positive_budget_microusd(raw: &str, context: &str) -> Result<u64, String> {
+    let value = raw
+        .parse::<u64>()
+        .map_err(|_| format!("{context} expects a positive MICROUSD value"))?;
+    if value == 0 {
+        return Err(format!("{context} expects a positive MICROUSD value"));
+    }
+    Ok(value)
 }
 
 fn parse_tui_args(args: Vec<String>) -> Result<TuiArgs, String> {
@@ -8912,6 +8939,44 @@ mod tests {
                 );
                 assert!(!args.init);
                 assert!(!args.print_default);
+            }
+            other => panic!("expected Command::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_config_budget_raise() {
+        let cli = Cli::from_argv(vec![
+            "config".to_string(),
+            "budget".to_string(),
+            "raise".to_string(),
+            "750".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Config(args)) => {
+                assert_eq!(
+                    args.budget_action,
+                    Some(ConfigBudgetAction::RaiseMicrousd(750))
+                );
+            }
+            other => panic!("expected Command::Config, got {other:?}"),
+        }
+
+        let shorthand = Cli::from_argv(vec![
+            "config".to_string(),
+            "budget".to_string(),
+            "+250".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match shorthand.command {
+            Some(Command::Config(args)) => {
+                assert_eq!(
+                    args.budget_action,
+                    Some(ConfigBudgetAction::RaiseMicrousd(250))
+                );
             }
             other => panic!("expected Command::Config, got {other:?}"),
         }

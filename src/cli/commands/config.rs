@@ -175,6 +175,14 @@ fn run_budget_action(action: ConfigBudgetAction) -> AppResult<()> {
             }
             println!("config: {}", result.path.display());
         }
+        ConfigBudgetAction::RaiseMicrousd(delta) => {
+            let result = raise_session_budget_at(&cwd, delta)?;
+            println!(
+                "session budget raised: {} -> {} microusd (+{})",
+                result.previous_microusd, result.session_budget_microusd, delta
+            );
+            println!("config: {}", result.path.display());
+        }
     }
     Ok(())
 }
@@ -675,6 +683,38 @@ pub(crate) fn set_session_budget_at(
         previous_microusd,
         session_budget_microusd: budget_microusd,
         changed,
+    })
+}
+
+pub(crate) fn raise_session_budget_at(
+    root: &std::path::Path,
+    delta_microusd: u64,
+) -> AppResult<SessionBudgetSetResult> {
+    if delta_microusd == 0 {
+        return Err(app_error(
+            "config budget raise expects a positive MICROUSD delta",
+        ));
+    }
+    let path = network_config_path_at(root);
+    if !path.exists() {
+        init_config_at(root, false)?;
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let previous_microusd = read_u64_key(&content, "model.session_budget_microusd")
+        .unwrap_or_else(|| AppConfig::default().model.session_budget_microusd);
+    let budget_microusd = previous_microusd
+        .checked_add(delta_microusd)
+        .ok_or_else(|| {
+            app_error("config budget raise would overflow model.session_budget_microusd")
+        })?;
+    let updated =
+        replace_or_append_u64_key(&content, "model.session_budget_microusd", budget_microusd);
+    std::fs::write(&path, updated)?;
+    Ok(SessionBudgetSetResult {
+        path,
+        previous_microusd,
+        session_budget_microusd: budget_microusd,
+        changed: true,
     })
 }
 
@@ -2086,6 +2126,23 @@ mod tests {
         assert_eq!(result.session_budget_microusd, 1200);
         let content = std::fs::read_to_string(root.join(".dscode/config.toml")).unwrap();
         assert!(content.contains("model.session_budget_microusd = 1200"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn raise_session_budget_at_adds_to_current_budget() {
+        let root = temp_root("model-budget-raise");
+        init_config_at(&root, false).unwrap();
+        set_session_budget_at(&root, 1200).unwrap();
+
+        let result = raise_session_budget_at(&root, 800).unwrap();
+
+        assert!(result.changed);
+        assert_eq!(result.previous_microusd, 1200);
+        assert_eq!(result.session_budget_microusd, 2000);
+        let content = std::fs::read_to_string(root.join(".dscode/config.toml")).unwrap();
+        assert!(content.contains("model.session_budget_microusd = 2000"));
 
         let _ = std::fs::remove_dir_all(root);
     }

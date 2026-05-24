@@ -143,12 +143,12 @@ impl<W: Write> StreamEvents for TtyRenderer<W> {
         if self.use_ansi {
             let _ = writeln!(
                 self.out,
-                "\x1b[33msession budget warning: {used_microusd}/{budget_microusd} microusd used\x1b[0m"
+                "\x1b[33msession budget warning: {used_microusd}/{budget_microusd} microusd used; run `deepseek config budget raise <MICROUSD>` or `deepseek config budget off`\x1b[0m"
             );
         } else {
             let _ = writeln!(
                 self.out,
-                "session budget warning: {used_microusd}/{budget_microusd} microusd used"
+                "session budget warning: {used_microusd}/{budget_microusd} microusd used; run `deepseek config budget raise <MICROUSD>` or `deepseek config budget off`"
             );
         }
     }

@@ -21,11 +21,11 @@ use crate::cli::commands::config::{
     apply_model_preset_override, diagnostics_config_summary_at, logout_credentials_at,
     model_config_summary_at, network_policy_summary_at, persist_auth_secret_at,
     profile_config_summary_at, provider_config_summary_at,
-    provider_model_completion_values_for_base_url, remove_network_rule_at,
+    provider_model_completion_values_for_base_url, raise_session_budget_at, remove_network_rule_at,
     set_diagnostics_post_edit_at, set_model_at, set_model_preset_at, set_network_default_at,
-    set_network_rule_at, set_provider_at, switch_profile_at, DiagnosticsConfigSummary,
-    LogoutCredentialSummary, ModelConfigSummary, NetworkPolicySummary, NetworkRuleTarget,
-    ProfileConfigSummary, ProviderConfigSummary,
+    set_network_rule_at, set_provider_at, set_session_budget_at, switch_profile_at,
+    DiagnosticsConfigSummary, LogoutCredentialSummary, ModelConfigSummary, NetworkPolicySummary,
+    NetworkRuleTarget, ProfileConfigSummary, ProviderConfigSummary,
 };
 use crate::cli::commands::mcp::{
     add_mcp_server_at, init_mcp_config_at, list_remote_prompts_summary,
@@ -3502,7 +3502,7 @@ fn format_lsp_summary(summary: &DiagnosticsConfigSummary) -> String {
 
 fn format_model_config_summary(summary: &ModelConfigSummary) -> String {
     format!(
-        "DeepSeekCode Model Config ({})\n\nmodel.preset = {}\nmodel.model = {}\nmodel.reasoning_effort = {}\nmodel.session_budget_microusd = {}\nmodel.base_url = {}\nmodel.api_key_env = {}\n\nUse model to open the picker, model preset <auto|flash|pro> to update the DeepSeek routing preset, model <name> to update model.model, or models for the offline catalog.",
+        "DeepSeekCode Model Config ({})\n\nmodel.preset = {}\nmodel.model = {}\nmodel.reasoning_effort = {}\nmodel.session_budget_microusd = {}\nmodel.base_url = {}\nmodel.api_key_env = {}\n\nUse model to open the picker, model preset <auto|flash|pro> to update routing, model budget <MICROUSD|off|raise MICROUSD> to manage the session cost limit, model <name> to update model.model, or models for the offline catalog.",
         summary.path.display(),
         summary.preset,
         summary.model,
@@ -3975,12 +3975,17 @@ fn handle_tui_action_with_live(
             let workspace = Path::new(&workspace);
             let completes_setup_step = matches!(
                 &command,
-                TuiModelCommand::Set { .. } | TuiModelCommand::Preset { .. }
+                TuiModelCommand::Set { .. }
+                    | TuiModelCommand::Preset { .. }
+                    | TuiModelCommand::BudgetSet { .. }
+                    | TuiModelCommand::BudgetRaise { .. }
+                    | TuiModelCommand::BudgetOff
             );
             let status = match &command {
                 TuiModelCommand::Pick => "model picker shown".to_string(),
                 TuiModelCommand::Show => "model config shown".to_string(),
                 TuiModelCommand::List => "model catalog shown".to_string(),
+                TuiModelCommand::BudgetShow => "model budget shown".to_string(),
                 TuiModelCommand::Set { model } => {
                     let result = set_model_at(workspace, model)?;
                     if result.changed {
@@ -4003,6 +4008,38 @@ fn handle_tui_action_with_live(
                         )
                     }
                 }
+                TuiModelCommand::BudgetSet { microusd } => {
+                    let result = set_session_budget_at(workspace, *microusd)?;
+                    if result.changed {
+                        format!(
+                            "model budget set: {} -> {} microusd",
+                            result.previous_microusd, result.session_budget_microusd
+                        )
+                    } else {
+                        format!(
+                            "model budget unchanged: {} microusd",
+                            result.session_budget_microusd
+                        )
+                    }
+                }
+                TuiModelCommand::BudgetRaise { microusd } => {
+                    let result = raise_session_budget_at(workspace, *microusd)?;
+                    format!(
+                        "model budget raised: {} -> {} microusd (+{})",
+                        result.previous_microusd, result.session_budget_microusd, microusd
+                    )
+                }
+                TuiModelCommand::BudgetOff => {
+                    let result = set_session_budget_at(workspace, 0)?;
+                    if result.changed {
+                        format!(
+                            "model budget disabled: {} -> 0 microusd",
+                            result.previous_microusd
+                        )
+                    } else {
+                        "model budget already disabled".to_string()
+                    }
+                }
             };
             let setup_status = status.clone();
             let summary = model_config_summary_at(workspace)?;
@@ -4011,8 +4048,12 @@ fn handle_tui_action_with_live(
                     format_model_catalog_summary(&summary)
                 }
                 TuiModelCommand::Show
+                | TuiModelCommand::BudgetShow
                 | TuiModelCommand::Set { .. }
-                | TuiModelCommand::Preset { .. } => format_model_config_summary(&summary),
+                | TuiModelCommand::Preset { .. }
+                | TuiModelCommand::BudgetSet { .. }
+                | TuiModelCommand::BudgetRaise { .. }
+                | TuiModelCommand::BudgetOff => format_model_config_summary(&summary),
             };
             app.set_mcp_detail(TuiMcpDetailKind::Model, detail);
             app.set_status(status);
@@ -7783,7 +7824,7 @@ impl StreamEvents for RuntimeItemStream {
 
     fn on_model_budget_warning(&mut self, used_microusd: u64, budget_microusd: u64) {
         let content =
-            format!("session budget warning: {used_microusd}/{budget_microusd} microusd used");
+            format!("session budget warning: {used_microusd}/{budget_microusd} microusd used\nuse model budget raise <MICROUSD> or model budget off");
         if let Ok(item) = self.store.append_item(
             &self.thread_id,
             Some(&self.turn_id),
@@ -10147,6 +10188,35 @@ allowed_tools = ["read_file"]
         let output = render_once(&app, 120, 36).unwrap();
         assert!(output.contains("model set:"));
         assert!(output.contains("model.model = deepseek-v4-pro"));
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::Model {
+                workspace: root.display().to_string(),
+                command: TuiModelCommand::BudgetSet { microusd: 1200 },
+            },
+        )
+        .unwrap();
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::Model {
+                workspace: root.display().to_string(),
+                command: TuiModelCommand::BudgetRaise { microusd: 800 },
+            },
+        )
+        .unwrap();
+
+        let config = std::fs::read_to_string(root.join(".dscode/config.toml")).unwrap();
+        assert!(config.contains("model.session_budget_microusd = 2000"));
+        let output = render_once(&app, 120, 60).unwrap();
+        assert!(output.contains("model budget raised: 1200 -> 2000 microusd"));
+        let (_, detail) = app.mcp_detail_for_test().expect("model detail");
+        assert!(detail.contains("model.session_budget_microusd = 2000"));
 
         handle_tui_action(
             &store,

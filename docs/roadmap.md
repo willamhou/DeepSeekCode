@@ -90,9 +90,11 @@ npm remains useful for Node-oriented users but is not the primary blocker.
   `model.preset = "auto" | "flash" | "pro"`, `deepseek config preset`,
   `run/exec --preset`, `--pro-next`, TUI `/pro`, visible auto-to-Pro
   escalation events, `model.session_budget_microusd` warning/refusal, and
-  cross-process runtime budget metadata. The repair/cache evidence command now
-  records comparable before/after runtime threads with cache-hit deltas and
-  replay/diff/stats commands.
+  cross-process runtime budget metadata. Budget raise/disable flows are now
+  explicit through `deepseek config budget raise <MICROUSD>`, `deepseek config
+  budget +<MICROUSD>`, `deepseek config budget off`, and TUI `model budget ...`.
+  The repair/cache evidence command now records comparable before/after runtime
+  threads with cache-hit deltas and replay/diff/stats commands.
 - Parallel-safe read dispatch has landed for same-turn batches across local
   read/search/git/project-map/data-validation tools plus common runtime query
   tools such as `task_list`, `task_read`, `agent_list`, `agent_result`,

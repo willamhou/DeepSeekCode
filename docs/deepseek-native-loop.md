@@ -31,9 +31,9 @@ hardening gaps rather than architecture blockers:
 - Tool-call repair has deterministic coverage, but it needs more live
   DeepSeek-backed examples across real gateways, dynamic MCP schemas, and
   non-recoverable malformed-call recovery paths before treating it as mature.
-- Model presets and session budgets work, but auto-escalation remains an
-  initial heuristic. It still needs dogfood calibration against real failure
-  modes and clearer user override/raise-budget flows.
+- Model presets and session budgets work, including explicit budget raise/off
+  flows. Auto-escalation remains an initial heuristic and still needs dogfood
+  calibration against real failure modes.
 - Parallel dispatch is deliberately conservative. Built-in local read tools and
   common runtime query tools now cover the initial and extended safe set;
   read-only MCP/resource tools should be added incrementally after each surface
@@ -98,8 +98,7 @@ visible escalation, `/pro` for the next turn, and budget-aware session behavior.
 
 DeepSeekCode already has DeepSeek V4 pricing, usage cost estimates, first-class
 `flash | auto | pro` presets, visible escalation, and runtime budget records.
-The remaining work is dogfood calibration of the auto-escalation heuristic and
-clearer user raise-budget flows.
+The remaining work is dogfood calibration of the auto-escalation heuristic.
 
 Absorb:
 
@@ -426,17 +425,18 @@ Status on 2026-05-24: initial model preset and budget controls landed.
 DeepSeekCode now stores `model.preset = "auto" | "flash" | "pro"` separately
 from the raw `model.model` marker, defaults new configs to the `auto` preset,
 and exposes `deepseek config preset [auto|flash|pro]`,
-`deepseek config budget [MICROUSD|off]`, `deepseek run --preset ...`,
-`deepseek exec --preset ...`, and `--pro-next` overrides. The TUI supports
-`model preset <auto|flash|pro>` plus `/pro` to arm DeepSeek V4 Pro for the next
+`deepseek config budget [MICROUSD|off|raise MICROUSD|+MICROUSD]`, `deepseek run
+--preset ...`, `deepseek exec --preset ...`, and `--pro-next` overrides. The TUI
+supports `model preset <auto|flash|pro>`, `model budget
+<MICROUSD|off|raise MICROUSD>`, and `/pro` to arm DeepSeek V4 Pro for the next
 submitted user turn. Auto routing emits a visible escalation line/event before
 using `deepseek-v4-pro`, and session budget enforcement warns at 80% and refuses
 new model calls once the in-loop estimated DeepSeek spend reaches
 `model.session_budget_microusd`. Runtime session/thread records now also persist
 `session_budget_microusd` from the active config; TUI and daemon task turns
 restore prior durable usage cost before entering the agent loop, so budget
-warning/refusal survives process restarts while `deepseek config budget off`
-clears the runtime limit.
+warning/refusal survives process restarts while `deepseek config budget raise
+<MICROUSD>` raises the runtime limit and `deepseek config budget off` clears it.
 
 Deliver:
 
@@ -445,6 +445,7 @@ Deliver:
 - visible auto-escalation; landed for auto routes that select Pro;
 - session budget warning/refusal; landed for current agent-loop estimated
   DeepSeek spend and cross-process runtime sessions;
+- explicit budget raise/off commands; landed for CLI and TUI model surfaces;
 - explicit per-thread/session budget metadata in runtime records; landed.
 
 Reason: it gives users predictable cost/performance controls while preserving
