@@ -75,7 +75,7 @@ demo_budget=${DEEPSEEK_2048_BUDGET:-16}
 demo_out=${DEEPSEEK_2048_OUT:-"$repo_root/docs/demo/deepseek-code-2048-demo-$run_id.log"}
 work_parent=${DEEPSEEK_2048_WORKDIR:-"${TMPDIR:-/tmp}"}
 demo_repo="$work_parent/deepseek-code-2048-demo-$run_id"
-demo_prompt=${DEEPSEEK_2048_PROMPT:-"Build a playable 2048 web game in this empty repository using plain HTML, CSS, and JavaScript. Create index.html, styles.css, and app.js. Requirements: a 4x4 board, keyboard arrow controls, tile merging, score tracking, random new tiles, win/game-over messaging, and a restart button. Keep the UI polished but lightweight. After writing files, run a validation command that verifies index.html, styles.css, and app.js exist and prints their byte sizes."}
+demo_prompt=${DEEPSEEK_2048_PROMPT:-"Build a playable 2048 web game in this empty repository using plain HTML, CSS, and JavaScript. Create index.html, styles.css, and app.js. Requirements: a 4x4 board, keyboard arrow controls, tile merging, score tracking, random new tiles, win/game-over messaging, and a restart button. Keep the UI polished, lightweight, and concise. If a file write fails, recover by retrying with a smaller valid patch instead of stopping. After writing files, run a validation command that verifies index.html, styles.css, and app.js exist and prints their byte sizes."}
 
 redact_demo_stream() {
   awk '
@@ -224,12 +224,27 @@ run_session() {
   find . -maxdepth 2 -type f | sort
   echo
   echo "$ DSCODE_AUTO_APPROVE_WRITES=1 DSCODE_AUTO_APPROVE_SHELL=1 $deepseek_bin exec --budget $demo_budget \"<2048 prompt>\""
+  local exec_status=0
   DSCODE_AUTO_APPROVE_WRITES=1 \
     DSCODE_AUTO_APPROVE_SHELL=1 \
-    "$deepseek_bin" exec --budget "$demo_budget" "$demo_prompt"
+    "$deepseek_bin" exec --budget "$demo_budget" "$demo_prompt" || exec_status=$?
+  if [[ "$exec_status" -ne 0 ]]; then
+    echo "deepseek exec failed with status $exec_status" >&2
+    return "$exec_status"
+  fi
   echo
   echo "$ test -s index.html && test -s styles.css && test -s app.js"
-  test -s index.html && test -s styles.css && test -s app.js
+  local missing=0
+  for required_file in index.html styles.css app.js; do
+    if [[ ! -s "$required_file" ]]; then
+      echo "missing or empty required file: $required_file" >&2
+      missing=1
+    fi
+  done
+  if [[ "$missing" -ne 0 ]]; then
+    return 1
+  fi
+  echo "required files present"
   echo
   echo "$ wc -c index.html styles.css app.js"
   wc -c index.html styles.css app.js
@@ -260,6 +275,11 @@ set -e
 echo
 echo "transcript: $demo_out"
 echo "demo repo: $demo_repo"
+if [[ "$session_status" -eq 0 ]]; then
+  echo "status: ok"
+else
+  echo "status: failed ($session_status)"
+fi
 
 if [[ "$cleanup" -eq 1 ]]; then
   rm -rf "$demo_repo"
