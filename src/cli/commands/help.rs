@@ -180,7 +180,7 @@ fn stats_help() -> &'static str {
         "DeepSeekCode stats\n",
         "\n",
         "Usage:\n",
-        "  deepseek stats [--thread <id>|--session <id>] [--limit <N>] [--json] [--require-prefix-stable]\n",
+        "  deepseek stats [--thread <id>|--session <id|name>] [--limit <N>] [--json] [--require-prefix-stable]\n",
         "\n",
         "Aggregates durable runtime usage records, prompt cache hit/miss tokens,\n",
         "estimated cost, model split, repair events, repeated-tool suppressions, and\n",
@@ -557,6 +557,13 @@ mod tests {
         assert!(help.contains("config preset [show|auto|flash|pro]"));
         assert!(help.contains("config budget [show|off|MICROUSD|raise MICROUSD|+MICROUSD]"));
         assert!(help.contains("config auth [ENV] --stdin"));
+    }
+
+    #[test]
+    fn stats_help_documents_session_title_selector() {
+        let help = render_help(&["stats".to_string()]);
+        assert!(help.contains("--session <id|name>"));
+        assert!(help.contains("--require-prefix-stable"));
     }
 
     #[test]

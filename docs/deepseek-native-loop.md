@@ -344,7 +344,7 @@ Add a small CLI layer over existing runtime records:
 
 ```text
 deepseek stats
-deepseek stats --session <name>
+deepseek stats --session <id|name>
 deepseek stats --thread <id>
 deepseek events diff <left-thread> <right-thread>
 deepseek events replay <thread>

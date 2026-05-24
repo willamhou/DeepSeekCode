@@ -141,11 +141,31 @@ fn selected_threads(store: &RuntimeStore, args: &StatsArgs) -> AppResult<Vec<Thr
     if let Some(thread_id) = args.thread.as_deref() {
         return Ok(vec![store.load_thread(thread_id)?]);
     }
-    if let Some(session_id) = args.session.as_deref() {
-        store.load_session(session_id)?;
-        return store.list_session_threads(session_id, usize::MAX);
+    if let Some(session_selector) = args.session.as_deref() {
+        let session_id = resolve_session_selector(store, session_selector)?;
+        return store.list_session_threads(&session_id, usize::MAX);
     }
     store.list_threads(usize::MAX)
+}
+
+fn resolve_session_selector(store: &RuntimeStore, selector: &str) -> AppResult<String> {
+    if let Ok(session) = store.load_session(selector) {
+        return Ok(session.id);
+    }
+    let matches = store
+        .list_sessions(usize::MAX)?
+        .into_iter()
+        .filter(|session| session.title == selector)
+        .collect::<Vec<_>>();
+    match matches.len() {
+        1 => Ok(matches[0].id.clone()),
+        0 => Err(app_error(format!(
+            "runtime session not found by id or title: {selector}"
+        ))),
+        _ => Err(app_error(format!(
+            "runtime session selector `{selector}` matched multiple sessions; use the session id"
+        ))),
+    }
 }
 
 fn selected_usage(
@@ -1065,5 +1085,72 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("runtime thread not found"));
+    }
+
+    #[test]
+    fn stats_summary_accepts_session_title_selector() {
+        let store = temp_store("session-title");
+        let session = store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Stats".to_string(),
+                ".".to_string(),
+                "deepseek-v4-flash".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let turn = store
+            .append_turn(&thread.id, "assistant".to_string(), "done".to_string())
+            .unwrap();
+        store
+            .append_usage_with_cache(
+                &thread.id,
+                Some(&turn.id),
+                "deepseek-v4-flash".to_string(),
+                "test".to_string(),
+                12,
+                3,
+                8,
+                4,
+            )
+            .unwrap();
+
+        let summary = stats_summary(
+            &store,
+            &StatsArgs {
+                session: Some("Daily work".to_string()),
+                ..StatsArgs::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.thread_count, 1);
+        assert_eq!(summary.model_turns, 1);
+        assert_eq!(summary.prompt_tokens, 12);
+    }
+
+    #[test]
+    fn stats_summary_rejects_ambiguous_session_title_selector() {
+        let store = temp_store("session-title-ambiguous");
+        store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+        store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+
+        let error = stats_summary(
+            &store,
+            &StatsArgs {
+                session: Some("Daily work".to_string()),
+                ..StatsArgs::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("matched multiple sessions"));
     }
 }
