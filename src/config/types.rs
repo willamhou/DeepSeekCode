@@ -7,6 +7,7 @@ pub struct AppConfig {
     pub hooks: HooksConfig,
     pub mcp: McpConfig,
     pub diagnostics: DiagnosticsConfig,
+    pub runtime: RuntimeConfig,
     pub memory: MemoryConfig,
     pub network: NetworkConfig,
     pub skills: SkillsConfig,
@@ -22,6 +23,7 @@ impl Default for AppConfig {
             hooks: HooksConfig::default(),
             mcp: McpConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
+            runtime: RuntimeConfig::default(),
             memory: MemoryConfig::default(),
             network: NetworkConfig::default(),
             skills: SkillsConfig::default(),
@@ -139,6 +141,21 @@ pub struct DiagnosticsConfig {
 impl Default for DiagnosticsConfig {
     fn default() -> Self {
         Self { post_edit: false }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeConfig {
+    pub daemon_compaction_threshold_tokens: u64,
+    pub daemon_compaction_keep_tail_turns: usize,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            daemon_compaction_threshold_tokens: 800_000,
+            daemon_compaction_keep_tail_turns: 8,
+        }
     }
 }
 

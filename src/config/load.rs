@@ -149,6 +149,22 @@ fn apply_env_overrides(config: &mut AppConfig) {
     {
         config.skills.cache_dir = value;
     }
+    if let Some(value) = first_nonempty_env(&[
+        "DSCODE_DAEMON_COMPACTION_THRESHOLD_TOKENS",
+        "DEEPSEEK_DAEMON_COMPACTION_THRESHOLD_TOKENS",
+    ]) {
+        if let Ok(tokens) = value.parse::<u64>() {
+            config.runtime.daemon_compaction_threshold_tokens = tokens;
+        }
+    }
+    if let Some(value) = first_nonempty_env(&[
+        "DSCODE_DAEMON_COMPACTION_KEEP_TAIL_TURNS",
+        "DEEPSEEK_DAEMON_COMPACTION_KEEP_TAIL_TURNS",
+    ]) {
+        if let Ok(turns) = value.parse::<usize>() {
+            config.runtime.daemon_compaction_keep_tail_turns = turns;
+        }
+    }
 }
 
 fn first_nonempty_env(keys: &[&str]) -> Option<String> {
@@ -312,6 +328,12 @@ fn apply_config_key(key: &str, value: &str, config: &mut AppConfig) -> AppResult
         "diagnostics.post_edit" => {
             config.diagnostics.post_edit = parse_bool(value)?;
         }
+        "runtime.daemon_compaction_threshold_tokens" => {
+            config.runtime.daemon_compaction_threshold_tokens = parse_u64(value)?;
+        }
+        "runtime.daemon_compaction_keep_tail_turns" => {
+            config.runtime.daemon_compaction_keep_tail_turns = parse_usize(value)?;
+        }
         "memory.enabled" => {
             config.memory.enabled = parse_bool(value)?;
         }
@@ -374,6 +396,13 @@ fn parse_u64(value: &str) -> AppResult<u64> {
     value
         .trim_matches('"')
         .parse::<u64>()
+        .map_err(|_| app_error(format!("invalid integer value: {value}")))
+}
+
+fn parse_usize(value: &str) -> AppResult<usize> {
+    value
+        .trim_matches('"')
+        .parse::<usize>()
         .map_err(|_| app_error(format!("invalid integer value: {value}")))
 }
 
@@ -504,6 +533,19 @@ model.session_budget_microusd = 2500
         parse_config(toml, &mut config).unwrap();
         assert_eq!(config.model.preset, "pro");
         assert_eq!(config.model.session_budget_microusd, 2500);
+    }
+
+    #[test]
+    fn parse_config_overrides_runtime_compaction_from_toml() {
+        let mut config = AppConfig::default();
+        let toml = r#"
+[runtime]
+daemon_compaction_threshold_tokens = 123456
+daemon_compaction_keep_tail_turns = 12
+"#;
+        parse_config(toml, &mut config).unwrap();
+        assert_eq!(config.runtime.daemon_compaction_threshold_tokens, 123456);
+        assert_eq!(config.runtime.daemon_compaction_keep_tail_turns, 12);
     }
 
     #[test]

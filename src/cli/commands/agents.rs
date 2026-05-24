@@ -1955,8 +1955,21 @@ struct RuntimeDaemonTick {
     failed_compactions: usize,
 }
 
-const DAEMON_COMPACTION_THRESHOLD_TOKENS: u64 = 800_000;
-const DAEMON_COMPACTION_KEEP_TAIL_TURNS: usize = 8;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeDaemonCompactionSettings {
+    threshold_tokens: u64,
+    keep_tail_turns: usize,
+}
+
+fn runtime_daemon_compaction_settings(config: &AppConfig) -> RuntimeDaemonCompactionSettings {
+    RuntimeDaemonCompactionSettings {
+        threshold_tokens: config.runtime.daemon_compaction_threshold_tokens,
+        keep_tail_turns: config
+            .runtime
+            .daemon_compaction_keep_tail_turns
+            .clamp(1, 200),
+    }
+}
 
 fn run_runtime_daemon(
     config: AppConfig,
@@ -8481,22 +8494,33 @@ fn run_runtime_daemon_compactions(
     json: bool,
     tick: &mut RuntimeDaemonTick,
 ) -> AppResult<()> {
-    run_runtime_daemon_compactions_with_summary_provider(store, json, tick, |store, thread| {
-        automatic_model_compaction_summary(config, store, thread, DAEMON_COMPACTION_KEEP_TAIL_TURNS)
-    })
+    let settings = runtime_daemon_compaction_settings(config);
+    run_runtime_daemon_compactions_with_summary_provider(
+        store,
+        json,
+        tick,
+        settings,
+        |store, thread| {
+            automatic_model_compaction_summary(config, store, thread, settings.keep_tail_turns)
+        },
+    )
 }
 
 fn run_runtime_daemon_compactions_with_summary_provider<F>(
     store: &RuntimeStore,
     json: bool,
     tick: &mut RuntimeDaemonTick,
+    settings: RuntimeDaemonCompactionSettings,
     mut summary_provider: F,
 ) -> AppResult<()>
 where
     F: FnMut(&RuntimeStore, &ThreadRecord) -> AppResult<Option<String>>,
 {
+    if settings.threshold_tokens == 0 {
+        return Ok(());
+    }
     for thread in store.list_threads(1_000)? {
-        if !thread_needs_compaction(store, &thread)? {
+        if !thread_needs_compaction(store, &thread, settings)? {
             continue;
         }
         let model_summary = match summary_provider(store, &thread) {
@@ -8520,12 +8544,12 @@ where
         let result = if let Some(summary) = model_summary {
             store.compact_thread_with_summary_source(
                 &thread.id,
-                DAEMON_COMPACTION_KEEP_TAIL_TURNS,
+                settings.keep_tail_turns,
                 summary,
                 "model",
             )
         } else {
-            store.compact_thread(&thread.id, DAEMON_COMPACTION_KEEP_TAIL_TURNS, None)
+            store.compact_thread(&thread.id, settings.keep_tail_turns, None)
         };
         match result {
             Ok(compaction) => {
@@ -8699,14 +8723,18 @@ fn compaction_excerpt(content: &str, max_chars: usize) -> String {
     excerpt
 }
 
-fn thread_needs_compaction(store: &RuntimeStore, thread: &ThreadRecord) -> AppResult<bool> {
+fn thread_needs_compaction(
+    store: &RuntimeStore,
+    thread: &ThreadRecord,
+    settings: RuntimeDaemonCompactionSettings,
+) -> AppResult<bool> {
     let Some(latest_usage) = store.list_usage(Some(&thread.id), 1)?.into_iter().next() else {
         return Ok(false);
     };
-    if latest_usage.total_tokens < DAEMON_COMPACTION_THRESHOLD_TOKENS {
+    if latest_usage.total_tokens < settings.threshold_tokens {
         return Ok(false);
     }
-    if store.list_turns(&thread.id)?.len() <= DAEMON_COMPACTION_KEEP_TAIL_TURNS {
+    if store.list_turns(&thread.id)?.len() <= settings.keep_tail_turns {
         return Ok(false);
     }
 
@@ -12060,6 +12088,53 @@ mod tests {
     }
 
     #[test]
+    fn runtime_daemon_tick_respects_configured_compaction_threshold() {
+        let root = temp_root("runtime-daemon-compact-threshold");
+        let config_dir = root.join(".dscode");
+        let mut config = AppConfig::default();
+        config.workspace.config_dir = config_dir.display().to_string();
+        config.model.api_key_env = "DSCODE_TEST_NO_KEY".to_string();
+        config.runtime.daemon_compaction_threshold_tokens = 900_000;
+        let store = RuntimeStore::new(config_dir.join("runtime"));
+        let thread = store
+            .create_thread(
+                "Long context below configured threshold".to_string(),
+                ".".to_string(),
+                "deepseek-v4-flash".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let mut latest_turn_id = String::new();
+        for index in 1..=10 {
+            latest_turn_id = store
+                .append_turn(&thread.id, "assistant".to_string(), format!("turn {index}"))
+                .unwrap()
+                .id;
+        }
+        store
+            .append_usage_with_cache(
+                &thread.id,
+                Some(&latest_turn_id),
+                "deepseek-v4-flash".to_string(),
+                "test".to_string(),
+                850_000,
+                25,
+                200_000,
+                650_000,
+            )
+            .unwrap();
+
+        let tick = run_runtime_daemon_tick(&config, &store, None, false).unwrap();
+
+        assert_eq!(tick.compacted_threads, 0);
+        assert!(!store
+            .read_events(&thread.id, 0)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "thread_compacted"));
+    }
+
+    #[test]
     fn runtime_daemon_compaction_uses_model_summary_provider() {
         let root = temp_root("runtime-daemon-model-compact");
         let config_dir = root.join(".dscode");
@@ -12098,6 +12173,10 @@ mod tests {
             &store,
             false,
             &mut tick,
+            RuntimeDaemonCompactionSettings {
+                threshold_tokens: 800_000,
+                keep_tail_turns: 8,
+            },
             |_store, _thread| {
                 called += 1;
                 Ok(Some("Generated model context summary".to_string()))

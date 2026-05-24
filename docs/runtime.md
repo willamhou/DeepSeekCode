@@ -978,7 +978,11 @@ creates a pre-run rollback snapshot when possible. For background execution,
 runtime store, triggers due active automations, executes one queued live
 `rlm_process` turn through the live RLM worker path, executes one non-RLM
 thread-linked pending task per tick, and performs non-destructive compaction for
-threads whose latest usage record crosses the 800k-token warning threshold.
+threads whose latest usage record crosses the configured daemon compaction
+threshold. The default is 800k tokens with 8 tail turns preserved; tune it with
+`runtime.daemon_compaction_threshold_tokens` and
+`runtime.daemon_compaction_keep_tail_turns`, or set the threshold to `0` to
+disable automatic daemon compaction.
 Daemon JSON ticks include `executed_rlm_turns` and `failed_rlm_turns`; generic
 task execution intentionally skips `kind=rlm_process` so live RLM turns cannot
 bypass their payload, manifest, and event-log state machine. When the

@@ -23,13 +23,11 @@ diagnostics, presets/budgets, parallel read dispatch, and stats/replay evidence
 all have code paths and deterministic tests. The remaining loop gaps are now
 hardening gaps rather than architecture blockers:
 
-- Cache-first behavior is observable but not yet policy-complete. Prompt-layer
-  hashes, token estimates, and cache hit/miss usage are recorded, but
-  cache-safe compaction threshold tuning still needs product hardening.
-  Per-layer trend analysis is visible in `deepseek stats` through token deltas,
-  hash-change counts, and cache-stable-layer hash-change totals, and
-  `deepseek stats --require-prefix-stable` can fail CI/dogfood checks when
-  prompt-layer evidence is missing or stable prompt-prefix layers change hash.
+- Cache-first behavior is observable and locally enforceable. Prompt-layer
+  hashes, token estimates, cache hit/miss usage, configurable daemon
+  compaction thresholds, and per-layer trend analysis are recorded. `deepseek
+  stats --require-prefix-stable` can fail CI/dogfood checks when prompt-layer
+  evidence is missing or stable prompt-prefix layers change hash.
 - Tool-call repair has deterministic coverage, but it needs more live
   DeepSeek-backed examples across real gateways, dynamic MCP schemas, and
   non-recoverable malformed-call recovery paths before treating it as mature.
@@ -407,7 +405,10 @@ Deliver:
 - `deepseek stats` MVP; landed;
 - per-layer prompt trend output and cache-stable hash-change totals; landed;
 - automated prefix-stability regression gate via
-  `deepseek stats --require-prefix-stable`; landed.
+  `deepseek stats --require-prefix-stable`; landed;
+- configurable daemon compaction threshold and keep-tail policy via
+  `runtime.daemon_compaction_threshold_tokens` and
+  `runtime.daemon_compaction_keep_tail_turns`; landed.
 
 Reason: it turns existing cache telemetry into actionable cache-first behavior.
 

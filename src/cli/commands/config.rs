@@ -944,6 +944,14 @@ fn print_config(config: &AppConfig) {
     println!("mcp.project_file = {}", config.mcp.project_file);
     println!("mcp.user_file = {}", config.mcp.user_file);
     println!("diagnostics.post_edit = {}", config.diagnostics.post_edit);
+    println!(
+        "runtime.daemon_compaction_threshold_tokens = {}",
+        config.runtime.daemon_compaction_threshold_tokens
+    );
+    println!(
+        "runtime.daemon_compaction_keep_tail_turns = {}",
+        config.runtime.daemon_compaction_keep_tail_turns
+    );
     println!("memory.enabled = {}", config.memory.enabled);
     println!("memory.notes_path = {}", config.memory.notes_path);
     println!("memory.memory_path = {}", config.memory.memory_path);
@@ -1762,6 +1770,11 @@ mcp.user_file = "{mcp_user_file}"
 # Set post_edit to true to append diagnostics after successful apply_patch calls.
 diagnostics.post_edit = {diagnostics_post_edit}
 
+# Runtime daemon compaction keeps long-running threads below the context window.
+# Set daemon_compaction_threshold_tokens to 0 to disable automatic compaction.
+runtime.daemon_compaction_threshold_tokens = {runtime_compaction_threshold_tokens}
+runtime.daemon_compaction_keep_tail_turns = {runtime_compaction_keep_tail_turns}
+
 # User memory is opt-in. `note` appends to notes_path; `remember` is exposed
 # only when memory.enabled is true and appends to memory_path.
 memory.enabled = {memory_enabled}
@@ -1808,6 +1821,8 @@ skills.cache_dir = "{skills_cache_dir}"
         mcp_project_file = config.mcp.project_file,
         mcp_user_file = config.mcp.user_file,
         diagnostics_post_edit = config.diagnostics.post_edit,
+        runtime_compaction_threshold_tokens = config.runtime.daemon_compaction_threshold_tokens,
+        runtime_compaction_keep_tail_turns = config.runtime.daemon_compaction_keep_tail_turns,
         memory_enabled = config.memory.enabled,
         memory_notes_path = config.memory.notes_path,
         memory_memory_path = config.memory.memory_path,
@@ -1875,6 +1890,7 @@ mod tests {
         assert!(content.contains("vision.model"));
         assert!(content.contains("network.default"));
         assert!(content.contains("network.audit_path"));
+        assert!(content.contains("runtime.daemon_compaction_threshold_tokens"));
         assert!(content.contains("hooks.enabled = false"));
         assert!(root.join(".dscode/sessions").is_dir());
         assert!(root.join(".dscode/commands").is_dir());
