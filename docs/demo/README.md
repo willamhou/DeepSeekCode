@@ -90,6 +90,18 @@ Record with a local preview server for GIF/MP4 capture:
 DEEPSEEK_2048_KEY_FILE=/tmp/deepseek-2048.key docs/demo/record-2048-demo.sh --serve
 ```
 
+The 2048 recorder defaults to `DEEPSEEK_2048_MODEL=deepseek-v4-pro`, a longer
+model stream timeout, a larger per-turn output cap for code-generating tool
+calls, and one retry because launch captures are expensive to restart:
+`DSCODE_MODEL_STREAM_TIMEOUT_SECS=240`, `DSCODE_MODEL_MAX_TOKENS=4096`, and
+`DEEPSEEK_2048_ATTEMPTS=2`.
+It also validates the generated app with `node --check app.js`, required DOM
+ids, linked assets, byte counts, `git status --short`, and `git diff --stat`.
+The model process runs with an isolated `HOME` and a temporary `demo-2048` skill
+that exposes only `list_files` and `write_file`, so local/user skill
+auto-selection cannot change the demo tool surface or spend steps on unrelated
+tools.
+
 The script prints the disposable demo repo and transcript path. Keep raw
 transcripts only after reviewing them for local paths and generated content
 quality. Use `--cleanup` only after recording any browser gameplay you need.
