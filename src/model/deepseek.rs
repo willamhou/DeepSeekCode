@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::io::{self, BufRead, Read};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -332,8 +332,14 @@ impl DeepSeekClient {
                     return Err(error);
                 }
             };
-        let parsed =
-            parse_openai_process_stream(&mut process, events, cancel_check, schema_flattening);
+        let repair_tool_names = known_tool_names_for_repair(&input.available_tools);
+        let parsed = parse_openai_process_stream(
+            &mut process,
+            events,
+            cancel_check,
+            schema_flattening,
+            &repair_tool_names,
+        );
         if parsed.is_err() {
             drop(process);
             return attach_usage_model(parsed, &route.model);
@@ -423,8 +429,14 @@ impl DeepSeekClient {
                     return Err(error);
                 }
             };
-        let parsed =
-            parse_anthropic_process_stream(&mut process, events, cancel_check, schema_flattening);
+        let repair_tool_names = known_tool_names_for_repair(&input.available_tools);
+        let parsed = parse_anthropic_process_stream(
+            &mut process,
+            events,
+            cancel_check,
+            schema_flattening,
+            &repair_tool_names,
+        );
         if parsed.is_err() {
             drop(process);
             return attach_usage_model(parsed, &route.model);
@@ -3929,8 +3941,17 @@ pub(crate) fn static_tool_search_catalog() -> Vec<(&'static str, &'static str, &
         .collect()
 }
 
-fn known_tool_names_for_repair() -> Vec<&'static str> {
-    TOOL_SPECS.iter().map(|spec| spec.name).collect()
+fn known_tool_names_for_repair(available_tools: &[String]) -> Vec<String> {
+    let mut known = TOOL_SPECS
+        .iter()
+        .map(|spec| spec.name.to_string())
+        .collect::<BTreeSet<_>>();
+    for tool in available_tools {
+        if raw_tool_spec(tool).is_some() {
+            known.insert(tool.clone());
+        }
+    }
+    known.into_iter().collect()
 }
 
 fn schema_transform_for_tool(
@@ -4877,13 +4898,26 @@ fn parse_openai_process_stream(
     events: &mut dyn StreamEvents,
     cancel_check: Option<&mut dyn CancellationCheck>,
     schema_flattening: ToolSchemaFlattening,
+    repair_tool_names: &[String],
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     if let Some(cancel_check) = cancel_check {
         let stdout = process.take_stdout()?;
         let mut reader = CancelAwarePipeReader::spawn(stdout, cancel_check);
-        parse_openai_stream_with_cancel(&mut reader, events, None, schema_flattening)
+        parse_openai_stream_with_cancel(
+            &mut reader,
+            events,
+            None,
+            schema_flattening,
+            repair_tool_names,
+        )
     } else {
-        parse_openai_stream_with_cancel(process.stdout_mut()?, events, None, schema_flattening)
+        parse_openai_stream_with_cancel(
+            process.stdout_mut()?,
+            events,
+            None,
+            schema_flattening,
+            repair_tool_names,
+        )
     }
 }
 
@@ -4892,13 +4926,26 @@ fn parse_anthropic_process_stream(
     events: &mut dyn StreamEvents,
     cancel_check: Option<&mut dyn CancellationCheck>,
     schema_flattening: ToolSchemaFlattening,
+    repair_tool_names: &[String],
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     if let Some(cancel_check) = cancel_check {
         let stdout = process.take_stdout()?;
         let mut reader = CancelAwarePipeReader::spawn(stdout, cancel_check);
-        parse_anthropic_stream_with_cancel(&mut reader, events, None, schema_flattening)
+        parse_anthropic_stream_with_cancel(
+            &mut reader,
+            events,
+            None,
+            schema_flattening,
+            repair_tool_names,
+        )
     } else {
-        parse_anthropic_stream_with_cancel(process.stdout_mut()?, events, None, schema_flattening)
+        parse_anthropic_stream_with_cancel(
+            process.stdout_mut()?,
+            events,
+            None,
+            schema_flattening,
+            repair_tool_names,
+        )
     }
 }
 
@@ -5020,7 +5067,14 @@ pub(crate) fn parse_openai_stream<R: BufRead>(
     reader: &mut R,
     events: &mut dyn StreamEvents,
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
-    parse_openai_stream_with_cancel(reader, events, None, ToolSchemaFlattening::Auto)
+    let repair_tool_names = known_tool_names_for_repair(&[]);
+    parse_openai_stream_with_cancel(
+        reader,
+        events,
+        None,
+        ToolSchemaFlattening::Auto,
+        &repair_tool_names,
+    )
 }
 
 fn parse_openai_stream_with_cancel<R: BufRead>(
@@ -5028,6 +5082,7 @@ fn parse_openai_stream_with_cancel<R: BufRead>(
     events: &mut dyn StreamEvents,
     cancel_check: Option<&mut dyn CancellationCheck>,
     schema_flattening: ToolSchemaFlattening,
+    repair_tool_names: &[String],
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     let mut full_text = String::new();
     let result = parse_openai_stream_inner(
@@ -5036,6 +5091,7 @@ fn parse_openai_stream_with_cancel<R: BufRead>(
         &mut full_text,
         cancel_check,
         schema_flattening,
+        repair_tool_names,
     );
     events.on_assistant_done(&full_text);
     result
@@ -5047,6 +5103,7 @@ fn parse_openai_stream_inner<R: BufRead>(
     full_text: &mut String,
     mut cancel_check: Option<&mut dyn CancellationCheck>,
     schema_flattening: ToolSchemaFlattening,
+    repair_tool_names: &[String],
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     let mut usage: Option<TokenUsage> = None;
     let mut tool_assemblies: Vec<OpenAiToolAssembly> = Vec::new();
@@ -5133,7 +5190,7 @@ fn parse_openai_stream_inner<R: BufRead>(
     let mut repair_notes = Vec::new();
     let calls = if tool_assemblies.is_empty() {
         let repair_text = format!("{reasoning_text}\n{full_text}");
-        let (calls, notes) = scavenge_tool_calls(&repair_text, &known_tool_names_for_repair());
+        let (calls, notes) = scavenge_tool_calls(&repair_text, repair_tool_names);
         repair_notes.extend(notes);
         re_nest_tool_calls(calls, schema_flattening)
     } else {
@@ -5175,7 +5232,14 @@ pub(crate) fn parse_anthropic_stream<R: BufRead>(
     reader: &mut R,
     events: &mut dyn StreamEvents,
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
-    parse_anthropic_stream_with_cancel(reader, events, None, ToolSchemaFlattening::Auto)
+    let repair_tool_names = known_tool_names_for_repair(&[]);
+    parse_anthropic_stream_with_cancel(
+        reader,
+        events,
+        None,
+        ToolSchemaFlattening::Auto,
+        &repair_tool_names,
+    )
 }
 
 fn parse_anthropic_stream_with_cancel<R: BufRead>(
@@ -5183,6 +5247,7 @@ fn parse_anthropic_stream_with_cancel<R: BufRead>(
     events: &mut dyn StreamEvents,
     cancel_check: Option<&mut dyn CancellationCheck>,
     schema_flattening: ToolSchemaFlattening,
+    repair_tool_names: &[String],
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     let mut full_text = String::new();
     let result = parse_anthropic_stream_inner(
@@ -5191,6 +5256,7 @@ fn parse_anthropic_stream_with_cancel<R: BufRead>(
         &mut full_text,
         cancel_check,
         schema_flattening,
+        repair_tool_names,
     );
     events.on_assistant_done(&full_text);
     result
@@ -5202,6 +5268,7 @@ fn parse_anthropic_stream_inner<R: BufRead>(
     full_text: &mut String,
     mut cancel_check: Option<&mut dyn CancellationCheck>,
     schema_flattening: ToolSchemaFlattening,
+    repair_tool_names: &[String],
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     let mut tool_assembly: Option<AnthropicToolAssembly> = None;
     let mut reasoning_text = String::new();
@@ -5362,7 +5429,7 @@ fn parse_anthropic_stream_inner<R: BufRead>(
         }
     } else {
         let repair_text = format!("{reasoning_text}\n{full_text}");
-        let (calls, notes) = scavenge_tool_calls(&repair_text, &known_tool_names_for_repair());
+        let (calls, notes) = scavenge_tool_calls(&repair_text, repair_tool_names);
         repair_notes.extend(notes);
         emit_tool_repair_notes(events, &repair_notes);
         model_action_from_tool_calls(re_nest_tool_calls(calls, schema_flattening), events)
@@ -5455,7 +5522,8 @@ fn parse_openai_chat_completion(body: &str) -> AppResult<ModelResponse> {
         .and_then(json_as_string)
         .unwrap_or("DeepSeek returned no content.")
         .to_string();
-    let (calls, _notes) = scavenge_tool_calls(&message, &known_tool_names_for_repair());
+    let repair_tool_names = known_tool_names_for_repair(&[]);
+    let (calls, _notes) = scavenge_tool_calls(&message, &repair_tool_names);
     if !calls.is_empty() {
         return Ok(ModelResponse {
             message,
@@ -5575,7 +5643,8 @@ fn parse_anthropic_messages(body: &str) -> AppResult<ModelResponse> {
     } else {
         text_chunks.join("\n")
     };
-    let (calls, _notes) = scavenge_tool_calls(&message, &known_tool_names_for_repair());
+    let repair_tool_names = known_tool_names_for_repair(&[]);
+    let (calls, _notes) = scavenge_tool_calls(&message, &repair_tool_names);
     if !calls.is_empty() {
         return Ok(ModelResponse {
             message,
@@ -11016,6 +11085,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
             &mut events,
             Some(&mut cancel),
             ToolSchemaFlattening::Auto,
+            &super::known_tool_names_for_repair(&[]),
         )
         .unwrap_err();
 
@@ -11043,6 +11113,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
             &mut events,
             Some(&mut cancel),
             ToolSchemaFlattening::Auto,
+            &super::known_tool_names_for_repair(&[]),
         )
         .unwrap_err();
 
@@ -11146,6 +11217,36 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
         assert!(reasoning.contains("[tool-call repair:scavenged-tool-call]"));
         assert_eq!(events.repairs.borrow()[0].0, "scavenged-tool-call");
         assert_eq!(events.tool_calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn parse_openai_stream_scavenges_available_dynamic_mcp_tool_call() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"tool_name\\\":\\\"mcp__stdio_self__read_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"README.md\\\"}}\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let repair_tool_names =
+            super::known_tool_names_for_repair(&["mcp__stdio_self__read_file".to_string()]);
+        let mut cur = Cursor::new(body.as_bytes().to_vec());
+        let mut events = CapturingEvents::default();
+        let (resp, _usage) = super::parse_openai_stream_with_cancel(
+            &mut cur,
+            &mut events,
+            None,
+            ToolSchemaFlattening::Auto,
+            &repair_tool_names,
+        )
+        .unwrap();
+
+        match resp.action {
+            super::ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "mcp__stdio_self__read_file");
+                assert_eq!(input.get("path"), Some("README.md"));
+            }
+            _ => panic!("expected scavenged dynamic MCP tool call"),
+        }
+        assert_eq!(events.repairs.borrow()[0].0, "scavenged-tool-call");
     }
 
     #[test]

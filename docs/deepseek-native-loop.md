@@ -382,7 +382,8 @@ calls from assistant reasoning/text when formal provider tool calls are absent,
 rejects unknown tool names, rejects trailing JSON garbage in repaired tool
 arguments, flattens nested object tool schemas behind
 `model.tool_schema_flattening = "auto"` and re-nests flat arguments before tool
-  dispatch, converts non-recoverable malformed tool-call parse failures into
+  dispatch, includes available dynamic MCP tools in the bounded text/reasoning
+  scavenge allowlist, converts non-recoverable malformed tool-call parse failures into
   model-facing failed observations for the next loop step, emits visible repair
   notes, persists structured `tool_call_repair` runtime events, and surfaces
   repair evidence in the TUI/runtime stream. Storm detection is now
@@ -392,7 +393,8 @@ arguments, flattens nested object tool schemas behind
 Deliver:
 
 - `tool_repair` module; landed;
-- truncation repair and scavenge for known tool names; landed;
+- truncation repair and scavenge for known static and available dynamic MCP tool
+  names; landed;
 - schema flatten/re-nest behind `model.tool_schema_flattening=auto`; landed;
 - failed repair surfaced as a model-facing `tool_call_parse_failed`
   observation instead of a hard loop failure; landed;

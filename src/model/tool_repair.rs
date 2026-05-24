@@ -132,14 +132,17 @@ pub fn parse_tool_arguments_with_repair(
     }
 }
 
-pub fn scavenge_tool_calls(
+pub fn scavenge_tool_calls<S: AsRef<str>>(
     text: &str,
-    known_tools: &[&str],
+    known_tools: &[S],
 ) -> (Vec<ToolCallRequest>, Vec<ToolRepairNote>) {
     if text.trim().is_empty() || known_tools.is_empty() {
         return (Vec::new(), Vec::new());
     }
-    let known = known_tools.iter().copied().collect::<BTreeSet<_>>();
+    let known = known_tools
+        .iter()
+        .map(|tool| tool.as_ref())
+        .collect::<BTreeSet<_>>();
     let haystack = truncate_for_scavenge(text);
     let mut calls = Vec::new();
     let mut notes = Vec::new();
