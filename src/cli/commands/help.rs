@@ -156,11 +156,13 @@ fn stats_help() -> &'static str {
         "DeepSeekCode stats\n",
         "\n",
         "Usage:\n",
-        "  deepseek stats [--thread <id>|--session <id>] [--limit <N>] [--json]\n",
+        "  deepseek stats [--thread <id>|--session <id>] [--limit <N>] [--json] [--require-prefix-stable]\n",
         "\n",
         "Aggregates durable runtime usage records, prompt cache hit/miss tokens,\n",
         "estimated cost, model split, repair events, repeated-tool suppressions, and\n",
-        "prompt-layer snapshots when they have been recorded by the runtime."
+        "prompt-layer snapshots when they have been recorded by the runtime. The\n",
+        "--require-prefix-stable gate requires snapshots and fails if cache-stable\n",
+        "prompt layers changed hash."
     )
 }
 

@@ -279,6 +279,7 @@ pub struct StatsArgs {
     pub session: Option<String>,
     pub json: bool,
     pub limit: Option<usize>,
+    pub require_prefix_stable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3332,9 +3333,13 @@ fn parse_stats_args(args: Vec<String>) -> Result<StatsArgs, String> {
                 parsed.json = true;
                 index += 1;
             }
+            "--require-prefix-stable" => {
+                parsed.require_prefix_stable = true;
+                index += 1;
+            }
             other => {
                 return Err(format!(
-                    "unknown flag for `stats`: {other}; expected --thread|--session|--limit|--json"
+                    "unknown flag for `stats`: {other}; expected --thread|--session|--limit|--json|--require-prefix-stable"
                 ));
             }
         }
@@ -7768,6 +7773,26 @@ mod tests {
                 assert_eq!(args.session, None);
                 assert_eq!(args.limit, Some(25));
                 assert!(args.json);
+                assert!(!args.require_prefix_stable);
+            }
+            other => panic!("expected Command::Stats, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_stats_prefix_stability_gate() {
+        let cli = Cli::from_argv(vec![
+            "stats".to_string(),
+            "--session".to_string(),
+            "session-123".to_string(),
+            "--require-prefix-stable".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Stats(args)) => {
+                assert_eq!(args.session.as_deref(), Some("session-123"));
+                assert!(args.require_prefix_stable);
             }
             other => panic!("expected Command::Stats, got {other:?}"),
         }

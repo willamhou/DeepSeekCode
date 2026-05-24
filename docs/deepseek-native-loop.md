@@ -25,10 +25,11 @@ hardening gaps rather than architecture blockers:
 
 - Cache-first behavior is observable but not yet policy-complete. Prompt-layer
   hashes, token estimates, and cache hit/miss usage are recorded, but
-  cache-safe compaction thresholds and automated prefix-stability regression
-  gates still need product hardening. Per-layer trend analysis is now visible in
-  `deepseek stats` through token deltas, hash-change counts, and
-  cache-stable-layer hash-change totals.
+  cache-safe compaction threshold tuning still needs product hardening.
+  Per-layer trend analysis is visible in `deepseek stats` through token deltas,
+  hash-change counts, and cache-stable-layer hash-change totals, and
+  `deepseek stats --require-prefix-stable` can fail CI/dogfood checks when
+  prompt-layer evidence is missing or stable prompt-prefix layers change hash.
 - Tool-call repair has deterministic coverage, but it needs more live
   DeepSeek-backed examples across real gateways, dynamic MCP schemas, and
   non-recoverable malformed-call recovery paths before treating it as mature.
@@ -62,6 +63,7 @@ Absorb:
 - append-only conversation invariants;
 - cache-safe compaction thresholds;
 - per-turn cache hit ratio and prefix diagnostics;
+- automated prefix-stability regression gates;
 - user-visible cache/cost status in CLI and TUI surfaces.
 
 ### Tool-Call Repair
@@ -332,7 +334,9 @@ Minimum `stats` output:
 - current preset/model split;
 - repair count and repeated-tool suppressions once those events exist;
 - per-layer prompt trend output for token deltas, hash changes, and
-  cache-stable-layer hash-change totals.
+  cache-stable-layer hash-change totals;
+- `--require-prefix-stable` failure gate for cache-stable prompt-layer hash
+  regressions.
 
 Minimum `diff` output:
 
@@ -401,7 +405,9 @@ Deliver:
   turns; landed;
 - `/cache inspect` enhancement; landed;
 - `deepseek stats` MVP; landed;
-- per-layer prompt trend output and cache-stable hash-change totals; landed.
+- per-layer prompt trend output and cache-stable hash-change totals; landed;
+- automated prefix-stability regression gate via
+  `deepseek stats --require-prefix-stable`; landed.
 
 Reason: it turns existing cache telemetry into actionable cache-first behavior.
 

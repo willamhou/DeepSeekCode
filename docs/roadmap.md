@@ -81,6 +81,8 @@ npm remains useful for Node-oriented users but is not the primary blocker.
   replay|diff` MVPs have landed for runtime evidence. Cache, cost, repair,
   suppression, tool-call, failed-tool, event-kind deltas, and per-layer prompt
   token/hash trends can now be inspected without reading raw runtime JSON.
+  `deepseek stats --require-prefix-stable` provides a CI/dogfood gate for
+  cache-stable prompt-layer hash regressions.
 - Model presets and first-pass budget controls have landed:
   `model.preset = "auto" | "flash" | "pro"`, `deepseek config preset`,
   `run/exec --preset`, `--pro-next`, TUI `/pro`, visible auto-to-Pro

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::cli::app::StatsArgs;
 use crate::config::load::load_or_default;
 use crate::core::runtime::{RuntimeEvent, RuntimeStore, ThreadRecord, UsageRecord};
-use crate::error::AppResult;
+use crate::error::{app_error, AppResult};
 use crate::util::json::{
     json_as_array, json_as_object, json_as_string, json_value_to_string, JsonValue,
 };
@@ -56,6 +56,9 @@ pub fn run(args: StatsArgs) -> AppResult<()> {
         println!("{}", json_value_to_string(&stats_summary_to_json(&summary)));
     } else {
         println!("{}", render_stats_summary(&summary));
+    }
+    if args.require_prefix_stable {
+        require_prompt_prefix_stable(&summary)?;
     }
     Ok(())
 }
@@ -515,6 +518,34 @@ fn signed_token_delta(trend: &PromptLayerTrend) -> i128 {
     i128::from(trend.latest_estimated_tokens) - i128::from(trend.first_estimated_tokens)
 }
 
+fn require_prompt_prefix_stable(summary: &StatsSummary) -> AppResult<()> {
+    if summary.prompt_layer_snapshot_count == 0 {
+        return Err(app_error(
+            "prompt prefix stability gate failed: no prompt-layer snapshots recorded",
+        ));
+    }
+    if summary.prompt_layer_cache_stable_hash_changes == 0 {
+        return Ok(());
+    }
+    let changed_layers = summary
+        .prompt_layer_trends
+        .iter()
+        .filter_map(|(name, trend)| {
+            (trend.cache_stable && trend.hash_changes > 0)
+                .then(|| format!("{name}:{}", trend.hash_changes))
+        })
+        .collect::<Vec<_>>();
+    let suffix = if changed_layers.is_empty() {
+        "inspect prompt_layer_trends for changed cache-stable layers".to_string()
+    } else {
+        format!("changed cache-stable layers: {}", changed_layers.join(", "))
+    };
+    Err(app_error(format!(
+        "prompt prefix stability gate failed: {} cache-stable layer hash change(s); {suffix}",
+        summary.prompt_layer_cache_stable_hash_changes
+    )))
+}
+
 fn basis_points_percent(value: u64) -> String {
     format!("{}.{:02}%", value / 100, value % 100)
 }
@@ -753,6 +784,37 @@ mod tests {
         assert!(rendered.contains("estimated_cost_usd: 0.001234"));
         assert!(rendered.contains("prompt_layer_cache_stable_hash_changes: 0"));
         assert!(rendered.contains("- deepseek-v4-flash: 2"));
+    }
+
+    #[test]
+    fn prefix_stability_gate_fails_without_prompt_layer_evidence() {
+        let error = require_prompt_prefix_stable(&StatsSummary::default()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("no prompt-layer snapshots recorded"));
+    }
+
+    #[test]
+    fn prefix_stability_gate_fails_on_cache_stable_hash_change() {
+        let mut summary = StatsSummary {
+            prompt_layer_snapshot_count: 2,
+            prompt_layer_cache_stable_hash_changes: 1,
+            ..StatsSummary::default()
+        };
+        summary.prompt_layer_trends.insert(
+            "system_static".to_string(),
+            PromptLayerTrend {
+                cache_stable: true,
+                hash_changes: 1,
+                ..PromptLayerTrend::default()
+            },
+        );
+
+        let error = require_prompt_prefix_stable(&summary).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("prompt prefix stability gate failed"));
+        assert!(error.to_string().contains("system_static:1"));
     }
 
     #[test]
