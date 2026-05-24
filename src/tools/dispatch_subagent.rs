@@ -1009,6 +1009,7 @@ mod tests {
             }],
             usage: TokenUsage::default(),
             prompt_layers: Vec::new(),
+            model_routes: Vec::new(),
         };
         let summary = render_summary("inspect file", None, None, None, 2, &result);
         assert!(summary.contains("meta.child_outcome=blocked"));
@@ -1033,6 +1034,7 @@ mod tests {
             }],
             usage: TokenUsage::default(),
             prompt_layers: Vec::new(),
+            model_routes: Vec::new(),
         };
         let summary = render_summary("inspect entrypoint", None, None, None, 2, &result);
         assert!(summary.contains("meta.child_next_action=read_file:src/main.rs"));
@@ -1045,6 +1047,7 @@ mod tests {
             tool_events: Vec::new(),
             usage: TokenUsage::default(),
             prompt_layers: Vec::new(),
+            model_routes: Vec::new(),
         };
         let summary = render_summary("inspect symbol", None, None, None, 2, &result);
         assert!(summary.contains("meta.child_next_action=search_text:route_benchmark_subcommand"));
@@ -1073,6 +1076,7 @@ mod tests {
             ],
             usage: TokenUsage::default(),
             prompt_layers: Vec::new(),
+            model_routes: Vec::new(),
         };
         let summary = render_summary("fix route", None, None, Some("src/lib.rs"), 4, &result);
         assert!(summary.contains("meta.child_files=src/lib.rs"));
@@ -1096,6 +1100,7 @@ mod tests {
             tool_events: Vec::new(),
             usage: TokenUsage::default(),
             prompt_layers: Vec::new(),
+            model_routes: Vec::new(),
         };
 
         let summary = render_summary("review code", None, Some(&agent), None, 2, &result);

@@ -87,12 +87,21 @@ pub struct ToolEvent {
     pub status: crate::model::protocol::ObservationStatus,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRouteEvent {
+    pub preset: String,
+    pub model: String,
+    pub reason: String,
+    pub escalated: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RunResult {
     pub final_message: String,
     pub tool_events: Vec<ToolEvent>,
     pub usage: crate::model::protocol::TokenUsage,
     pub prompt_layers: Vec<PromptLayerSnapshot>,
+    pub model_routes: Vec<ModelRouteEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -441,6 +450,7 @@ impl AgentLoop {
         }
         let mut last_message = String::new();
         let mut tool_events: Vec<ToolEvent> = Vec::new();
+        let mut model_route_events: Vec<ModelRouteEvent> = Vec::new();
         let mut total_usage = crate::model::protocol::TokenUsage::default();
         let session_budget_microusd = session_budget
             .map(|budget| budget.budget_microusd)
@@ -547,22 +557,22 @@ impl AgentLoop {
                 let mut capture = ReasoningCaptureEvents::new(events);
                 let outcome =
                     model_respond_with_cancel(client, request, &mut capture, cancel_check.as_ref());
-                let reasoning = capture.into_reasoning();
-                outcome.map(|outcome| (outcome.0, outcome.1, reasoning))
+                let (reasoning, routes) = capture.into_parts();
+                outcome.map(|outcome| (outcome.0, outcome.1, reasoning, routes))
             } else if let Some(renderer) = renderer.as_mut() {
                 let mut capture = ReasoningCaptureEvents::new(renderer);
                 let outcome =
                     model_respond_with_cancel(client, request, &mut capture, cancel_check.as_ref());
-                let reasoning = capture.into_reasoning();
-                outcome.map(|outcome| (outcome.0, outcome.1, reasoning))
+                let (reasoning, routes) = capture.into_parts();
+                outcome.map(|outcome| (outcome.0, outcome.1, reasoning, routes))
             } else {
                 let mut capture = ReasoningCaptureEvents::new(&mut noop_events);
                 let outcome =
                     model_respond_with_cancel(client, request, &mut capture, cancel_check.as_ref());
-                let reasoning = capture.into_reasoning();
-                outcome.map(|outcome| (outcome.0, outcome.1, reasoning))
+                let (reasoning, routes) = capture.into_parts();
+                outcome.map(|outcome| (outcome.0, outcome.1, reasoning, routes))
             };
-            let (response, step_usage, step_reasoning) = match model_outcome {
+            let (response, step_usage, step_reasoning, step_model_routes) = match model_outcome {
                 Ok(outcome) => outcome,
                 Err(error) if is_recoverable_model_tool_call_parse_error(error.as_ref()) => {
                     let observation = model_tool_call_parse_failure_observation(error.as_ref());
@@ -581,6 +591,7 @@ impl AgentLoop {
                 }
                 Err(error) => return Err(error),
             };
+            model_route_events.extend(step_model_routes);
             if let Some(usage) = step_usage {
                 if let Some(cost) = crate::core::runtime::estimate_token_usage_cost_microusd(
                     &self.config.model.model,
@@ -1050,6 +1061,7 @@ impl AgentLoop {
             tool_events,
             usage: total_usage,
             prompt_layers: prompt_layer_snapshots,
+            model_routes: model_route_events,
         })
     }
 }
@@ -1057,6 +1069,7 @@ impl AgentLoop {
 struct ReasoningCaptureEvents<'a> {
     inner: &'a mut dyn StreamEvents,
     reasoning: String,
+    model_routes: Vec<ModelRouteEvent>,
 }
 
 impl<'a> ReasoningCaptureEvents<'a> {
@@ -1064,11 +1077,12 @@ impl<'a> ReasoningCaptureEvents<'a> {
         Self {
             inner,
             reasoning: String::new(),
+            model_routes: Vec::new(),
         }
     }
 
-    fn into_reasoning(self) -> String {
-        self.reasoning
+    fn into_parts(self) -> (String, Vec<ModelRouteEvent>) {
+        (self.reasoning, self.model_routes)
     }
 }
 
@@ -1086,6 +1100,21 @@ impl StreamEvents for ReasoningCaptureEvents<'_> {
 
     fn on_assistant_done(&mut self, full_text: &str) {
         self.inner.on_assistant_done(full_text);
+    }
+
+    fn on_model_route(&mut self, preset: &str, model: &str, reason: &str, escalated: bool) {
+        self.model_routes.push(ModelRouteEvent {
+            preset: preset.to_string(),
+            model: model.to_string(),
+            reason: reason.to_string(),
+            escalated,
+        });
+        self.inner.on_model_route(preset, model, reason, escalated);
+    }
+
+    fn on_model_budget_warning(&mut self, used_microusd: u64, budget_microusd: u64) {
+        self.inner
+            .on_model_budget_warning(used_microusd, budget_microusd);
     }
 
     fn on_tool_repair(&mut self, kind: &str, detail: &str) {
@@ -3108,6 +3137,55 @@ mod cr1_regression_test {
                 Some(usage),
             ))
         }
+    }
+
+    #[derive(Default)]
+    struct CapturingStreamEvents {
+        routes: Vec<ModelRouteEvent>,
+        budget_warnings: Vec<(u64, u64)>,
+    }
+
+    impl StreamEvents for CapturingStreamEvents {
+        fn on_text_delta(&mut self, _chunk: &str) {}
+
+        fn on_assistant_done(&mut self, _full_text: &str) {}
+
+        fn on_model_route(&mut self, preset: &str, model: &str, reason: &str, escalated: bool) {
+            self.routes.push(ModelRouteEvent {
+                preset: preset.to_string(),
+                model: model.to_string(),
+                reason: reason.to_string(),
+                escalated,
+            });
+        }
+
+        fn on_model_budget_warning(&mut self, used_microusd: u64, budget_microusd: u64) {
+            self.budget_warnings.push((used_microusd, budget_microusd));
+        }
+
+        fn on_tool_call(&mut self, _name: &str, _input: &BTreeMap<String, String>) {}
+    }
+
+    #[test]
+    fn reasoning_capture_forwards_model_policy_events_and_captures_routes() {
+        let mut sink = CapturingStreamEvents::default();
+        let mut capture = ReasoningCaptureEvents::new(&mut sink);
+
+        capture.on_model_route("auto", "deepseek-v4-pro", "repeated repair signals", true);
+        capture.on_model_budget_warning(800, 1000);
+        let (_reasoning, routes) = capture.into_parts();
+
+        assert_eq!(
+            routes,
+            vec![ModelRouteEvent {
+                preset: "auto".to_string(),
+                model: "deepseek-v4-pro".to_string(),
+                reason: "repeated repair signals".to_string(),
+                escalated: true,
+            }]
+        );
+        assert_eq!(sink.routes, routes);
+        assert_eq!(sink.budget_warnings, vec![(800, 1000)]);
     }
 
     #[test]

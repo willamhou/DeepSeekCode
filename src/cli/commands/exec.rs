@@ -300,6 +300,13 @@ fn record_exec_runtime(
             prompt_layers_event_payload(&assistant.id, &usage.id, &result.prompt_layers),
         )?;
     }
+    for route in &result.model_routes {
+        store.append_thread_event(
+            &thread.id,
+            "model_route",
+            model_route_event(&route.preset, &route.model, &route.reason, route.escalated),
+        )?;
+    }
     store.create_task(
         Some(&session.id),
         Some(&thread.id),
@@ -720,6 +727,7 @@ mod tests {
             }],
             usage: TokenUsage::new(12, 3),
             prompt_layers: Vec::new(),
+            model_routes: Vec::new(),
         };
 
         let call = json_value_to_string(&tool_call_parts_event(
@@ -765,6 +773,12 @@ mod tests {
                     estimated_tokens: 3,
                     cache_stable: true,
                 }],
+            }],
+            model_routes: vec![crate::core::loop_runtime::ModelRouteEvent {
+                preset: "auto".to_string(),
+                model: "deepseek-v4-pro".to_string(),
+                reason: "repeated repair signals".to_string(),
+                escalated: true,
             }],
         };
 
@@ -818,13 +832,16 @@ mod tests {
         assert_eq!(tasks[0].kind, "exec");
         assert_eq!(tasks[0].status, "completed");
         let events = store.read_events(&threads[0].id, 0).unwrap();
-        assert_eq!(events.len(), 8);
+        assert_eq!(events.len(), 9);
         assert_eq!(events[2].kind, "item_recorded");
         assert_eq!(events[4].kind, "item_recorded");
         assert_eq!(events[5].kind, "usage_recorded");
         assert_eq!(events[6].kind, "prompt_layers_recorded");
         assert!(json_value_to_string(&events[6].payload).contains(&usage[0].id));
-        assert_eq!(events[7].kind, "task_recorded");
+        assert_eq!(events[7].kind, "model_route");
+        assert!(json_value_to_string(&events[7].payload).contains(r#""preset":"auto""#));
+        assert!(json_value_to_string(&events[7].payload).contains(r#""escalated":true"#));
+        assert_eq!(events[8].kind, "task_recorded");
     }
 
     #[test]

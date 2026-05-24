@@ -27,6 +27,8 @@ struct StatsSummary {
     estimated_total_cost_microusd: u64,
     unpriced_record_count: u64,
     model_counts: BTreeMap<String, u64>,
+    model_preset_counts: BTreeMap<String, u64>,
+    model_route_counts: BTreeMap<ModelRouteKey, u64>,
     repair_count: u64,
     repeated_tool_suppressions: u64,
     prompt_layer_snapshot_count: u64,
@@ -34,6 +36,13 @@ struct StatsSummary {
     latest_prompt_layer_digest: Option<String>,
     prompt_layer_cache_stable_hash_changes: u64,
     prompt_layer_trends: BTreeMap<String, PromptLayerTrend>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ModelRouteKey {
+    preset: String,
+    model: String,
+    escalated: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -94,8 +103,11 @@ fn stats_summary(store: &RuntimeStore, args: &StatsArgs) -> AppResult<StatsSumma
         let events = store.read_events(&thread.id, 0)?;
         accumulate_prompt_layer_events(&mut summary, &events);
         for item in store.list_items(&thread.id, None)? {
-            if item.item_type == "event" && item.content.contains("tool_call_repair") {
-                summary.repair_count = summary.repair_count.saturating_add(1);
+            if item.item_type == "event" {
+                if item.content.contains("tool_call_repair") {
+                    summary.repair_count = summary.repair_count.saturating_add(1);
+                }
+                accumulate_model_route_item(&mut summary, &item.content);
             }
             if item.content.contains("repeated identical")
                 && (item.item_type == "tool_result" || item.item_type == "event")
@@ -108,6 +120,7 @@ fn stats_summary(store: &RuntimeStore, args: &StatsArgs) -> AppResult<StatsSumma
             if event.kind == "tool_call_repair" {
                 summary.repair_count = summary.repair_count.saturating_add(1);
             }
+            accumulate_model_route_event(&mut summary, &event);
             if event.kind == "tool_result"
                 && json_value_to_string(&event.payload).contains("repeated identical")
             {
@@ -181,6 +194,83 @@ fn accumulate_usage(summary: &mut StatsSummary, record: &UsageRecord) {
         .model_counts
         .entry(record.model.clone())
         .or_insert(0) += 1;
+}
+
+fn accumulate_model_route_event(summary: &mut StatsSummary, event: &RuntimeEvent) {
+    if event.kind != "model_route" {
+        return;
+    }
+    let Some(root) = json_as_object(&event.payload) else {
+        return;
+    };
+    let Some(preset) = root.get("preset").and_then(json_as_string) else {
+        return;
+    };
+    let Some(model) = root.get("model").and_then(json_as_string) else {
+        return;
+    };
+    let escalated = root.get("escalated").and_then(json_bool).unwrap_or(false);
+    accumulate_model_route(summary, preset, model, escalated);
+}
+
+fn accumulate_model_route_item(summary: &mut StatsSummary, content: &str) {
+    if let Some((preset, model, escalated)) = parse_model_route_item(content) {
+        accumulate_model_route(summary, &preset, &model, escalated);
+    }
+}
+
+fn accumulate_model_route(summary: &mut StatsSummary, preset: &str, model: &str, escalated: bool) {
+    let preset = preset.trim();
+    let model = model.trim();
+    if preset.is_empty() || model.is_empty() {
+        return;
+    }
+    *summary
+        .model_preset_counts
+        .entry(preset.to_string())
+        .or_insert(0) += 1;
+    *summary
+        .model_route_counts
+        .entry(ModelRouteKey {
+            preset: preset.to_string(),
+            model: model.to_string(),
+            escalated,
+        })
+        .or_insert(0) += 1;
+}
+
+fn parse_model_route_item(content: &str) -> Option<(String, String, bool)> {
+    let mut preset = None;
+    let mut model = None;
+    let mut escalated = false;
+    for line in content.lines().map(str::trim) {
+        if let Some(value) = line.strip_prefix("model preset: ") {
+            let value = value.trim();
+            if !value.is_empty() {
+                preset = Some(value.to_string());
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("model: ") {
+            let value = value.trim();
+            if !value.is_empty() {
+                model = Some(value.to_string());
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("escalating next call to ") {
+            let model_value = value
+                .split_once(':')
+                .map(|(head, _)| head)
+                .unwrap_or(value)
+                .trim();
+            if !model_value.is_empty() {
+                model = Some(model_value.to_string());
+                escalated = true;
+            }
+        }
+    }
+    Some((preset?, model?, escalated))
 }
 
 fn accumulate_prompt_layer_events(summary: &mut StatsSummary, events: &[RuntimeEvent]) {
@@ -351,6 +441,22 @@ fn render_stats_summary(summary: &StatsSummary) -> String {
             out.push_str(&format!("- {model}: {count}\n"));
         }
     }
+    if !summary.model_preset_counts.is_empty() {
+        out.push_str("model_presets:\n");
+        for (preset, count) in &summary.model_preset_counts {
+            out.push_str(&format!("- {preset}: {count}\n"));
+        }
+    }
+    if !summary.model_route_counts.is_empty() {
+        out.push_str("model_routes:\n");
+        for (route, count) in &summary.model_route_counts {
+            let suffix = if route.escalated { " (escalated)" } else { "" };
+            out.push_str(&format!(
+                "- {} -> {}{}: {}\n",
+                route.preset, route.model, suffix, count
+            ));
+        }
+    }
     out.trim_end().to_string()
 }
 
@@ -455,9 +561,48 @@ fn stats_summary_to_json(summary: &StatsSummary) -> JsonValue {
                         .collect(),
                 ),
             ),
+            (
+                "model_presets".to_string(),
+                JsonValue::Object(
+                    summary
+                        .model_preset_counts
+                        .iter()
+                        .map(|(preset, count)| {
+                            (preset.clone(), JsonValue::Number(count.to_string()))
+                        })
+                        .collect(),
+                ),
+            ),
+            (
+                "model_routes".to_string(),
+                model_routes_to_json(&summary.model_route_counts),
+            ),
         ]
         .into_iter()
         .collect(),
+    )
+}
+
+fn model_routes_to_json(routes: &BTreeMap<ModelRouteKey, u64>) -> JsonValue {
+    JsonValue::Array(
+        routes
+            .iter()
+            .map(|(route, count)| {
+                JsonValue::Object(
+                    [
+                        (
+                            "preset".to_string(),
+                            JsonValue::String(route.preset.clone()),
+                        ),
+                        ("model".to_string(), JsonValue::String(route.model.clone())),
+                        ("escalated".to_string(), JsonValue::Bool(route.escalated)),
+                        ("count".to_string(), JsonValue::Number(count.to_string())),
+                    ]
+                    .into_iter()
+                    .collect(),
+                )
+            })
+            .collect(),
     )
 }
 
@@ -723,6 +868,33 @@ mod tests {
             .append_item(
                 &thread.id,
                 Some(&turn.id),
+                "event".to_string(),
+                Some("system".to_string()),
+                "model preset: flash\nmodel: deepseek-v4-flash\nreason: explicit preset"
+                    .to_string(),
+                "completed".to_string(),
+            )
+            .unwrap();
+        store
+            .append_thread_event(
+                &thread.id,
+                "model_route",
+                json_object([
+                    ("type", JsonValue::String("model_route".to_string())),
+                    ("preset", JsonValue::String("auto".to_string())),
+                    ("model", JsonValue::String("deepseek-v4-pro".to_string())),
+                    (
+                        "reason",
+                        JsonValue::String("repeated repair signals".to_string()),
+                    ),
+                    ("escalated", JsonValue::Bool(true)),
+                ]),
+            )
+            .unwrap();
+        store
+            .append_item(
+                &thread.id,
+                Some(&turn.id),
                 "tool_result".to_string(),
                 Some("tool".to_string()),
                 "repeated identical mutating or side-effecting tool call suppressed".to_string(),
@@ -751,6 +923,24 @@ mod tests {
             Some("abc123")
         );
         assert_eq!(summary.prompt_layer_cache_stable_hash_changes, 1);
+        assert_eq!(summary.model_preset_counts.get("auto"), Some(&1));
+        assert_eq!(summary.model_preset_counts.get("flash"), Some(&1));
+        assert_eq!(
+            summary.model_route_counts.get(&ModelRouteKey {
+                preset: "auto".to_string(),
+                model: "deepseek-v4-pro".to_string(),
+                escalated: true,
+            }),
+            Some(&1)
+        );
+        assert_eq!(
+            summary.model_route_counts.get(&ModelRouteKey {
+                preset: "flash".to_string(),
+                model: "deepseek-v4-flash".to_string(),
+                escalated: false,
+            }),
+            Some(&1)
+        );
         let system = summary
             .prompt_layer_trends
             .get("system_static")
@@ -779,11 +969,33 @@ mod tests {
         summary
             .model_counts
             .insert("deepseek-v4-flash".to_string(), 2);
+        summary.model_preset_counts.insert("flash".to_string(), 2);
+        summary.model_route_counts.insert(
+            ModelRouteKey {
+                preset: "flash".to_string(),
+                model: "deepseek-v4-flash".to_string(),
+                escalated: false,
+            },
+            2,
+        );
+        summary.model_route_counts.insert(
+            ModelRouteKey {
+                preset: "auto".to_string(),
+                model: "deepseek-v4-pro".to_string(),
+                escalated: true,
+            },
+            1,
+        );
         let rendered = render_stats_summary(&summary);
         assert!(rendered.contains("prompt_cache_hit_rate: 75.50%"));
         assert!(rendered.contains("estimated_cost_usd: 0.001234"));
         assert!(rendered.contains("prompt_layer_cache_stable_hash_changes: 0"));
         assert!(rendered.contains("- deepseek-v4-flash: 2"));
+        assert!(rendered.contains("model_presets:"));
+        assert!(rendered.contains("- flash: 2"));
+        assert!(rendered.contains("model_routes:"));
+        assert!(rendered.contains("- auto -> deepseek-v4-pro (escalated): 1"));
+        assert!(rendered.contains("- flash -> deepseek-v4-flash: 2"));
     }
 
     #[test]

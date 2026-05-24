@@ -124,7 +124,7 @@ dogfood 证据。
    TUI runtime/`exec --json` 中留下 repair 证据；不可修复的 malformed tool-call parse
    failure 会转成下一步模型可见的 failed `model` observation，而不是直接硬失败；重复工具调用守卫已区分只读和写状态工具，
    prompt-layer diagnostics 与 `deepseek stats` MVP 也已接入 exec、TUI 和 runtime daemon
-   turns，并可展示 per-layer token/hash trend 与 cache-stable hash-change totals，
+   turns，并可展示 model preset/route split、per-layer token/hash trend 与 cache-stable hash-change totals，
    `deepseek stats --require-prefix-stable` 可作为 cache-stable prompt layer hash
    regression gate，runtime daemon compaction threshold/keep-tail 也已可配置；
    `model.preset = "auto" | "flash" | "pro"`、`deepseek config preset`、

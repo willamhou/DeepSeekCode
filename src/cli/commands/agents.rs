@@ -11673,6 +11673,7 @@ mod tests {
                 total_bytes: 12,
                 estimated_tokens: 3,
             }],
+            model_routes: Vec::new(),
         };
 
         let assistant_turn_id =
