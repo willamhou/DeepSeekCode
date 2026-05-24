@@ -2502,11 +2502,15 @@ fn repair_cache_evidence_summary_json(
         (
             "commands",
             json_array(vec![
-                JsonValue::String(format!("deepseek events replay {after_thread_id}")),
+                JsonValue::String(format!(
+                    "deepseek events replay {after_thread_id} --limit 50"
+                )),
                 JsonValue::String(format!(
                     "deepseek events diff {before_thread_id} {after_thread_id}"
                 )),
-                JsonValue::String(format!("deepseek stats --thread {after_thread_id}")),
+                JsonValue::String(format!(
+                    "deepseek stats --thread {after_thread_id} --require-prefix-stable"
+                )),
             ]),
         ),
         (
@@ -6745,7 +6749,8 @@ mod tests {
         assert!(commands
             .iter()
             .filter_map(json_as_string)
-            .any(|command| command.contains("deepseek events replay")));
+            .any(|command| command.contains("deepseek events replay")
+                && command.contains("--limit 50")));
         assert!(commands
             .iter()
             .filter_map(json_as_string)
@@ -6753,7 +6758,8 @@ mod tests {
         assert!(commands
             .iter()
             .filter_map(json_as_string)
-            .any(|command| command.contains("deepseek stats --thread")));
+            .any(|command| command.contains("deepseek stats --thread")
+                && command.contains("--require-prefix-stable")));
 
         fs::remove_dir_all(root).unwrap();
     }
