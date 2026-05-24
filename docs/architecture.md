@@ -39,6 +39,11 @@ through the same permission, policy, hook, execution, observation, and recovery
 paths regardless of whether the request came from TUI, REPL, exec, runtime
 daemon, GitHub Action bridge, or dogfood.
 
+DeepSeek-specific loop hardening is tracked in
+[DeepSeek-Native Agent Loop Design](./deepseek-native-loop.md). That design
+covers cache-first prompt layers, tool-call repair, cost-aware model presets,
+parallel read dispatch, and stats/replay surfaces.
+
 ### Model Adapter
 
 The model layer normalizes DeepSeek/OpenAI-compatible and Anthropic-compatible

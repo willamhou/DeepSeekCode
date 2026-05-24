@@ -106,13 +106,17 @@ dogfood 证据。
 
 ### 更大产品目标
 
-1. 配置 `NPM_TOKEN` 并发布 npm wrapper，验证 `npm install` 后裸 `deepseek` 入口。
-2. 配置 `HOMEBREW_TAP_TOKEN`，让后续 tag workflow 自动更新 tap；当前 `v0.1.3` tap
+1. 按 [DeepSeek-Native Agent Loop Design](./deepseek-native-loop.md) 推进
+   cache-first prompt layers、tool-call repair、cost-aware model presets、
+   read-only parallel dispatch 和 stats/replay surfaces。优先从 tool-call
+   repair 开始，因为它直接影响 DeepSeek 模型真实改代码时的成功率。
+2. 配置 `NPM_TOKEN` 并发布 npm wrapper，验证 `npm install` 后裸 `deepseek` 入口。
+3. 配置 `HOMEBREW_TAP_TOKEN`，让后续 tag workflow 自动更新 tap；当前 `v0.1.3` tap
    已手动发布并验证。
-3. 在干净 Linux/macOS 机器上安装 systemd/launchd user services，记录
+4. 在干净 Linux/macOS 机器上安装 systemd/launchd user services，记录
    `service-doctor --installed` 和 `service-smoke --installed` 证据。
-4. 补真实 VS Code CLI runner 或 manual GUI fixture 证据。
-5. 持续和 Claude Code CLI / Codex CLI / DeepSeek-TUI 做核心 loop 对照，只保留会影响真实用户使用的差距。
+5. 补真实 VS Code CLI runner 或 manual GUI fixture 证据。
+6. 持续和 Claude Code CLI / Codex CLI / DeepSeek-TUI 做核心 loop 对照，只保留会影响真实用户使用的差距。
 
 ## 推荐公开表述
 

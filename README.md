@@ -175,6 +175,7 @@ For release and dogfood evidence, see:
 - [Dogfood evidence](./docs/dogfood-evidence.md)
 - [Demo assets](./docs/demo/README.md)
 - [Architecture](./docs/architecture.md)
+- [DeepSeek-native loop design](./docs/deepseek-native-loop.md)
 - [Runtime contract](./docs/runtime.md)
 - [TUI workbench](./docs/tui.md)
 - [REPL mode](./docs/repl.md)

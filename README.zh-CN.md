@@ -167,6 +167,7 @@ deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 - [Dogfood 证据](./docs/dogfood-evidence.md)
 - [Demo 素材](./docs/demo/README.md)
 - [架构](./docs/architecture.md)
+- [DeepSeek-native loop design](./docs/deepseek-native-loop.md)
 - [Runtime contract](./docs/runtime.md)
 - [TUI workbench](./docs/tui.md)
 - [REPL mode](./docs/repl.md)

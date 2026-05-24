@@ -62,7 +62,21 @@ service proof, and documentation polish.
 For the Linux/macOS CLI milestone, Homebrew is now the verified installer path;
 npm remains useful for Node-oriented users but is not the primary blocker.
 
-### 3. More External Model-Backed Samples
+### 3. DeepSeek-Native Agent Loop Hardening
+
+- Use [DeepSeek-Native Agent Loop Design](./deepseek-native-loop.md) as the
+  working design for cache-first prompt layers, tool-call repair, cost-aware
+  model presets, read-only parallel dispatch, and stats/replay surfaces.
+- Start with the tool-call repair pipeline because it directly improves
+  model-backed edit success when DeepSeek emits malformed or partial tool
+  arguments.
+- Follow with prompt-layer hash diagnostics and `deepseek stats`, so cache and
+  cost behavior can be inspected from committed runtime evidence.
+- Keep pro-tier escalation user-visible; do not silently route expensive calls.
+- Treat this as product hardening rather than a blocker for the already
+  established Linux/macOS CLI milestone.
+
+### 4. More External Model-Backed Samples
 
 - Keep the Python invoice multi-file fixture as the canonical tracked release
   evidence sample.
@@ -73,7 +87,7 @@ npm remains useful for Node-oriented users but is not the primary blocker.
 - Require `dogfood external-evidence` verification with
   `post_validation_passed=true` for every sample counted as release evidence.
 
-### 4. Documentation Compression
+### 5. Documentation Compression
 
 - Keep README focused on install, `deepseek quickstart`, current gap, demo, and
   validation.
@@ -82,7 +96,7 @@ npm remains useful for Node-oriented users but is not the primary blocker.
 - Treat `docs/superpowers/` as historical execution logs, not user-facing
   status.
 
-### 5. Broader Product Hardening
+### 6. Broader Product Hardening
 
 - Record installed systemd/launchd service smoke evidence on clean machines.
 - Record a real VS Code runner/manual GUI fixture for the native agent panel.
