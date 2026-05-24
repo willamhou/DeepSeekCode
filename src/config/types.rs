@@ -53,17 +53,23 @@ impl Default for VisionConfig {
 pub struct ModelConfig {
     pub base_url: String,
     pub model: String,
+    pub preset: String,
     pub api_key_env: String,
     pub reasoning_effort: String,
+    pub tool_schema_flattening: String,
+    pub session_budget_microusd: u64,
 }
 
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
             base_url: "https://api.deepseek.com".to_string(),
-            model: "deepseek-coder".to_string(),
+            model: "auto".to_string(),
+            preset: "auto".to_string(),
             api_key_env: "DEEPSEEK_API_KEY".to_string(),
             reasoning_effort: "off".to_string(),
+            tool_schema_flattening: "auto".to_string(),
+            session_budget_microusd: 0,
         }
     }
 }

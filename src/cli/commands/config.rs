@@ -1,4 +1,6 @@
-use crate::cli::app::{ConfigArgs, ConfigModelAction, ConfigProviderAction};
+use crate::cli::app::{
+    ConfigArgs, ConfigBudgetAction, ConfigModelAction, ConfigPresetAction, ConfigProviderAction,
+};
 use crate::config::load::{config_assignments, load_or_default, parse_dotenv_assignment};
 use crate::config::types::AppConfig;
 use crate::core::network_policy::{decide, normalize_host, NetworkDecision};
@@ -13,6 +15,14 @@ pub fn run(args: ConfigArgs) -> AppResult<()> {
     }
     if let Some(action) = args.provider_action.clone() {
         run_provider_action(action)?;
+        return Ok(());
+    }
+    if let Some(action) = args.preset_action.clone() {
+        run_preset_action(action)?;
+        return Ok(());
+    }
+    if let Some(action) = args.budget_action.clone() {
+        run_budget_action(action)?;
         return Ok(());
     }
     if let Some(host) = args.network_allow {
@@ -117,6 +127,58 @@ fn run_provider_action(action: ConfigProviderAction) -> AppResult<()> {
     Ok(())
 }
 
+fn run_preset_action(action: ConfigPresetAction) -> AppResult<()> {
+    let cwd = std::env::current_dir()?;
+    match action {
+        ConfigPresetAction::Show => {
+            let summary = model_config_summary_at(&cwd)?;
+            print_model_summary(&summary);
+        }
+        ConfigPresetAction::Set(preset) => {
+            let result = set_model_preset_at(&cwd, &preset)?;
+            if result.changed {
+                println!(
+                    "preset: {} -> {} ({})",
+                    result.previous_preset, result.preset, result.model
+                );
+            } else {
+                println!(
+                    "preset: {} already selected ({})",
+                    result.preset, result.model
+                );
+            }
+            println!("config: {}", result.path.display());
+        }
+    }
+    Ok(())
+}
+
+fn run_budget_action(action: ConfigBudgetAction) -> AppResult<()> {
+    let cwd = std::env::current_dir()?;
+    match action {
+        ConfigBudgetAction::Show => {
+            let summary = model_config_summary_at(&cwd)?;
+            print_budget_summary(&summary);
+        }
+        ConfigBudgetAction::SetMicrousd(value) => {
+            let result = set_session_budget_at(&cwd, value)?;
+            if result.changed {
+                println!(
+                    "session budget: {} -> {} microusd",
+                    result.previous_microusd, result.session_budget_microusd
+                );
+            } else {
+                println!(
+                    "session budget: {} microusd already selected",
+                    result.session_budget_microusd
+                );
+            }
+            println!("config: {}", result.path.display());
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NetworkRuleTarget {
     Allow,
@@ -173,8 +235,11 @@ pub(crate) struct ModelConfigSummary {
     pub(crate) path: std::path::PathBuf,
     pub(crate) base_url: String,
     pub(crate) model: String,
+    pub(crate) preset: String,
     pub(crate) api_key_env: String,
     pub(crate) reasoning_effort: String,
+    pub(crate) tool_schema_flattening: String,
+    pub(crate) session_budget_microusd: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,14 +251,35 @@ pub(crate) struct ModelSetResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelPresetSetResult {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) previous_preset: String,
+    pub(crate) previous_model: String,
+    pub(crate) preset: String,
+    pub(crate) model: String,
+    pub(crate) changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionBudgetSetResult {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) previous_microusd: u64,
+    pub(crate) session_budget_microusd: u64,
+    pub(crate) changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProviderConfigSummary {
     pub(crate) path: std::path::PathBuf,
     pub(crate) provider: String,
     pub(crate) label: String,
     pub(crate) base_url: String,
     pub(crate) model: String,
+    pub(crate) preset: String,
     pub(crate) api_key_env: String,
     pub(crate) reasoning_effort: String,
+    pub(crate) tool_schema_flattening: String,
+    pub(crate) session_budget_microusd: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,19 +362,43 @@ fn print_network_rule_result(result: &NetworkRuleResult) {
 }
 
 fn print_model_summary(summary: &ModelConfigSummary) {
+    println!("preset: {}", summary.preset);
     println!("model: {}", summary.model);
     println!("base_url: {}", summary.base_url);
     println!("api_key_env: {}", summary.api_key_env);
     println!("reasoning_effort: {}", summary.reasoning_effort);
+    println!("tool_schema_flattening: {}", summary.tool_schema_flattening);
+    println!(
+        "session_budget_microusd: {}",
+        summary.session_budget_microusd
+    );
     println!("config: {}", summary.path.display());
 }
 
 fn print_provider_summary(summary: &ProviderConfigSummary) {
     println!("provider: {} ({})", summary.provider, summary.label);
+    println!("preset: {}", summary.preset);
     println!("base_url: {}", summary.base_url);
     println!("model: {}", summary.model);
     println!("api_key_env: {}", summary.api_key_env);
     println!("reasoning_effort: {}", summary.reasoning_effort);
+    println!("tool_schema_flattening: {}", summary.tool_schema_flattening);
+    println!(
+        "session_budget_microusd: {}",
+        summary.session_budget_microusd
+    );
+    println!("config: {}", summary.path.display());
+}
+
+fn print_budget_summary(summary: &ModelConfigSummary) {
+    if summary.session_budget_microusd == 0 {
+        println!("session budget: off");
+    } else {
+        println!(
+            "session budget: {} microusd",
+            summary.session_budget_microusd
+        );
+    }
     println!("config: {}", summary.path.display());
 }
 
@@ -474,10 +584,15 @@ pub(crate) fn model_config_summary_at(root: &std::path::Path) -> AppResult<Model
         path,
         base_url: read_string_key(&content, "model.base_url").unwrap_or(defaults.model.base_url),
         model: read_string_key(&content, "model.model").unwrap_or(defaults.model.model),
+        preset: read_string_key(&content, "model.preset").unwrap_or(defaults.model.preset),
         api_key_env: read_string_key(&content, "model.api_key_env")
             .unwrap_or(defaults.model.api_key_env),
         reasoning_effort: read_string_key(&content, "model.reasoning_effort")
             .unwrap_or(defaults.model.reasoning_effort),
+        tool_schema_flattening: read_string_key(&content, "model.tool_schema_flattening")
+            .unwrap_or(defaults.model.tool_schema_flattening),
+        session_budget_microusd: read_u64_key(&content, "model.session_budget_microusd")
+            .unwrap_or(defaults.model.session_budget_microusd),
     })
 }
 
@@ -506,6 +621,62 @@ pub(crate) fn set_model_at(root: &std::path::Path, model: &str) -> AppResult<Mod
     })
 }
 
+pub(crate) fn set_model_preset_at(
+    root: &std::path::Path,
+    preset: &str,
+) -> AppResult<ModelPresetSetResult> {
+    let preset = normalize_model_preset_value(preset)?;
+    let model = model_for_preset_value(&preset).to_string();
+    let path = network_config_path_at(root);
+    if !path.exists() {
+        init_config_at(root, false)?;
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let defaults = AppConfig::default();
+    let previous_preset =
+        read_string_key(&content, "model.preset").unwrap_or(defaults.model.preset);
+    let previous_model = read_string_key(&content, "model.model").unwrap_or(defaults.model.model);
+    let changed = previous_preset != preset || previous_model != model;
+    if changed {
+        let updated = replace_or_append_string_key(&content, "model.preset", &preset);
+        let updated = replace_or_append_string_key(&updated, "model.model", &model);
+        std::fs::write(&path, updated)?;
+    }
+    Ok(ModelPresetSetResult {
+        path,
+        previous_preset,
+        previous_model,
+        preset,
+        model,
+        changed,
+    })
+}
+
+pub(crate) fn set_session_budget_at(
+    root: &std::path::Path,
+    budget_microusd: u64,
+) -> AppResult<SessionBudgetSetResult> {
+    let path = network_config_path_at(root);
+    if !path.exists() {
+        init_config_at(root, false)?;
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let previous_microusd = read_u64_key(&content, "model.session_budget_microusd")
+        .unwrap_or_else(|| AppConfig::default().model.session_budget_microusd);
+    let changed = previous_microusd != budget_microusd;
+    if changed {
+        let updated =
+            replace_or_append_u64_key(&content, "model.session_budget_microusd", budget_microusd);
+        std::fs::write(&path, updated)?;
+    }
+    Ok(SessionBudgetSetResult {
+        path,
+        previous_microusd,
+        session_budget_microusd: budget_microusd,
+        changed,
+    })
+}
+
 pub(crate) fn provider_config_summary_at(
     root: &std::path::Path,
 ) -> AppResult<ProviderConfigSummary> {
@@ -517,8 +688,11 @@ pub(crate) fn provider_config_summary_at(
         label: preset.label.to_string(),
         base_url: model.base_url,
         model: model.model,
+        preset: model.preset,
         api_key_env: model.api_key_env,
         reasoning_effort: model.reasoning_effort,
+        tool_schema_flattening: model.tool_schema_flattening,
+        session_budget_microusd: model.session_budget_microusd,
     })
 }
 
@@ -710,8 +884,17 @@ pub(crate) fn persist_auth_secret_at(
 fn print_config(config: &AppConfig) {
     println!("model.base_url = {}", config.model.base_url);
     println!("model.model = {}", config.model.model);
+    println!("model.preset = {}", config.model.preset);
     println!("model.api_key_env = {}", config.model.api_key_env);
     println!("model.reasoning_effort = {}", config.model.reasoning_effort);
+    println!(
+        "model.tool_schema_flattening = {}",
+        config.model.tool_schema_flattening
+    );
+    println!(
+        "model.session_budget_microusd = {}",
+        config.model.session_budget_microusd
+    );
     println!("vision.base_url = {}", config.vision.base_url);
     println!("vision.model = {}", config.vision.model);
     println!("vision.api_key_env = {}", config.vision.api_key_env);
@@ -931,6 +1114,41 @@ fn normalize_model_value(model: &str) -> AppResult<String> {
     Ok(normalized)
 }
 
+pub(crate) fn normalize_model_preset_value(preset: &str) -> AppResult<String> {
+    let normalized = match preset.trim().to_ascii_lowercase().as_str() {
+        "auto" | "default" => "auto",
+        "flash" | "fast" => "flash",
+        "pro" | "reasoning" | "deep" => "pro",
+        _ => return Err(app_error("model preset must be auto, flash, or pro")),
+    };
+    Ok(normalized.to_string())
+}
+
+pub(crate) fn model_for_preset_value(preset: &str) -> &'static str {
+    match preset.trim().to_ascii_lowercase().as_str() {
+        "flash" => "deepseek-v4-flash",
+        "pro" => "deepseek-v4-pro",
+        _ => "auto",
+    }
+}
+
+pub(crate) fn apply_model_preset_override(
+    config: &mut AppConfig,
+    preset: Option<&str>,
+    pro_next: bool,
+) -> AppResult<()> {
+    if let Some(preset) = preset {
+        let preset = normalize_model_preset_value(preset)?;
+        config.model.model = model_for_preset_value(&preset).to_string();
+        config.model.preset = preset;
+    }
+    if pro_next {
+        config.model.preset = "pro".to_string();
+        config.model.model = "deepseek-v4-pro".to_string();
+    }
+    Ok(())
+}
+
 fn provider_presets() -> &'static [ProviderPreset] {
     &[
         ProviderPreset {
@@ -938,7 +1156,7 @@ fn provider_presets() -> &'static [ProviderPreset] {
             label: "DeepSeek",
             base_url: "https://api.deepseek.com",
             api_key_env: "DEEPSEEK_API_KEY",
-            default_model: "deepseek-v4-pro",
+            default_model: "auto",
         },
         ProviderPreset {
             name: "nvidia-nim",
@@ -1103,7 +1321,7 @@ pub(crate) fn provider_model_completion_values_for_base_url(base_url: &str) -> V
 
 fn provider_model_completion_values(provider: &str) -> Vec<&'static str> {
     match provider {
-        "deepseek" => vec!["deepseek-v4-pro", "deepseek-v4-flash"],
+        "deepseek" => vec!["auto", "deepseek-v4-flash", "deepseek-v4-pro"],
         "nvidia-nim" => vec![
             "deepseek-ai/deepseek-v4-pro",
             "deepseek-ai/deepseek-v4-flash",
@@ -1335,6 +1553,21 @@ fn read_bool_key(content: &str, key: &str) -> Option<bool> {
     None
 }
 
+fn read_u64_key(content: &str, key: &str) -> Option<u64> {
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix(key) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(value) = rest.strip_prefix('=') else {
+            continue;
+        };
+        return value.trim().trim_matches('"').parse::<u64>().ok();
+    }
+    None
+}
+
 fn unquote_config_string(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
@@ -1452,6 +1685,10 @@ fn replace_or_append_bool_key(content: &str, key: &str, value: bool) -> String {
     replace_or_append_line(content, key, format!("{key} = {value}"))
 }
 
+fn replace_or_append_u64_key(content: &str, key: &str, value: u64) -> String {
+    replace_or_append_line(content, key, format!("{key} = {value}"))
+}
+
 fn replace_or_append_line(content: &str, key: &str, rendered: String) -> String {
     let mut replaced = false;
     let mut lines = Vec::new();
@@ -1484,8 +1721,11 @@ fn render_default_config(config: &AppConfig) -> String {
         r#"# DeepSeekCode project configuration
 model.base_url = "{base_url}"
 model.model = "{model}"
+model.preset = "{preset}"
 model.api_key_env = "{api_key_env}"
 model.reasoning_effort = "{reasoning_effort}"
+model.tool_schema_flattening = "{tool_schema_flattening}"
+model.session_budget_microusd = {session_budget_microusd}
 
 # Optional OpenAI-compatible vision model for the image_analyze tool.
 vision.base_url = "{vision_base_url}"
@@ -1541,8 +1781,11 @@ skills.cache_dir = "{skills_cache_dir}"
 "#,
         base_url = config.model.base_url,
         model = config.model.model,
+        preset = config.model.preset,
         api_key_env = config.model.api_key_env,
         reasoning_effort = config.model.reasoning_effort,
+        tool_schema_flattening = config.model.tool_schema_flattening,
+        session_budget_microusd = config.model.session_budget_microusd,
         vision_base_url = config.vision.base_url,
         vision_model = config.vision.model,
         vision_api_key_env = config.vision.api_key_env,
@@ -1738,7 +1981,7 @@ mod tests {
         init_config_at(&root, false).unwrap();
         let result = set_provider_at(&root, "deepseek-cn", None).unwrap();
         assert_eq!(result.provider, "deepseek");
-        assert_eq!(result.model, "deepseek-v4-pro");
+        assert_eq!(result.model, "auto");
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1774,10 +2017,51 @@ mod tests {
     }
 
     #[test]
+    fn set_model_preset_at_updates_preset_and_model_marker() {
+        let root = temp_root("model-preset");
+        init_config_at(&root, false).unwrap();
+
+        let result = set_model_preset_at(&root, "flash").unwrap();
+
+        assert!(result.changed);
+        assert_eq!(result.previous_preset, "auto");
+        assert_eq!(result.preset, "flash");
+        assert_eq!(result.model, "deepseek-v4-flash");
+        let content = std::fs::read_to_string(root.join(".dscode/config.toml")).unwrap();
+        assert!(content.contains(r#"model.preset = "flash""#));
+        assert!(content.contains(r#"model.model = "deepseek-v4-flash""#));
+
+        let pro = set_model_preset_at(&root, "pro").unwrap();
+        assert_eq!(pro.previous_model, "deepseek-v4-flash");
+        assert_eq!(pro.model, "deepseek-v4-pro");
+
+        let invalid = set_model_preset_at(&root, "ultra").unwrap_err();
+        assert!(invalid.to_string().contains("auto, flash, or pro"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn set_session_budget_at_updates_budget_key() {
+        let root = temp_root("model-budget");
+        init_config_at(&root, false).unwrap();
+
+        let result = set_session_budget_at(&root, 1200).unwrap();
+
+        assert!(result.changed);
+        assert_eq!(result.previous_microusd, 0);
+        assert_eq!(result.session_budget_microusd, 1200);
+        let content = std::fs::read_to_string(root.join(".dscode/config.toml")).unwrap();
+        assert!(content.contains("model.session_budget_microusd = 1200"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn provider_model_completion_values_use_active_provider_ids() {
         assert_eq!(
             provider_model_completion_values_for_base_url("https://api.deepseek.com"),
-            vec!["deepseek-v4-pro", "deepseek-v4-flash"]
+            vec!["auto", "deepseek-v4-flash", "deepseek-v4-pro"]
         );
         assert_eq!(
             provider_model_completion_values_for_base_url("https://integrate.api.nvidia.com/v1"),

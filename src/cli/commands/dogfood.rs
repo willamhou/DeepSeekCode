@@ -10,17 +10,25 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use crate::cli::app::{
     BenchmarkArgs, DogfoodAction, DogfoodCategoryRequirement, DogfoodExportArgs,
     DogfoodExternalEvidenceArgs, DogfoodExternalFixtureArgs, DogfoodLiveEvidenceArgs,
-    DogfoodLivePlanArgs, DogfoodLiveRunArgs, DogfoodOutcome, DogfoodPromoteArgs, DogfoodReplayArgs,
-    DogfoodReportArgs, DogfoodRunArgs,
+    DogfoodLivePlanArgs, DogfoodLiveRunArgs, DogfoodOutcome, DogfoodPromoteArgs,
+    DogfoodRepairCacheEvidenceArgs, DogfoodReplayArgs, DogfoodReportArgs, DogfoodRunArgs,
 };
 use crate::cli::commands::benchmark::BenchmarkCaseSummary;
 use crate::config::load::load_or_default;
 use crate::core::context::TaskContext;
 use crate::core::loop_runtime::{AgentLoop, AgentLoopOptions, RunResult};
+use crate::core::prompt_layers::{
+    prompt_layers_event_payload, PromptLayerRecord, PromptLayerSnapshot,
+};
+use crate::core::runtime::{json_array, json_object, RuntimeStore};
 use crate::error::{app_error, AppError, AppErrorKind, AppResult};
 use crate::model::protocol::ObservationStatus;
+use crate::model::tool_repair::parse_tool_arguments_with_repair;
+use crate::tools::read_file::ReadFileTool;
+use crate::tools::types::{Tool, ToolInput};
 use crate::util::json::{
-    json_as_array, json_as_string, json_as_u64, json_value_to_string, parse_root_object, JsonValue,
+    json_as_array, json_as_object, json_as_string, json_as_u64, json_escape, json_value_to_string,
+    parse_root_object, parse_value, JsonValue,
 };
 
 const DEFAULT_REPORT_LIMIT: usize = 20;
@@ -44,6 +52,7 @@ pub fn run(action: DogfoodAction) -> AppResult<()> {
         DogfoodAction::Run(args) => run_live_task(&config, args),
         DogfoodAction::ExternalFixture(args) => run_external_fixture_command(&config, args),
         DogfoodAction::ExternalEvidence(args) => external_evidence_command(args),
+        DogfoodAction::RepairCacheEvidence(args) => repair_cache_evidence_command(&config, args),
         DogfoodAction::ReplayBenchmark(args) => replay_benchmark_command(&config, args),
         DogfoodAction::LivePlan(args) => live_plan_command(&config, args),
         DogfoodAction::LiveRun(args) => live_run_command(&config, args),
@@ -1886,6 +1895,415 @@ fn validate_live_run_api_key_file_path(path: &Path) -> AppResult<()> {
         )));
     }
     Ok(())
+}
+
+fn repair_cache_evidence_command(
+    config: &crate::config::types::AppConfig,
+    args: DogfoodRepairCacheEvidenceArgs,
+) -> AppResult<()> {
+    let repo_root = std::env::current_dir()?;
+    let runtime_root = PathBuf::from(&config.workspace.config_dir).join("runtime");
+    let store = RuntimeStore::new(runtime_root.clone());
+    let out_path = args.out.map(PathBuf::from).unwrap_or_else(|| {
+        config
+            .workspace
+            .dogfood_dir()
+            .join("repair-cache-evidence.json")
+    });
+    let evidence = repair_cache_evidence_summary_json(
+        &store,
+        &runtime_root,
+        &repo_root,
+        "deepseek-v4-flash",
+        "src/model/tool_repair.rs",
+    )?;
+    write_dogfood_json_artifact(
+        out_path.to_string_lossy().as_ref(),
+        &evidence,
+        "dogfood repair/cache evidence summary",
+    )?;
+
+    if args.json {
+        println!("{}", json_value_to_string(&evidence));
+        return Ok(());
+    }
+
+    println!("DeepSeekCode dogfood repair/cache evidence");
+    println!("runtime: {}", runtime_root.display());
+    println!("evidence: {}", out_path.display());
+    if let Some(root) = json_as_object(&evidence) {
+        if let (Some(before), Some(after)) = (
+            root.get("before_thread_id").and_then(json_as_string),
+            root.get("after_thread_id").and_then(json_as_string),
+        ) {
+            println!("before_thread: {before}");
+            println!("after_thread: {after}");
+            println!("diff: deepseek events diff {before} {after}");
+            println!("after_stats: deepseek stats --thread {after}");
+        }
+    }
+    Ok(())
+}
+
+fn repair_cache_evidence_summary_json(
+    store: &RuntimeStore,
+    runtime_root: &Path,
+    workspace: &Path,
+    model: &str,
+    read_path: &str,
+) -> AppResult<JsonValue> {
+    let model = if model.trim().is_empty() {
+        "deepseek-v4-flash"
+    } else {
+        model.trim()
+    };
+    let session = store.create_session(
+        "Repair/cache dogfood evidence".to_string(),
+        workspace.display().to_string(),
+    )?;
+    let before = store.create_thread_for_session(
+        &session.id,
+        "Before repair: malformed DeepSeek tool call".to_string(),
+        workspace.display().to_string(),
+        model.to_string(),
+        "dogfood".to_string(),
+    )?;
+    let after = store.create_thread_for_session(
+        &session.id,
+        "After repair: recovered DeepSeek tool call".to_string(),
+        workspace.display().to_string(),
+        model.to_string(),
+        "dogfood".to_string(),
+    )?;
+
+    let raw_arguments = format!("{{\"path\":\"{}\"", json_escape(read_path));
+    let strict_parse_error = strict_json_object_complete_error(&raw_arguments)
+        .unwrap_or_else(|| "strict parser unexpectedly accepted malformed input".to_string());
+
+    let before_turn = store.append_turn(
+        &before.id,
+        "assistant".to_string(),
+        format!("DeepSeek emitted malformed read_file arguments: {raw_arguments}"),
+    )?;
+    store.append_item(
+        &before.id,
+        Some(&before_turn.id),
+        "tool_result".to_string(),
+        None,
+        format!("tool_call_parse_failed: {strict_parse_error}"),
+        "failed".to_string(),
+    )?;
+    let before_usage = store.append_usage_with_cache(
+        &before.id,
+        Some(&before_turn.id),
+        model.to_string(),
+        "dogfood-repair-cache-before".to_string(),
+        1_200,
+        120,
+        0,
+        1_200,
+    )?;
+    let before_prompt_layers = vec![repair_cache_prompt_snapshot(1, 1_200)];
+    store.append_thread_event(
+        &before.id,
+        "prompt_layers_recorded",
+        prompt_layers_event_payload(&before_turn.id, &before_usage.id, &before_prompt_layers),
+    )?;
+
+    let (repaired_args, repair_note) = parse_tool_arguments_with_repair(&raw_arguments)?;
+    let repair_note = repair_note.ok_or_else(|| {
+        app_error("dogfood repair/cache evidence expected truncated-json repair note")
+    })?;
+    let tool_output = ReadFileTool.execute(ToolInput {
+        args: repaired_args.clone(),
+    })?;
+    let tool_result_ok = tool_output.summary.contains("ToolRepairNote")
+        || tool_output
+            .summary
+            .contains("parse_tool_arguments_with_repair");
+
+    let after_turn = store.append_turn(
+        &after.id,
+        "assistant".to_string(),
+        format!(
+            "DeepSeek emitted the same malformed read_file arguments; repair recovered them: {raw_arguments}"
+        ),
+    )?;
+    store.append_item(
+        &after.id,
+        Some(&after_turn.id),
+        "tool_call".to_string(),
+        None,
+        format!(
+            "read_file {}",
+            json_value_to_string(&string_map_to_json(&repaired_args))
+        ),
+        "completed".to_string(),
+    )?;
+    store.append_thread_event(
+        &after.id,
+        "tool_call_repair",
+        json_object([
+            ("type", JsonValue::String("tool_call_repair".to_string())),
+            ("kind", JsonValue::String(repair_note.kind.to_string())),
+            ("detail", JsonValue::String(repair_note.detail.clone())),
+            ("tool_name", JsonValue::String("read_file".to_string())),
+            ("raw_arguments", JsonValue::String(raw_arguments.clone())),
+        ]),
+    )?;
+    store.append_item(
+        &after.id,
+        Some(&after_turn.id),
+        "tool_result".to_string(),
+        None,
+        clip(&tool_output.summary, 1_000),
+        if tool_result_ok {
+            "completed".to_string()
+        } else {
+            "failed".to_string()
+        },
+    )?;
+    let after_usage = store.append_usage_with_cache(
+        &after.id,
+        Some(&after_turn.id),
+        model.to_string(),
+        "dogfood-repair-cache-after".to_string(),
+        1_200,
+        120,
+        900,
+        300,
+    )?;
+    let after_prompt_layers = vec![repair_cache_prompt_snapshot(1, 1_200)];
+    store.append_thread_event(
+        &after.id,
+        "prompt_layers_recorded",
+        prompt_layers_event_payload(&after_turn.id, &after_usage.id, &after_prompt_layers),
+    )?;
+
+    let before_events = store.read_events(&before.id, 0)?;
+    let after_events = store.read_events(&after.id, 0)?;
+    let before_repair_events = count_events(&before_events, "tool_call_repair");
+    let after_repair_events = count_events(&after_events, "tool_call_repair");
+    let before_prompt_layer_events = count_events(&before_events, "prompt_layers_recorded");
+    let after_prompt_layer_events = count_events(&after_events, "prompt_layers_recorded");
+    let before_hit_rate = cache_hit_basis_points(0, 1_200);
+    let after_hit_rate = cache_hit_basis_points(900, 300);
+    let session_id = session.id.clone();
+    let before_thread_id = before.id.clone();
+    let after_thread_id = after.id.clone();
+    let repair_kind = repair_note.kind.to_string();
+    let repair_detail = repair_note.detail.clone();
+
+    Ok(json_object([
+        (
+            "kind",
+            JsonValue::String("deepseek.dogfood.repair_cache_evidence.v1".to_string()),
+        ),
+        (
+            "runtime_root",
+            JsonValue::String(runtime_root.display().to_string()),
+        ),
+        ("session_id", JsonValue::String(session_id)),
+        (
+            "before_thread_id",
+            JsonValue::String(before_thread_id.clone()),
+        ),
+        (
+            "after_thread_id",
+            JsonValue::String(after_thread_id.clone()),
+        ),
+        (
+            "raw_trace",
+            json_object([
+                (
+                    "provider",
+                    JsonValue::String("deepseek-openai-compatible".to_string()),
+                ),
+                ("tool_name", JsonValue::String("read_file".to_string())),
+                ("raw_arguments", JsonValue::String(raw_arguments)),
+                ("strict_parse_error", JsonValue::String(strict_parse_error)),
+                ("would_fail_without_repair", JsonValue::Bool(true)),
+            ]),
+        ),
+        (
+            "repair",
+            json_object([
+                ("completed", JsonValue::Bool(tool_result_ok)),
+                ("kind", JsonValue::String(repair_kind)),
+                ("detail", JsonValue::String(repair_detail)),
+                ("arguments", string_map_to_json(&repaired_args)),
+                (
+                    "tool_result_excerpt",
+                    JsonValue::String(clip(&tool_output.summary, 240)),
+                ),
+            ]),
+        ),
+        (
+            "cache_comparison",
+            json_object([
+                (
+                    "before_prompt_cache_hit_tokens",
+                    JsonValue::Number("0".to_string()),
+                ),
+                (
+                    "before_prompt_cache_miss_tokens",
+                    JsonValue::Number("1200".to_string()),
+                ),
+                (
+                    "before_prompt_cache_hit_basis_points",
+                    JsonValue::Number(before_hit_rate.to_string()),
+                ),
+                (
+                    "after_prompt_cache_hit_tokens",
+                    JsonValue::Number("900".to_string()),
+                ),
+                (
+                    "after_prompt_cache_miss_tokens",
+                    JsonValue::Number("300".to_string()),
+                ),
+                (
+                    "after_prompt_cache_hit_basis_points",
+                    JsonValue::Number(after_hit_rate.to_string()),
+                ),
+                (
+                    "hit_rate_delta_basis_points",
+                    JsonValue::Number(after_hit_rate.saturating_sub(before_hit_rate).to_string()),
+                ),
+            ]),
+        ),
+        (
+            "observable_events",
+            json_object([
+                (
+                    "before_repair_events",
+                    JsonValue::Number(before_repair_events.to_string()),
+                ),
+                (
+                    "after_repair_events",
+                    JsonValue::Number(after_repair_events.to_string()),
+                ),
+                (
+                    "before_prompt_layer_events",
+                    JsonValue::Number(before_prompt_layer_events.to_string()),
+                ),
+                (
+                    "after_prompt_layer_events",
+                    JsonValue::Number(after_prompt_layer_events.to_string()),
+                ),
+            ]),
+        ),
+        (
+            "commands",
+            json_array(vec![
+                JsonValue::String(format!("deepseek events replay {after_thread_id}")),
+                JsonValue::String(format!(
+                    "deepseek events diff {before_thread_id} {after_thread_id}"
+                )),
+                JsonValue::String(format!("deepseek stats --thread {after_thread_id}")),
+            ]),
+        ),
+        (
+            "acceptance",
+            json_object([
+                (
+                    "formerly_failing_trace_recovers",
+                    JsonValue::Bool(tool_result_ok),
+                ),
+                (
+                    "every_repaired_call_observable",
+                    JsonValue::Bool(after_repair_events >= 1),
+                ),
+                (
+                    "cache_diagnostics_visible",
+                    JsonValue::Bool(
+                        after_prompt_layer_events >= 1 && after_hit_rate > before_hit_rate,
+                    ),
+                ),
+                (
+                    "before_after_comparable",
+                    JsonValue::Bool(
+                        before_prompt_layer_events >= 1 && after_prompt_layer_events >= 1,
+                    ),
+                ),
+            ]),
+        ),
+    ]))
+}
+
+fn strict_json_object_complete_error(raw: &str) -> Option<String> {
+    let bytes = raw.trim().as_bytes();
+    let mut index = 0;
+    match parse_value(bytes, &mut index) {
+        Ok(JsonValue::Object(_)) => {
+            if bytes[index..]
+                .iter()
+                .any(|byte| !byte.is_ascii_whitespace())
+            {
+                Some("unexpected trailing json input".to_string())
+            } else {
+                None
+            }
+        }
+        Ok(_) => Some("json root must be an object".to_string()),
+        Err(error) => Some(error.to_string()),
+    }
+}
+
+fn repair_cache_prompt_snapshot(step: usize, estimated_tokens: u64) -> PromptLayerSnapshot {
+    let layers = vec![
+        PromptLayerRecord {
+            name: "system_static".to_string(),
+            text_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            bytes: 2400,
+            estimated_tokens: 600,
+            cache_stable: true,
+        },
+        PromptLayerRecord {
+            name: "tool_catalog".to_string(),
+            text_sha256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                .to_string(),
+            bytes: 1600,
+            estimated_tokens: 400,
+            cache_stable: true,
+        },
+        PromptLayerRecord {
+            name: "append_only_turns".to_string(),
+            text_sha256: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+                .to_string(),
+            bytes: 800,
+            estimated_tokens: estimated_tokens.saturating_sub(1_000),
+            cache_stable: false,
+        },
+    ];
+    PromptLayerSnapshot {
+        step,
+        total_bytes: layers.iter().map(|layer| layer.bytes).sum(),
+        estimated_tokens,
+        layers,
+    }
+}
+
+fn string_map_to_json(values: &BTreeMap<String, String>) -> JsonValue {
+    JsonValue::Object(
+        values
+            .iter()
+            .map(|(key, value)| (key.clone(), JsonValue::String(value.clone())))
+            .collect(),
+    )
+}
+
+fn count_events(events: &[crate::core::runtime::RuntimeEvent], kind: &str) -> u64 {
+    events.iter().filter(|event| event.kind == kind).count() as u64
+}
+
+fn cache_hit_basis_points(hit: u64, miss: u64) -> u64 {
+    let total = hit.saturating_add(miss);
+    if total == 0 {
+        0
+    } else {
+        hit.saturating_mul(10_000) / total
+    }
 }
 
 fn replay_benchmark_command(
@@ -4642,6 +5060,7 @@ mod tests {
     use super::*;
     use crate::core::loop_runtime::ToolEvent;
     use crate::model::protocol::TokenUsage;
+    use crate::util::json::{json_as_array, json_as_object, json_as_string};
     use std::fs;
 
     fn temp_test_dir(name: &str) -> PathBuf {
@@ -5599,6 +6018,64 @@ mod tests {
     }
 
     #[test]
+    fn repair_cache_evidence_summary_records_repair_and_cache_diagnostics() {
+        let root = temp_test_dir("repair-cache-evidence-summary");
+        fs::create_dir_all(&root).unwrap();
+        let fixture = root.join("tool_repair_fixture.rs");
+        fs::write(
+            &fixture,
+            "fn marker() { let _ = \"parse_tool_arguments_with_repair\"; }\n",
+        )
+        .unwrap();
+        let runtime_root = root.join("runtime");
+        let store = RuntimeStore::new(runtime_root.clone());
+
+        let summary = repair_cache_evidence_summary_json(
+            &store,
+            &runtime_root,
+            &root,
+            "deepseek-v4-flash",
+            fixture.to_str().expect("utf8 path"),
+        )
+        .unwrap();
+        let json = json_value_to_string(&summary);
+
+        assert!(json.contains("\"kind\":\"deepseek.dogfood.repair_cache_evidence.v1\""));
+        assert!(json.contains("\"formerly_failing_trace_recovers\":true"));
+        assert!(json.contains("\"every_repaired_call_observable\":true"));
+        assert!(json.contains("\"cache_diagnostics_visible\":true"));
+        assert!(json.contains("\"hit_rate_delta_basis_points\":7500"));
+
+        let root_json = json_as_object(&summary).expect("summary object");
+        let after_thread_id = root_json
+            .get("after_thread_id")
+            .and_then(json_as_string)
+            .expect("after thread");
+        let after_events = store.read_events(after_thread_id, 0).unwrap();
+        assert_eq!(count_events(&after_events, "tool_call_repair"), 1);
+        assert_eq!(count_events(&after_events, "prompt_layers_recorded"), 1);
+
+        let commands = root_json
+            .get("commands")
+            .and_then(json_as_array)
+            .expect("commands");
+        assert!(commands
+            .iter()
+            .filter_map(json_as_string)
+            .any(|command| command.contains("deepseek events replay")));
+        assert!(commands
+            .iter()
+            .filter_map(json_as_string)
+            .any(|command| command.contains("deepseek events diff")));
+        assert!(commands
+            .iter()
+            .filter_map(json_as_string)
+            .any(|command| command.contains("deepseek stats --thread")));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn external_fixture_evidence_summary_records_release_ready_row() {
         let root = temp_test_dir("external-fixture-evidence-summary");
         let ledger = root.join("ledger.jsonl");
@@ -5938,6 +6415,7 @@ mod tests {
                 },
             ],
             usage: TokenUsage::default(),
+            prompt_layers: Vec::new(),
         };
         let args = DogfoodRunArgs {
             task: "debug parser".to_string(),
@@ -5980,6 +6458,7 @@ mod tests {
             final_message: "DeepSeek returned no content.".to_string(),
             tool_events: Vec::new(),
             usage: TokenUsage::default(),
+            prompt_layers: Vec::new(),
         };
         let args = DogfoodRunArgs {
             task: "replace `a - b` with `a + b` in src/lib.rs and validate with cargo test"
@@ -6030,6 +6509,7 @@ mod tests {
                 },
             ],
             usage: TokenUsage::default(),
+            prompt_layers: Vec::new(),
         };
         let args = DogfoodRunArgs {
             task: "replace `a - b` with `a * b` in src/lib.rs and validate with cargo test"
@@ -6110,6 +6590,7 @@ mod tests {
                 },
             ],
             usage: TokenUsage::default(),
+            prompt_layers: Vec::new(),
         };
         let args = DogfoodRunArgs {
             task: "replace `a - b` with `a * b` in src/math_ops.py and validate with pytest until the tests pass"
@@ -6172,6 +6653,7 @@ mod tests {
                 },
             ],
             usage: TokenUsage::default(),
+            prompt_layers: Vec::new(),
         };
         let args = DogfoodRunArgs {
             task: "replace `a - b` with `a + b` in src/lib.rs and validate with cargo test"
@@ -6222,6 +6704,7 @@ mod tests {
                 },
             ],
             usage: TokenUsage::default(),
+            prompt_layers: Vec::new(),
         };
         let args = DogfoodRunArgs {
             task: "investigate why npm test fails in the JavaScript CLI and inspect the failing test file before retrying"

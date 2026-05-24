@@ -12,6 +12,8 @@ pub fn run(cli: app::Cli) -> AppResult<()> {
         app::Command::Run(args) => commands::run::run(args),
         app::Command::Exec(action) => commands::exec::run(action),
         app::Command::Agents(action) => commands::agents::run(action),
+        app::Command::Stats(args) => commands::stats::run(args),
+        app::Command::Events(action) => commands::events::run(action),
         app::Command::Diagnostics(args) => commands::diagnostics::run(args),
         app::Command::Diff(args) => commands::diff::run(args),
         app::Command::Resume(args) => commands::resume::run(args),

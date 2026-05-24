@@ -60,8 +60,10 @@ Current surfaces:
   `links show`, plus `dashboard` / `/dashboard` and `api` / `/api` aliases
 - home dashboard with `home` / `/home` plus `stats` / `/stats` and
   `overview` / `/overview` aliases
-- session goal tracking with `goal` / `/goal`, including optional token budget
-  display from active-thread usage telemetry
+- active-thread goal tracking with `goal` / `/goal`, including optional token
+  budget display from active-thread usage telemetry; file-backed and HTTP
+  runtime sessions persist the goal as durable thread events so it is restored
+  after TUI restart, resume, or runtime reconnect
 - slash-mode switching with `mode` / `/mode` and
   `mode agent|plan|yolo|1|2|3`
 - help index and command topics with `help` / `/help`, `help <command>`, and
@@ -124,16 +126,18 @@ Current surfaces:
 - token and cost inspection with `tokens` / `/tokens` and `cost` / `/cost`,
   matching DeepSeek-TUI's runtime usage and approximate spend commands
 - cache telemetry inspection with `cache [count]` / `/cache [count]` plus
-  read-only `cache inspect` / `cache warmup` explanations over durable usage
-  records
+  read-only `cache inspect` prompt-layer diagnostics and `cache warmup`
+  explanations over durable usage records
 - model picker, inspection, and switching with `model` / `/model`,
-  `model show`, `model <name>` / `/model <name>`, and offline
-  `models` / `/models`; known DeepSeek V4 aliases are normalized for the
-  active provider, so official DeepSeek endpoints receive bare
-  `deepseek-v4-*` ids while compatible backends keep provider-specific ids.
-  Composer slash completions for `/model <name>` and command-palette
-  completions for `model <name>` use the selected workspace's current provider
-  so suggested model ids match the active backend.
+  `model show`, `model preset <auto|flash|pro>`,
+  `model <name>` / `/model <name>`, and offline `models` / `/models`; known
+  DeepSeek V4 aliases are normalized for the active provider, so official
+  DeepSeek endpoints receive bare `deepseek-v4-*` ids while compatible backends
+  keep provider-specific ids. `/pro` arms DeepSeek V4 Pro for the next submitted
+  user turn without permanently changing the workspace config. Composer slash
+  completions for `/model <name>` and command-palette completions for
+  `model <name>` use the selected workspace's current provider so suggested
+  model ids match the active backend.
 - provider preset picker, inspection, and switching with `provider` /
   `/provider`, `provider show`, `provider list`, and
   `provider <name> [model]`; legacy DeepSeek CN aliases such as
@@ -184,7 +188,7 @@ Current surfaces:
 - `deepseek tui --runtime-url http://HOST:PORT` connects the workbench to a
   running HTTP runtime, builds the initial UI from `/v1/sessions` and linked
   thread detail endpoints, writes composer/approval/cancel/task/automation/
-  compaction actions back through HTTP, and subscribes to the aggregate
+  compaction/goal actions back through HTTP, and subscribes to the aggregate
   `/v1/events/stream?follow=1` runtime stream so foreground refresh covers
   known and newly created threads
 - approval modal backed by durable `permission_request` runtime events
@@ -370,7 +374,7 @@ Command palette commands currently implemented:
 | `setup wizard`, `/setup wizard` | Open the first-run stepper with per-step done/todo/review state for provider, model, auth, trust, theme, and language setup |
 | `setup provider|model|auth [ENV]|trust|theme|language|settings`, `/setup provider|model|auth [ENV]|trust|theme|language|settings` | Jump from onboarding into guided provider/model pickers, the masked credential wizard, trust, theme, language-output, or settings controls |
 | `config tui`, `config native`, `config web`, `/config tui`, `/config native`, `/config web` | Show the requested config surface and focused DeepSeekCode config commands |
-| `config model [pick\|show\|list\|<name>]`, `/config model [pick\|show\|list\|<name>]` | Route to selected workspace model picker, inspection, catalog, or update commands |
+| `config model [pick\|show\|list\|preset <auto\|flash\|pro>\|<name>]`, `/config model [pick\|show\|list\|preset <auto\|flash\|pro>\|<name>]` | Route to selected workspace model picker, inspection, catalog, preset, or update commands |
 | `config provider [pick\|show\|list\|<name> [model]]`, `/config provider [pick\|show\|list\|<name> [model]]` | Route to provider preset picker, inspection, or updates |
 | `config profile [list\|clear\|<name>]`, `/config profile [list\|clear\|<name>]` | Route to active project profile inspection or switching |
 | `config mode [agent\|plan\|yolo]`, `/config mode [agent\|plan\|yolo]` | Show or switch the current TUI mode |
@@ -386,9 +390,9 @@ Command palette commands currently implemented:
 | `translate`, `/translate` | Toggle locale-targeted model output for future local agent turns |
 | `translate on|off|show`, `/translate on|off|show` | Enable, disable, or inspect the session-local translation prompt instruction |
 | `context`, `/context`, `ctx`, `/ctx` | Show active-thread context window, token/cache, item, and reasoning replay state |
-| `goal`, `/goal` | Show the current TUI session goal and token budget progress |
-| `goal <objective> [budget: N]`, `/goal <objective> [budget: N]` | Set or replace the current TUI session goal |
-| `goal clear`, `/goal clear` | Clear the current TUI session goal |
+| `goal`, `/goal` | Show the current active-thread goal and token budget progress |
+| `goal <objective> [budget: N]`, `/goal <objective> [budget: N]` | Set or replace the current active-thread goal |
+| `goal clear`, `/goal clear` | Clear the current active-thread goal |
 | `exit`, `/exit`, `quit`, `/quit`, `q`, `/q` | Quit the TUI workbench |
 | `mode`, `/mode` | Show current mode and mode-switching commands in the right-side detail panel |
 | `mode agent|plan|yolo|1|2|3`, `/mode agent|plan|yolo|1|2|3` | Switch Plan / Agent / YOLO mode |
@@ -492,7 +496,7 @@ Command palette commands currently implemented:
 | `translate`, `/translate`, `translation`, `/translation`, `transale`, `/transale` | Toggle future local agent turns to answer natural-language prose in the detected UI locale, with a post-hoc fallback translator for English-heavy final replies while preserving code, paths, URLs, and identifiers |
 | `cost`, `/cost` | Show active-thread approximate total, input, and output cost with telemetry caveats |
 | `cache`, `/cache`, `cache <count>` | Show active-thread durable cache hit/miss summary, hit rate, cache chart, context, and approximate cost |
-| `cache inspect`, `cache warmup` | Explain durable read-only cache limits: no persisted prompt layer hashes and no TUI-issued warmup request |
+| `cache inspect`, `cache warmup` | Inspect durable prompt-layer diagnostics when recorded, or explain why no TUI-issued warmup request is sent |
 | `change`, `/change`, `changes`, `/changes`, `changelog`, `/changelog` | Show the latest bundled DeepSeekCode changelog entry in the right-side detail panel |
 | `system`, `/system` | Show the selected workspace local runtime system prompt preview in the right-side detail panel |
 | `edit`, `/edit` | Load the selected thread's latest user message back into the composer for revision |

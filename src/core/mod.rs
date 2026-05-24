@@ -6,6 +6,7 @@ pub mod loop_runtime;
 pub mod memory;
 pub mod network_policy;
 pub mod observations;
+pub mod prompt_layers;
 pub mod rollback;
 pub mod runtime;
 pub mod session;

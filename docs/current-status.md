@@ -69,12 +69,18 @@ dogfood 证据。
 - 外部 write-fixture 生成器已扩展为 Python、Rust、Node 三个 disposable repo 样本；
   CI 会 smoke scaffold。Node task-report 和 Rust order multi-file 样本也已记录
   online model-backed evidence，Python invoice 样本仍是 canonical release path。
+- DeepSeek-native loop 的 repair/cache 证据已补齐：`deepseek dogfood
+  repair-cache-evidence --json` 会生成
+  `.dscode/dogfood/repair-cache-evidence.json`，记录 before/after runtime
+  threads，并可用 `deepseek events replay`、`deepseek events diff` 和
+  `deepseek stats --thread` 验证 `tool_call_repair`、prompt-layer 事件和
+  cache hit/miss delta。
 
 ## 当前能力概览
 
 - 入口：`deepseek`、`deepseek chat`、`deepseek run`、`deepseek tui`、`deepseek exec`。
 - TUI：Plan / Agent / YOLO 模式、approval modal、command palette、session/thread 视图、
-  MCP 管理、setup/onboarding、provider/model picker。
+  runtime-backed `/goal`、MCP 管理、setup/onboarding、provider/model picker。
 - 首跑：`deepseek quickstart` 以只读方式展示 workspace config、API key env、model/base
   URL、TTY 状态、下一步命令和 starter tasks；`deepseek config provider
   [show|list|<name> [model]]`、`deepseek config model [show|list|<model>]` 和
@@ -83,7 +89,7 @@ dogfood 证据。
 - REPL：raw-mode line editor、history、session list/load completion、SIGINT cancel、
   `/save`、`/load`、`/sessions`、custom slash commands。
 - Runtime：`.dscode/runtime/` 下持久化 sessions、threads、turns、items、events、
-  tasks、usage、automations，并提供 HTTP/SSE runtime surface。
+  thread goals、tasks、usage、automations，并提供 HTTP/SSE runtime surface。
 - 工具：文件读写/search、patch、diff、shell、background jobs、diagnostics、review、
   notes、memory、rollback、skills、subagents、MCP/ACP。
 - Shell/PTY：Linux native PTY、bounded interactive attach、byte stream、raw proxy、
@@ -108,8 +114,22 @@ dogfood 证据。
 
 1. 按 [DeepSeek-Native Agent Loop Design](./deepseek-native-loop.md) 推进
    cache-first prompt layers、tool-call repair、cost-aware model presets、
-   read-only parallel dispatch 和 stats/replay surfaces。优先从 tool-call
-   repair 开始，因为它直接影响 DeepSeek 模型真实改代码时的成功率。
+   read-only parallel dispatch 和 stats/replay surfaces。tool-call repair
+   初版已落地：可修复可恢复的截断 JSON 参数、从显式 JSON-shaped 文本中找回已知工具调用，
+   支持 `model.tool_schema_flattening = "auto"` 下的 schema flatten/re-nest，并在
+   TUI runtime/`exec --json` 中留下 repair 证据；重复工具调用守卫已区分只读和写状态工具，
+   prompt-layer diagnostics 与 `deepseek stats` MVP 也已接入 exec、TUI 和 runtime daemon
+   turns；`model.preset = "auto" | "flash" | "pro"`、`deepseek config preset`、
+   `run/exec --preset`、`--pro-next`、TUI `/pro` 和
+   `model.session_budget_microusd` 的 80% warning / 100% refusal 初版也已落地，runtime
+   session/thread records 会同步 `session_budget_microusd`，在 TUI/daemon 进程重启后用
+   durable usage 恢复已用成本，`deepseek config budget off` 会清掉 runtime limit；同回合
+   batch 中的 `list_files`、`list_dir`、`read_file`、`search_text`、`git_status`、
+   `git_diff` 现在会在无 hooks/permission/repeat 的情况下按连续 read-only chunk 并发，
+   并保持结果顺序，写入、shell、MCP side-effect 和审批路径仍是串行 barrier；`deepseek
+   events replay <thread>` 和 `deepseek events diff <left> <right>` 初版也已接入
+   runtime events/items/usage，可输出 text 或 JSON 证据；`deepseek dogfood
+   repair-cache-evidence --json` 已补齐确定性的 before/after repair/cache 证据。
 2. 配置 `NPM_TOKEN` 并发布 npm wrapper，验证 `npm install` 后裸 `deepseek` 入口。
 3. 配置 `HOMEBREW_TAP_TOKEN`，让后续 tag workflow 自动更新 tap；当前 `v0.1.3` tap
    已手动发布并验证。

@@ -27,8 +27,8 @@ use unicode_width::UnicodeWidthChar;
 use crate::config::load::{config_assignments, parse_dotenv_assignment};
 use crate::config::types::AppConfig;
 use crate::core::runtime::{
-    AutomationRecord, ItemRecord, RuntimeEvent, SessionRecord, TaskRecord, ThreadRecord,
-    UsageRecord,
+    AutomationRecord, ItemRecord, RuntimeEvent, SessionRecord, TaskRecord, ThreadGoalRecord,
+    ThreadRecord, UsageRecord,
 };
 use crate::error::AppResult;
 use crate::tools::run_shell::is_safe_shell_command;
@@ -296,6 +296,7 @@ pub enum TuiLiveEvent {
         usage_summaries: Vec<TuiUsageSummary>,
         approvals: Vec<TuiApprovalRequest>,
         user_inputs: Vec<TuiUserInputRequest>,
+        thread_goals: BTreeMap<String, TuiGoalState>,
     },
     Status(String),
 }
@@ -304,6 +305,7 @@ pub enum TuiLiveEvent {
 pub struct TuiQueuedMessage {
     pub thread_id: String,
     pub content: String,
+    pub preset_override: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -534,6 +536,10 @@ pub struct TuiUsageSummary {
     pub estimated_total_cost_microusd: Option<u64>,
     pub context_remaining_tokens: u64,
     pub context_strategy: String,
+    pub prompt_layer_snapshot_count: u64,
+    pub latest_prompt_layer_estimated_tokens: u64,
+    pub latest_prompt_layer_digest: Option<String>,
+    pub latest_prompt_layer_names: Vec<String>,
 }
 
 impl TuiUsageSummary {
@@ -612,6 +618,72 @@ impl TuiUsageSummary {
             estimated_total_cost_microusd,
             context_remaining_tokens,
             context_strategy: context_strategy(latest_total_tokens).to_string(),
+            prompt_layer_snapshot_count: 0,
+            latest_prompt_layer_estimated_tokens: 0,
+            latest_prompt_layer_digest: None,
+            latest_prompt_layer_names: Vec::new(),
+        }
+    }
+
+    pub fn merge_prompt_layer_events(&mut self, events: &[RuntimeEvent]) {
+        for event in events {
+            if event.kind != "prompt_layers_recorded" {
+                continue;
+            }
+            let Some(root) = json_as_object(&event.payload) else {
+                continue;
+            };
+            if let Some(digest) = root.get("digest").and_then(json_as_string) {
+                self.latest_prompt_layer_digest = Some(digest.to_string());
+            }
+            let Some(snapshots) = root.get("snapshots").and_then(json_as_array) else {
+                continue;
+            };
+            self.prompt_layer_snapshot_count = self
+                .prompt_layer_snapshot_count
+                .saturating_add(snapshots.len() as u64);
+            if let Some(latest) = snapshots.last().and_then(json_as_object) {
+                if let Some(tokens) = latest.get("estimated_tokens").and_then(json_as_u64) {
+                    self.latest_prompt_layer_estimated_tokens = tokens;
+                }
+                self.latest_prompt_layer_names = prompt_layer_names_from_snapshot(latest);
+            }
+        }
+    }
+}
+
+fn prompt_layer_names_from_snapshot(snapshot: &BTreeMap<String, JsonValue>) -> Vec<String> {
+    snapshot
+        .get("layers")
+        .and_then(json_as_array)
+        .map(|layers| {
+            layers
+                .iter()
+                .filter_map(json_as_object)
+                .filter_map(|layer| layer.get("name").and_then(json_as_string))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiGoalState {
+    pub thread_id: String,
+    pub objective: String,
+    pub token_budget: Option<u64>,
+    pub started_at: String,
+    pub updated_at: String,
+}
+
+impl From<ThreadGoalRecord> for TuiGoalState {
+    fn from(goal: ThreadGoalRecord) -> Self {
+        Self {
+            thread_id: goal.thread_id,
+            objective: goal.objective,
+            token_budget: goal.token_budget,
+            started_at: goal.started_at,
+            updated_at: goal.updated_at,
         }
     }
 }
@@ -1074,6 +1146,14 @@ pub enum TuiModelCommand {
     Show,
     List,
     Set { model: String },
+    Preset { preset: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiProCommand {
+    Arm,
+    Off,
+    Show,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2045,7 +2125,7 @@ fn parse_tui_model_command(line: &str) -> Option<Result<TuiModelCommand, String>
             Some(Ok(TuiModelCommand::List))
         } else {
             Some(Err(
-                "usage: model [pick|show|list|name], models, /model [pick|show|list|name], or /models"
+                "usage: model [pick|show|list|preset <auto|flash|pro>|name], models, /model [pick|show|list|preset <auto|flash|pro>|name], or /models"
                     .to_string(),
             ))
         };
@@ -2057,13 +2137,29 @@ fn parse_tui_model_command(line: &str) -> Option<Result<TuiModelCommand, String>
         [] | ["pick" | "picker"] => Some(Ok(TuiModelCommand::Pick)),
         ["list" | "ls"] => Some(Ok(TuiModelCommand::List)),
         ["show" | "status"] => Some(Ok(TuiModelCommand::Show)),
+        ["preset", preset] if !preset.starts_with('-') => Some(Ok(TuiModelCommand::Preset {
+            preset: (*preset).to_string(),
+        })),
         [model] if !model.starts_with('-') => Some(Ok(TuiModelCommand::Set {
             model: (*model).to_string(),
         })),
         _ => Some(Err(
-            "usage: model [pick|show|list|name], models, /model [pick|show|list|name], or /models"
+            "usage: model [pick|show|list|preset <auto|flash|pro>|name], models, /model [pick|show|list|preset <auto|flash|pro>|name], or /models"
                 .to_string(),
         )),
+    }
+}
+
+fn parse_tui_pro_command(line: &str) -> Option<Result<TuiProCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/pro")
+        .or_else(|| strip_tui_command_prefix(trimmed, "pro"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] | ["on"] | ["next"] => Some(Ok(TuiProCommand::Arm)),
+        ["off"] | ["clear"] | ["cancel"] => Some(Ok(TuiProCommand::Off)),
+        ["show"] | ["status"] => Some(Ok(TuiProCommand::Show)),
+        _ => Some(Err("usage: /pro [off|show]".to_string())),
     }
 }
 
@@ -3141,6 +3237,7 @@ pub enum TuiAction {
     SubmitUserMessage {
         thread_id: String,
         content: String,
+        preset_override: Option<String>,
     },
     UndoConversation {
         thread_id: String,
@@ -3253,6 +3350,14 @@ pub enum TuiAction {
     },
     Hooks {
         command: TuiHooksCommand,
+    },
+    SetGoal {
+        thread_id: String,
+        objective: String,
+        token_budget: Option<u64>,
+    },
+    ClearGoal {
+        thread_id: String,
     },
     RespondApproval {
         thread_id: String,
@@ -3723,8 +3828,15 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         category: "Config",
         name: "model",
         aliases: &[],
-        usage: "/model [pick|show|list|name]",
+        usage: "/model [pick|show|list|preset <auto|flash|pro>|name]",
         description: "Pick, inspect, or update the selected workspace model.",
+    },
+    TuiHelpCommandInfo {
+        category: "Config",
+        name: "pro",
+        aliases: &[],
+        usage: "/pro [off|show]",
+        description: "Arm DeepSeek V4 Pro for the next submitted user turn.",
     },
     TuiHelpCommandInfo {
         category: "Config",
@@ -4026,7 +4138,12 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "model",
     "model show",
     "model pick",
+    "model preset auto",
+    "model preset flash",
+    "model preset pro",
     "model auto",
+    "pro",
+    "pro off",
     "models",
     "provider",
     "provider show",
@@ -4389,7 +4506,12 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/model",
     "/model show",
     "/model pick",
+    "/model preset auto",
+    "/model preset flash",
+    "/model preset pro",
     "/model auto",
+    "/pro",
+    "/pro off",
     "/models",
     "/provider",
     "/provider show",
@@ -4604,6 +4726,15 @@ fn composer_stash_timestamp() -> String {
     format!("epoch+{seconds}")
 }
 
+fn tui_goal_timestamp() -> String {
+    composer_stash_timestamp()
+}
+
+fn tui_goal_system_time(label: &str) -> Option<SystemTime> {
+    let seconds = label.strip_prefix("epoch+")?.parse::<u64>().ok()?;
+    Some(UNIX_EPOCH + Duration::from_secs(seconds))
+}
+
 fn composer_stash_preview(text: &str, max_chars: usize) -> String {
     let first_line = text.lines().next().unwrap_or("").trim();
     if first_line.chars().count() <= max_chars {
@@ -4739,12 +4870,14 @@ pub struct TuiApp {
     verbose_transcript: bool,
     translation_enabled: bool,
     translation_target_language: String,
+    thread_goals: BTreeMap<String, TuiGoalState>,
     goal_objective: Option<String>,
     goal_token_budget: Option<u64>,
     goal_started_at: Option<SystemTime>,
     reasoning_replay_limit: usize,
     reasoning_replay_pinned_turn_ids: BTreeSet<String>,
     reasoning_replay_preferences_path: Option<PathBuf>,
+    next_turn_model_preset: Option<String>,
     extra_slash_completions: Vec<String>,
     extra_command_completions: Vec<String>,
     pending_actions: Vec<TuiAction>,
@@ -4935,12 +5068,14 @@ impl TuiApp {
             verbose_transcript: false,
             translation_enabled: false,
             translation_target_language: detect_tui_translation_target_language(),
+            thread_goals: BTreeMap::new(),
             goal_objective: None,
             goal_token_budget: None,
             goal_started_at: None,
             reasoning_replay_limit: DEFAULT_TUI_REASONING_REPLAY_LIMIT,
             reasoning_replay_pinned_turn_ids: BTreeSet::new(),
             reasoning_replay_preferences_path: None,
+            next_turn_model_preset: None,
             extra_slash_completions: Vec::new(),
             extra_command_completions: Vec::new(),
             pending_actions: Vec::new(),
@@ -5192,18 +5327,27 @@ impl TuiApp {
                 usage_summaries,
                 approvals,
                 user_inputs,
-            } => self.replace_runtime_with_usage_tasks_automations_approvals_and_user_inputs(
-                sessions,
-                threads,
-                items,
-                tasks,
-                automations,
-                usage_summaries,
-                approvals,
-                user_inputs,
-            ),
+                thread_goals,
+            } => {
+                self.replace_runtime_with_usage_tasks_automations_approvals_and_user_inputs(
+                    sessions,
+                    threads,
+                    items,
+                    tasks,
+                    automations,
+                    usage_summaries,
+                    approvals,
+                    user_inputs,
+                );
+                self.replace_thread_goals(thread_goals);
+            }
             TuiLiveEvent::Status(status) => self.set_status(status),
         }
+    }
+
+    pub fn replace_thread_goals(&mut self, thread_goals: BTreeMap<String, TuiGoalState>) {
+        self.thread_goals = thread_goals;
+        self.sync_goal_from_selected_thread();
     }
 
     pub fn replace_runtime(
@@ -5352,6 +5496,7 @@ impl TuiApp {
         }
         self.ensure_selected_session_matches_filter();
         self.ensure_selected_thread_matches_filter();
+        self.sync_goal_from_selected_thread();
         self.refresh_runtime_view();
         let opened_user_input = self.sync_user_input_modal();
         let opened_approval = if opened_user_input {
@@ -5635,6 +5780,23 @@ impl TuiApp {
         self.threads.iter().find(|thread| thread.id == thread_id)
     }
 
+    fn active_thread_goal(&self) -> Option<&TuiGoalState> {
+        let thread_id = self.selected_thread_id.as_deref()?;
+        self.thread_goals.get(thread_id)
+    }
+
+    fn sync_goal_from_selected_thread(&mut self) {
+        if let Some(goal) = self.active_thread_goal().cloned() {
+            self.goal_objective = Some(goal.objective);
+            self.goal_token_budget = goal.token_budget;
+            self.goal_started_at = tui_goal_system_time(&goal.started_at);
+        } else {
+            self.goal_objective = None;
+            self.goal_token_budget = None;
+            self.goal_started_at = None;
+        }
+    }
+
     fn threads_for_selected_session(&self) -> Vec<&TuiThread> {
         let Some(session) = self.selected_session() else {
             return Vec::new();
@@ -5669,6 +5831,7 @@ impl TuiApp {
         let thread_id = threads[0].id.clone();
         self.selected_thread_id = Some(thread_id);
         self.transcript_scroll = 0;
+        self.sync_goal_from_selected_thread();
         self.refresh_runtime_view();
     }
 
@@ -6217,6 +6380,7 @@ impl TuiApp {
         self.selected_thread_id = self.default_thread_id_for_selected_session();
         self.edit_pending_thread_id = None;
         self.transcript_scroll = 0;
+        self.sync_goal_from_selected_thread();
         self.refresh_runtime_view();
     }
 
@@ -6234,6 +6398,7 @@ impl TuiApp {
             self.selected_thread_id = Some(thread_id.clone());
             self.edit_pending_thread_id = None;
             self.transcript_scroll = 0;
+            self.sync_goal_from_selected_thread();
             self.refresh_runtime_view();
             self.status = format!("selected thread: {} {}", thread_id, clip_line(&title, 60));
         } else {
@@ -6263,6 +6428,7 @@ impl TuiApp {
         self.selected_thread_id = Some(thread.id.clone());
         self.edit_pending_thread_id = None;
         self.transcript_scroll = 0;
+        self.sync_goal_from_selected_thread();
         self.refresh_runtime_view();
         self.status = format!(
             "selected thread: {} {}",
@@ -7525,6 +7691,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_pro_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.handle_pro_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = parse_tui_model_command(&content) {
                     match command {
                         Ok(command) => {
@@ -8340,6 +8519,17 @@ impl TuiApp {
             match command {
                 Ok(command) => {
                     self.handle_theme_command(command);
+                }
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_pro_command(command) {
+            match command {
+                Ok(command) => {
+                    self.handle_pro_command(command);
                 }
                 Err(message) => {
                     self.status = message;
@@ -9852,11 +10042,13 @@ impl TuiApp {
     }
 
     fn submit_or_queue_user_message(&mut self, thread_id: String, content: String) {
+        let preset_override = self.next_turn_model_preset.take();
         if self.edit_pending_thread_id.as_deref() == Some(thread_id.as_str()) {
             if self.active_thread_busy() {
                 self.composer = content;
                 self.composer_cursor = self.composer.len();
                 self.composer_focused = true;
+                self.next_turn_model_preset = preset_override;
                 self.status =
                     "cannot submit edited message while active thread is busy".to_string();
                 return;
@@ -9868,16 +10060,22 @@ impl TuiApp {
             return;
         }
         if self.active_thread_busy() {
-            self.queued_messages
-                .push_back(TuiQueuedMessage { thread_id, content });
+            self.queued_messages.push_back(TuiQueuedMessage {
+                thread_id,
+                content,
+                preset_override,
+            });
             self.status = format!(
                 "message queued for next turn ({} queued)",
                 self.queued_messages.len()
             );
             return;
         }
-        self.pending_actions
-            .push(TuiAction::SubmitUserMessage { thread_id, content });
+        self.pending_actions.push(TuiAction::SubmitUserMessage {
+            thread_id,
+            content,
+            preset_override,
+        });
         self.status = "submitting composer message".to_string();
     }
 
@@ -9892,6 +10090,7 @@ impl TuiApp {
         self.pending_actions.push(TuiAction::SubmitUserMessage {
             thread_id: message.thread_id,
             content: message.content,
+            preset_override: message.preset_override,
         });
         self.status = format!(
             "submitted queued message to {thread_id} ({} remaining)",
@@ -10036,6 +10235,25 @@ impl TuiApp {
             command,
         });
         self.status = format!("model command queued: {workspace}");
+    }
+
+    fn handle_pro_command(&mut self, command: TuiProCommand) {
+        match command {
+            TuiProCommand::Arm => {
+                self.next_turn_model_preset = Some("pro".to_string());
+                self.status = "pro armed for next user turn".to_string();
+            }
+            TuiProCommand::Off => {
+                self.next_turn_model_preset = None;
+                self.status = "pro next-turn override cleared".to_string();
+            }
+            TuiProCommand::Show => {
+                self.status = match self.next_turn_model_preset.as_deref() {
+                    Some("pro") => "pro is armed for next user turn".to_string(),
+                    _ => "pro is not armed".to_string(),
+                };
+            }
+        }
     }
 
     fn open_model_picker(&mut self) {
@@ -10480,6 +10698,7 @@ impl TuiApp {
         self.pending_actions.push(TuiAction::SubmitUserMessage {
             thread_id: thread_id.clone(),
             content,
+            preset_override: None,
         });
         self.status = format!(
             "rlm request queued for {thread_id} (depth={max_depth}): {}",
@@ -10573,6 +10792,7 @@ impl TuiApp {
         self.pending_actions.push(TuiAction::SubmitUserMessage {
             thread_id: thread_id.clone(),
             content,
+            preset_override: None,
         });
         self.status = match focus
             .as_deref()
@@ -11668,12 +11888,35 @@ impl TuiApp {
                 objective,
                 token_budget,
             } => {
+                let started_at = tui_goal_timestamp();
+                if let Some(thread_id) = self.selected_thread_id.clone() {
+                    self.thread_goals.insert(
+                        thread_id.clone(),
+                        TuiGoalState {
+                            thread_id: thread_id.clone(),
+                            objective: objective.clone(),
+                            token_budget,
+                            started_at: started_at.clone(),
+                            updated_at: started_at,
+                        },
+                    );
+                    self.pending_actions.push(TuiAction::SetGoal {
+                        thread_id,
+                        objective: objective.clone(),
+                        token_budget,
+                    });
+                }
                 self.goal_objective = Some(objective);
                 self.goal_token_budget = token_budget;
                 self.goal_started_at = Some(SystemTime::now());
                 self.status = "goal set".to_string();
             }
             TuiGoalCommand::Clear => {
+                if let Some(thread_id) = self.selected_thread_id.clone() {
+                    self.thread_goals.remove(&thread_id);
+                    self.pending_actions
+                        .push(TuiAction::ClearGoal { thread_id });
+                }
                 self.goal_objective = None;
                 self.goal_token_budget = None;
                 self.goal_started_at = None;
@@ -12435,7 +12678,11 @@ impl TuiApp {
         let _ = writeln!(detail, "- /cycles | /cycle <n> | /recall <query>");
         let _ = writeln!(detail, "- /review <target>");
         let _ = writeln!(detail, "- /goal [objective [budget: N]|clear]");
-        let _ = writeln!(detail, "- /model [pick|show|list|name]");
+        let _ = writeln!(
+            detail,
+            "- /model [pick|show|list|preset <auto|flash|pro>|name]"
+        );
+        let _ = writeln!(detail, "- /pro [off|show]");
         let _ = writeln!(detail, "- /provider [pick|show|list|name [model]]");
         let _ = writeln!(detail, "- /profile [name|list|clear]");
         let _ = writeln!(detail, "- /trust [on|off|add <path>|remove <path>|list]");
@@ -13516,11 +13763,11 @@ impl TuiApp {
             TuiCacheCommand::Inspect => {
                 let _ = writeln!(
                     detail,
-                    "Durable TUI usage records do not persist rendered prompt layer hashes or prompt text."
+                    "Prompt-layer diagnostics are loaded from durable prompt_layers_recorded events when the active thread has them."
                 );
                 let _ = writeln!(
                     detail,
-                    "This read-only view surfaces the cache telemetry available for the active thread."
+                    "Prompt text is not persisted here; only layer names, hashes, sizes, and token estimates are recorded."
                 );
                 let _ = writeln!(detail);
             }
@@ -13596,6 +13843,28 @@ impl TuiApp {
                     ),
                 );
                 push_status_row(&mut detail, "Context:", &format_context_usage(summary));
+                if matches!(command, TuiCacheCommand::Inspect) {
+                    push_status_row(
+                        &mut detail,
+                        "Prompt layer snapshots:",
+                        &summary.prompt_layer_snapshot_count.to_string(),
+                    );
+                    push_status_row(
+                        &mut detail,
+                        "Latest layer tokens:",
+                        &summary.latest_prompt_layer_estimated_tokens.to_string(),
+                    );
+                    if let Some(digest) = summary.latest_prompt_layer_digest.as_deref() {
+                        push_status_row(&mut detail, "Latest layer digest:", digest);
+                    }
+                    if !summary.latest_prompt_layer_names.is_empty() {
+                        push_status_row(
+                            &mut detail,
+                            "Latest layers:",
+                            &summary.latest_prompt_layer_names.join(", "),
+                        );
+                    }
+                }
                 let cost = summary
                     .estimated_total_cost_microusd
                     .map(format_microusd)
@@ -18610,6 +18879,10 @@ mod tests {
                 estimated_total_cost_microusd: Some(300),
                 context_remaining_tokens: TUI_CONTEXT_WINDOW_TOKENS - 625,
                 context_strategy: "normal".to_string(),
+                prompt_layer_snapshot_count: 0,
+                latest_prompt_layer_estimated_tokens: 0,
+                latest_prompt_layer_digest: None,
+                latest_prompt_layer_names: Vec::new(),
             }],
             Vec::new(),
         );
@@ -18702,7 +18975,8 @@ mod tests {
         assert_eq!(*kind, TuiMcpDetailKind::Settings);
         assert!(detail.contains("DeepSeekCode Settings"));
         assert!(detail.contains("/tmp/deepseek-settings/.dscode/config.toml"));
-        assert!(detail.contains("/model [pick|show|list|name]"));
+        assert!(detail.contains("/model [pick|show|list|preset <auto|flash|pro>|name]"));
+        assert!(detail.contains("/pro [off|show]"));
         assert!(detail.contains("/provider [pick|show|list|name [model]]"));
         assert!(detail.contains("/mcp manager"));
 
@@ -21085,10 +21359,12 @@ model.model = "deepseek-v4-pro"
         app.queued_messages.push_back(TuiQueuedMessage {
             thread_id: "thread-one".to_string(),
             content: "First follow-up".to_string(),
+            preset_override: None,
         });
         app.queued_messages.push_back(TuiQueuedMessage {
             thread_id: "thread-one".to_string(),
             content: "Second follow-up".to_string(),
+            preset_override: None,
         });
 
         run_palette_command(&mut app, "queue list");
@@ -21115,6 +21391,7 @@ model.model = "deepseek-v4-pro"
             vec![TuiAction::SubmitUserMessage {
                 thread_id: "thread-one".to_string(),
                 content: "Edited follow-up".to_string(),
+                preset_override: None,
             }]
         );
         assert!(app.queued_draft.is_none());
@@ -21122,6 +21399,7 @@ model.model = "deepseek-v4-pro"
         app.queued_messages.push_back(TuiQueuedMessage {
             thread_id: "thread-one".to_string(),
             content: "Clear me".to_string(),
+            preset_override: None,
         });
         app.composer_focused = false;
         run_palette_command(&mut app, "/queue clear");
@@ -21180,10 +21458,56 @@ model.model = "deepseek-v4-pro"
             vec![TuiAction::SubmitUserMessage {
                 thread_id: "thread-one".to_string(),
                 content: "follow up when ready".to_string(),
+                preset_override: None,
             }]
         );
         assert!(app.queued_messages.is_empty());
         assert!(app.status.contains("submitted queued message"));
+    }
+
+    #[test]
+    fn pro_command_arms_next_user_turn_only() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: ".".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        run_palette_command(&mut app, "/pro");
+        assert_eq!(app.status, "pro armed for next user turn");
+
+        app.composer_focused = true;
+        app.composer = "use stronger reasoning once".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        let actions = app.drain_actions();
+        let TuiAction::SubmitUserMessage {
+            preset_override, ..
+        } = &actions[0]
+        else {
+            panic!("expected submit action");
+        };
+        assert_eq!(preset_override.as_deref(), Some("pro"));
+        assert!(app.next_turn_model_preset.is_none());
+
+        app.composer_focused = false;
+        run_palette_command(&mut app, "/pro off");
+        assert_eq!(app.status, "pro next-turn override cleared");
     }
 
     #[test]
@@ -21981,7 +22305,10 @@ model.model = "deepseek-v4-pro"
         run_palette_command(&mut app, "rlm 2 analyze src/main.rs");
         let actions = app.drain_actions();
         assert_eq!(actions.len(), 1);
-        let TuiAction::SubmitUserMessage { thread_id, content } = &actions[0] else {
+        let TuiAction::SubmitUserMessage {
+            thread_id, content, ..
+        } = &actions[0]
+        else {
             panic!("expected rlm submit action");
         };
         assert_eq!(thread_id, "thread-one");
@@ -22040,7 +22367,10 @@ model.model = "deepseek-v4-pro"
         run_palette_command(&mut app, "relay verify install");
         let actions = app.drain_actions();
         assert_eq!(actions.len(), 1);
-        let TuiAction::SubmitUserMessage { thread_id, content } = &actions[0] else {
+        let TuiAction::SubmitUserMessage {
+            thread_id, content, ..
+        } = &actions[0]
+        else {
             panic!("expected relay submit action");
         };
         assert_eq!(thread_id, "thread-one");
@@ -22143,6 +22473,10 @@ model.model = "deepseek-v4-pro"
                 estimated_total_cost_microusd: Some(30),
                 context_remaining_tokens: 999_200,
                 context_strategy: "normal".to_string(),
+                prompt_layer_snapshot_count: 0,
+                latest_prompt_layer_estimated_tokens: 0,
+                latest_prompt_layer_digest: None,
+                latest_prompt_layer_names: Vec::new(),
             }],
             Vec::new(),
         );
@@ -22156,6 +22490,14 @@ model.model = "deepseek-v4-pro"
         assert!(detail.contains("Token budget:"));
         assert!(detail.contains("2000"));
         assert!(detail.contains("1234 (62%)"));
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::SetGoal {
+                thread_id: "thread-one".to_string(),
+                objective: "Stabilize TUI parity".to_string(),
+                token_budget: Some(2000),
+            }]
+        );
 
         run_palette_command(&mut app, "goal");
         assert_eq!(app.status, "goal shown");
@@ -22171,6 +22513,67 @@ model.model = "deepseek-v4-pro"
         let (kind, detail) = app.mcp_detail.as_ref().expect("goal detail");
         assert_eq!(*kind, TuiMcpDetailKind::Goal);
         assert!(detail.contains("No goal set"));
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::ClearGoal {
+                thread_id: "thread-one".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn runtime_goal_state_restores_when_thread_is_selected() {
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: "/workspace/project".to_string(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 2,
+            }],
+            vec![
+                TuiThread {
+                    id: "thread-one".to_string(),
+                    session_id: Some("session-one".to_string()),
+                    title: "First thread".to_string(),
+                    mode: "agent".to_string(),
+                    status: "active".to_string(),
+                    latest_turn_id: None,
+                    event_seq: 1,
+                },
+                TuiThread {
+                    id: "thread-two".to_string(),
+                    session_id: Some("session-one".to_string()),
+                    title: "Second thread".to_string(),
+                    mode: "agent".to_string(),
+                    status: "active".to_string(),
+                    latest_turn_id: None,
+                    event_seq: 1,
+                },
+            ],
+            Vec::new(),
+        );
+        app.replace_thread_goals(BTreeMap::from([(
+            "thread-two".to_string(),
+            TuiGoalState {
+                thread_id: "thread-two".to_string(),
+                objective: "Resume durable goal".to_string(),
+                token_budget: Some(1234),
+                started_at: "epoch+1".to_string(),
+                updated_at: "epoch+2".to_string(),
+            },
+        )]));
+
+        run_palette_command(&mut app, "goal");
+        let (_, empty_detail) = app.mcp_detail.as_ref().expect("goal detail");
+        assert!(empty_detail.contains("No goal set"));
+
+        assert!(app.select_thread_by_id("thread-two"));
+        run_palette_command(&mut app, "goal");
+        let (_, detail) = app.mcp_detail.as_ref().expect("goal detail");
+        assert!(detail.contains("Resume durable goal"));
+        assert!(detail.contains("1234"));
     }
 
     #[test]
@@ -23044,6 +23447,10 @@ model.api_key_env = "OPENAI_API_KEY"
                 estimated_total_cost_microusd: Some(3),
                 context_remaining_tokens: TUI_CONTEXT_WINDOW_TOKENS - 15,
                 context_strategy: "normal".to_string(),
+                prompt_layer_snapshot_count: 0,
+                latest_prompt_layer_estimated_tokens: 0,
+                latest_prompt_layer_digest: None,
+                latest_prompt_layer_names: Vec::new(),
             }],
             Vec::new(),
         );
@@ -23215,6 +23622,7 @@ model.api_key_env = "OPENAI_API_KEY"
             vec![TuiAction::SubmitUserMessage {
                 thread_id: "thread-one".to_string(),
                 content: "hello from tui".to_string(),
+                preset_override: None,
             }]
         );
     }
@@ -23255,6 +23663,7 @@ model.api_key_env = "OPENAI_API_KEY"
             vec![TuiAction::SubmitUserMessage {
                 thread_id: "thread-one".to_string(),
                 content: input.to_string(),
+                preset_override: None,
             }]
         );
     }
@@ -23540,6 +23949,7 @@ model.api_key_env = "OPENAI_API_KEY"
             vec![TuiAction::SubmitUserMessage {
                 thread_id: "thread-one".to_string(),
                 content: "## markdown heading".to_string(),
+                preset_override: None,
             }]
         );
     }
@@ -23612,6 +24022,10 @@ model.api_key_env = "OPENAI_API_KEY"
                 estimated_total_cost_microusd: Some(30),
                 context_remaining_tokens: 999_200,
                 context_strategy: "normal".to_string(),
+                prompt_layer_snapshot_count: 0,
+                latest_prompt_layer_estimated_tokens: 0,
+                latest_prompt_layer_digest: None,
+                latest_prompt_layer_names: Vec::new(),
             }],
             vec![TuiApprovalRequest {
                 id: "approval-one".to_string(),
@@ -23697,6 +24111,10 @@ model.api_key_env = "OPENAI_API_KEY"
                 estimated_total_cost_microusd: Some(30),
                 context_remaining_tokens: 999_200,
                 context_strategy: "normal".to_string(),
+                prompt_layer_snapshot_count: 0,
+                latest_prompt_layer_estimated_tokens: 0,
+                latest_prompt_layer_digest: None,
+                latest_prompt_layer_names: Vec::new(),
             }],
             Vec::new(),
         );
@@ -23765,6 +24183,13 @@ model.api_key_env = "OPENAI_API_KEY"
                 estimated_total_cost_microusd: Some(30),
                 context_remaining_tokens: 999_200,
                 context_strategy: "normal".to_string(),
+                prompt_layer_snapshot_count: 2,
+                latest_prompt_layer_estimated_tokens: 88,
+                latest_prompt_layer_digest: Some("digest123".to_string()),
+                latest_prompt_layer_names: vec![
+                    "system_static".to_string(),
+                    "tool_catalog".to_string(),
+                ],
             }],
             Vec::new(),
         );
@@ -23786,12 +24211,92 @@ model.api_key_env = "OPENAI_API_KEY"
         app.execute_palette_command("cache inspect");
         let (_, detail) = app.mcp_detail.as_ref().expect("cache inspect detail");
         assert!(detail.contains("DeepSeekCode Cache Inspect"));
-        assert!(detail.contains("prompt layer hashes"));
+        assert!(detail.contains("Prompt-layer diagnostics"));
+        assert!(detail.contains("Prompt layer snapshots:"));
+        assert!(detail.contains("digest123"));
+        assert!(detail.contains("system_static, tool_catalog"));
 
         app.execute_palette_command("cache warmup");
         let (_, detail) = app.mcp_detail.as_ref().expect("cache warmup detail");
         assert!(detail.contains("DeepSeekCode Cache Warmup"));
         assert!(detail.contains("does not send"));
+    }
+
+    #[test]
+    fn usage_summary_merges_prompt_layer_runtime_events() {
+        let usage = UsageRecord {
+            id: "usage-one".to_string(),
+            thread_id: "thread-one".to_string(),
+            turn_id: Some("turn-one".to_string()),
+            model: "deepseek-v4-flash".to_string(),
+            source: "test".to_string(),
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            prompt_cache_hit_tokens: 70,
+            prompt_cache_miss_tokens: 30,
+            estimated_input_cost_microusd: Some(1),
+            estimated_output_cost_microusd: Some(2),
+            estimated_total_cost_microusd: Some(3),
+            pricing_source: Some("deepseek-v4".to_string()),
+            created_at: "epoch".to_string(),
+        };
+        let event = RuntimeEvent {
+            id: "event-one".to_string(),
+            thread_id: "thread-one".to_string(),
+            turn_id: Some("turn-one".to_string()),
+            seq: 1,
+            kind: "prompt_layers_recorded".to_string(),
+            created_at: "epoch".to_string(),
+            payload: JsonValue::Object(
+                [
+                    (
+                        "digest".to_string(),
+                        JsonValue::String("digest123".to_string()),
+                    ),
+                    (
+                        "snapshots".to_string(),
+                        JsonValue::Array(vec![JsonValue::Object(
+                            [
+                                (
+                                    "estimated_tokens".to_string(),
+                                    JsonValue::Number("88".to_string()),
+                                ),
+                                (
+                                    "layers".to_string(),
+                                    JsonValue::Array(vec![JsonValue::Object(
+                                        [(
+                                            "name".to_string(),
+                                            JsonValue::String("system_static".to_string()),
+                                        )]
+                                        .into_iter()
+                                        .collect(),
+                                    )]),
+                                ),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        )]),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        };
+
+        let mut summary = TuiUsageSummary::from_usage_records("thread-one", &[usage]);
+        summary.merge_prompt_layer_events(&[event]);
+
+        assert_eq!(summary.prompt_layer_snapshot_count, 1);
+        assert_eq!(summary.latest_prompt_layer_estimated_tokens, 88);
+        assert_eq!(
+            summary.latest_prompt_layer_digest.as_deref(),
+            Some("digest123")
+        );
+        assert_eq!(
+            summary.latest_prompt_layer_names,
+            vec!["system_static".to_string()]
+        );
     }
 
     #[test]
@@ -25577,6 +26082,7 @@ model.api_key_env = "OPENAI_API_KEY"
             usage_summaries: Vec::new(),
             approvals: Vec::new(),
             user_inputs: Vec::new(),
+            thread_goals: BTreeMap::new(),
         });
 
         assert!(app

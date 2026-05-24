@@ -18,10 +18,11 @@ use flate2::read::GzDecoder;
 
 use crate::cli::app::{McpConfigScope, TuiArgs};
 use crate::cli::commands::config::{
-    diagnostics_config_summary_at, logout_credentials_at, model_config_summary_at,
-    network_policy_summary_at, persist_auth_secret_at, profile_config_summary_at,
-    provider_config_summary_at, provider_model_completion_values_for_base_url,
-    remove_network_rule_at, set_diagnostics_post_edit_at, set_model_at, set_network_default_at,
+    apply_model_preset_override, diagnostics_config_summary_at, logout_credentials_at,
+    model_config_summary_at, network_policy_summary_at, persist_auth_secret_at,
+    profile_config_summary_at, provider_config_summary_at,
+    provider_model_completion_values_for_base_url, remove_network_rule_at,
+    set_diagnostics_post_edit_at, set_model_at, set_model_preset_at, set_network_default_at,
     set_network_rule_at, set_provider_at, switch_profile_at, DiagnosticsConfigSummary,
     LogoutCredentialSummary, ModelConfigSummary, NetworkPolicySummary, NetworkRuleTarget,
     ProfileConfigSummary, ProviderConfigSummary,
@@ -40,10 +41,11 @@ use crate::core::instructions::init_project_instructions_at;
 use crate::core::loop_runtime::{
     preview_system_prompt_for_workspace, AgentApprovalDecision, AgentApprovalRequest,
     AgentApprovalResolver, AgentCancelCheck, AgentLoop, AgentLoopOptions, AgentRunEvents,
-    AgentUserInputRequest, AgentUserInputResolver, AgentUserInputResponse, RunResult,
-    SharedAgentApprovalResolver, SharedAgentCancelCheck, SharedAgentRunEvents,
+    AgentSessionBudget, AgentUserInputRequest, AgentUserInputResolver, AgentUserInputResponse,
+    RunResult, SharedAgentApprovalResolver, SharedAgentCancelCheck, SharedAgentRunEvents,
     SharedAgentUserInputResolver, SystemPromptPreview, ToolEvent,
 };
+use crate::core::prompt_layers::prompt_layers_event_payload;
 use crate::core::rollback::{RestorePlan, RollbackStore, SnapshotRecord};
 use crate::core::runtime::{
     item_to_json, json_object, parse_automation_record, parse_item_record, parse_runtime_event,
@@ -72,16 +74,16 @@ use crate::tools::web::{fetch_url_bytes, fetch_url_text};
 use crate::tui::{
     discover_custom_slash_commands_dir, render_once, run_interactive,
     run_interactive_with_refresh_actions_and_live, TuiAction, TuiAnchorCommand, TuiApp,
-    TuiApprovalRequest, TuiAutomationRecord, TuiHooksCommand, TuiItem, TuiLiveEvent, TuiLspCommand,
-    TuiMcpConfigScope, TuiMcpDetailKind, TuiMemoryCommand, TuiMode, TuiModelCommand,
+    TuiApprovalRequest, TuiAutomationRecord, TuiGoalState, TuiHooksCommand, TuiItem, TuiLiveEvent,
+    TuiLspCommand, TuiMcpConfigScope, TuiMcpDetailKind, TuiMemoryCommand, TuiMode, TuiModelCommand,
     TuiNetworkCommand, TuiNoteCommand, TuiProfileCommand, TuiProviderCommand, TuiSession,
     TuiSkillsCommand, TuiTaskRecord, TuiThread, TuiTrustCommand, TuiUsageSummary,
     TuiUserInputRequest,
 };
 use crate::ui::stream::StreamEvents;
 use crate::util::json::{
-    json_as_array, json_as_object, json_as_string, json_value_to_string, parse_json_value,
-    parse_root_object, JsonValue,
+    json_as_array, json_as_object, json_as_string, json_as_u64, json_value_to_string,
+    parse_json_value, parse_root_object, JsonValue,
 };
 use crate::util::sse;
 use crate::workspace_trust::{
@@ -734,6 +736,7 @@ struct RuntimeSnapshot {
     usage_summaries: Vec<TuiUsageSummary>,
     approvals: Vec<TuiApprovalRequest>,
     user_inputs: Vec<TuiUserInputRequest>,
+    thread_goals: BTreeMap<String, TuiGoalState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -743,9 +746,10 @@ struct RuntimeSnapshotSignature {
     item_count: usize,
     tasks: Vec<(String, String, String)>,
     automations: Vec<(String, String, Option<String>, Option<String>)>,
-    usage_summaries: Vec<(String, usize, u64, u64)>,
+    usage_summaries: Vec<(String, usize, u64, u64, u64, Option<String>)>,
     approvals: Vec<(String, String)>,
     user_inputs: Vec<(String, String)>,
+    thread_goals: Vec<(String, String, Option<u64>, String)>,
 }
 
 struct RuntimeLiveWatcher {
@@ -1097,6 +1101,7 @@ fn runtime_http_snapshot(client: &RuntimeHttpClient) -> AppResult<RuntimeSnapsho
     let mut usage_summaries = Vec::new();
     let mut approvals = Vec::new();
     let mut user_inputs = Vec::new();
+    let mut thread_goals = BTreeMap::new();
 
     for session in &session_records {
         let session_root = json_object_value(
@@ -1137,20 +1142,24 @@ fn runtime_http_snapshot(client: &RuntimeHttpClient) -> AppResult<RuntimeSnapsho
                     .map(TuiAutomationRecord::from),
             );
 
+            let events_root = json_object_value(
+                client.get_json(&format!("/v1/threads/{thread_id}/events?since_seq=0"))?,
+                "events",
+            )?;
+            let events = parse_record_array(&events_root, "events", parse_runtime_event)?;
             let usage_root = json_object_value(
                 client.get_json(&format!("/v1/threads/{thread_id}/usage?limit=200"))?,
                 "usage",
             )?;
             let usage = parse_record_array(&usage_root, "usage", parse_usage_record)?;
             if !usage.is_empty() {
-                usage_summaries.push(TuiUsageSummary::from_usage_records(&thread_id, &usage));
+                let mut summary = TuiUsageSummary::from_usage_records(&thread_id, &usage);
+                summary.merge_prompt_layer_events(&events);
+                usage_summaries.push(summary);
             }
-
-            let events_root = json_object_value(
-                client.get_json(&format!("/v1/threads/{thread_id}/events?since_seq=0"))?,
-                "events",
-            )?;
-            let events = parse_record_array(&events_root, "events", parse_runtime_event)?;
+            if let Some(goal) = thread_goal_from_events(&thread_id, &events) {
+                thread_goals.insert(thread_id.clone(), goal);
+            }
             let resolved_approval_ids = events
                 .iter()
                 .filter_map(TuiApprovalRequest::response_request_id)
@@ -1189,7 +1198,40 @@ fn runtime_http_snapshot(client: &RuntimeHttpClient) -> AppResult<RuntimeSnapsho
         usage_summaries,
         approvals,
         user_inputs,
+        thread_goals,
     })
+}
+
+fn thread_goal_from_events(thread_id: &str, events: &[RuntimeEvent]) -> Option<TuiGoalState> {
+    let mut goal = None;
+    for event in events {
+        match event.kind.as_str() {
+            "thread_goal_set" => {
+                let Some(payload) = json_as_object(&event.payload) else {
+                    continue;
+                };
+                let Some(objective) = payload.get("objective").and_then(json_as_string) else {
+                    continue;
+                };
+                goal = Some(TuiGoalState {
+                    thread_id: thread_id.to_string(),
+                    objective: objective.to_string(),
+                    token_budget: payload.get("token_budget").and_then(json_as_u64),
+                    started_at: payload
+                        .get("started_at")
+                        .and_then(json_as_string)
+                        .unwrap_or(event.created_at.as_str())
+                        .to_string(),
+                    updated_at: event.created_at.clone(),
+                });
+            }
+            "thread_goal_cleared" => {
+                goal = None;
+            }
+            _ => {}
+        }
+    }
+    goal
 }
 
 fn handle_tui_http_action(
@@ -1198,7 +1240,9 @@ fn handle_tui_http_action(
     action: TuiAction,
 ) -> AppResult<()> {
     match action {
-        TuiAction::SubmitUserMessage { thread_id, content } => {
+        TuiAction::SubmitUserMessage {
+            thread_id, content, ..
+        } => {
             client.post_json(
                 &format!("/v1/threads/{thread_id}/turns"),
                 json_object([
@@ -1248,6 +1292,32 @@ fn handle_tui_http_action(
         }
         TuiAction::Skills { .. } => {
             app.set_status("skills commands require local file-backed TUI".to_string());
+        }
+        TuiAction::SetGoal {
+            thread_id,
+            objective,
+            token_budget,
+        } => {
+            let mut body = BTreeMap::new();
+            body.insert("objective".to_string(), JsonValue::String(objective));
+            body.insert(
+                "token_budget".to_string(),
+                token_budget
+                    .map(|budget| JsonValue::Number(budget.to_string()))
+                    .unwrap_or(JsonValue::Null),
+            );
+            client.post_json(
+                &format!("/v1/threads/{thread_id}/goal"),
+                JsonValue::Object(body),
+            )?;
+            app.set_status(format!("remote goal saved for {thread_id}"));
+        }
+        TuiAction::ClearGoal { thread_id } => {
+            client.post_json(
+                &format!("/v1/threads/{thread_id}/goal"),
+                json_object([("clear", JsonValue::Bool(true))]),
+            )?;
+            app.set_status(format!("remote goal cleared for {thread_id}"));
         }
         TuiAction::RespondApproval {
             thread_id,
@@ -1562,9 +1632,13 @@ fn runtime_snapshot(store: &RuntimeStore) -> AppResult<RuntimeSnapshot> {
     let mut usage_summaries = Vec::new();
     let mut approvals = Vec::new();
     let mut user_inputs = Vec::new();
+    let mut thread_goals = BTreeMap::new();
     for session in &session_records {
         for thread in store.list_session_threads(&session.id, 50)? {
             let events = store.read_events(&thread.id, 0)?;
+            if let Some(goal) = store.load_thread_goal(&thread.id)? {
+                thread_goals.insert(thread.id.clone(), TuiGoalState::from(goal));
+            }
             let resolved_approval_ids = events
                 .iter()
                 .filter_map(TuiApprovalRequest::response_request_id)
@@ -1593,7 +1667,9 @@ fn runtime_snapshot(store: &RuntimeStore) -> AppResult<RuntimeSnapshot> {
             );
             let usage = store.list_usage(Some(&thread.id), usize::MAX)?;
             if !usage.is_empty() {
-                usage_summaries.push(TuiUsageSummary::from_usage_records(&thread.id, &usage));
+                let mut summary = TuiUsageSummary::from_usage_records(&thread.id, &usage);
+                summary.merge_prompt_layer_events(&events);
+                usage_summaries.push(summary);
             }
             approvals.extend(events.iter().filter_map(|event| {
                 let approval = TuiApprovalRequest::from_runtime_event(event)?;
@@ -1627,6 +1703,7 @@ fn runtime_snapshot(store: &RuntimeStore) -> AppResult<RuntimeSnapshot> {
         usage_summaries,
         approvals,
         user_inputs,
+        thread_goals,
     })
 }
 
@@ -1696,6 +1773,8 @@ fn runtime_snapshot_signature(snapshot: &RuntimeSnapshot) -> RuntimeSnapshotSign
                 usage.record_count,
                 usage.total_tokens,
                 usage.latest_total_tokens,
+                usage.prompt_layer_snapshot_count,
+                usage.latest_prompt_layer_digest.clone(),
             )
         })
         .collect::<Vec<_>>();
@@ -1715,6 +1794,20 @@ fn runtime_snapshot_signature(snapshot: &RuntimeSnapshot) -> RuntimeSnapshotSign
         .collect::<Vec<_>>();
     user_inputs.sort();
 
+    let mut thread_goals = snapshot
+        .thread_goals
+        .iter()
+        .map(|(thread_id, goal)| {
+            (
+                thread_id.clone(),
+                goal.objective.clone(),
+                goal.token_budget,
+                goal.updated_at.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    thread_goals.sort();
+
     RuntimeSnapshotSignature {
         sessions,
         threads,
@@ -1724,6 +1817,7 @@ fn runtime_snapshot_signature(snapshot: &RuntimeSnapshot) -> RuntimeSnapshotSign
         usage_summaries,
         approvals,
         user_inputs,
+        thread_goals,
     }
 }
 
@@ -1737,6 +1831,7 @@ fn snapshot_live_event(snapshot: RuntimeSnapshot) -> TuiLiveEvent {
         usage_summaries: snapshot.usage_summaries,
         approvals: snapshot.approvals,
         user_inputs: snapshot.user_inputs,
+        thread_goals: snapshot.thread_goals,
     }
 }
 
@@ -1788,18 +1883,18 @@ fn start_runtime_live_watcher(
 
 fn app_from_store(store: &RuntimeStore) -> AppResult<TuiApp> {
     let snapshot = runtime_snapshot(store)?;
-    Ok(
-        TuiApp::with_runtime_usage_tasks_automations_approvals_and_user_inputs(
-            snapshot.sessions,
-            snapshot.threads,
-            snapshot.items,
-            snapshot.tasks,
-            snapshot.automations,
-            snapshot.usage_summaries,
-            snapshot.approvals,
-            snapshot.user_inputs,
-        ),
-    )
+    let mut app = TuiApp::with_runtime_usage_tasks_automations_approvals_and_user_inputs(
+        snapshot.sessions,
+        snapshot.threads,
+        snapshot.items,
+        snapshot.tasks,
+        snapshot.automations,
+        snapshot.usage_summaries,
+        snapshot.approvals,
+        snapshot.user_inputs,
+    );
+    app.replace_thread_goals(snapshot.thread_goals);
+    Ok(app)
 }
 
 fn configure_tui_slash_completions(app: &mut TuiApp, config: &AppConfig) {
@@ -1841,6 +1936,7 @@ fn refresh_app_from_store(store: &RuntimeStore, app: &mut TuiApp) -> AppResult<(
         snapshot.approvals,
         snapshot.user_inputs,
     );
+    app.replace_thread_goals(snapshot.thread_goals);
     Ok(())
 }
 
@@ -3406,10 +3502,12 @@ fn format_lsp_summary(summary: &DiagnosticsConfigSummary) -> String {
 
 fn format_model_config_summary(summary: &ModelConfigSummary) -> String {
     format!(
-        "DeepSeekCode Model Config ({})\n\nmodel.model = {}\nmodel.reasoning_effort = {}\nmodel.base_url = {}\nmodel.api_key_env = {}\n\nUse model to open the picker, model show to inspect this config, model <name> to update model.model, or models for the offline catalog.",
+        "DeepSeekCode Model Config ({})\n\nmodel.preset = {}\nmodel.model = {}\nmodel.reasoning_effort = {}\nmodel.session_budget_microusd = {}\nmodel.base_url = {}\nmodel.api_key_env = {}\n\nUse model to open the picker, model preset <auto|flash|pro> to update the DeepSeek routing preset, model <name> to update model.model, or models for the offline catalog.",
         summary.path.display(),
+        summary.preset,
         summary.model,
         summary.reasoning_effort,
+        summary.session_budget_microusd,
         summary.base_url,
         summary.api_key_env
     )
@@ -3428,6 +3526,7 @@ fn format_model_catalog_summary(summary: &ModelConfigSummary) -> String {
     out.push_str("DeepSeekCode Model Catalog\n");
     out.push_str("==========================\n\n");
     out.push_str(&format!("Current project model: {}\n", summary.model));
+    out.push_str(&format!("Current project preset: {}\n", summary.preset));
     out.push_str(&format!("Reasoning effort: {}\n", summary.reasoning_effort));
     out.push_str("\nKnown local model ids:\n");
     for model in models {
@@ -3445,14 +3544,16 @@ fn format_model_catalog_summary(summary: &ModelConfigSummary) -> String {
 
 fn format_provider_config_summary(summary: &ProviderConfigSummary) -> String {
     format!(
-        "DeepSeekCode Provider Config ({})\n\nprovider = {} ({})\nmodel.base_url = {}\nmodel.api_key_env = {}\nmodel.model = {}\nmodel.reasoning_effort = {}\n\nUse provider to open the picker, provider <name> [model] to update this project config, or provider list for supported presets.",
+        "DeepSeekCode Provider Config ({})\n\nprovider = {} ({})\nmodel.preset = {}\nmodel.base_url = {}\nmodel.api_key_env = {}\nmodel.model = {}\nmodel.reasoning_effort = {}\nmodel.session_budget_microusd = {}\n\nUse provider to open the picker, provider <name> [model] to update this project config, or provider list for supported presets.",
         summary.path.display(),
         summary.provider,
         summary.label,
+        summary.preset,
         summary.base_url,
         summary.api_key_env,
         summary.model,
-        summary.reasoning_effort
+        summary.reasoning_effort,
+        summary.session_budget_microusd
     )
 }
 
@@ -3638,8 +3739,20 @@ fn handle_tui_action_with_live(
     live_tx: Option<Sender<TuiLiveEvent>>,
 ) -> AppResult<()> {
     match action {
-        TuiAction::SubmitUserMessage { thread_id, content } => {
-            run_tui_submit_user_message(store, config, app, thread_id, content, live_tx)?;
+        TuiAction::SubmitUserMessage {
+            thread_id,
+            content,
+            preset_override,
+        } => {
+            run_tui_submit_user_message(
+                store,
+                config,
+                app,
+                thread_id,
+                content,
+                preset_override,
+                live_tx,
+            )?;
         }
         TuiAction::UndoConversation { thread_id } => {
             match run_tui_undo_conversation(store, app, &thread_id, "Undo") {
@@ -3666,6 +3779,7 @@ fn handle_tui_action_with_live(
                         app,
                         fork.thread.id.clone(),
                         last_user.clone(),
+                        None,
                         live_tx,
                     )?;
                     app.set_status(format!(
@@ -3688,6 +3802,7 @@ fn handle_tui_action_with_live(
                         app,
                         fork.thread.id.clone(),
                         content.clone(),
+                        None,
                         live_tx,
                     )?;
                     app.set_status(format!(
@@ -3858,7 +3973,10 @@ fn handle_tui_action_with_live(
         }
         TuiAction::Model { workspace, command } => {
             let workspace = Path::new(&workspace);
-            let completes_setup_step = matches!(&command, TuiModelCommand::Set { .. });
+            let completes_setup_step = matches!(
+                &command,
+                TuiModelCommand::Set { .. } | TuiModelCommand::Preset { .. }
+            );
             let status = match &command {
                 TuiModelCommand::Pick => "model picker shown".to_string(),
                 TuiModelCommand::Show => "model config shown".to_string(),
@@ -3871,6 +3989,20 @@ fn handle_tui_action_with_live(
                         format!("model unchanged: {}", result.model)
                     }
                 }
+                TuiModelCommand::Preset { preset } => {
+                    let result = set_model_preset_at(workspace, preset)?;
+                    if result.changed {
+                        format!(
+                            "model preset set: {} -> {} ({})",
+                            result.previous_preset, result.preset, result.model
+                        )
+                    } else {
+                        format!(
+                            "model preset unchanged: {} ({})",
+                            result.preset, result.model
+                        )
+                    }
+                }
             };
             let setup_status = status.clone();
             let summary = model_config_summary_at(workspace)?;
@@ -3878,9 +4010,9 @@ fn handle_tui_action_with_live(
                 TuiModelCommand::Pick | TuiModelCommand::List => {
                     format_model_catalog_summary(&summary)
                 }
-                TuiModelCommand::Show | TuiModelCommand::Set { .. } => {
-                    format_model_config_summary(&summary)
-                }
+                TuiModelCommand::Show
+                | TuiModelCommand::Set { .. }
+                | TuiModelCommand::Preset { .. } => format_model_config_summary(&summary),
             };
             app.set_mcp_detail(TuiMcpDetailKind::Model, detail);
             app.set_status(status);
@@ -4267,6 +4399,18 @@ fn handle_tui_action_with_live(
         TuiAction::Hooks { command } => {
             run_tui_hooks_command(app, config, command);
         }
+        TuiAction::SetGoal {
+            thread_id,
+            objective,
+            token_budget,
+        } => match store.set_thread_goal(&thread_id, objective, token_budget) {
+            Ok(_) => app.set_status(format!("goal saved for {thread_id}")),
+            Err(error) => app.set_status(format!("goal save failed: {error}")),
+        },
+        TuiAction::ClearGoal { thread_id } => match store.clear_thread_goal(&thread_id) {
+            Ok(_) => app.set_status(format!("goal cleared for {thread_id}")),
+            Err(error) => app.set_status(format!("goal clear failed: {error}")),
+        },
         TuiAction::McpManager => match config {
             Some(config) => match mcp_manager_summary(config) {
                 Ok(summary) => {
@@ -4649,6 +4793,7 @@ fn run_tui_submit_user_message(
     app: &mut TuiApp,
     thread_id: String,
     content: String,
+    preset_override: Option<String>,
     live_tx: Option<Sender<TuiLiveEvent>>,
 ) -> AppResult<()> {
     let turn = store.append_turn(&thread_id, "user".to_string(), content.clone())?;
@@ -4661,7 +4806,8 @@ fn run_tui_submit_user_message(
         "completed".to_string(),
     )?;
     if let Some(config) = config {
-        let run_config = load_or_default().unwrap_or_else(|_| config.clone());
+        let mut run_config = load_or_default().unwrap_or_else(|_| config.clone());
+        apply_model_preset_override(&mut run_config, preset_override.as_deref(), false)?;
         start_tui_agent_run(
             store.clone(),
             run_config,
@@ -7236,6 +7382,8 @@ fn run_tui_agent_turn(
         Rc::clone(&live_tool_result_count),
     )));
     let translation_config = config.clone();
+    let session_budget =
+        runtime_agent_session_budget(&store, &thread_id, config.model.session_budget_microusd)?;
     let agent = AgentLoop::new(config);
     let mut context = TaskContext::new(prompt, None);
     let translation_target_for_result = translation_target_language.clone();
@@ -7257,6 +7405,7 @@ fn run_tui_agent_turn(
             approval_resolver: Some(resolver),
             user_input_resolver: Some(user_input_resolver),
             cancel_check: Some(cancel_check),
+            session_budget,
             ..AgentLoopOptions::default()
         },
     ) {
@@ -7300,6 +7449,20 @@ fn run_tui_agent_turn(
         live_tool_results,
     )?;
     Ok(())
+}
+
+fn runtime_agent_session_budget(
+    store: &RuntimeStore,
+    thread_id: &str,
+    configured_budget_microusd: u64,
+) -> AppResult<Option<AgentSessionBudget>> {
+    store.ensure_thread_session_budget_microusd(thread_id, configured_budget_microusd)?;
+    Ok(store
+        .thread_budget_snapshot(thread_id)?
+        .map(|snapshot| AgentSessionBudget {
+            budget_microusd: snapshot.budget_microusd,
+            used_microusd: snapshot.used_microusd,
+        }))
 }
 
 fn apply_tui_posthoc_translation(
@@ -7600,12 +7763,59 @@ impl StreamEvents for RuntimeItemStream {
         self.flush_running();
     }
 
+    fn on_model_route(&mut self, preset: &str, model: &str, reason: &str, escalated: bool) {
+        let content = if escalated {
+            format!("model preset: {preset}\nescalating next call to {model}: {reason}")
+        } else {
+            format!("model preset: {preset}\nmodel: {model}\nreason: {reason}")
+        };
+        if let Ok(item) = self.store.append_item(
+            &self.thread_id,
+            Some(&self.turn_id),
+            "event".to_string(),
+            Some("system".to_string()),
+            content,
+            "completed".to_string(),
+        ) {
+            self.emit_live_item(item);
+        }
+    }
+
+    fn on_model_budget_warning(&mut self, used_microusd: u64, budget_microusd: u64) {
+        let content =
+            format!("session budget warning: {used_microusd}/{budget_microusd} microusd used");
+        if let Ok(item) = self.store.append_item(
+            &self.thread_id,
+            Some(&self.turn_id),
+            "event".to_string(),
+            Some("system".to_string()),
+            content,
+            "completed".to_string(),
+        ) {
+            self.emit_live_item(item);
+        }
+    }
+
     fn on_assistant_done(&mut self, full_text: &str) {
         if !full_text.is_empty() {
             self.content = full_text.to_string();
         }
         self.flush_running();
         self.flush_reasoning("completed");
+    }
+
+    fn on_tool_repair(&mut self, kind: &str, detail: &str) {
+        let content = format!("tool_call_repair kind={kind}\n{detail}");
+        if let Ok(item) = self.store.append_item(
+            &self.thread_id,
+            Some(&self.turn_id),
+            "event".to_string(),
+            Some("system".to_string()),
+            content,
+            "completed".to_string(),
+        ) {
+            self.emit_live_item(item);
+        }
     }
 
     fn on_tool_call(&mut self, _name: &str, _input: &std::collections::BTreeMap<String, String>) {}
@@ -7931,7 +8141,7 @@ fn record_tui_agent_result_into(
         )?;
     }
     let usage_model = result.usage.model.as_deref().unwrap_or(model);
-    store.append_usage_with_cache(
+    let usage = store.append_usage_with_cache(
         thread_id,
         Some(assistant_turn_id),
         usage_model.to_string(),
@@ -7941,6 +8151,13 @@ fn record_tui_agent_result_into(
         result.usage.prompt_cache_hit,
         result.usage.prompt_cache_miss,
     )?;
+    if !result.prompt_layers.is_empty() {
+        store.append_thread_event(
+            thread_id,
+            "prompt_layers_recorded",
+            prompt_layers_event_payload(assistant_turn_id, &usage.id, &result.prompt_layers),
+        )?;
+    }
     finish_tui_agent_task(store, thread_id, task_id, "completed", message)?;
     Ok(())
 }
@@ -8838,6 +9055,7 @@ description: {description}
             TuiAction::SubmitUserMessage {
                 thread_id: thread.id.clone(),
                 content: "hello remote runtime".to_string(),
+                preset_override: None,
             },
         )
         .unwrap();
@@ -9247,7 +9465,7 @@ description: {description}
         let turn = store
             .append_turn(&thread.id, "assistant".to_string(), "done".to_string())
             .unwrap();
-        store
+        let usage = store
             .append_usage_with_cache(
                 &thread.id,
                 Some(&turn.id),
@@ -9259,6 +9477,39 @@ description: {description}
                 5,
             )
             .unwrap();
+        store
+            .append_thread_event(
+                &thread.id,
+                "prompt_layers_recorded",
+                prompt_layers_event_payload(
+                    &turn.id,
+                    &usage.id,
+                    &[crate::core::prompt_layers::PromptLayerSnapshot {
+                        step: 1,
+                        layers: vec![crate::core::prompt_layers::PromptLayerRecord {
+                            name: "system_static".to_string(),
+                            text_sha256: "abc123".to_string(),
+                            bytes: 12,
+                            estimated_tokens: 3,
+                            cache_stable: true,
+                        }],
+                        total_bytes: 12,
+                        estimated_tokens: 3,
+                    }],
+                ),
+            )
+            .unwrap();
+
+        let snapshot = runtime_snapshot(&store).unwrap();
+        assert_eq!(snapshot.usage_summaries[0].prompt_layer_snapshot_count, 1);
+        assert_eq!(
+            snapshot.usage_summaries[0].latest_prompt_layer_estimated_tokens,
+            3
+        );
+        assert_eq!(
+            snapshot.usage_summaries[0].latest_prompt_layer_names,
+            vec!["system_static".to_string()]
+        );
 
         let app = app_from_store(&store).unwrap();
         let output = render_once(&app, 160, 48).unwrap();
@@ -9534,6 +9785,7 @@ description: {description}
             TuiAction::SubmitUserMessage {
                 thread_id: thread.id.clone(),
                 content: "hello from composer".to_string(),
+                preset_override: None,
             },
         )
         .unwrap();
@@ -12057,6 +12309,7 @@ shell_allowlist = ["git diff"]
             status: "active".to_string(),
             latest_turn_id: Some("turn-one".to_string()),
             event_seq: 1,
+            session_budget_microusd: None,
         };
         let session = SessionRecord {
             id: "session-one".to_string(),
@@ -12067,6 +12320,7 @@ shell_allowlist = ["git diff"]
             status: "active".to_string(),
             active_thread_id: Some("thread-one".to_string()),
             thread_count: 1,
+            session_budget_microusd: None,
         };
         let items = vec![ItemRecord {
             id: "item-one".to_string(),
@@ -12318,6 +12572,7 @@ shell_allowlist = ["git diff"]
             status: "active".to_string(),
             latest_turn_id: None,
             event_seq: 1,
+            session_budget_microusd: None,
         };
 
         let markdown = render_tui_export_markdown(None, &thread, &[]);
@@ -12814,6 +13069,50 @@ shell_allowlist = ["git diff"]
     }
 
     #[test]
+    fn handle_tui_action_persists_thread_goal() {
+        let store = temp_store("goal-action");
+        let session = store
+            .create_session("Goal session".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Goal thread".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let mut app = TuiApp::new(Vec::new());
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::SetGoal {
+                thread_id: thread.id.clone(),
+                objective: "Keep the goal".to_string(),
+                token_budget: Some(2048),
+            },
+        )
+        .unwrap();
+        let goal = store.load_thread_goal(&thread.id).unwrap().unwrap();
+        assert_eq!(goal.objective, "Keep the goal");
+        assert_eq!(goal.token_budget, Some(2048));
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::ClearGoal {
+                thread_id: thread.id.clone(),
+            },
+        )
+        .unwrap();
+        assert!(store.load_thread_goal(&thread.id).unwrap().is_none());
+    }
+
+    #[test]
     fn handle_tui_action_runs_and_polls_shell_job() {
         let _guard = shell_tool_lock();
         let store = temp_store("shell-action");
@@ -13197,6 +13496,18 @@ shell_allowlist = ["git diff"]
                 status: crate::model::protocol::ObservationStatus::Ok,
             }],
             usage,
+            prompt_layers: vec![crate::core::prompt_layers::PromptLayerSnapshot {
+                step: 1,
+                layers: vec![crate::core::prompt_layers::PromptLayerRecord {
+                    name: "system_static".to_string(),
+                    text_sha256: "abc123".to_string(),
+                    bytes: 12,
+                    estimated_tokens: 3,
+                    cache_stable: true,
+                }],
+                total_bytes: 12,
+                estimated_tokens: 3,
+            }],
         };
 
         record_tui_agent_result(&store, &thread.id, "deepseek-coder", &result).unwrap();
@@ -13216,6 +13527,10 @@ shell_allowlist = ["git diff"]
         let tasks = store.list_tasks(None, Some(&thread.id), 10).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].status, "completed");
+        let events = store.read_events(&thread.id, 0).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "prompt_layers_recorded"));
     }
 
     #[test]
@@ -13310,6 +13625,7 @@ shell_allowlist = ["git diff"]
         stream.on_reasoning_delta("thinking");
         stream.on_text_delta("hello");
         stream.on_text_delta(" world");
+        stream.on_tool_repair("truncated-json", "repaired truncated tool arguments JSON");
         stream.on_assistant_done("hello world");
 
         let running = store.load_item(&thread.id, &item.id).unwrap();
@@ -13322,6 +13638,12 @@ shell_allowlist = ["git diff"]
             .expect("reasoning item");
         assert_eq!(reasoning.content, "thinking");
         assert_eq!(reasoning.status, "completed");
+        let repair = items
+            .iter()
+            .find(|item| item.item_type == "event" && item.content.contains("tool_call_repair"))
+            .expect("tool-call repair event item");
+        assert!(repair.content.contains("kind=truncated-json"));
+        assert_eq!(repair.status, "completed");
         assert!(store
             .read_events(&thread.id, 0)
             .unwrap()
@@ -13513,6 +13835,7 @@ shell_allowlist = ["git diff"]
                 },
             ],
             usage,
+            prompt_layers: Vec::new(),
         };
 
         record_tui_agent_result_into(

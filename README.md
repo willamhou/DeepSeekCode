@@ -89,6 +89,7 @@ cargo install --path .
 deepseek quickstart
 deepseek config init
 printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
+deepseek config preset auto
 deepseek doctor --json
 ```
 
@@ -97,7 +98,7 @@ Run a coding task:
 ```bash
 deepseek
 deepseek chat
-deepseek run "explain the current repository structure"
+deepseek run --preset auto "explain the current repository structure"
 ```
 
 Start the local runtime and connect the TUI:
@@ -116,8 +117,17 @@ git.
   palette, setup/onboarding, provider/model picker, and MCP management.
 - REPL with raw-mode line editing, history, session list/load completion,
   SIGINT cancellation, `/save`, `/load`, `/sessions`, and custom slash commands.
-- OpenAI-compatible single and same-turn batch tool calls, routed through the
-  normal hook, permission, and recovery layers.
+- OpenAI-compatible single and same-turn batch tool calls, with independent
+  read-only chunks parallelized conservatively and writes/shell/approvals kept
+  as serial barriers.
+- Recoverable DeepSeek-style malformed tool-call arguments are repaired through
+  a bounded pipeline and recorded as observable runtime repair events.
+- Runtime evidence commands: `deepseek stats`, `deepseek events replay`, and
+  `deepseek events diff` summarize cost/cache/tool/failure traces without
+  reading raw `.dscode/runtime` JSON.
+- DeepSeek model presets and estimated-cost budgets sync into runtime
+  session/thread records, so TUI and daemon task sessions can enforce or clear
+  budgets across process restarts.
 - Guided first-run checks through `deepseek quickstart` and
   `deepseek quickstart --json`.
 - Local HTTP/SSE runtime, ACP stdio adapter, MCP client/server surfaces, and
@@ -151,6 +161,10 @@ cargo fmt --check
 cargo test --lib -- --test-threads=1
 node scripts/check-secrets.js
 deepseek quickstart --json
+deepseek dogfood repair-cache-evidence --json
+deepseek stats --json
+deepseek events replay <thread-id> --limit 50
+deepseek events diff <before-thread-id> <after-thread-id> --json
 deepseek update publish-status --json
 deepseek update release-smoke --version 0.1.3 --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"

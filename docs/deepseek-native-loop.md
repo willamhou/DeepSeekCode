@@ -16,6 +16,31 @@ Reasonix is MIT licensed. DeepSeekCode should treat it as design inspiration
 and test-case inspiration. Do not vendor or copy source implementation unless a
 future change explicitly carries the required license notice and review.
 
+## Current Residual Gap Snapshot
+
+The first DeepSeek-native loop slice has landed: repair, prompt-layer
+diagnostics, presets/budgets, parallel read dispatch, and stats/replay evidence
+all have code paths and deterministic tests. The remaining loop gaps are now
+hardening gaps rather than architecture blockers:
+
+- Cache-first behavior is observable but not yet policy-complete. Prompt-layer
+  hashes, token estimates, and cache hit/miss usage are recorded, but
+  cache-safe compaction thresholds, prefix-stability regression gates, and
+  per-layer trend analysis still need product hardening.
+- Tool-call repair has deterministic coverage, but it needs more live
+  DeepSeek-backed examples across real gateways, dynamic MCP schemas, and
+  non-recoverable malformed-call recovery paths before treating it as mature.
+- Model presets and session budgets work, but auto-escalation remains an
+  initial heuristic. It still needs dogfood calibration against real failure
+  modes and clearer user override/raise-budget flows.
+- Parallel dispatch is deliberately narrow. Only the initial built-in read
+  tools opt in; read-only MCP/resource tools, runtime queries, and performance
+  telemetry should be added incrementally after each surface proves side-effect
+  free.
+- Evidence surfaces exist locally, but the repair/cache command and
+  prompt-layer deltas should become recurring release evidence alongside live
+  model-backed dogfood runs.
+
 ## What To Absorb
 
 ### Cache-First Loop
@@ -320,60 +345,133 @@ raw runtime JSON.
 
 ### Phase 1: Repair Pipeline
 
+Status on 2026-05-24: initial repair pipeline landed. DeepSeekCode now repairs
+recoverable truncated JSON tool arguments, scavenges explicit JSON-shaped tool
+calls from assistant reasoning/text when formal provider tool calls are absent,
+rejects unknown tool names, rejects trailing JSON garbage in repaired tool
+arguments, flattens nested object tool schemas behind
+`model.tool_schema_flattening = "auto"` and re-nests flat arguments before tool
+dispatch, emits visible repair notes, persists structured `tool_call_repair`
+runtime events, and surfaces repair evidence in the TUI/runtime stream. Storm
+detection is now mutating-aware: read-only calls get one warning retry, while
+mutating or unknown calls are suppressed before the second identical execution.
+
 Deliver:
 
-- `tool_repair` module;
-- truncation repair and scavenge for known tool names;
-- schema flatten/re-nest behind `model.tool_schema_flattening=auto`;
-- repair runtime events;
+- `tool_repair` module; landed;
+- truncation repair and scavenge for known tool names; landed;
+- schema flatten/re-nest behind `model.tool_schema_flattening=auto`; landed;
+- repair runtime events; landed as structured `tool_call_repair` events,
+  runtime stream items, and `exec --json` repair notices;
 - unit tests for malformed JSON, truncated JSON, scavenged calls, and unknown
-  tool rejection.
+  tool rejection; landed.
+
+Verification:
+
+- `deepseek dogfood repair-cache-evidence --json` writes
+  `.dscode/dogfood/repair-cache-evidence.json`, records before/after runtime
+  threads, and proves a truncated `read_file` argument object fails strict
+  parsing before repair but recovers end to end after repair.
 
 Reason to start here: it directly improves task success when DeepSeek emits
 almost-correct tool calls.
 
 ### Phase 2: Prompt Layer Diagnostics
 
+Status on 2026-05-24: initial prompt-layer diagnostics landed. DeepSeekCode now
+derives named prompt layers with SHA-256 hashes, byte counts, token estimates,
+and cache-stability flags for every agent-loop model request. `exec`,
+TUI-started agent turns, and runtime daemon task turns persist
+`prompt_layers_recorded` events linked to the corresponding usage record.
+`/cache inspect` surfaces active-thread prompt-layer snapshot counts, latest
+digest, latest token estimate, and layer names when those events exist, and
+`deepseek stats` aggregates cache, cost, model split, repair, suppression, and
+prompt-layer evidence.
+
 Deliver:
 
-- prompt-layer hashes and token estimates;
-- runtime usage linkage to prompt-layer metadata;
-- `/cache inspect` enhancement;
-- `deepseek stats` MVP.
+- prompt-layer hashes and token estimates; landed;
+- runtime usage linkage to prompt-layer metadata for exec, TUI, and daemon task
+  turns; landed;
+- `/cache inspect` enhancement; landed;
+- `deepseek stats` MVP; landed.
 
 Reason: it turns existing cache telemetry into actionable cache-first behavior.
 
 ### Phase 3: Model Presets And Budgets
 
+Status on 2026-05-24: initial model preset and budget controls landed.
+DeepSeekCode now stores `model.preset = "auto" | "flash" | "pro"` separately
+from the raw `model.model` marker, defaults new configs to the `auto` preset,
+and exposes `deepseek config preset [auto|flash|pro]`,
+`deepseek config budget [MICROUSD|off]`, `deepseek run --preset ...`,
+`deepseek exec --preset ...`, and `--pro-next` overrides. The TUI supports
+`model preset <auto|flash|pro>` plus `/pro` to arm DeepSeek V4 Pro for the next
+submitted user turn. Auto routing emits a visible escalation line/event before
+using `deepseek-v4-pro`, and session budget enforcement warns at 80% and refuses
+new model calls once the in-loop estimated DeepSeek spend reaches
+`model.session_budget_microusd`. Runtime session/thread records now also persist
+`session_budget_microusd` from the active config; TUI and daemon task turns
+restore prior durable usage cost before entering the agent loop, so budget
+warning/refusal survives process restarts while `deepseek config budget off`
+clears the runtime limit.
+
 Deliver:
 
-- `preset = auto | flash | pro` config;
-- CLI/TUI commands for preset and `/pro`;
-- visible auto-escalation;
-- session budget warning/refusal.
+- `preset = auto | flash | pro` config; landed;
+- CLI/TUI commands for preset and `/pro`; landed;
+- visible auto-escalation; landed for auto routes that select Pro;
+- session budget warning/refusal; landed for current agent-loop estimated
+  DeepSeek spend and cross-process runtime sessions;
+- explicit per-thread/session budget metadata in runtime records; landed.
 
 Reason: it gives users predictable cost/performance controls while preserving
 DeepSeek-first defaults.
 
 ### Phase 4: Parallel Read Dispatch
 
+Status on 2026-05-24: initial parallel-safe read dispatch landed. The tool
+registry now exposes conservative `read_only` and `parallel_safe` metadata.
+The agent loop splits same-turn batches into contiguous safe chunks and runs
+only opt-in read tools concurrently when hooks and permission prompts are not in
+play. The initial parallel-safe set is `list_files`, `list_dir`, `read_file`,
+`search_text`, `git_status`, and `git_diff`. Results are written back in the
+original model-call order, mixed read/write batches fall back to serial
+execution at write barriers, `DSCODE_TOOL_DISPATCH=serial` disables the path,
+and `DSCODE_PARALLEL_MAX` caps concurrency.
+
 Deliver:
 
-- tool metadata;
-- same-turn read-only parallel chunks;
-- output-order preservation;
-- serial fallback;
-- cancellation tests.
+- tool metadata; landed for registry read-only and parallel-safe flags;
+- same-turn read-only parallel chunks; landed for the initial opt-in tool set;
+- output-order preservation; landed for observations and tool events;
+- serial fallback; landed for writes, shell, approval/user-input, hooks, repeats,
+  side-effect MCP calls, and `DSCODE_TOOL_DISPATCH=serial`;
+- cancellation tests; landed for pre-dispatch cancellation.
 
 Reason: this speeds up exploration without changing write safety.
 
 ### Phase 5: Evidence And Polish
 
+Status on 2026-05-24: initial runtime event replay/diff CLI and repair/cache
+dogfood evidence command landed.
+`deepseek events replay <thread>` renders compact chronological runtime event
+summaries with stable labels for thread, turn, item, usage, prompt-layer,
+permission, goal, and task events. `deepseek events diff <left-thread>
+<right-thread>` compares two runtime threads for event count, estimated cost,
+prompt cache hit rate, tool calls, failed tool calls, file modification evidence
+when paths were recorded, repair events, repeated-tool suppressions, and event
+kind deltas. Both commands support `--json` for regression evidence and demos.
+`deepseek dogfood repair-cache-evidence` creates a deterministic local
+before/after run that exercises `tool_call_repair`, prompt-layer events, cache
+hit/miss usage, `events replay`, `events diff`, and `stats`.
+
 Deliver:
 
-- `deepseek events diff` and replay summaries;
-- dogfood evidence comparing before/after repair and cache behavior;
-- README/current-status updates once behavior is verified.
+- `deepseek events diff` and replay summaries; landed;
+- dogfood evidence comparing before/after repair and cache behavior; landed via
+  `deepseek dogfood repair-cache-evidence --json`;
+- README/current-status updates once behavior is verified; landed.
 
 Reason: public claims should be backed by observable runtime data.
 

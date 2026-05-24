@@ -234,6 +234,7 @@ fn run_subagent_request(
                 approval_resolver: None,
                 user_input_resolver: None,
                 cancel_check,
+                session_budget: None,
             },
         )
         .map_err(|error| tool_failure(format!("subagent failed: {error}")))?;
@@ -1007,6 +1008,7 @@ mod tests {
                 status: ObservationStatus::Failed,
             }],
             usage: TokenUsage::default(),
+            prompt_layers: Vec::new(),
         };
         let summary = render_summary("inspect file", None, None, None, 2, &result);
         assert!(summary.contains("meta.child_outcome=blocked"));
@@ -1030,6 +1032,7 @@ mod tests {
                 status: ObservationStatus::Ok,
             }],
             usage: TokenUsage::default(),
+            prompt_layers: Vec::new(),
         };
         let summary = render_summary("inspect entrypoint", None, None, None, 2, &result);
         assert!(summary.contains("meta.child_next_action=read_file:src/main.rs"));
@@ -1041,6 +1044,7 @@ mod tests {
             final_message: "search for `route_benchmark_subcommand`".to_string(),
             tool_events: Vec::new(),
             usage: TokenUsage::default(),
+            prompt_layers: Vec::new(),
         };
         let summary = render_summary("inspect symbol", None, None, None, 2, &result);
         assert!(summary.contains("meta.child_next_action=search_text:route_benchmark_subcommand"));
@@ -1068,6 +1072,7 @@ mod tests {
                 },
             ],
             usage: TokenUsage::default(),
+            prompt_layers: Vec::new(),
         };
         let summary = render_summary("fix route", None, None, Some("src/lib.rs"), 4, &result);
         assert!(summary.contains("meta.child_files=src/lib.rs"));
@@ -1090,6 +1095,7 @@ mod tests {
             final_message: "done".to_string(),
             tool_events: Vec::new(),
             usage: TokenUsage::default(),
+            prompt_layers: Vec::new(),
         };
 
         let summary = render_summary("review code", None, Some(&agent), None, 2, &result);

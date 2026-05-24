@@ -2,11 +2,17 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+#[cfg(test)]
+use std::time::Duration;
 
 use crate::config::types::AppConfig;
 use crate::core::context::TaskContext;
 use crate::core::memory::MemoryState;
 use crate::core::observations::{compact_observations, summarize_for_kind};
+use crate::core::prompt_layers::{prompt_layers_for_request, PromptLayerSnapshot};
 use crate::core::session::{SessionSnapshot, SessionStore};
 use crate::error::{app_error, AppResult};
 use crate::language::detect::detect_profile;
@@ -20,7 +26,7 @@ use crate::model::protocol::{
 use crate::skills::registry::SkillRegistry;
 use crate::skills::resolver::{resolve_skill, SkillResolution};
 use crate::skills::schema::SkillSpec;
-use crate::tools::registry::ExecutionPolicy;
+use crate::tools::registry::{tool_metadata_for_name, ExecutionPolicy};
 use crate::ui::render::print_banner;
 use crate::ui::stream::StreamEvents;
 use crate::util::cancel::CancellationCheck;
@@ -39,6 +45,7 @@ pub struct AgentLoopOptions {
     pub approval_resolver: Option<SharedAgentApprovalResolver>,
     pub user_input_resolver: Option<SharedAgentUserInputResolver>,
     pub cancel_check: Option<SharedAgentCancelCheck>,
+    pub session_budget: Option<AgentSessionBudget>,
 }
 
 impl Default for AgentLoopOptions {
@@ -58,8 +65,15 @@ impl Default for AgentLoopOptions {
             approval_resolver: None,
             user_input_resolver: None,
             cancel_check: None,
+            session_budget: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentSessionBudget {
+    pub budget_microusd: u64,
+    pub used_microusd: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +89,7 @@ pub struct RunResult {
     pub final_message: String,
     pub tool_events: Vec<ToolEvent>,
     pub usage: crate::model::protocol::TokenUsage,
+    pub prompt_layers: Vec<PromptLayerSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +198,8 @@ pub fn preview_system_prompt_for_workspace(
 pub type SharedAgentRunEvents = Rc<RefCell<dyn AgentRunEvents>>;
 
 pub trait AgentRunEvents {
+    fn on_prompt_layers(&mut self, _snapshot: &PromptLayerSnapshot) {}
+
     fn on_tool_call(&mut self, tool_name: &str, input: &BTreeMap<String, String>);
 
     fn on_permission_request(
@@ -292,6 +309,7 @@ impl AgentLoop {
             approval_resolver,
             user_input_resolver,
             cancel_check,
+            session_budget,
         } = options;
         if emit_progress {
             print_banner("DeepSeekCode");
@@ -421,6 +439,14 @@ impl AgentLoop {
         let mut last_message = String::new();
         let mut tool_events: Vec<ToolEvent> = Vec::new();
         let mut total_usage = crate::model::protocol::TokenUsage::default();
+        let session_budget_microusd = session_budget
+            .map(|budget| budget.budget_microusd)
+            .unwrap_or(self.config.model.session_budget_microusd);
+        let mut estimated_session_cost_microusd = session_budget
+            .map(|budget| budget.used_microusd)
+            .unwrap_or(0);
+        let mut session_budget_warned = false;
+        let mut prompt_layer_snapshots = Vec::new();
         let mut renderer = emit_progress.then(crate::ui::stream::TtyRenderer::from_stdout);
         let mut noop_events = crate::ui::stream::NoopStreamEvents;
         // Phase 10c-1: accumulate prior assistant messages and compact reasoning
@@ -436,14 +462,39 @@ impl AgentLoop {
             .collect::<Vec<_>>();
         recent_steps_log.reverse();
         // Phase 10c-2: repeat-call detection. Track fingerprints of the last
-        // REPEAT_WINDOW tool calls. 2nd identical call appends a stuck-warning to the
-        // observation summary; 3rd short-circuits with tool_failure forcing the LLM
-        // to change strategy. Dogfood-driven: v4-pro reproducibly looped 30 steps on
-        // identical list_files invocations against an empty workspace.
+        // REPEAT_WINDOW tool calls. Read-only tools get one retry with a
+        // stuck-warning, then short-circuit on the 3rd identical call. Mutating or
+        // unknown tools short-circuit on the 2nd identical call before execution so
+        // model retries cannot duplicate writes, shell actions, MCP calls, or task
+        // mutations.
         let mut recent_call_fingerprints: Vec<String> = Vec::new();
         const REPEAT_WINDOW: usize = 3;
         for step in 0..steps {
             check_cancelled(cancel_check.as_ref())?;
+            if session_budget_microusd > 0 {
+                if estimated_session_cost_microusd >= session_budget_microusd {
+                    return Err(app_error(format!(
+                        "session budget exhausted: {estimated_session_cost_microusd}/{session_budget_microusd} microusd used; raise model.session_budget_microusd or set it to 0 to disable"
+                    )));
+                }
+                if !session_budget_warned
+                    && estimated_session_cost_microusd.saturating_mul(100)
+                        >= session_budget_microusd.saturating_mul(80)
+                {
+                    if let Some(events) = stream_events.as_deref_mut() {
+                        events.on_model_budget_warning(
+                            estimated_session_cost_microusd,
+                            session_budget_microusd,
+                        );
+                    } else if let Some(renderer) = renderer.as_mut() {
+                        renderer.on_model_budget_warning(
+                            estimated_session_cost_microusd,
+                            session_budget_microusd,
+                        );
+                    }
+                    session_budget_warned = true;
+                }
+            }
             let recent_window = recent_steps_log
                 .iter()
                 .rev()
@@ -480,6 +531,11 @@ impl AgentLoop {
                 planning_mode,
                 recent_steps: recent_window,
             };
+            let prompt_layers = prompt_layers_for_request(step + 1, &request);
+            if let Some(events) = run_events.as_ref() {
+                events.borrow_mut().on_prompt_layers(&prompt_layers);
+            }
+            prompt_layer_snapshots.push(prompt_layers);
 
             if let Some(renderer) = renderer.as_mut() {
                 renderer.paint_step_divider(step + 1);
@@ -517,6 +573,13 @@ impl AgentLoop {
                     (outcome.0, outcome.1, reasoning)
                 };
             if let Some(usage) = step_usage {
+                if let Some(cost) = crate::core::runtime::estimate_token_usage_cost_microusd(
+                    &self.config.model.model,
+                    &usage,
+                ) {
+                    estimated_session_cost_microusd =
+                        estimated_session_cost_microusd.saturating_add(cost);
+                }
                 total_usage.add_assign(&usage);
             }
             check_cancelled(cancel_check.as_ref())?;
@@ -535,25 +598,38 @@ impl AgentLoop {
                 }
             };
 
-            for ToolCallRequest {
-                tool_name,
-                mut input,
-            } in tool_calls
-            {
+            let mut tool_call_index = 0;
+            while tool_call_index < tool_calls.len() {
+                if let Some(consumed) = maybe_execute_parallel_safe_chunk(
+                    &tool_calls[tool_call_index..],
+                    &registry,
+                    &policy,
+                    self.config.hooks.enabled,
+                    &available_tools,
+                    primary_file.as_deref(),
+                    &mut renderer,
+                    run_events.as_ref(),
+                    cancel_check.as_ref(),
+                    &mut observations,
+                    &mut tool_events,
+                    &mut recent_call_fingerprints,
+                    REPEAT_WINDOW,
+                )? {
+                    tool_call_index += consumed;
+                    continue;
+                }
+
+                let ToolCallRequest {
+                    tool_name,
+                    mut input,
+                } = tool_calls[tool_call_index].clone();
+                tool_call_index += 1;
                 check_cancelled(cancel_check.as_ref())?;
                 let event_input = input.args.clone();
                 emit_tool_call(run_events.as_ref(), &tool_name, &event_input);
 
                 // Phase 10c-2: compute fingerprint and check window BEFORE executing.
-                let fingerprint = format!(
-                    "{}:{}",
-                    tool_name,
-                    event_input
-                        .iter()
-                        .map(|(k, v)| format!("{k}={v}"))
-                        .collect::<Vec<_>>()
-                        .join("|")
-                );
+                let fingerprint = tool_call_fingerprint(&tool_name, &event_input);
                 let same_count_in_window = recent_call_fingerprints
                     .iter()
                     .rev()
@@ -563,19 +639,15 @@ impl AgentLoop {
                 recent_call_fingerprints.push(fingerprint.clone());
                 // Trim to keep memory bounded over long runs (only the last
                 // REPEAT_WINDOW are ever read).
-                if recent_call_fingerprints.len() > REPEAT_WINDOW {
-                    let drop_n = recent_call_fingerprints.len() - REPEAT_WINDOW;
-                    recent_call_fingerprints.drain(0..drop_n);
-                }
+                trim_recent_call_fingerprints(&mut recent_call_fingerprints, REPEAT_WINDOW);
 
-                if same_count_in_window >= 2 {
-                    // Third identical call in window → short-circuit as tool_failure.
-                    let stuck_msg = format!(
-                            "repeated identical tool call detected: '{}' invoked {} times in last {} steps with same args. Break out of stuck loop — try a different approach (todo_write to plan, gh/curl for research, or a different path/argument).",
-                            tool_name,
-                            same_count_in_window + 1,
-                            REPEAT_WINDOW
-                        );
+                let repeat_threshold = repeat_short_circuit_threshold(&tool_name);
+                if same_count_in_window >= repeat_threshold {
+                    let stuck_msg = repeat_short_circuit_message(
+                        &tool_name,
+                        same_count_in_window + 1,
+                        REPEAT_WINDOW,
+                    );
                     if let Some(renderer) = renderer.as_mut() {
                         renderer.paint_tool_result(
                             crate::ui::stream::ToolResultKind::Failed,
@@ -599,11 +671,11 @@ impl AgentLoop {
                     continue;
                 }
 
-                // Phase 10c-2: 2nd identical call — emit a separate stuck-warning
+                // Phase 10c-2: 2nd identical read-only call: emit a stuck-warning
                 // Observation BEFORE running the tool. Avoids burying the warning in the
                 // tail of a long tool output that head_trim / Todos summarize would eat,
                 // and works for both Ok and Err result paths.
-                if same_count_in_window == 1 {
+                if same_count_in_window == 1 && repeat_threshold > 1 {
                     let warning = format!(
                             "⚠ stuck-warning: '{tool_name}' was called with the same args last step. If output is unchanged, try a DIFFERENT approach (todo_write to plan, gh/curl for research, different path/args, or move to the next step)."
                         );
@@ -948,6 +1020,7 @@ impl AgentLoop {
             final_message: last_message,
             tool_events,
             usage: total_usage,
+            prompt_layers: prompt_layer_snapshots,
         })
     }
 }
@@ -984,6 +1057,10 @@ impl StreamEvents for ReasoningCaptureEvents<'_> {
 
     fn on_assistant_done(&mut self, full_text: &str) {
         self.inner.on_assistant_done(full_text);
+    }
+
+    fn on_tool_repair(&mut self, kind: &str, detail: &str) {
+        self.inner.on_tool_repair(kind, detail);
     }
 
     fn on_tool_call(&mut self, name: &str, input: &BTreeMap<String, String>) {
@@ -1046,6 +1123,49 @@ fn push_tool_event(
     tool_events.push(event);
 }
 
+fn tool_call_fingerprint(tool_name: &str, event_input: &BTreeMap<String, String>) -> String {
+    format!(
+        "{}:{}",
+        tool_name,
+        event_input
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join("|")
+    )
+}
+
+fn trim_recent_call_fingerprints(fingerprints: &mut Vec<String>, keep: usize) {
+    if fingerprints.len() > keep {
+        let drop_n = fingerprints.len() - keep;
+        fingerprints.drain(0..drop_n);
+    }
+}
+
+fn repeat_short_circuit_threshold(tool_name: &str) -> usize {
+    if is_read_only_repeat_tool(tool_name) {
+        2
+    } else {
+        1
+    }
+}
+
+fn repeat_short_circuit_message(tool_name: &str, count: usize, window: usize) -> String {
+    if is_read_only_repeat_tool(tool_name) {
+        format!(
+            "repeated identical tool call detected: '{tool_name}' invoked {count} times in last {window} steps with same args. Break out of stuck loop and try a different path, arguments, or strategy."
+        )
+    } else {
+        format!(
+            "repeated identical mutating or side-effecting tool call suppressed before execution: '{tool_name}' was requested {count} times in last {window} steps with same args. Change strategy before retrying to avoid duplicate writes or side effects."
+        )
+    }
+}
+
+fn is_read_only_repeat_tool(tool_name: &str) -> bool {
+    tool_metadata_for_name(tool_name).read_only
+}
+
 fn render_user_input_answers(answers: &BTreeMap<String, String>) -> String {
     let answers_json = JsonValue::Object(
         answers
@@ -1095,6 +1215,288 @@ fn execute_tool_with_cancel(
     } else {
         registry.execute_with_policy_and_cancel(tool_name, input, policy, None)
     }
+}
+
+#[derive(Debug, Clone)]
+struct PreparedParallelToolCall {
+    tool_name: String,
+    input: crate::tools::types::ToolInput,
+    event_input: BTreeMap<String, String>,
+}
+
+fn maybe_execute_parallel_safe_chunk<W: std::io::Write>(
+    calls: &[ToolCallRequest],
+    registry: &crate::tools::registry::ToolRegistry,
+    policy: &ExecutionPolicy,
+    hooks_enabled: bool,
+    available_tools: &[String],
+    primary_file: Option<&str>,
+    renderer: &mut Option<crate::ui::stream::TtyRenderer<W>>,
+    run_events: Option<&SharedAgentRunEvents>,
+    cancel_check: Option<&SharedAgentCancelCheck>,
+    observations: &mut Vec<Observation>,
+    tool_events: &mut Vec<ToolEvent>,
+    recent_call_fingerprints: &mut Vec<String>,
+    repeat_window: usize,
+) -> AppResult<Option<usize>> {
+    if hooks_enabled || !parallel_dispatch_enabled() || calls.len() < 2 {
+        return Ok(None);
+    }
+    let max_parallel = parallel_dispatch_max();
+    if max_parallel < 2 {
+        return Ok(None);
+    }
+    let chunk_len = calls
+        .iter()
+        .take(max_parallel)
+        .take_while(|call| registry.metadata(&call.tool_name).parallel_safe)
+        .count();
+    if chunk_len < 2 {
+        return Ok(None);
+    }
+
+    let mut simulated_fingerprints = recent_call_fingerprints.clone();
+    let mut prepared = Vec::with_capacity(chunk_len);
+    for call in &calls[..chunk_len] {
+        check_cancelled(cancel_check)?;
+        if registry
+            .permission_request_for(&call.tool_name, &call.input, policy)
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let event_input = call.input.args.clone();
+        let fingerprint = tool_call_fingerprint(&call.tool_name, &event_input);
+        let same_count_in_window = simulated_fingerprints
+            .iter()
+            .rev()
+            .take(repeat_window)
+            .filter(|fp| **fp == fingerprint)
+            .count();
+        if same_count_in_window > 0 {
+            return Ok(None);
+        }
+        simulated_fingerprints.push(fingerprint);
+        trim_recent_call_fingerprints(&mut simulated_fingerprints, repeat_window);
+        prepared.push(PreparedParallelToolCall {
+            tool_name: call.tool_name.clone(),
+            input: call.input.clone(),
+            event_input,
+        });
+    }
+
+    *recent_call_fingerprints = simulated_fingerprints;
+    for call in &prepared {
+        emit_tool_call(run_events, &call.tool_name, &call.event_input);
+    }
+
+    let outcomes = execute_prepared_parallel_safe_calls(prepared, policy);
+    for (call, result) in outcomes {
+        check_cancelled(cancel_check)?;
+        match result {
+            Ok(mut output) => {
+                output.summary = crate::tools::tool_output::maybe_spill_successful_tool_output(
+                    &call.tool_name,
+                    &output.summary,
+                );
+                let kind = ObservationKind::from_tool_name(&call.tool_name);
+                let observation_summary = summarize_for_kind(&output.summary, kind);
+                if let Some(renderer) = renderer.as_mut() {
+                    renderer.paint_tool_result(
+                        crate::ui::stream::ToolResultKind::Ok,
+                        &call.tool_name,
+                        kind.label(),
+                        &output.summary,
+                    );
+                }
+                observations.push(Observation::ok(
+                    call.tool_name.clone(),
+                    observation_summary.clone(),
+                ));
+                if let Some(recovery_hint) = derive_recovery_hint_after_success(
+                    &call.tool_name,
+                    &output.summary,
+                    available_tools,
+                    primary_file,
+                    observations,
+                ) {
+                    observations.push(Observation::ok("recovery_hint", recovery_hint));
+                }
+                if let Some(replan_hint) =
+                    derive_replan_hint(&call.tool_name, &output.summary, observations)
+                {
+                    observations.push(Observation::ok("replan_hint", replan_hint));
+                }
+                push_tool_event(
+                    tool_events,
+                    run_events,
+                    ToolEvent {
+                        tool_name: call.tool_name,
+                        input: call.event_input,
+                        output: output.summary,
+                        status: crate::model::protocol::ObservationStatus::Ok,
+                    },
+                );
+            }
+            Err(raw) => {
+                let kind = ObservationKind::from_tool_name(&call.tool_name);
+                let observation_summary = summarize_for_kind(&raw, kind);
+                if let Some(renderer) = renderer.as_mut() {
+                    renderer.paint_tool_result(
+                        crate::ui::stream::ToolResultKind::Failed,
+                        &call.tool_name,
+                        kind.label(),
+                        &raw,
+                    );
+                }
+                observations.push(Observation::failed(
+                    call.tool_name.clone(),
+                    observation_summary.clone(),
+                ));
+                if let Some(recovery_hint) = derive_recovery_hint_after_failure(
+                    &call.tool_name,
+                    available_tools,
+                    primary_file,
+                    observations,
+                ) {
+                    observations.push(Observation::ok("recovery_hint", recovery_hint));
+                }
+                if let Some(replan_hint) =
+                    derive_replan_hint(&call.tool_name, &observation_summary, observations)
+                {
+                    observations.push(Observation::ok("replan_hint", replan_hint));
+                }
+                push_tool_event(
+                    tool_events,
+                    run_events,
+                    ToolEvent {
+                        tool_name: call.tool_name,
+                        input: call.event_input,
+                        output: raw,
+                        status: crate::model::protocol::ObservationStatus::Failed,
+                    },
+                );
+            }
+        }
+    }
+
+    Ok(Some(chunk_len))
+}
+
+fn execute_prepared_parallel_safe_calls(
+    calls: Vec<PreparedParallelToolCall>,
+    policy: &ExecutionPolicy,
+) -> Vec<(
+    PreparedParallelToolCall,
+    Result<crate::tools::types::ToolOutput, String>,
+)> {
+    thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(calls.len());
+        for call in calls {
+            let fallback = call.clone();
+            let worker_policy = policy.clone();
+            let handle = scope.spawn(move || {
+                parallel_test_probe(&call.input);
+                let result = crate::tools::registry::execute_parallel_safe_tool(
+                    &call.tool_name,
+                    call.input.clone(),
+                    &worker_policy,
+                )
+                .map_err(|error| error.to_string());
+                (call, result)
+            });
+            handles.push((fallback, handle));
+        }
+        handles
+            .into_iter()
+            .map(|(fallback, handle)| match handle.join() {
+                Ok(result) => result,
+                Err(_) => (fallback, Err("parallel tool worker panicked".to_string())),
+            })
+            .collect()
+    })
+}
+
+fn parallel_dispatch_enabled() -> bool {
+    !matches!(
+        std::env::var("DSCODE_TOOL_DISPATCH")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("serial") | Some("off") | Some("disabled")
+    )
+}
+
+fn parallel_dispatch_max() -> usize {
+    std::env::var("DSCODE_PARALLEL_MAX")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(4)
+        .min(16)
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default)]
+struct ParallelProbeStats {
+    active: usize,
+    max_active: usize,
+}
+
+#[cfg(test)]
+static PARALLEL_TEST_PROBES: OnceLock<Mutex<BTreeMap<String, ParallelProbeStats>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+fn parallel_test_probes() -> &'static Mutex<BTreeMap<String, ParallelProbeStats>> {
+    PARALLEL_TEST_PROBES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+fn parallel_test_probe(input: &crate::tools::types::ToolInput) {
+    let Some(key) = input
+        .get("_parallel_test_probe")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let key = if key == "true" { "default" } else { key }.to_string();
+    {
+        let mut probes = parallel_test_probes().lock().unwrap();
+        let stats = probes.entry(key.clone()).or_default();
+        stats.active += 1;
+        stats.max_active = stats.max_active.max(stats.active);
+    }
+    let delay_ms = input
+        .get("_parallel_test_delay_ms")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(50);
+    thread::sleep(Duration::from_millis(delay_ms));
+    let mut probes = parallel_test_probes().lock().unwrap();
+    let stats = probes.entry(key).or_default();
+    stats.active = stats.active.saturating_sub(1);
+}
+
+#[cfg(not(test))]
+fn parallel_test_probe(_input: &crate::tools::types::ToolInput) {}
+
+#[cfg(test)]
+fn reset_parallel_test_probe(key: &str) {
+    parallel_test_probes()
+        .lock()
+        .unwrap()
+        .insert(key.to_string(), ParallelProbeStats::default());
+}
+
+#[cfg(test)]
+fn max_parallel_test_probe(key: &str) -> usize {
+    parallel_test_probes()
+        .lock()
+        .unwrap()
+        .get(key)
+        .map(|stats| stats.max_active)
+        .unwrap_or_default()
 }
 
 fn shell_env_hook_applies_to(tool_name: &str) -> bool {
@@ -1658,12 +2060,10 @@ fn build_system_prompt(skill_name: Option<&SkillSpec>) -> String {
     build_system_prompt_with_flags(skill_name, false, false, false, false)
 }
 
-/// Phase 10c-3: tool-call concurrency constraint. DeepSeek v4 (both flash + pro)
-/// happily emits parallel tool calls when the task mentions multiple subtopics
-/// ("research these 4 topics"). dscode's parser rejects them (C3 fail-loud) so
-/// the agent gets a fatal error instead of useful work. State this constraint
-/// explicitly so the model issues sequential calls.
-const ONE_TOOL_PER_TURN_NUDGE: &str = "\n\nALWAYS emit exactly ONE tool call per turn. NEVER emit parallel tool calls — the runtime rejects them with a hard error. Process multiple subtopics SEQUENTIALLY across turns.";
+/// DeepSeek may batch tool calls when a task mentions multiple subtopics. The
+/// runtime can parallelize independent read-only batches, but side-effecting
+/// work remains a serial barrier.
+const TOOL_DISPATCH_NUDGE: &str = "\n\nYou may emit multiple tool calls in one turn only when every call is independent and read-only, such as list_files, read_file, search_text, git_status, or git_diff. Keep writes, shell commands, approvals, user input, side-effect MCP calls, and dependent calls serial: one tool call per turn.";
 
 fn should_use_explicit_planning(
     task: &str,
@@ -1738,8 +2138,8 @@ fn build_system_prompt_with_flags(
     let mut prompt = String::from(
         "You are the offline planning layer for DeepSeekCode. Prefer repository inspection before edits.",
     );
-    prompt.push_str(ONE_TOOL_PER_TURN_NUDGE);
-    // Note: ONE_TOOL_PER_TURN_NUDGE starts with explicit "\n\n" so order with
+    prompt.push_str(TOOL_DISPATCH_NUDGE);
+    // Note: TOOL_DISPATCH_NUDGE starts with explicit "\n\n" so order with
     // skill.system_append (added below) is well-defined regardless of trailing
     // punctuation in the base prompt.
     if let Some(skill) = skill_name {
@@ -2526,6 +2926,97 @@ mod cr1_regression_test {
         }
     }
 
+    struct BudgetUsageClient {
+        calls: RefCell<u32>,
+    }
+
+    impl ModelClient for BudgetUsageClient {
+        fn respond(
+            &self,
+            _input: ModelRequest,
+            _events: &mut dyn StreamEvents,
+        ) -> crate::error::AppResult<(ModelResponse, Option<TokenUsage>)> {
+            let n = *self.calls.borrow();
+            *self.calls.borrow_mut() = n + 1;
+            let action = if n == 0 {
+                ModelAction::CallTool {
+                    tool_name: "list_files".to_string(),
+                    input: ToolInput::new()
+                        .with_arg("root", ".")
+                        .with_arg("max_depth", "1")
+                        .with_arg("limit", "1"),
+                }
+            } else {
+                ModelAction::Finish
+            };
+            let mut usage = TokenUsage::with_prompt_cache(1000, 1000, 0, 1000);
+            usage.model = Some("deepseek-v4-flash".to_string());
+            Ok((
+                ModelResponse {
+                    message: "budget step".to_string(),
+                    action,
+                },
+                Some(usage),
+            ))
+        }
+    }
+
+    #[test]
+    fn run_with_client_refuses_next_turn_after_session_budget_is_exhausted() {
+        let mut cfg = crate::config::types::AppConfig::default();
+        cfg.model.session_budget_microusd = 1;
+        let agent = AgentLoop::new(cfg);
+        let client = BudgetUsageClient {
+            calls: RefCell::new(0),
+        };
+
+        let error = agent
+            .run_with_client(
+                TaskContext::new("list one file then continue".to_string(), None),
+                AgentLoopOptions {
+                    steps: 2,
+                    emit_progress: false,
+                    persist_session: false,
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("session budget exhausted"));
+        assert_eq!(*client.calls.borrow(), 1);
+    }
+
+    #[test]
+    fn run_with_client_refuses_first_turn_when_persisted_budget_is_exhausted() {
+        let mut cfg = crate::config::types::AppConfig::default();
+        cfg.model.session_budget_microusd = 0;
+        let agent = AgentLoop::new(cfg);
+        let client = BudgetUsageClient {
+            calls: RefCell::new(0),
+        };
+
+        let error = agent
+            .run_with_client(
+                TaskContext::new("do not call the model".to_string(), None),
+                AgentLoopOptions {
+                    steps: 1,
+                    emit_progress: false,
+                    persist_session: false,
+                    session_budget: Some(AgentSessionBudget {
+                        budget_microusd: 10,
+                        used_microusd: 10,
+                    }),
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("session budget exhausted"));
+        assert_eq!(*client.calls.borrow(), 0);
+    }
+
     #[test]
     fn run_with_client_replays_recent_reasoning_into_next_request() {
         let cfg = crate::config::types::AppConfig::default();
@@ -3071,6 +3562,15 @@ mod cr1_regression_test {
         ));
     }
 
+    #[test]
+    fn repeat_detection_classifies_known_read_only_and_unknown_tools() {
+        assert_eq!(super::repeat_short_circuit_threshold("list_files"), 2);
+        assert_eq!(super::repeat_short_circuit_threshold("read_file"), 2);
+        assert_eq!(super::repeat_short_circuit_threshold("todo_add"), 1);
+        assert_eq!(super::repeat_short_circuit_threshold("write_file"), 1);
+        assert_eq!(super::repeat_short_circuit_threshold("mcp__fake__write"), 1);
+    }
+
     struct ScriptedActionsClient {
         captured_observations: RefCell<Vec<Vec<crate::model::protocol::Observation>>>,
         actions: Vec<ModelAction>,
@@ -3160,6 +3660,273 @@ mod cr1_regression_test {
         assert!(step2_obs
             .iter()
             .any(|observation| observation.tool_name == "read_file"));
+    }
+
+    struct EnvRestore {
+        values: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvRestore {
+        fn set(values: &[(&'static str, &'static str)]) -> Self {
+            let restore = Self {
+                values: values
+                    .iter()
+                    .map(|(key, _)| (*key, std::env::var(key).ok()))
+                    .collect(),
+            };
+            for (key, value) in values {
+                std::env::set_var(key, value);
+            }
+            restore
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (key, value) in self.values.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn run_with_client_parallelizes_same_turn_read_only_tool_chunk() {
+        let _env = EnvRestore::set(&[
+            ("DSCODE_TOOL_DISPATCH", "auto"),
+            ("DSCODE_PARALLEL_MAX", "4"),
+        ]);
+        let probe = "parallel_read_chunk";
+        reset_parallel_test_probe(probe);
+        let root = unique_tmp("parallel_read_chunk");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(root.join("src/b.rs"), "pub fn b() {}\n").unwrap();
+        let root_arg = root.display().to_string();
+
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("inspect two independent listings".to_string(), None);
+        let client = ScriptedActionsClient {
+            captured_observations: RefCell::new(Vec::new()),
+            actions: vec![
+                ModelAction::CallTools(vec![
+                    ToolCallRequest {
+                        tool_name: "list_files".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("root", &root_arg)
+                            .with_arg("max_depth", "1")
+                            .with_arg("_parallel_test_probe", probe)
+                            .with_arg("_parallel_test_delay_ms", "80"),
+                    },
+                    ToolCallRequest {
+                        tool_name: "list_files".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("root", root.join("src").display().to_string())
+                            .with_arg("max_depth", "1")
+                            .with_arg("_parallel_test_probe", probe)
+                            .with_arg("_parallel_test_delay_ms", "80"),
+                    },
+                ]),
+                ModelAction::Finish,
+            ],
+            calls: RefCell::new(0),
+        };
+
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 2,
+                    emit_progress: false,
+                    persist_session: false,
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(result.tool_events.len(), 2);
+        assert_eq!(result.tool_events[0].tool_name, "list_files");
+        assert_eq!(result.tool_events[1].tool_name, "list_files");
+        assert!(
+            max_parallel_test_probe(probe) >= 2,
+            "expected at least two read-only tools in flight, max active was {}",
+            max_parallel_test_probe(probe)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_with_client_keeps_mixed_read_write_batch_serial() {
+        let _env = EnvRestore::set(&[
+            ("DSCODE_TOOL_DISPATCH", "auto"),
+            ("DSCODE_PARALLEL_MAX", "4"),
+        ]);
+        let probe = "parallel_read_write_barrier";
+        reset_parallel_test_probe(probe);
+        let root = unique_tmp("parallel_read_write_barrier");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("README.md"), "hello\n").unwrap();
+        let todos = Rc::new(RefCell::new(TodoList::default()));
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("read then mutate todo".to_string(), None);
+        let client = ScriptedActionsClient {
+            captured_observations: RefCell::new(Vec::new()),
+            actions: vec![
+                ModelAction::CallTools(vec![
+                    ToolCallRequest {
+                        tool_name: "list_files".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("root", root.display().to_string())
+                            .with_arg("max_depth", "1")
+                            .with_arg("_parallel_test_probe", probe)
+                            .with_arg("_parallel_test_delay_ms", "80"),
+                    },
+                    ToolCallRequest {
+                        tool_name: "todo_add".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("content", "Run tests")
+                            .with_arg("status", "pending"),
+                    },
+                ]),
+                ModelAction::Finish,
+            ],
+            calls: RefCell::new(0),
+        };
+
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 2,
+                    emit_progress: false,
+                    persist_session: false,
+                    todos: todos.clone(),
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(result.tool_events.len(), 2);
+        assert_eq!(result.tool_events[0].tool_name, "list_files");
+        assert_eq!(result.tool_events[1].tool_name, "todo_add");
+        assert_eq!(max_parallel_test_probe(probe), 0);
+        assert_eq!(todos.borrow().items.len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_with_client_checks_cancellation_before_parallel_read_chunk() {
+        let _env = EnvRestore::set(&[
+            ("DSCODE_TOOL_DISPATCH", "auto"),
+            ("DSCODE_PARALLEL_MAX", "4"),
+        ]);
+        let probe = "parallel_cancel";
+        reset_parallel_test_probe(probe);
+        let root = unique_tmp("parallel_cancel");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("README.md"), "hello\n").unwrap();
+        let client = ScriptedActionsClient {
+            captured_observations: RefCell::new(Vec::new()),
+            actions: vec![ModelAction::CallTools(vec![
+                ToolCallRequest {
+                    tool_name: "list_files".to_string(),
+                    input: ToolInput::new()
+                        .with_arg("root", root.display().to_string())
+                        .with_arg("max_depth", "1")
+                        .with_arg("_parallel_test_probe", probe),
+                },
+                ToolCallRequest {
+                    tool_name: "read_file".to_string(),
+                    input: ToolInput::new()
+                        .with_arg("path", root.join("README.md").display().to_string())
+                        .with_arg("_parallel_test_probe", probe),
+                },
+            ])],
+            calls: RefCell::new(0),
+        };
+        let cancel_check: SharedAgentCancelCheck = Rc::new(RefCell::new(CountingCancelCheck {
+            calls: 0,
+            cancel_after: 3,
+        }));
+        let agent = AgentLoop::new(crate::config::types::AppConfig::default());
+
+        let error = agent
+            .run_with_client(
+                TaskContext::new("inspect then cancel".to_string(), None),
+                AgentLoopOptions {
+                    steps: 1,
+                    emit_progress: false,
+                    persist_session: false,
+                    cancel_check: Some(cancel_check),
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("agent run cancelled"));
+        assert_eq!(max_parallel_test_probe(probe), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn repeat_detection_second_identical_mutating_call_short_circuits_before_execution() {
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("update todos".to_string(), None);
+        let todos = Rc::new(RefCell::new(TodoList::default()));
+        let action = ModelAction::CallTool {
+            tool_name: "todo_add".to_string(),
+            input: ToolInput::new()
+                .with_arg("content", "Run tests")
+                .with_arg("status", "pending"),
+        };
+        let client = ScriptedActionsClient {
+            captured_observations: RefCell::new(Vec::new()),
+            actions: vec![action.clone(), action, ModelAction::Finish],
+            calls: RefCell::new(0),
+        };
+
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 3,
+                    emit_progress: false,
+                    todos: todos.clone(),
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(result.tool_events.len(), 2);
+        assert!(matches!(
+            result.tool_events[0].status,
+            crate::model::protocol::ObservationStatus::Ok
+        ));
+        assert!(matches!(
+            result.tool_events[1].status,
+            crate::model::protocol::ObservationStatus::Failed
+        ));
+        assert!(
+            result.tool_events[1]
+                .output
+                .contains("repeated identical mutating or side-effecting tool call suppressed"),
+            "2nd mutating repeat should be suppressed before execution: {}",
+            result.tool_events[1].output
+        );
+        assert_eq!(
+            todos.borrow().items.len(),
+            1,
+            "the second identical todo_add must not execute"
+        );
     }
 
     #[test]

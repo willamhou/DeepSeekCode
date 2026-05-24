@@ -13,9 +13,34 @@ The most useful public-beta evidence today is:
 
 - tracked online multi-file external fixture evidence for Python, Rust, and
   Node samples;
+- deterministic repair/cache evidence for DeepSeek-style malformed tool-call
+  recovery and runtime cache diagnostics;
 - reusable Python, Rust, and Node external fixture scaffolds;
 - live dogfood report gates;
 - release-binary smoke checks through `deepseek update release-smoke`.
+
+## Repair And Cache Evidence
+
+Use this local no-model command to reproduce a formerly failing DeepSeek-style
+tool-call trace and prove that the repair and cache diagnostics are visible
+through runtime surfaces:
+
+```bash
+deepseek dogfood repair-cache-evidence --json
+deepseek events replay <after-thread-id> --limit 50
+deepseek events diff <before-thread-id> <after-thread-id>
+deepseek stats --thread <after-thread-id>
+```
+
+The first command writes `.dscode/dogfood/repair-cache-evidence.json`. The JSON
+contains the before/after thread ids and command list. Expected evidence:
+
+- strict parsing rejects the truncated `read_file` arguments before repair;
+- the after thread records one structured `tool_call_repair` event;
+- the after thread records one `prompt_layers_recorded` event;
+- `events diff` shows failed tool calls dropping from 1 to 0 and cache hit rate
+  increasing from 0% to 75%;
+- `stats --thread` shows `repair_count: 1` and prompt-layer diagnostics.
 
 ## Fixture Catalog
 

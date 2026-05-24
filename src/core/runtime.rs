@@ -7,8 +7,10 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::{app_error, AppResult};
+use crate::model::protocol::TokenUsage;
 use crate::util::json::{
-    json_as_array, json_as_string, json_as_u64, json_value_to_string, parse_root_object, JsonValue,
+    json_as_array, json_as_object, json_as_string, json_as_u64, json_value_to_string,
+    parse_root_object, JsonValue,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +23,7 @@ pub struct SessionRecord {
     pub status: String,
     pub active_thread_id: Option<String>,
     pub thread_count: u64,
+    pub session_budget_microusd: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +39,7 @@ pub struct ThreadRecord {
     pub status: String,
     pub latest_turn_id: Option<String>,
     pub event_seq: u64,
+    pub session_budget_microusd: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +86,15 @@ pub struct UsageRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadGoalRecord {
+    pub thread_id: String,
+    pub objective: String,
+    pub token_budget: Option<u64>,
+    pub started_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRecord {
     pub id: String,
     pub session_id: Option<String>,
@@ -118,6 +131,12 @@ pub struct RuntimeEvent {
     pub kind: String,
     pub created_at: String,
     pub payload: JsonValue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeBudgetSnapshot {
+    pub budget_microusd: u64,
+    pub used_microusd: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -206,6 +225,15 @@ impl RuntimeStore {
     }
 
     pub fn create_session(&self, title: String, workspace: String) -> AppResult<SessionRecord> {
+        self.create_session_with_budget(title, workspace, None)
+    }
+
+    pub fn create_session_with_budget(
+        &self,
+        title: String,
+        workspace: String,
+        session_budget_microusd: Option<u64>,
+    ) -> AppResult<SessionRecord> {
         self.ensure_dirs()?;
         let now = epoch_label();
         let session = SessionRecord {
@@ -217,6 +245,7 @@ impl RuntimeStore {
             status: "active".to_string(),
             active_thread_id: None,
             thread_count: 0,
+            session_budget_microusd: nonzero_budget(session_budget_microusd),
         };
         self.write_session(&session)?;
         Ok(session)
@@ -258,6 +287,18 @@ impl RuntimeStore {
     pub fn rename_session(&self, id: &str, title: String) -> AppResult<SessionRecord> {
         let mut session = self.load_session(id)?;
         session.title = title;
+        session.updated_at = epoch_label();
+        self.write_session(&session)?;
+        Ok(session)
+    }
+
+    pub fn set_session_budget_microusd(
+        &self,
+        id: &str,
+        session_budget_microusd: Option<u64>,
+    ) -> AppResult<SessionRecord> {
+        let mut session = self.load_session(id)?;
+        session.session_budget_microusd = nonzero_budget(session_budget_microusd);
         session.updated_at = epoch_label();
         self.write_session(&session)?;
         Ok(session)
@@ -349,9 +390,12 @@ impl RuntimeStore {
         mode: String,
     ) -> AppResult<ThreadRecord> {
         self.ensure_dirs()?;
-        if let Some(session_id) = session_id {
+        let session_budget_microusd = if let Some(session_id) = session_id {
             validate_record_id(session_id)?;
-        }
+            self.load_session(session_id)?.session_budget_microusd
+        } else {
+            None
+        };
         let now = epoch_label();
         let mut thread = ThreadRecord {
             id: new_id("thread"),
@@ -365,6 +409,7 @@ impl RuntimeStore {
             status: "active".to_string(),
             latest_turn_id: None,
             event_seq: 0,
+            session_budget_microusd,
         };
         self.write_thread(&thread)?;
         let event = self.append_event(
@@ -374,6 +419,10 @@ impl RuntimeStore {
             JsonValue::Object(object([
                 ("title", JsonValue::String(thread.title.clone())),
                 ("mode", JsonValue::String(thread.mode.clone())),
+                (
+                    "session_budget_microusd",
+                    optional_u64_json(thread.session_budget_microusd),
+                ),
                 (
                     "session_id",
                     thread
@@ -417,6 +466,7 @@ impl RuntimeStore {
             status: "active".to_string(),
             latest_turn_id: None,
             event_seq: 0,
+            session_budget_microusd: source.session_budget_microusd,
         };
         self.write_thread(&thread)?;
         let created = self.append_event(
@@ -426,6 +476,10 @@ impl RuntimeStore {
             JsonValue::Object(object([
                 ("title", JsonValue::String(thread.title.clone())),
                 ("mode", JsonValue::String(thread.mode.clone())),
+                (
+                    "session_budget_microusd",
+                    optional_u64_json(thread.session_budget_microusd),
+                ),
                 (
                     "session_id",
                     thread
@@ -589,6 +643,7 @@ impl RuntimeStore {
             status: "active".to_string(),
             latest_turn_id: None,
             event_seq: 0,
+            session_budget_microusd: source.session_budget_microusd,
         };
         self.write_thread(&thread)?;
         let created = self.append_event(
@@ -598,6 +653,10 @@ impl RuntimeStore {
             JsonValue::Object(object([
                 ("title", JsonValue::String(thread.title.clone())),
                 ("mode", JsonValue::String(thread.mode.clone())),
+                (
+                    "session_budget_microusd",
+                    optional_u64_json(thread.session_budget_microusd),
+                ),
                 (
                     "session_id",
                     thread
@@ -772,6 +831,114 @@ impl RuntimeStore {
         }
         let content = fs::read_to_string(path)?;
         parse_thread_record(&parse_root_object(&content)?)
+    }
+
+    pub fn ensure_thread_session_budget_microusd(
+        &self,
+        thread_id: &str,
+        configured_budget_microusd: u64,
+    ) -> AppResult<Option<u64>> {
+        let thread = self.load_thread(thread_id)?;
+        if configured_budget_microusd == 0 {
+            if let Some(session_id) = thread.session_id.as_deref() {
+                if self
+                    .load_session(session_id)?
+                    .session_budget_microusd
+                    .is_some()
+                {
+                    self.set_session_budget_microusd(session_id, None)?;
+                }
+            }
+            if thread.session_budget_microusd.is_some() {
+                self.set_thread_budget_microusd(thread_id, None)?;
+            }
+            return Ok(None);
+        }
+
+        let budget = configured_budget_microusd;
+        if let Some(session_id) = thread.session_id.as_deref() {
+            if self.load_session(session_id)?.session_budget_microusd != Some(budget) {
+                self.set_session_budget_microusd(session_id, Some(budget))?;
+            }
+        }
+        if thread.session_budget_microusd != Some(budget) {
+            self.set_thread_budget_microusd(thread_id, Some(budget))?;
+        }
+        Ok(Some(budget))
+    }
+
+    pub fn set_thread_budget_microusd(
+        &self,
+        thread_id: &str,
+        session_budget_microusd: Option<u64>,
+    ) -> AppResult<ThreadRecord> {
+        let mut thread = self.load_thread(thread_id)?;
+        thread.session_budget_microusd = nonzero_budget(session_budget_microusd);
+        self.write_thread(&thread)?;
+        let event = self.append_event(
+            thread_id,
+            thread.latest_turn_id.as_deref(),
+            "thread_budget_set",
+            JsonValue::Object(object([(
+                "session_budget_microusd",
+                optional_u64_json(thread.session_budget_microusd),
+            )])),
+        )?;
+        thread.updated_at = event.created_at;
+        thread.event_seq = event.seq;
+        self.write_thread(&thread)?;
+        if let Some(session_id) = thread.session_id.as_deref() {
+            if let Ok(mut session) = self.load_session(session_id) {
+                session.active_thread_id = Some(thread.id.clone());
+                session.updated_at = thread.updated_at.clone();
+                self.write_session(&session)?;
+            }
+        }
+        Ok(thread)
+    }
+
+    pub fn thread_budget_snapshot(
+        &self,
+        thread_id: &str,
+    ) -> AppResult<Option<RuntimeBudgetSnapshot>> {
+        let thread = self.load_thread(thread_id)?;
+        let budget = match thread.session_budget_microusd {
+            Some(budget) if budget > 0 => budget,
+            _ => {
+                let Some(session_id) = thread.session_id.as_deref() else {
+                    return Ok(None);
+                };
+                match self.load_session(session_id)?.session_budget_microusd {
+                    Some(budget) if budget > 0 => budget,
+                    _ => return Ok(None),
+                }
+            }
+        };
+        let used_microusd = if let Some(session_id) = thread.session_id.as_deref() {
+            self.estimated_session_total_cost_microusd(session_id)?
+        } else {
+            self.estimated_thread_total_cost_microusd(&thread.id)?
+        };
+        Ok(Some(RuntimeBudgetSnapshot {
+            budget_microusd: budget,
+            used_microusd,
+        }))
+    }
+
+    pub fn estimated_thread_total_cost_microusd(&self, thread_id: &str) -> AppResult<u64> {
+        Ok(self
+            .list_usage(Some(thread_id), usize::MAX)?
+            .into_iter()
+            .filter_map(|usage| usage.estimated_total_cost_microusd)
+            .fold(0_u64, u64::saturating_add))
+    }
+
+    pub fn estimated_session_total_cost_microusd(&self, session_id: &str) -> AppResult<u64> {
+        let mut total = 0_u64;
+        for thread in self.list_session_threads(session_id, usize::MAX)? {
+            total = total.saturating_add(self.estimated_thread_total_cost_microusd(&thread.id)?);
+        }
+        Ok(total)
     }
 
     pub fn append_turn(
@@ -1298,6 +1465,84 @@ impl RuntimeStore {
             }
         }
         Ok(event)
+    }
+
+    pub fn load_thread_goal(&self, thread_id: &str) -> AppResult<Option<ThreadGoalRecord>> {
+        validate_record_id(thread_id)?;
+        self.load_thread(thread_id)?;
+        let mut goal = None;
+        for event in self.read_events(thread_id, 0)? {
+            match event.kind.as_str() {
+                "thread_goal_set" => {
+                    let Some(payload) = json_as_object(&event.payload) else {
+                        continue;
+                    };
+                    let Some(objective) = payload.get("objective").and_then(json_as_string) else {
+                        continue;
+                    };
+                    goal = Some(ThreadGoalRecord {
+                        thread_id: thread_id.to_string(),
+                        objective: objective.to_string(),
+                        token_budget: payload.get("token_budget").and_then(json_as_u64),
+                        started_at: payload
+                            .get("started_at")
+                            .and_then(json_as_string)
+                            .unwrap_or(event.created_at.as_str())
+                            .to_string(),
+                        updated_at: event.created_at,
+                    });
+                }
+                "thread_goal_cleared" => {
+                    goal = None;
+                }
+                _ => {}
+            }
+        }
+        Ok(goal)
+    }
+
+    pub fn set_thread_goal(
+        &self,
+        thread_id: &str,
+        objective: String,
+        token_budget: Option<u64>,
+    ) -> AppResult<ThreadGoalRecord> {
+        validate_record_id(thread_id)?;
+        let objective = objective.trim().to_string();
+        if objective.is_empty() {
+            return Err(app_error("thread goal objective must not be empty"));
+        }
+        let mut payload = object([
+            ("type", JsonValue::String("thread_goal_set".to_string())),
+            ("objective", JsonValue::String(objective.clone())),
+        ]);
+        payload.insert(
+            "token_budget".to_string(),
+            token_budget
+                .map(|budget| JsonValue::Number(budget.to_string()))
+                .unwrap_or(JsonValue::Null),
+        );
+        let event =
+            self.append_thread_event(thread_id, "thread_goal_set", JsonValue::Object(payload))?;
+        Ok(ThreadGoalRecord {
+            thread_id: thread_id.to_string(),
+            objective,
+            token_budget,
+            started_at: event.created_at.clone(),
+            updated_at: event.created_at,
+        })
+    }
+
+    pub fn clear_thread_goal(&self, thread_id: &str) -> AppResult<RuntimeEvent> {
+        validate_record_id(thread_id)?;
+        self.append_thread_event(
+            thread_id,
+            "thread_goal_cleared",
+            JsonValue::Object(object([(
+                "type",
+                JsonValue::String("thread_goal_cleared".to_string()),
+            )])),
+        )
     }
 
     pub fn append_permission_request(
@@ -2602,6 +2847,10 @@ pub fn session_to_json(session: &SessionRecord) -> JsonValue {
             "thread_count",
             JsonValue::Number(session.thread_count.to_string()),
         ),
+        (
+            "session_budget_microusd",
+            optional_u64_json(session.session_budget_microusd),
+        ),
     ]))
 }
 
@@ -2628,6 +2877,10 @@ pub fn thread_to_json(thread: &ThreadRecord) -> JsonValue {
         ("status", JsonValue::String(thread.status.clone())),
         ("latest_turn_id", latest_turn_id),
         ("event_seq", JsonValue::Number(thread.event_seq.to_string())),
+        (
+            "session_budget_microusd",
+            optional_u64_json(thread.session_budget_microusd),
+        ),
     ]))
 }
 
@@ -2799,6 +3052,20 @@ pub fn usage_to_json(usage: &UsageRecord) -> JsonValue {
     ]))
 }
 
+pub fn thread_goal_to_json(goal: &ThreadGoalRecord) -> JsonValue {
+    let token_budget = goal
+        .token_budget
+        .map(|budget| JsonValue::Number(budget.to_string()))
+        .unwrap_or(JsonValue::Null);
+    JsonValue::Object(object([
+        ("thread_id", JsonValue::String(goal.thread_id.clone())),
+        ("objective", JsonValue::String(goal.objective.clone())),
+        ("token_budget", token_budget),
+        ("started_at", JsonValue::String(goal.started_at.clone())),
+        ("updated_at", JsonValue::String(goal.updated_at.clone())),
+    ]))
+}
+
 pub fn task_to_json(task: &TaskRecord) -> JsonValue {
     let session_id = task
         .session_id
@@ -2902,6 +3169,7 @@ pub(crate) fn parse_session_record(root: &BTreeMap<String, JsonValue>) -> AppRes
         status: required_string(root, "status")?,
         active_thread_id: optional_string(root, "active_thread_id")?,
         thread_count: required_u64(root, "thread_count")?,
+        session_budget_microusd: optional_u64(root, "session_budget_microusd")?,
     })
 }
 
@@ -2918,6 +3186,7 @@ pub(crate) fn parse_thread_record(root: &BTreeMap<String, JsonValue>) -> AppResu
         status: required_string(root, "status")?,
         latest_turn_id: optional_string(root, "latest_turn_id")?,
         event_seq: required_u64(root, "event_seq")?,
+        session_budget_microusd: optional_u64(root, "session_budget_microusd")?,
     })
 }
 
@@ -3106,6 +3375,20 @@ fn estimate_deepseek_cost_microusd(
     })
 }
 
+pub(crate) fn estimate_token_usage_cost_microusd(
+    fallback_model: &str,
+    usage: &TokenUsage,
+) -> Option<u64> {
+    let model = usage.model.as_deref().unwrap_or(fallback_model);
+    estimate_deepseek_cost_microusd(
+        model,
+        usage.prompt_cache_hit,
+        usage.prompt_cache_miss,
+        usage.completion,
+    )
+    .map(|cost| cost.total)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct DeepSeekPricing {
     cache_hit_microusd_per_million: u64,
@@ -3172,6 +3455,16 @@ fn optional_u64(root: &BTreeMap<String, JsonValue>, key: &str) -> AppResult<Opti
             .map(Some)
             .ok_or_else(|| app_error(format!("runtime record `{key}` must be number or null"))),
     }
+}
+
+fn optional_u64_json(value: Option<u64>) -> JsonValue {
+    value
+        .map(|value| JsonValue::Number(value.to_string()))
+        .unwrap_or(JsonValue::Null)
+}
+
+fn nonzero_budget(value: Option<u64>) -> Option<u64> {
+    value.filter(|value| *value > 0)
 }
 
 pub fn validate_record_id(id: &str) -> AppResult<()> {
@@ -3624,6 +3917,163 @@ mod tests {
         let events = store.read_events(&thread.id, 0).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "thread_created");
+    }
+
+    #[test]
+    fn runtime_budget_metadata_persists_and_sums_session_usage() {
+        let store = RuntimeStore::new(temp_root("budget-metadata"));
+        let session = store
+            .create_session_with_budget("Budgeted".to_string(), ".".to_string(), Some(900))
+            .unwrap();
+        let left = store
+            .create_thread_for_session(
+                &session.id,
+                "Left".to_string(),
+                ".".to_string(),
+                "deepseek-v4-flash".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let right = store
+            .create_thread_for_session(
+                &session.id,
+                "Right".to_string(),
+                ".".to_string(),
+                "deepseek-v4-flash".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+
+        assert_eq!(left.session_budget_microusd, Some(900));
+        assert_eq!(right.session_budget_microusd, Some(900));
+        store
+            .append_usage_with_cache(
+                &left.id,
+                None,
+                "deepseek-v4-flash".to_string(),
+                "test".to_string(),
+                1000,
+                1000,
+                0,
+                1000,
+            )
+            .unwrap();
+        store
+            .append_usage_with_cache(
+                &right.id,
+                None,
+                "deepseek-v4-flash".to_string(),
+                "test".to_string(),
+                1000,
+                1000,
+                0,
+                1000,
+            )
+            .unwrap();
+
+        let snapshot = store.thread_budget_snapshot(&left.id).unwrap().unwrap();
+        assert_eq!(snapshot.budget_microusd, 900);
+        assert_eq!(snapshot.used_microusd, 840);
+
+        let reloaded = RuntimeStore::new(store.root().to_path_buf());
+        let loaded_thread = reloaded.load_thread(&left.id).unwrap();
+        let loaded_session = reloaded.load_session(&session.id).unwrap();
+        assert_eq!(loaded_thread.session_budget_microusd, Some(900));
+        assert_eq!(loaded_session.session_budget_microusd, Some(900));
+        assert_eq!(
+            reloaded.thread_budget_snapshot(&left.id).unwrap().unwrap(),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn ensure_thread_session_budget_syncs_config_budget() {
+        let store = RuntimeStore::new(temp_root("budget-ensure"));
+        let session = store
+            .create_session("Budget ensure".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Thread".to_string(),
+                ".".to_string(),
+                "deepseek-v4-flash".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+
+        let budget = store
+            .ensure_thread_session_budget_microusd(&thread.id, 700)
+            .unwrap();
+        assert_eq!(budget, Some(700));
+        assert_eq!(
+            store
+                .load_session(&session.id)
+                .unwrap()
+                .session_budget_microusd,
+            Some(700)
+        );
+        assert_eq!(
+            store
+                .load_thread(&thread.id)
+                .unwrap()
+                .session_budget_microusd,
+            Some(700)
+        );
+        let events = store.read_events(&thread.id, 0).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "thread_budget_set")
+                .count(),
+            1
+        );
+
+        let budget = store
+            .ensure_thread_session_budget_microusd(&thread.id, 900)
+            .unwrap();
+        assert_eq!(budget, Some(900));
+        assert_eq!(
+            store
+                .load_session(&session.id)
+                .unwrap()
+                .session_budget_microusd,
+            Some(900)
+        );
+        assert_eq!(
+            store
+                .load_thread(&thread.id)
+                .unwrap()
+                .session_budget_microusd,
+            Some(900)
+        );
+        let events = store.read_events(&thread.id, 0).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "thread_budget_set")
+                .count(),
+            2
+        );
+
+        let budget = store
+            .ensure_thread_session_budget_microusd(&thread.id, 0)
+            .unwrap();
+        assert_eq!(budget, None);
+        assert_eq!(
+            store
+                .load_session(&session.id)
+                .unwrap()
+                .session_budget_microusd,
+            None
+        );
+        assert_eq!(
+            store
+                .load_thread(&thread.id)
+                .unwrap()
+                .session_budget_microusd,
+            None
+        );
     }
 
     #[test]
@@ -5122,6 +5572,51 @@ mod tests {
         assert!(kinds.contains(&"automation_paused"));
         assert!(kinds.contains(&"automation_resumed"));
         assert!(kinds.contains(&"automation_deleted"));
+    }
+
+    #[test]
+    fn thread_goal_round_trips_through_runtime_events() {
+        let store = RuntimeStore::new(temp_root("thread-goal"));
+        let session = store
+            .create_session("Goal work".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Goal thread".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+
+        assert!(store.load_thread_goal(&thread.id).unwrap().is_none());
+        let goal = store
+            .set_thread_goal(&thread.id, "Ship durable goal".to_string(), Some(4096))
+            .unwrap();
+        assert_eq!(goal.objective, "Ship durable goal");
+        assert_eq!(goal.token_budget, Some(4096));
+        let loaded = store.load_thread_goal(&thread.id).unwrap().unwrap();
+        assert_eq!(loaded.objective, "Ship durable goal");
+        assert_eq!(loaded.token_budget, Some(4096));
+        let goal_json = thread_goal_to_json(&loaded);
+        let JsonValue::Object(goal_root) = goal_json else {
+            panic!("thread goal json should be an object");
+        };
+        assert_eq!(
+            goal_root.get("objective").and_then(json_as_string),
+            Some("Ship durable goal")
+        );
+
+        store.clear_thread_goal(&thread.id).unwrap();
+        assert!(store.load_thread_goal(&thread.id).unwrap().is_none());
+        let events = store.read_events(&thread.id, 1).unwrap();
+        let kinds = events
+            .iter()
+            .map(|event| event.kind.as_str())
+            .collect::<Vec<_>>();
+        assert!(kinds.contains(&"thread_goal_set"));
+        assert!(kinds.contains(&"thread_goal_cleared"));
     }
 
     #[test]

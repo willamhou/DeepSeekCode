@@ -84,12 +84,12 @@ deepseek tui --runtime-url http://127.0.0.1:13000
 ```
 
 In HTTP mode, `deepseek tui` builds snapshots from the runtime endpoints,
-writes composer/approval/cancel/task/automation/compaction actions back over
-HTTP, and follows `/v1/events/stream?follow=1` for lower-latency foreground
-refresh across known and newly created threads. Mirrored live RLM worker events
-arrive on that aggregate stream as `kind=rlm_live_event`, so HTTP-mode TUI
-instances can show live RLM status without opening a separate per-session
-stream.
+writes composer/approval/cancel/task/automation/compaction/goal actions back
+over HTTP, and follows `/v1/events/stream?follow=1` for lower-latency
+foreground refresh across known and newly created threads. Mirrored live RLM
+worker events arrive on that aggregate stream as `kind=rlm_live_event`, so
+HTTP-mode TUI instances can show live RLM status without opening a separate
+per-session stream.
 
 Use `--addr HOST:PORT` to override the bind address and `--once` for one
 request in tests:
@@ -134,6 +134,7 @@ Endpoints:
 | `/v1/threads/{id}/tasks` | `GET`, `POST` | Task records for one thread |
 | `/v1/threads/{id}/events` | `GET`, `HEAD`, `POST` | Append-only event replay and permission request append |
 | `/v1/threads/{id}/events/stream` | `GET`, `HEAD` | SSE replay, bounded wait, or follow-mode streaming of append-only events |
+| `/v1/threads/{id}/goal` | `GET`, `HEAD`, `POST` | Runtime-backed active-thread goal set/read/clear |
 | `/v1/threads/{id}/usage` | `GET`, `HEAD` | Usage records for one thread |
 | `/v1/threads/{id}/usage/summary` | `GET`, `HEAD` | Usage accounting and 1M-context policy for one thread |
 | `/v1/usage` | `GET`, `HEAD` | Usage records across threads, optionally filtered by `thread_id` |
@@ -152,6 +153,15 @@ cancelled through a first-class task endpoint, and active automations can be
 triggered into pending tasks. Usage records now include cache-hit/cache-miss
 token telemetry and estimated USD micro-costs for recognized DeepSeek V4 model
 names.
+
+Active-thread goals are persisted as append-only `thread_goal_set` and
+`thread_goal_cleared` runtime events. `GET /v1/threads/{id}/goal` returns schema
+`deepseek.runtime.thread_goal.v1` with a nullable `goal` object containing
+`thread_id`, `objective`, `token_budget`, `started_at`, and `updated_at`.
+`POST /v1/threads/{id}/goal` accepts either `{"objective": "...",
+"token_budget": 4096}` to set or replace the goal, or `{"clear": true}` to
+append a clear event. This is the durable backing for TUI `goal` / `/goal`
+state across restart, resume, and HTTP runtime reconnect.
 
 `deepseek agents run-task` and the daemon runner also publish durable
 `permission_request` events for permissioned write/shell/MCP calls and wait for
@@ -241,6 +251,7 @@ flags:
     "/v1/threads/{id}/tasks",
     "/v1/threads/{id}/events",
     "/v1/threads/{id}/events/stream",
+    "/v1/threads/{id}/goal",
     "/v1/threads/{id}/usage",
     "/v1/threads/{id}/usage/summary",
     "/v1/usage",
@@ -253,6 +264,7 @@ flags:
     "threads": true,
     "thread_compaction": true,
     "thread_fork": true,
+    "thread_goal": true,
     "turns": true,
     "items": true,
     "events": true,

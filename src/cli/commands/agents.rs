@@ -28,9 +28,11 @@ use crate::core::agents::{load_agent_file, load_default_agents, AgentLoadResult,
 use crate::core::context::TaskContext;
 use crate::core::loop_runtime::{
     AgentApprovalDecision, AgentApprovalRequest, AgentApprovalResolver, AgentLoop,
-    AgentLoopOptions, AgentUserInputRequest, AgentUserInputResolver, AgentUserInputResponse,
-    RunResult, SharedAgentApprovalResolver, SharedAgentUserInputResolver, ToolEvent,
+    AgentLoopOptions, AgentSessionBudget, AgentUserInputRequest, AgentUserInputResolver,
+    AgentUserInputResponse, RunResult, SharedAgentApprovalResolver, SharedAgentUserInputResolver,
+    ToolEvent,
 };
+use crate::core::prompt_layers::prompt_layers_event_payload;
 use crate::core::rollback::RollbackStore;
 use crate::core::runtime::{
     AutomationRecord, RuntimeStore, TaskRecord, ThreadCompactionRecord, ThreadRecord, TurnRecord,
@@ -8733,6 +8735,8 @@ fn run_runtime_task_loop(
     json: bool,
 ) -> AppResult<RunResult> {
     let agent = AgentLoop::new(config.clone());
+    let session_budget =
+        runtime_agent_session_budget(store, &thread.id, config.model.session_budget_microusd)?;
     let approval_resolver: SharedAgentApprovalResolver =
         Rc::new(RefCell::new(RuntimeTaskApprovalResolver {
             store: store.clone(),
@@ -8752,11 +8756,26 @@ fn run_runtime_task_loop(
         initial_recent_steps: store.recent_reasoning_replay_entries(&thread.id, 3)?,
         emit_progress: !json,
         persist_session: false,
+        session_budget,
         approval_resolver: Some(approval_resolver),
         user_input_resolver: Some(user_input_resolver),
         ..AgentLoopOptions::default()
     };
     agent.run_with(TaskContext::new(task.summary.clone(), None), options)
+}
+
+fn runtime_agent_session_budget(
+    store: &RuntimeStore,
+    thread_id: &str,
+    configured_budget_microusd: u64,
+) -> AppResult<Option<AgentSessionBudget>> {
+    store.ensure_thread_session_budget_microusd(thread_id, configured_budget_microusd)?;
+    Ok(store
+        .thread_budget_snapshot(thread_id)?
+        .map(|snapshot| AgentSessionBudget {
+            budget_microusd: snapshot.budget_microusd,
+            used_microusd: snapshot.used_microusd,
+        }))
 }
 
 struct RuntimeTaskApprovalResolver {
@@ -8911,7 +8930,7 @@ fn record_runtime_task_result(
         )?;
     }
     let usage_model = result.usage.model.as_deref().unwrap_or(&thread.model);
-    store.append_usage_with_cache(
+    let usage = store.append_usage_with_cache(
         &thread.id,
         Some(&assistant.id),
         usage_model.to_string(),
@@ -8921,6 +8940,13 @@ fn record_runtime_task_result(
         result.usage.prompt_cache_hit,
         result.usage.prompt_cache_miss,
     )?;
+    if !result.prompt_layers.is_empty() {
+        store.append_thread_event(
+            &thread.id,
+            "prompt_layers_recorded",
+            prompt_layers_event_payload(&assistant.id, &usage.id, &result.prompt_layers),
+        )?;
+    }
     store.update_task(&task.id, "completed".to_string(), message)?;
     Ok(assistant.id)
 }
@@ -11607,6 +11633,18 @@ mod tests {
                 status: ObservationStatus::Ok,
             }],
             usage,
+            prompt_layers: vec![crate::core::prompt_layers::PromptLayerSnapshot {
+                step: 1,
+                layers: vec![crate::core::prompt_layers::PromptLayerRecord {
+                    name: "system_static".to_string(),
+                    text_sha256: "abc123".to_string(),
+                    bytes: 12,
+                    estimated_tokens: 3,
+                    cache_stable: true,
+                }],
+                total_bytes: 12,
+                estimated_tokens: 3,
+            }],
         };
 
         let assistant_turn_id =
@@ -11631,6 +11669,9 @@ mod tests {
         let events = store.read_events(&thread.id, 0).unwrap();
         assert!(events.iter().any(|event| event.kind == "task_updated"));
         assert!(events.iter().any(|event| event.kind == "usage_recorded"));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "prompt_layers_recorded"));
     }
 
     #[test]

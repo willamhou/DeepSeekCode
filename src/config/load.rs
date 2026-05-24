@@ -72,6 +72,9 @@ fn apply_env_overrides(config: &mut AppConfig) {
             config.model.model = model;
         }
     }
+    if let Some(preset) = first_nonempty_env(&["DSCODE_MODEL_PRESET", "DEEPSEEK_MODEL_PRESET"]) {
+        config.model.preset = preset;
+    }
     if let Ok(api_key_env) = std::env::var("DEEPSEEK_API_KEY_ENV") {
         if !api_key_env.trim().is_empty() {
             config.model.api_key_env = api_key_env;
@@ -80,6 +83,20 @@ fn apply_env_overrides(config: &mut AppConfig) {
     if let Ok(reasoning_effort) = std::env::var("DEEPSEEK_REASONING_EFFORT") {
         if !reasoning_effort.trim().is_empty() {
             config.model.reasoning_effort = reasoning_effort;
+        }
+    }
+    if let Some(tool_schema_flattening) = first_nonempty_env(&[
+        "DSCODE_TOOL_SCHEMA_FLATTENING",
+        "DEEPSEEK_TOOL_SCHEMA_FLATTENING",
+    ]) {
+        config.model.tool_schema_flattening = tool_schema_flattening;
+    }
+    if let Some(value) = first_nonempty_env(&[
+        "DSCODE_SESSION_BUDGET_MICROUSD",
+        "DEEPSEEK_SESSION_BUDGET_MICROUSD",
+    ]) {
+        if let Ok(budget) = value.parse::<u64>() {
+            config.model.session_budget_microusd = budget;
         }
     }
     if let Some(base_url) =
@@ -244,8 +261,13 @@ fn apply_config_key(key: &str, value: &str, config: &mut AppConfig) -> AppResult
     match key {
         "model.base_url" => config.model.base_url = unquote(value),
         "model.model" => config.model.model = unquote(value),
+        "model.preset" => config.model.preset = unquote(value),
         "model.api_key_env" => config.model.api_key_env = unquote(value),
         "model.reasoning_effort" => config.model.reasoning_effort = unquote(value),
+        "model.tool_schema_flattening" => config.model.tool_schema_flattening = unquote(value),
+        "model.session_budget_microusd" => {
+            config.model.session_budget_microusd = parse_u64(value)?;
+        }
         "vision.base_url" | "vision_model.base_url" => config.vision.base_url = unquote(value),
         "vision.model" | "vision_model.model" => config.vision.model = unquote(value),
         "vision.api_key_env" | "vision_model.api_key_env" => {
@@ -462,6 +484,26 @@ mod tests {
         let toml = "model.reasoning_effort = \"max\"\n";
         parse_config(toml, &mut config).unwrap();
         assert_eq!(config.model.reasoning_effort, "max");
+    }
+
+    #[test]
+    fn parse_config_overrides_model_tool_schema_flattening_from_toml() {
+        let mut config = AppConfig::default();
+        let toml = "model.tool_schema_flattening = \"off\"\n";
+        parse_config(toml, &mut config).unwrap();
+        assert_eq!(config.model.tool_schema_flattening, "off");
+    }
+
+    #[test]
+    fn parse_config_overrides_model_preset_and_budget_from_toml() {
+        let mut config = AppConfig::default();
+        let toml = r#"
+model.preset = "pro"
+model.session_budget_microusd = 2500
+"#;
+        parse_config(toml, &mut config).unwrap();
+        assert_eq!(config.model.preset, "pro");
+        assert_eq!(config.model.session_budget_microusd, 2500);
     }
 
     #[test]

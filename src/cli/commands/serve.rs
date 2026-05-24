@@ -15,8 +15,8 @@ use crate::core::rollback::{snapshot_to_json, RestorePlan, RollbackStore};
 use crate::core::runtime::{
     automation_to_json, event_to_json, item_to_json, json_array, json_object, json_string_field,
     parse_json_object_body, session_to_json, task_to_json, thread_compaction_to_json,
-    thread_fork_to_json, thread_to_json, turn_to_json, usage_to_json, validate_record_id,
-    RuntimeEvent, RuntimeStore, TaskRecord,
+    thread_fork_to_json, thread_goal_to_json, thread_to_json, turn_to_json, usage_to_json,
+    validate_record_id, RuntimeEvent, RuntimeStore, TaskRecord,
 };
 use crate::error::{app_error, AppResult};
 use crate::model::client::ModelClient;
@@ -7454,6 +7454,7 @@ fn runtime_response() -> HttpResponse {
                         "/v1/threads/{id}/turns/{turn_id}/items",
                         "/v1/threads/{id}/events",
                         "/v1/threads/{id}/events/stream",
+                        "/v1/threads/{id}/goal",
                         "/v1/threads/{id}/tasks",
                         "/v1/threads/{id}/usage",
                         "/v1/threads/{id}/usage/summary",
@@ -7474,6 +7475,7 @@ fn runtime_response() -> HttpResponse {
                     ("threads", JsonValue::Bool(true)),
                     ("thread_compaction", JsonValue::Bool(true)),
                     ("thread_fork", JsonValue::Bool(true)),
+                    ("thread_goal", JsonValue::Bool(true)),
                     ("turns", JsonValue::Bool(true)),
                     ("items", JsonValue::Bool(true)),
                     ("events", JsonValue::Bool(true)),
@@ -7628,9 +7630,10 @@ fn list_sessions_response(store: &RuntimeStore, request_target: &str) -> AppResu
 
 fn create_session_response(store: &RuntimeStore, body: &str) -> AppResult<HttpResponse> {
     let root = parse_json_object_body(body)?;
-    let session = store.create_session(
+    let session = store.create_session_with_budget(
         json_string_field(&root, "title", "Untitled session")?,
         json_string_field(&root, "workspace", ".")?,
+        json_optional_u64_field(&root, "session_budget_microusd")?,
     )?;
     Ok(HttpResponse::json(
         201,
@@ -7846,12 +7849,19 @@ fn create_thread_response(store: &RuntimeStore, body: &str) -> AppResult<HttpRes
     let workspace = json_string_field(&root, "workspace", ".")?;
     let model = json_string_field(&root, "model", "deepseek-coder")?;
     let mode = json_string_field(&root, "mode", "agent")?;
-    let thread = match json_optional_string_field(&root, "session_id")? {
+    let session_budget_microusd = json_optional_u64_field(&root, "session_budget_microusd")?;
+    let mut thread = match json_optional_string_field(&root, "session_id")? {
         Some(session_id) => {
             store.create_thread_for_session(&session_id, title, workspace, model, mode)?
         }
         None => store.create_thread(title, workspace, model, mode)?,
     };
+    if session_budget_microusd.is_some() {
+        if let Some(session_id) = thread.session_id.as_deref() {
+            store.set_session_budget_microusd(session_id, session_budget_microusd)?;
+        }
+        thread = store.set_thread_budget_microusd(&thread.id, session_budget_microusd)?;
+    }
     Ok(HttpResponse::json(
         201,
         "Created",
@@ -8257,6 +8267,8 @@ fn route_thread_path(
             let poll_ms = query_param_u64(request_target, "poll_ms").unwrap_or(100);
             events_stream_response(store, thread_id, since_seq, wait_ms, poll_ms)
         }
+        ("GET" | "HEAD", [thread_id, "goal"]) => show_thread_goal_response(store, thread_id),
+        ("POST", [thread_id, "goal"]) => update_thread_goal_response(store, thread_id, body),
         ("GET" | "HEAD", [thread_id, "automations"]) => {
             store.load_thread(thread_id)?;
             list_automations_response(store, request_target, None, Some(thread_id))
@@ -8311,6 +8323,66 @@ fn show_thread_response(store: &RuntimeStore, thread_id: &str) -> AppResult<Http
             ("thread", thread_to_json(&thread)),
             ("turns", json_array(turns)),
             ("items", json_array(items)),
+        ]),
+    ))
+}
+
+fn show_thread_goal_response(store: &RuntimeStore, thread_id: &str) -> AppResult<HttpResponse> {
+    validate_record_id(thread_id)?;
+    let goal = store
+        .load_thread_goal(thread_id)?
+        .as_ref()
+        .map(thread_goal_to_json)
+        .unwrap_or(JsonValue::Null);
+    Ok(HttpResponse::json(
+        200,
+        "OK",
+        json_object([
+            (
+                "schema",
+                JsonValue::String("deepseek.runtime.thread_goal.v1".to_string()),
+            ),
+            ("goal", goal),
+        ]),
+    ))
+}
+
+fn update_thread_goal_response(
+    store: &RuntimeStore,
+    thread_id: &str,
+    body: &str,
+) -> AppResult<HttpResponse> {
+    validate_record_id(thread_id)?;
+    let root = parse_json_object_body(body)?;
+    if acp_json_truthy(root.get("clear")) {
+        let event = store.clear_thread_goal(thread_id)?;
+        return Ok(HttpResponse::json(
+            200,
+            "OK",
+            json_object([
+                (
+                    "schema",
+                    JsonValue::String("deepseek.runtime.thread_goal.v1".to_string()),
+                ),
+                ("goal", JsonValue::Null),
+                ("event", event_to_json(&event)),
+            ]),
+        ));
+    }
+    let goal = store.set_thread_goal(
+        thread_id,
+        json_string_field(&root, "objective", "")?,
+        json_optional_u64_field(&root, "token_budget")?,
+    )?;
+    Ok(HttpResponse::json(
+        200,
+        "OK",
+        json_object([
+            (
+                "schema",
+                JsonValue::String("deepseek.runtime.thread_goal.v1".to_string()),
+            ),
+            ("goal", thread_goal_to_json(&goal)),
         ]),
     ))
 }
@@ -9367,6 +9439,18 @@ fn json_optional_string_field(
         Some(value) => json_as_string(value)
             .map(|value| Some(value.to_string()))
             .ok_or_else(|| app_error(format!("request field `{key}` must be a string or null"))),
+    }
+}
+
+fn json_optional_u64_field(
+    root: &BTreeMap<String, JsonValue>,
+    key: &str,
+) -> AppResult<Option<u64>> {
+    match root.get(key) {
+        Some(JsonValue::Null) | None => Ok(None),
+        Some(value) => json_as_u64(value)
+            .map(Some)
+            .ok_or_else(|| app_error(format!("request field `{key}` must be a number or null"))),
     }
 }
 
@@ -12761,6 +12845,10 @@ shell_allowlist = ["cargo test"]
             capabilities.get("usage_summary"),
             Some(JsonValue::Bool(true))
         ));
+        assert!(matches!(
+            capabilities.get("thread_goal"),
+            Some(JsonValue::Bool(true))
+        ));
         assert!(response.body.contains("/v1/automations"));
         assert!(response.body.contains("/v1/automations/{id}/trigger"));
         assert!(response.body.contains("/v1/diagnostics"));
@@ -12772,6 +12860,7 @@ shell_allowlist = ["cargo test"]
             .body
             .contains("/v1/threads/{id}/turns/{turn_id}/items"));
         assert!(response.body.contains("/v1/threads/{id}/events/stream"));
+        assert!(response.body.contains("/v1/threads/{id}/goal"));
         assert!(response.body.contains("/v1/threads/{id}/usage"));
         assert!(response.body.contains("/v1/usage/summary"));
         assert!(response.body.contains("/v1/usage"));
@@ -12869,6 +12958,54 @@ shell_allowlist = ["cargo test"]
         );
         assert_eq!(show.status, 200);
         assert!(show.body.contains("\"turns\":[]"));
+    }
+
+    #[test]
+    fn thread_goal_endpoint_sets_reads_and_clears_goal() {
+        let store = temp_store("thread-goal-http");
+        let thread = store
+            .create_thread(
+                "Goal thread".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let body = r#"{"objective":"Persist this goal","token_budget":4096}"#;
+
+        let set = response_for_request(
+            &format!(
+                "POST /v1/threads/{}/goal HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                thread.id,
+                body.len(),
+                body
+            ),
+            &store,
+        );
+        assert_eq!(set.status, 200);
+        assert!(set.body.contains("deepseek.runtime.thread_goal.v1"));
+        assert!(set.body.contains("Persist this goal"));
+
+        let show = response_for_request(
+            &format!(
+                "GET /v1/threads/{}/goal HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                thread.id
+            ),
+            &store,
+        );
+        assert_eq!(show.status, 200);
+        assert!(show.body.contains("\"token_budget\":4096"));
+
+        let clear = response_for_request(
+            &format!(
+                "POST /v1/threads/{}/goal HTTP/1.1\r\nHost: localhost\r\nContent-Length: 14\r\n\r\n{{\"clear\":true}}",
+                thread.id
+            ),
+            &store,
+        );
+        assert_eq!(clear.status, 200);
+        let clear_root = parse_root_object(&clear.body).unwrap();
+        assert!(matches!(clear_root.get("goal"), Some(JsonValue::Null)));
     }
 
     #[test]

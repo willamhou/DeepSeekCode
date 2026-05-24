@@ -14,6 +14,10 @@ use crate::model::client::ModelClient;
 use crate::model::protocol::{
     ImageInput, ModelAction, ModelRequest, ModelResponse, TokenUsage, ToolCallRequest,
 };
+use crate::model::tool_repair::{
+    flatten_tool_schema_auto, parse_tool_arguments_with_repair, re_nest_tool_arguments,
+    scavenge_tool_calls, ToolRepairNote, ToolSchemaTransform,
+};
 use crate::tools::types::ToolInput;
 use crate::ui::stream::StreamEvents;
 use crate::util::cancel::CancellationCheck;
@@ -28,6 +32,25 @@ const DEFAULT_MODEL_STREAM_TIMEOUT_SECS: u64 = 180;
 const MAX_MODEL_STREAM_TIMEOUT_SECS: u64 = 900;
 const DEFAULT_MODEL_MAX_TOKENS: u64 = 4096;
 const MAX_MODEL_COMPLETION_TOKENS: u64 = 32_768;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolSchemaFlattening {
+    Auto,
+    Off,
+}
+
+impl ToolSchemaFlattening {
+    fn from_config(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "false" | "0" | "no" => Self::Off,
+            _ => Self::Auto,
+        }
+    }
+
+    fn enabled(self) -> bool {
+        matches!(self, Self::Auto)
+    }
+}
 
 pub struct DeepSeekClient {
     pub config: ModelConfig,
@@ -57,15 +80,19 @@ impl ModelClient for DeepSeekClient {
                 emit_response_events(events, &response);
                 return Ok((response, None));
             }
+            let route = ModelRoute::resolve(&self.config, &input);
+            emit_model_route_event(events, &route);
             // Remote stream attempted: surface success or error directly.
             // Stream errors propagate so partial text isn't double-rendered
             // by the offline fallback (per StreamEvents "exactly once" contract).
-            return self.respond_remote(&input, &api_key, events, cancel_check);
+            return self.respond_remote(&input, &api_key, events, &route, cancel_check);
         }
 
         poll_model_cancel(&mut cancel_check)?;
         // No API key configured → run offline planner and drive events.
-        let response = self.respond_offline(input);
+        let route = ModelRoute::resolve(&self.config, &input);
+        emit_model_route_event(events, &route);
+        let response = self.respond_offline_with_route(input, &route);
         emit_response_events(events, &response);
         poll_model_cancel(&mut cancel_check)?;
         Ok((response, None))
@@ -208,15 +235,15 @@ impl DeepSeekClient {
         input: &ModelRequest,
         api_key: &str,
         events: &mut dyn StreamEvents,
+        route: &ModelRoute,
         cancel_check: Option<&mut dyn CancellationCheck>,
     ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
-        let route = ModelRoute::resolve(&self.config, input);
         match api_flavor(&self.config.base_url) {
             ApiFlavor::OpenAi => {
-                self.respond_remote_openai(input, api_key, events, &route, cancel_check)
+                self.respond_remote_openai(input, api_key, events, route, cancel_check)
             }
             ApiFlavor::Anthropic => {
-                self.respond_remote_anthropic(input, api_key, events, &route, cancel_check)
+                self.respond_remote_anthropic(input, api_key, events, route, cancel_check)
             }
         }
     }
@@ -242,7 +269,13 @@ impl DeepSeekClient {
         } else {
             "\"temperature\":0,"
         };
-        let tool_fields = openai_tool_fields(&input.available_tools, reasoning);
+        let schema_flattening =
+            ToolSchemaFlattening::from_config(&self.config.tool_schema_flattening);
+        let tool_fields = openai_tool_fields_with_schema_mode(
+            &input.available_tools,
+            reasoning,
+            schema_flattening,
+        );
         let reasoning_fields = openai_reasoning_fields(&self.config.base_url, reasoning);
         let max_tokens = model_max_tokens().to_string();
         let body = format!(
@@ -298,7 +331,8 @@ impl DeepSeekClient {
                     return Err(error);
                 }
             };
-        let parsed = parse_openai_process_stream(&mut process, events, cancel_check);
+        let parsed =
+            parse_openai_process_stream(&mut process, events, cancel_check, schema_flattening);
         if parsed.is_err() {
             drop(process);
             return attach_usage_model(parsed, &route.model);
@@ -327,7 +361,13 @@ impl DeepSeekClient {
         let user_prompt = build_user_prompt(input);
         let user_content = build_anthropic_user_content(input, &user_prompt, &self.config)?;
         let reasoning = route.reasoning;
-        let tool_fields = anthropic_tool_fields(&input.available_tools, reasoning);
+        let schema_flattening =
+            ToolSchemaFlattening::from_config(&self.config.tool_schema_flattening);
+        let tool_fields = anthropic_tool_fields_with_schema_mode(
+            &input.available_tools,
+            reasoning,
+            schema_flattening,
+        );
         let reasoning_fields = reasoning.anthropic_fields();
         let max_tokens = model_max_tokens().to_string();
         let body = format!(
@@ -382,7 +422,8 @@ impl DeepSeekClient {
                     return Err(error);
                 }
             };
-        let parsed = parse_anthropic_process_stream(&mut process, events, cancel_check);
+        let parsed =
+            parse_anthropic_process_stream(&mut process, events, cancel_check, schema_flattening);
         if parsed.is_err() {
             drop(process);
             return attach_usage_model(parsed, &route.model);
@@ -398,8 +439,13 @@ impl DeepSeekClient {
         attach_usage_model(parsed, &route.model)
     }
 
+    #[cfg(test)]
     fn respond_offline(&self, input: ModelRequest) -> ModelResponse {
         let route = ModelRoute::resolve(&self.config, &input);
+        self.respond_offline_with_route(input, &route)
+    }
+
+    fn respond_offline_with_route(&self, input: ModelRequest, route: &ModelRoute) -> ModelResponse {
         let model_name = route.model.as_str();
         let task = input.task.clone();
         let task_lower = task.to_lowercase();
@@ -1141,19 +1187,54 @@ fn attach_usage_model(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ModelRoute {
     model: String,
+    preset: String,
     reasoning: ReasoningTier,
+    reason: String,
+    escalated: bool,
 }
 
 impl ModelRoute {
     fn resolve(config: &ModelConfig, input: &ModelRequest) -> Self {
         let complexity = RouteComplexity::classify(input);
-        let model = if is_auto_model(&config.model) {
-            match complexity {
-                RouteComplexity::Simple => "deepseek-v4-flash".to_string(),
-                RouteComplexity::Complex | RouteComplexity::Deep => "deepseek-v4-pro".to_string(),
+        let preset = ModelPreset::from_config(&config.preset);
+        let raw_model = config.model.trim();
+        let preset_controls_model = raw_model.is_empty() || is_preset_controlled_model(raw_model);
+        let (model, reason, escalated) = if preset_controls_model {
+            match preset {
+                ModelPreset::Flash => (
+                    "deepseek-v4-flash".to_string(),
+                    "flash preset".to_string(),
+                    false,
+                ),
+                ModelPreset::Pro => (
+                    "deepseek-v4-pro".to_string(),
+                    "pro preset".to_string(),
+                    false,
+                ),
+                ModelPreset::Auto => match complexity {
+                    RouteComplexity::Simple => (
+                        "deepseek-v4-flash".to_string(),
+                        "simple task shape".to_string(),
+                        false,
+                    ),
+                    RouteComplexity::Complex => (
+                        "deepseek-v4-pro".to_string(),
+                        "complex task or recovery signals".to_string(),
+                        true,
+                    ),
+                    RouteComplexity::Deep => (
+                        "deepseek-v4-pro".to_string(),
+                        "deep task or failure signals".to_string(),
+                        true,
+                    ),
+                },
             }
         } else {
-            config.model.trim().to_string()
+            (
+                raw_model.to_string(),
+                "explicit model id".to_string(),
+                false,
+            )
         };
         let reasoning = if is_auto_reasoning(&config.reasoning_effort) {
             match complexity {
@@ -1164,7 +1245,42 @@ impl ModelRoute {
         } else {
             ReasoningTier::from_config(&config.reasoning_effort)
         };
-        Self { model, reasoning }
+        Self {
+            model,
+            preset: preset.as_str().to_string(),
+            reasoning,
+            reason,
+            escalated,
+        }
+    }
+}
+
+fn emit_model_route_event(events: &mut dyn StreamEvents, route: &ModelRoute) {
+    events.on_model_route(&route.preset, &route.model, &route.reason, route.escalated);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelPreset {
+    Auto,
+    Flash,
+    Pro,
+}
+
+impl ModelPreset {
+    fn from_config(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "flash" | "fast" => Self::Flash,
+            "pro" | "deep" | "reasoning" => Self::Pro,
+            _ => Self::Auto,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Flash => "flash",
+            Self::Pro => "pro",
+        }
     }
 }
 
@@ -1263,6 +1379,26 @@ fn is_auto_model(model: &str) -> bool {
     matches!(
         model.trim().to_ascii_lowercase().as_str(),
         "auto" | "auto-deepseek" | "deepseek-auto"
+    )
+}
+
+fn is_preset_controlled_model(model: &str) -> bool {
+    let normalized = model.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "auto"
+            | "auto-deepseek"
+            | "deepseek-auto"
+            | "flash"
+            | "v4-flash"
+            | "deepseek-v4-flash"
+            | "deepseek-ai/deepseek-v4-flash"
+            | "deepseek/deepseek-v4-flash"
+            | "pro"
+            | "v4-pro"
+            | "deepseek-v4-pro"
+            | "deepseek-ai/deepseek-v4-pro"
+            | "deepseek/deepseek-v4-pro"
     )
 }
 
@@ -3455,15 +3591,40 @@ fn pr_workflow_child_followup_complete(
             .any(|observation| observation.tool_name == "read_file" && !observation.is_failure())
 }
 
+#[cfg(test)]
 fn build_openai_tools(names: &[String]) -> String {
-    render_tools(names, openai_envelope)
+    build_openai_tools_with_schema_mode(names, ToolSchemaFlattening::Auto)
 }
 
+fn build_openai_tools_with_schema_mode(
+    names: &[String],
+    schema_flattening: ToolSchemaFlattening,
+) -> String {
+    render_tools(names, schema_flattening, openai_envelope)
+}
+
+#[cfg(test)]
 fn build_anthropic_tools(names: &[String]) -> String {
-    render_tools(names, anthropic_envelope)
+    build_anthropic_tools_with_schema_mode(names, ToolSchemaFlattening::Auto)
 }
 
+fn build_anthropic_tools_with_schema_mode(
+    names: &[String],
+    schema_flattening: ToolSchemaFlattening,
+) -> String {
+    render_tools(names, schema_flattening, anthropic_envelope)
+}
+
+#[cfg(test)]
 fn openai_tool_fields(names: &[String], reasoning: ReasoningTier) -> String {
+    openai_tool_fields_with_schema_mode(names, reasoning, ToolSchemaFlattening::Auto)
+}
+
+fn openai_tool_fields_with_schema_mode(
+    names: &[String],
+    reasoning: ReasoningTier,
+    schema_flattening: ToolSchemaFlattening,
+) -> String {
     if names.is_empty() {
         return String::new();
     }
@@ -3475,11 +3636,20 @@ fn openai_tool_fields(names: &[String], reasoning: ReasoningTier) -> String {
     format!(
         "{}\"parallel_tool_calls\":false,\"tools\":{},",
         tool_choice_field,
-        build_openai_tools(names)
+        build_openai_tools_with_schema_mode(names, schema_flattening)
     )
 }
 
+#[cfg(test)]
 fn anthropic_tool_fields(names: &[String], reasoning: ReasoningTier) -> String {
+    anthropic_tool_fields_with_schema_mode(names, reasoning, ToolSchemaFlattening::Auto)
+}
+
+fn anthropic_tool_fields_with_schema_mode(
+    names: &[String],
+    reasoning: ReasoningTier,
+    schema_flattening: ToolSchemaFlattening,
+) -> String {
     if names.is_empty() {
         return String::new();
     }
@@ -3491,14 +3661,20 @@ fn anthropic_tool_fields(names: &[String], reasoning: ReasoningTier) -> String {
     format!(
         "{}\"tools\":{},",
         tool_choice_field,
-        build_anthropic_tools(names)
+        build_anthropic_tools_with_schema_mode(names, schema_flattening)
     )
 }
 
-fn render_tools(names: &[String], envelope: fn(&ToolSpec) -> String) -> String {
+fn render_tools(
+    names: &[String],
+    schema_flattening: ToolSchemaFlattening,
+    envelope: fn(&ToolSpec) -> String,
+) -> String {
     let tools = names
         .iter()
-        .filter_map(|name| tool_spec(name).map(|spec| envelope(&spec)))
+        .filter_map(|name| {
+            tool_spec_with_schema_mode(name, schema_flattening).map(|spec| envelope(&spec))
+        })
         .collect::<Vec<_>>();
     format!("[{}]", tools.join(","))
 }
@@ -3528,9 +3704,32 @@ struct ToolSpec {
     description: Cow<'static, str>,
     properties_json: Cow<'static, str>,
     required_json: Cow<'static, str>,
+    schema_transform: ToolSchemaTransform,
 }
 
-fn tool_spec(name: &str) -> Option<ToolSpec> {
+fn tool_spec_with_schema_mode(
+    name: &str,
+    schema_flattening: ToolSchemaFlattening,
+) -> Option<ToolSpec> {
+    let spec = raw_tool_spec(name)?;
+    if !schema_flattening.enabled() {
+        return Some(spec);
+    }
+    let Some((properties_json, required_json, schema_transform)) =
+        flatten_tool_schema_auto(&spec.properties_json, &spec.required_json)
+    else {
+        return Some(spec);
+    };
+    Some(ToolSpec {
+        name: spec.name,
+        description: spec.description,
+        properties_json: Cow::Owned(properties_json),
+        required_json: Cow::Owned(required_json),
+        schema_transform,
+    })
+}
+
+fn raw_tool_spec(name: &str) -> Option<ToolSpec> {
     TOOL_SPECS
         .iter()
         .find(|spec| spec.name == name)
@@ -3539,6 +3738,7 @@ fn tool_spec(name: &str) -> Option<ToolSpec> {
             description: Cow::Borrowed(spec.description),
             properties_json: Cow::Borrowed(spec.properties_json),
             required_json: Cow::Borrowed(spec.required_json),
+            schema_transform: ToolSchemaTransform::default(),
         })
         .or_else(|| dynamic_mcp_tool_spec(name))
 }
@@ -3547,6 +3747,45 @@ pub(crate) fn static_tool_search_catalog() -> Vec<(&'static str, &'static str, &
     TOOL_SPECS
         .iter()
         .map(|spec| (spec.name, spec.description, spec.properties_json))
+        .collect()
+}
+
+fn known_tool_names_for_repair() -> Vec<&'static str> {
+    TOOL_SPECS.iter().map(|spec| spec.name).collect()
+}
+
+fn schema_transform_for_tool(
+    tool_name: &str,
+    schema_flattening: ToolSchemaFlattening,
+) -> ToolSchemaTransform {
+    tool_spec_with_schema_mode(tool_name, schema_flattening)
+        .map(|spec| spec.schema_transform)
+        .unwrap_or_default()
+}
+
+fn re_nest_tool_args_for_tool(
+    tool_name: &str,
+    args: BTreeMap<String, String>,
+    schema_flattening: ToolSchemaFlattening,
+) -> BTreeMap<String, String> {
+    let transform = schema_transform_for_tool(tool_name, schema_flattening);
+    re_nest_tool_arguments(args, &transform)
+}
+
+fn re_nest_tool_calls(
+    calls: Vec<ToolCallRequest>,
+    schema_flattening: ToolSchemaFlattening,
+) -> Vec<ToolCallRequest> {
+    calls
+        .into_iter()
+        .map(|call| {
+            let args =
+                re_nest_tool_args_for_tool(&call.tool_name, call.input.args, schema_flattening);
+            ToolCallRequest {
+                tool_name: call.tool_name,
+                input: ToolInput { args },
+            }
+        })
         .collect()
 }
 
@@ -3573,6 +3812,7 @@ fn dynamic_mcp_tool_spec(name: &str) -> Option<ToolSpec> {
                     })),
                     properties_json: Cow::Owned(properties_json),
                     required_json: Cow::Owned(required_json),
+                    schema_transform: ToolSchemaTransform::default(),
                 });
             }
         }
@@ -3586,6 +3826,7 @@ fn dynamic_mcp_tool_spec(name: &str) -> Option<ToolSpec> {
             r#"{"arguments":{"type":"string","description":"JSON object string containing remote tool arguments, for example {\"path\":\"README.md\"}. Use {} when the remote tool takes no arguments."}}"#,
         ),
         required_json: Cow::Borrowed(r#"[]"#),
+        schema_transform: ToolSchemaTransform::default(),
     })
 }
 
@@ -4366,19 +4607,26 @@ fn openai_tool_assembly_mut(
         .expect("openai tool assembly exists after fallback insert")
 }
 
-fn openai_tool_assembly_to_request(assembly: OpenAiToolAssembly) -> AppResult<ToolCallRequest> {
+fn openai_tool_assembly_to_request(
+    assembly: OpenAiToolAssembly,
+    schema_flattening: ToolSchemaFlattening,
+) -> AppResult<(ToolCallRequest, Option<ToolRepairNote>)> {
     let tool_name = assembly
         .name
         .ok_or_else(|| tool_failure("openai tool call missing function.name"))?;
-    let arguments = if assembly.arguments.trim().is_empty() {
-        BTreeMap::new()
+    let (arguments, repair_note) = if assembly.arguments.trim().is_empty() {
+        (BTreeMap::new(), None)
     } else {
-        parse_tool_arguments(&assembly.arguments)?
+        parse_tool_arguments_with_repair(&assembly.arguments)?
     };
-    Ok(ToolCallRequest {
-        tool_name,
-        input: ToolInput { args: arguments },
-    })
+    let arguments = re_nest_tool_args_for_tool(&tool_name, arguments, schema_flattening);
+    Ok((
+        ToolCallRequest {
+            tool_name,
+            input: ToolInput { args: arguments },
+        },
+        repair_note,
+    ))
 }
 
 fn model_action_from_tool_calls(
@@ -4413,6 +4661,16 @@ fn model_action_contains_tool_call(action: &ModelAction) -> bool {
     )
 }
 
+fn emit_tool_repair_notes(events: &mut dyn StreamEvents, notes: &[ToolRepairNote]) {
+    for note in notes {
+        events.on_tool_repair(note.kind, &note.detail);
+        events.on_reasoning_delta(&format!(
+            "[tool-call repair:{}] {}\n",
+            note.kind, note.detail
+        ));
+    }
+}
+
 fn read_cancelable_frame<R: BufRead>(
     reader: &mut R,
     cancel_check: &mut Option<&mut dyn CancellationCheck>,
@@ -4436,13 +4694,14 @@ fn parse_openai_process_stream(
     process: &mut StreamingProcess,
     events: &mut dyn StreamEvents,
     cancel_check: Option<&mut dyn CancellationCheck>,
+    schema_flattening: ToolSchemaFlattening,
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     if let Some(cancel_check) = cancel_check {
         let stdout = process.take_stdout()?;
         let mut reader = CancelAwarePipeReader::spawn(stdout, cancel_check);
-        parse_openai_stream_with_cancel(&mut reader, events, None)
+        parse_openai_stream_with_cancel(&mut reader, events, None, schema_flattening)
     } else {
-        parse_openai_stream_with_cancel(process.stdout_mut()?, events, None)
+        parse_openai_stream_with_cancel(process.stdout_mut()?, events, None, schema_flattening)
     }
 }
 
@@ -4450,13 +4709,14 @@ fn parse_anthropic_process_stream(
     process: &mut StreamingProcess,
     events: &mut dyn StreamEvents,
     cancel_check: Option<&mut dyn CancellationCheck>,
+    schema_flattening: ToolSchemaFlattening,
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     if let Some(cancel_check) = cancel_check {
         let stdout = process.take_stdout()?;
         let mut reader = CancelAwarePipeReader::spawn(stdout, cancel_check);
-        parse_anthropic_stream_with_cancel(&mut reader, events, None)
+        parse_anthropic_stream_with_cancel(&mut reader, events, None, schema_flattening)
     } else {
-        parse_anthropic_stream_with_cancel(process.stdout_mut()?, events, None)
+        parse_anthropic_stream_with_cancel(process.stdout_mut()?, events, None, schema_flattening)
     }
 }
 
@@ -4578,16 +4838,23 @@ pub(crate) fn parse_openai_stream<R: BufRead>(
     reader: &mut R,
     events: &mut dyn StreamEvents,
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
-    parse_openai_stream_with_cancel(reader, events, None)
+    parse_openai_stream_with_cancel(reader, events, None, ToolSchemaFlattening::Auto)
 }
 
 fn parse_openai_stream_with_cancel<R: BufRead>(
     reader: &mut R,
     events: &mut dyn StreamEvents,
     cancel_check: Option<&mut dyn CancellationCheck>,
+    schema_flattening: ToolSchemaFlattening,
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     let mut full_text = String::new();
-    let result = parse_openai_stream_inner(reader, events, &mut full_text, cancel_check);
+    let result = parse_openai_stream_inner(
+        reader,
+        events,
+        &mut full_text,
+        cancel_check,
+        schema_flattening,
+    );
     events.on_assistant_done(&full_text);
     result
 }
@@ -4597,9 +4864,11 @@ fn parse_openai_stream_inner<R: BufRead>(
     events: &mut dyn StreamEvents,
     full_text: &mut String,
     mut cancel_check: Option<&mut dyn CancellationCheck>,
+    schema_flattening: ToolSchemaFlattening,
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     let mut usage: Option<TokenUsage> = None;
     let mut tool_assemblies: Vec<OpenAiToolAssembly> = Vec::new();
+    let mut reasoning_text = String::new();
     let mut done_seen = false;
 
     while let Some(frame) = read_cancelable_frame(reader, &mut cancel_check)? {
@@ -4640,6 +4909,7 @@ fn parse_openai_stream_inner<R: BufRead>(
                 if let Some(reasoning) = delta.get("reasoning_content").and_then(json_as_string) {
                     if !reasoning.is_empty() {
                         events.on_reasoning_delta(reasoning);
+                        reasoning_text.push_str(reasoning);
                     }
                 }
                 if let Some(content) = delta.get("content").and_then(json_as_string) {
@@ -4678,10 +4948,24 @@ fn parse_openai_stream_inner<R: BufRead>(
     }
 
     tool_assemblies.sort_by_key(|assembly| assembly.index);
-    let calls = tool_assemblies
-        .into_iter()
-        .map(openai_tool_assembly_to_request)
-        .collect::<AppResult<Vec<_>>>()?;
+    let mut repair_notes = Vec::new();
+    let calls = if tool_assemblies.is_empty() {
+        let repair_text = format!("{reasoning_text}\n{full_text}");
+        let (calls, notes) = scavenge_tool_calls(&repair_text, &known_tool_names_for_repair());
+        repair_notes.extend(notes);
+        re_nest_tool_calls(calls, schema_flattening)
+    } else {
+        let mut calls = Vec::new();
+        for assembly in tool_assemblies {
+            let (call, note) = openai_tool_assembly_to_request(assembly, schema_flattening)?;
+            if let Some(note) = note {
+                repair_notes.push(note);
+            }
+            calls.push(call);
+        }
+        calls
+    };
+    emit_tool_repair_notes(events, &repair_notes);
     let action = model_action_from_tool_calls(calls, events);
 
     let message = if full_text.is_empty() && model_action_contains_tool_call(&action) {
@@ -4709,16 +4993,23 @@ pub(crate) fn parse_anthropic_stream<R: BufRead>(
     reader: &mut R,
     events: &mut dyn StreamEvents,
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
-    parse_anthropic_stream_with_cancel(reader, events, None)
+    parse_anthropic_stream_with_cancel(reader, events, None, ToolSchemaFlattening::Auto)
 }
 
 fn parse_anthropic_stream_with_cancel<R: BufRead>(
     reader: &mut R,
     events: &mut dyn StreamEvents,
     cancel_check: Option<&mut dyn CancellationCheck>,
+    schema_flattening: ToolSchemaFlattening,
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     let mut full_text = String::new();
-    let result = parse_anthropic_stream_inner(reader, events, &mut full_text, cancel_check);
+    let result = parse_anthropic_stream_inner(
+        reader,
+        events,
+        &mut full_text,
+        cancel_check,
+        schema_flattening,
+    );
     events.on_assistant_done(&full_text);
     result
 }
@@ -4728,8 +5019,10 @@ fn parse_anthropic_stream_inner<R: BufRead>(
     events: &mut dyn StreamEvents,
     full_text: &mut String,
     mut cancel_check: Option<&mut dyn CancellationCheck>,
+    schema_flattening: ToolSchemaFlattening,
 ) -> AppResult<(ModelResponse, Option<TokenUsage>)> {
     let mut tool_assembly: Option<AnthropicToolAssembly> = None;
+    let mut reasoning_text = String::new();
     let mut usage_prompt: Option<u64> = None;
     let mut usage_completion: Option<u64> = None;
     let mut usage_prompt_cache_hit: Option<u64> = None;
@@ -4813,6 +5106,7 @@ fn parse_anthropic_stream_inner<R: BufRead>(
                             {
                                 if !reasoning.is_empty() {
                                     events.on_reasoning_delta(reasoning);
+                                    reasoning_text.push_str(reasoning);
                                 }
                             }
                         }
@@ -4863,22 +5157,32 @@ fn parse_anthropic_stream_inner<R: BufRead>(
         }
     }
 
+    let mut repair_notes = Vec::new();
     let action = if let Some(assembly) = tool_assembly {
         let name = assembly
             .name
             .ok_or_else(|| tool_failure("anthropic tool_use missing name"))?;
-        let arguments = if assembly.partial_json.trim().is_empty() {
-            std::collections::BTreeMap::new()
+        let (arguments, repair_note) = if assembly.partial_json.trim().is_empty() {
+            (std::collections::BTreeMap::new(), None)
         } else {
-            parse_tool_arguments(&assembly.partial_json)?
+            parse_tool_arguments_with_repair(&assembly.partial_json)?
         };
+        let arguments = re_nest_tool_args_for_tool(&name, arguments, schema_flattening);
+        if let Some(note) = repair_note {
+            repair_notes.push(note);
+        }
+        emit_tool_repair_notes(events, &repair_notes);
         events.on_tool_call(&name, &arguments);
         ModelAction::CallTool {
             tool_name: name,
             input: ToolInput { args: arguments },
         }
     } else {
-        ModelAction::Finish
+        let repair_text = format!("{reasoning_text}\n{full_text}");
+        let (calls, notes) = scavenge_tool_calls(&repair_text, &known_tool_names_for_repair());
+        repair_notes.extend(notes);
+        emit_tool_repair_notes(events, &repair_notes);
+        model_action_from_tool_calls(re_nest_tool_calls(calls, schema_flattening), events)
     };
 
     let usage = match (usage_prompt, usage_completion) {
@@ -4940,7 +5244,11 @@ fn parse_openai_chat_completion(body: &str) -> AppResult<ModelResponse> {
                     .get("arguments")
                     .and_then(json_as_string)
                     .ok_or_else(|| app_error("tool call missing function arguments"))?;
-                let arguments = parse_tool_arguments(arguments_raw)?;
+                let arguments = re_nest_tool_args_for_tool(
+                    tool_name,
+                    parse_tool_arguments(arguments_raw)?,
+                    ToolSchemaFlattening::Auto,
+                );
                 Ok(ToolCallRequest {
                     tool_name: tool_name.to_string(),
                     input: ToolInput { args: arguments },
@@ -4964,6 +5272,16 @@ fn parse_openai_chat_completion(body: &str) -> AppResult<ModelResponse> {
         .and_then(json_as_string)
         .unwrap_or("DeepSeek returned no content.")
         .to_string();
+    let (calls, _notes) = scavenge_tool_calls(&message, &known_tool_names_for_repair());
+    if !calls.is_empty() {
+        return Ok(ModelResponse {
+            message,
+            action: model_action_from_tool_calls_no_events(re_nest_tool_calls(
+                calls,
+                ToolSchemaFlattening::Auto,
+            )),
+        });
+    }
 
     Ok(ModelResponse {
         message,
@@ -5042,7 +5360,11 @@ fn parse_anthropic_messages(body: &str) -> AppResult<ModelResponse> {
                 let input_obj = block
                     .get("input")
                     .ok_or_else(|| app_error("tool_use block missing `input`"))?;
-                let arguments = json_object_to_string_args(input_obj)?;
+                let arguments = re_nest_tool_args_for_tool(
+                    tool_name,
+                    json_object_to_string_args(input_obj)?,
+                    ToolSchemaFlattening::Auto,
+                );
                 let assistant_message = if text_chunks.is_empty() {
                     "DeepSeek selected a tool.".to_string()
                 } else {
@@ -5070,6 +5392,16 @@ fn parse_anthropic_messages(body: &str) -> AppResult<ModelResponse> {
     } else {
         text_chunks.join("\n")
     };
+    let (calls, _notes) = scavenge_tool_calls(&message, &known_tool_names_for_repair());
+    if !calls.is_empty() {
+        return Ok(ModelResponse {
+            message,
+            action: model_action_from_tool_calls_no_events(re_nest_tool_calls(
+                calls,
+                ToolSchemaFlattening::Auto,
+            )),
+        });
+    }
 
     Ok(ModelResponse {
         message,
@@ -5176,8 +5508,7 @@ fn json_object_to_string_args(value: &JsonValue) -> AppResult<BTreeMap<String, S
 }
 
 fn parse_tool_arguments(input: &str) -> AppResult<BTreeMap<String, String>> {
-    let root = parse_root_object(input)?;
-    json_object_to_string_args(&JsonValue::Object(root))
+    parse_tool_arguments_with_repair(input).map(|(args, _note)| args)
 }
 
 fn derive_search_query(task: &str) -> Option<String> {
@@ -5386,13 +5717,13 @@ fn is_supported_quote_delimiter(bytes: &[u8], index: usize, byte: u8) -> bool {
 mod tests {
     use super::{
         anthropic_tool_fields, api_flavor, build_anthropic_tools, build_openai_tools,
-        child_files_from_summary, derive_edit_request, derive_edit_requests,
-        derive_github_pr_context_request, derive_search_query, last_patched_file_path,
-        next_pending_edit_request, openai_tool_fields, parse_anthropic_messages,
-        parse_anthropic_translation_response, parse_anthropic_usage, parse_openai_chat_completion,
-        parse_openai_translation_response, parse_openai_usage, required_action_response,
-        translation_system_prompt, ApiFlavor, DeepSeekClient, GithubPrContextRequest,
-        ReasoningTier,
+        build_openai_tools_with_schema_mode, child_files_from_summary, derive_edit_request,
+        derive_edit_requests, derive_github_pr_context_request, derive_search_query,
+        last_patched_file_path, next_pending_edit_request, openai_tool_fields,
+        parse_anthropic_messages, parse_anthropic_translation_response, parse_anthropic_usage,
+        parse_openai_chat_completion, parse_openai_translation_response, parse_openai_usage,
+        required_action_response, translation_system_prompt, ApiFlavor, DeepSeekClient,
+        GithubPrContextRequest, ReasoningTier, ToolSchemaFlattening,
     };
     use crate::config::types::ModelConfig;
     use crate::model::client::ModelClient;
@@ -6312,6 +6643,105 @@ mod tests {
         assert!(!tools.contains("\"arguments\""));
     }
 
+    #[test]
+    fn build_tool_specs_flattens_nested_dynamic_mcp_schema() {
+        crate::tools::mcp::cache_dynamic_tool_schema(
+            "mcp__schema__nested_edit",
+            Some("Edit a nested target".to_string()),
+            Some(
+                r#"{"type":"object","properties":{"target":{"type":"object","properties":{"path":{"type":"string"},"range":{"type":"object","properties":{"start":{"type":"string"},"end":{"type":"string"}},"required":["start"]}},"required":["path","range"]},"dry_run":{"type":"string"}},"required":["target"]}"#
+                    .to_string(),
+            ),
+        );
+
+        let tools = build_openai_tools(&["mcp__schema__nested_edit".to_string()]);
+
+        assert!(tools.contains("\"target.path\""));
+        assert!(tools.contains("\"target.range.start\""));
+        assert!(tools.contains("\"required\":[\"target.path\",\"target.range.start\"]"));
+        assert!(!tools.contains("\"target\":{\"type\":\"object\""));
+
+        let off = build_openai_tools_with_schema_mode(
+            &["mcp__schema__nested_edit".to_string()],
+            ToolSchemaFlattening::Off,
+        );
+        assert!(off.contains("\"target\""));
+        assert!(off.contains("\"range\""));
+        assert!(!off.contains("\"target.path\""));
+    }
+
+    #[test]
+    fn parse_openai_tool_call_re_nests_flattened_dynamic_mcp_arguments() {
+        crate::tools::mcp::cache_dynamic_tool_schema(
+            "mcp__schema__nested_edit_parse",
+            Some("Edit a nested target".to_string()),
+            Some(
+                r#"{"type":"object","properties":{"target":{"type":"object","properties":{"path":{"type":"string"},"range":{"type":"object","properties":{"start":{"type":"string"}},"required":["start"]}},"required":["path","range"]}},"required":["target"]}"#
+                    .to_string(),
+            ),
+        );
+        let body = r#"{
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "function": {
+                            "name": "mcp__schema__nested_edit_parse",
+                            "arguments": "{\"target.path\":\"src/lib.rs\",\"target.range.start\":\"7\"}"
+                        }
+                    }]
+                }
+            }]
+        }"#;
+
+        let response = parse_openai_chat_completion(body).unwrap();
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "mcp__schema__nested_edit_parse");
+                assert_eq!(
+                    input.get("target"),
+                    Some(r#"{"path":"src/lib.rs","range":{"start":"7"}}"#)
+                );
+                assert!(input.get("target.path").is_none());
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_anthropic_tool_call_re_nests_flattened_dynamic_mcp_arguments() {
+        crate::tools::mcp::cache_dynamic_tool_schema(
+            "mcp__schema__nested_edit_anthropic",
+            Some("Edit a nested target".to_string()),
+            Some(
+                r#"{"type":"object","properties":{"target":{"type":"object","properties":{"path":{"type":"string"},"range":{"type":"object","properties":{"start":{"type":"string"}},"required":["start"]}},"required":["path","range"]}},"required":["target"]}"#
+                    .to_string(),
+            ),
+        );
+        let body = r#"{
+            "content": [{
+                "type": "tool_use",
+                "name": "mcp__schema__nested_edit_anthropic",
+                "input": {
+                    "target.path": "src/main.rs",
+                    "target.range.start": "12"
+                }
+            }]
+        }"#;
+
+        let response = parse_anthropic_messages(body).unwrap();
+        match response.action {
+            ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "mcp__schema__nested_edit_anthropic");
+                assert_eq!(
+                    input.get("target"),
+                    Some(r#"{"path":"src/main.rs","range":{"start":"12"}}"#)
+                );
+                assert!(input.get("target.path").is_none());
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
+    }
+
     fn empty_request_with_todos(todos: Vec<crate::core::todos::Todo>) -> ModelRequest {
         ModelRequest {
             system_prompt: String::new(),
@@ -6341,8 +6771,11 @@ mod tests {
         ModelConfig {
             base_url: "https://api.openai.com/v1".to_string(),
             model: "gpt-5.3-codex".to_string(),
+            preset: "auto".to_string(),
             api_key_env: "OPENAI_API_KEY".to_string(),
             reasoning_effort: "off".to_string(),
+            tool_schema_flattening: "auto".to_string(),
+            session_budget_microusd: 0,
         }
     }
 
@@ -6350,8 +6783,11 @@ mod tests {
         ModelConfig {
             base_url: "https://api.anthropic.com/v1/anthropic".to_string(),
             model: "claude-sonnet-4-5".to_string(),
+            preset: "auto".to_string(),
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
             reasoning_effort: "off".to_string(),
+            tool_schema_flattening: "auto".to_string(),
+            session_budget_microusd: 0,
         }
     }
 
@@ -6833,8 +7269,11 @@ mod tests {
         let config = ModelConfig {
             base_url: "https://api.deepseek.com".to_string(),
             model: "auto".to_string(),
+            preset: "auto".to_string(),
             api_key_env: "DSCODE_TEST_NO_KEY".to_string(),
             reasoning_effort: "auto".to_string(),
+            tool_schema_flattening: "auto".to_string(),
+            session_budget_microusd: 0,
         };
         let mut request = empty_request_with_todos(Vec::new());
         request.task = "quick read-only lookup".to_string();
@@ -6850,8 +7289,11 @@ mod tests {
         let config = ModelConfig {
             base_url: "https://api.deepseek.com".to_string(),
             model: "deepseek-auto".to_string(),
+            preset: "auto".to_string(),
             api_key_env: "DSCODE_TEST_NO_KEY".to_string(),
             reasoning_effort: "auto".to_string(),
+            tool_schema_flattening: "auto".to_string(),
+            session_budget_microusd: 0,
         };
         let mut request = empty_request_with_todos(Vec::new());
         request.task =
@@ -6863,6 +7305,8 @@ mod tests {
 
         assert_eq!(route.model, "deepseek-v4-pro");
         assert_eq!(route.reasoning, super::ReasoningTier::Max);
+        assert!(route.escalated);
+        assert_eq!(route.preset, "auto");
     }
 
     #[test]
@@ -6870,8 +7314,11 @@ mod tests {
         let config = ModelConfig {
             base_url: "https://api.deepseek.com".to_string(),
             model: "deepseek-chat".to_string(),
+            preset: "auto".to_string(),
             api_key_env: "DSCODE_TEST_NO_KEY".to_string(),
             reasoning_effort: "off".to_string(),
+            tool_schema_flattening: "auto".to_string(),
+            session_budget_microusd: 0,
         };
         let mut request = empty_request_with_todos(Vec::new());
         request.task = "complex architecture refactor with failed diagnostics".to_string();
@@ -6881,6 +7328,35 @@ mod tests {
 
         assert_eq!(route.model, "deepseek-chat");
         assert_eq!(route.reasoning, super::ReasoningTier::Off);
+        assert!(!route.escalated);
+    }
+
+    #[test]
+    fn model_preset_overrides_preset_controlled_model_markers() {
+        let mut config = ModelConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            model: "auto".to_string(),
+            preset: "flash".to_string(),
+            api_key_env: "DSCODE_TEST_NO_KEY".to_string(),
+            reasoning_effort: "auto".to_string(),
+            tool_schema_flattening: "auto".to_string(),
+            session_budget_microusd: 0,
+        };
+        let mut request = empty_request_with_todos(Vec::new());
+        request.task = "audit complex architecture".to_string();
+        request.planning_mode = true;
+
+        let flash = super::ModelRoute::resolve(&config, &request);
+        assert_eq!(flash.model, "deepseek-v4-flash");
+        assert_eq!(flash.preset, "flash");
+        assert!(!flash.escalated);
+
+        config.preset = "pro".to_string();
+        config.model = "deepseek-v4-flash".to_string();
+        let pro = super::ModelRoute::resolve(&config, &request);
+        assert_eq!(pro.model, "deepseek-v4-pro");
+        assert_eq!(pro.preset, "pro");
+        assert!(!pro.escalated);
     }
 
     #[test]
@@ -7022,8 +7498,11 @@ mod tests {
             config: ModelConfig {
                 base_url: "https://api.deepseek.com".to_string(),
                 model: "deepseek-coder".to_string(),
+                preset: "auto".to_string(),
                 api_key_env: "DSCODE_TEST_NO_KEY".to_string(),
                 reasoning_effort: "off".to_string(),
+                tool_schema_flattening: "auto".to_string(),
+                session_budget_microusd: 0,
             },
         }
     }
@@ -9945,6 +10424,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
         reasoning: RefCell<Vec<String>>,
         chunks: RefCell<Vec<String>>,
         done: RefCell<Vec<String>>,
+        repairs: RefCell<Vec<(String, String)>>,
         tool_calls: RefCell<Vec<(String, BTreeMap<String, String>)>>,
     }
 
@@ -9957,6 +10437,11 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
         }
         fn on_assistant_done(&mut self, full_text: &str) {
             self.done.borrow_mut().push(full_text.to_string());
+        }
+        fn on_tool_repair(&mut self, kind: &str, detail: &str) {
+            self.repairs
+                .borrow_mut()
+                .push((kind.to_string(), detail.to_string()));
         }
         fn on_tool_call(&mut self, name: &str, input: &BTreeMap<String, String>) {
             self.tool_calls
@@ -10018,9 +10503,13 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
             calls: 0,
             cancel_after: 3,
         };
-        let error =
-            super::parse_openai_stream_with_cancel(&mut cur, &mut events, Some(&mut cancel))
-                .unwrap_err();
+        let error = super::parse_openai_stream_with_cancel(
+            &mut cur,
+            &mut events,
+            Some(&mut cancel),
+            ToolSchemaFlattening::Auto,
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("agent run cancelled"));
         assert_eq!(*events.chunks.borrow(), vec!["Hel".to_string()]);
@@ -10041,9 +10530,13 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
             cancel_after: 2,
         };
         let started = std::time::Instant::now();
-        let error =
-            super::parse_openai_process_stream(&mut process, &mut events, Some(&mut cancel))
-                .unwrap_err();
+        let error = super::parse_openai_process_stream(
+            &mut process,
+            &mut events,
+            Some(&mut cancel),
+            ToolSchemaFlattening::Auto,
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("agent run cancelled"));
         assert!(
@@ -10100,6 +10593,51 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
         let mut events = NoopStreamEvents;
         let result = super::parse_openai_stream(&mut cur, &mut events);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_openai_stream_repairs_truncated_tool_arguments() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"x\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a.rs\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut cur = Cursor::new(body.as_bytes().to_vec());
+        let mut events = CapturingEvents::default();
+        let (resp, _usage) = super::parse_openai_stream(&mut cur, &mut events).unwrap();
+        match resp.action {
+            super::ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "read_file");
+                assert_eq!(input.get("path"), Some("a.rs"));
+            }
+            _ => panic!("expected repaired tool call"),
+        }
+        let reasoning = events.reasoning.borrow().join("");
+        assert!(reasoning.contains("[tool-call repair:truncated-json]"));
+        assert_eq!(events.repairs.borrow()[0].0, "truncated-json");
+    }
+
+    #[test]
+    fn parse_openai_stream_scavenges_text_tool_call() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"tool_name\\\":\\\"read_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"src/lib.rs\\\"}}\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut cur = Cursor::new(body.as_bytes().to_vec());
+        let mut events = CapturingEvents::default();
+        let (resp, _usage) = super::parse_openai_stream(&mut cur, &mut events).unwrap();
+        match resp.action {
+            super::ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "read_file");
+                assert_eq!(input.get("path"), Some("src/lib.rs"));
+            }
+            _ => panic!("expected scavenged tool call"),
+        }
+        let reasoning = events.reasoning.borrow().join("");
+        assert!(reasoning.contains("[tool-call repair:scavenged-tool-call]"));
+        assert_eq!(events.repairs.borrow()[0].0, "scavenged-tool-call");
+        assert_eq!(events.tool_calls.borrow().len(), 1);
     }
 
     #[test]
@@ -10186,6 +10724,30 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
         let mut events = NoopStreamEvents;
         let result = super::parse_anthropic_stream(&mut cur, &mut events);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_anthropic_stream_repairs_truncated_tool_input() {
+        let body = concat!(
+            "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tu\",\"name\":\"read_file\",\"input\":{}}}\n\n",
+            "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"a.rs\"}}\n\n",
+            "event: content_block_stop\ndata: {\"index\":0}\n\n",
+            "event: message_stop\ndata: {}\n\n",
+        );
+        let mut cur = Cursor::new(body.as_bytes().to_vec());
+        let mut events = CapturingEvents::default();
+        let (resp, _usage) = super::parse_anthropic_stream(&mut cur, &mut events).unwrap();
+        match resp.action {
+            super::ModelAction::CallTool { tool_name, input } => {
+                assert_eq!(tool_name, "read_file");
+                assert_eq!(input.get("path"), Some("a.rs"));
+            }
+            _ => panic!("expected repaired tool call"),
+        }
+        let reasoning = events.reasoning.borrow().join("");
+        assert!(reasoning.contains("[tool-call repair:truncated-json]"));
+        assert_eq!(events.repairs.borrow()[0].0, "truncated-json");
     }
 
     #[test]

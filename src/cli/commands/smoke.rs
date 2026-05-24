@@ -370,8 +370,11 @@ mod tests {
         let model = ModelConfig {
             base_url: "https://api.deepseek.com".to_string(),
             model: "deepseek-chat".to_string(),
+            preset: "auto".to_string(),
             api_key_env: "DEEPSEEK_API_KEY".to_string(),
             reasoning_effort: "off".to_string(),
+            tool_schema_flattening: "auto".to_string(),
+            session_budget_microusd: 0,
         };
         let openai = build_request_body(SmokeFlavor::OpenAi, &model, "ping");
         assert!(openai.contains("\"model\":\"deepseek-chat\""));
@@ -389,8 +392,11 @@ mod tests {
         let model = ModelConfig {
             base_url: "https://api.deepseek.com".to_string(),
             model: "auto".to_string(),
+            preset: "auto".to_string(),
             api_key_env: "DEEPSEEK_API_KEY".to_string(),
             reasoning_effort: "off".to_string(),
+            tool_schema_flattening: "auto".to_string(),
+            session_budget_microusd: 0,
         };
 
         let openai = build_request_body(SmokeFlavor::OpenAi, &model, "ping");

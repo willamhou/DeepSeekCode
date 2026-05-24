@@ -162,6 +162,7 @@ pub enum DogfoodAction {
     Run(DogfoodRunArgs),
     ExternalFixture(DogfoodExternalFixtureArgs),
     ExternalEvidence(DogfoodExternalEvidenceArgs),
+    RepairCacheEvidence(DogfoodRepairCacheEvidenceArgs),
     ReplayBenchmark(DogfoodReplayArgs),
     LivePlan(DogfoodLivePlanArgs),
     LiveRun(DogfoodLiveRunArgs),
@@ -270,6 +271,34 @@ pub enum TaskAction {
     Merge(TaskMergeArgs),
     Reject(TaskRejectArgs),
     FixtureSmoke(TaskFixtureSmokeArgs),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StatsArgs {
+    pub thread: Option<String>,
+    pub session: Option<String>,
+    pub json: bool,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventsAction {
+    Replay(EventsReplayArgs),
+    Diff(EventsDiffArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventsReplayArgs {
+    pub thread: String,
+    pub limit: Option<usize>,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventsDiffArgs {
+    pub left_thread: String,
+    pub right_thread: String,
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -406,6 +435,12 @@ impl Default for DogfoodExternalEvidenceArgs {
             json: false,
         }
     }
+}
+
+#[derive(Debug, Default)]
+pub struct DogfoodRepairCacheEvidenceArgs {
+    pub out: Option<String>,
+    pub json: bool,
 }
 
 #[derive(Debug, Default)]
@@ -932,6 +967,8 @@ impl Cli {
             "run" => Command::Run(parse_run_args(args)),
             "exec" => Command::Exec(parse_exec_subcommand(args)?),
             "agents" => Command::Agents(parse_agents_subcommand(args)?),
+            "stats" => Command::Stats(parse_stats_args(args)?),
+            "events" | "event" => Command::Events(parse_events_subcommand(args)?),
             "diagnostics" | "diag" => Command::Diagnostics(parse_diagnostics_args(args)?),
             "diff" => Command::Diff(DiffArgs {}),
             "resume" => Command::Resume(ResumeArgs { session: None }),
@@ -974,6 +1011,8 @@ pub enum Command {
     Run(RunArgs),
     Exec(ExecAction),
     Agents(AgentsAction),
+    Stats(StatsArgs),
+    Events(EventsAction),
     Diagnostics(DiagnosticsArgs),
     Diff(DiffArgs),
     Resume(ResumeArgs),
@@ -1043,6 +1082,8 @@ pub struct RunArgs {
     pub task: String,
     pub skill: Option<String>,
     pub budget: Option<usize>,
+    pub preset: Option<String>,
+    pub pro_next: bool,
     pub benchmark_gate: bool,
 }
 
@@ -1057,6 +1098,8 @@ pub struct ExecArgs {
     pub task: String,
     pub skill: Option<String>,
     pub budget: Option<usize>,
+    pub preset: Option<String>,
+    pub pro_next: bool,
     pub images: Vec<String>,
     pub json: bool,
 }
@@ -1067,6 +1110,8 @@ pub struct ExecResumeArgs {
     pub task: Option<String>,
     pub skill: Option<String>,
     pub budget: Option<usize>,
+    pub preset: Option<String>,
+    pub pro_next: bool,
     pub images: Vec<String>,
     pub json: bool,
 }
@@ -1349,6 +1394,8 @@ pub struct ConfigArgs {
     pub auth_stdin: bool,
     pub model_action: Option<ConfigModelAction>,
     pub provider_action: Option<ConfigProviderAction>,
+    pub preset_action: Option<ConfigPresetAction>,
+    pub budget_action: Option<ConfigBudgetAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1366,6 +1413,18 @@ pub enum ConfigProviderAction {
         provider: String,
         model: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigPresetAction {
+    Show,
+    Set(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigBudgetAction {
+    Show,
+    SetMicrousd(u64),
 }
 
 #[derive(Debug, Default)]
@@ -2360,6 +2419,8 @@ fn parse_config_args(args: Vec<String>) -> Result<ConfigArgs, String> {
         auth_stdin: false,
         model_action: None,
         provider_action: None,
+        preset_action: None,
+        budget_action: None,
     };
 
     let mut index = 0;
@@ -2424,9 +2485,25 @@ fn parse_config_args(args: Vec<String>) -> Result<ConfigArgs, String> {
                 parsed.provider_action = Some(parse_config_provider_action(rest)?);
                 index = args.len();
             }
+            "preset" => {
+                if parsed.preset_action.is_some() {
+                    return Err("config preset can only be specified once".to_string());
+                }
+                let rest = &args[index + 1..];
+                parsed.preset_action = Some(parse_config_preset_action(rest)?);
+                index = args.len();
+            }
+            "budget" => {
+                if parsed.budget_action.is_some() {
+                    return Err("config budget can only be specified once".to_string());
+                }
+                let rest = &args[index + 1..];
+                parsed.budget_action = Some(parse_config_budget_action(rest)?);
+                index = args.len();
+            }
             other => {
                 return Err(format!(
-                    "unknown config argument `{other}`; expected init|auth [ENV] --stdin|model [show|list|MODEL]|provider [show|list|NAME [MODEL]]|network allow|network deny|--force|--print-default"
+                    "unknown config argument `{other}`; expected init|auth [ENV] --stdin|model [show|list|MODEL]|provider [show|list|NAME [MODEL]]|preset [show|auto|flash|pro]|budget [show|off|MICROUSD]|network allow|network deny|--force|--print-default"
                 ));
             }
         }
@@ -2439,7 +2516,9 @@ fn parse_config_args(args: Vec<String>) -> Result<ConfigArgs, String> {
         + usize::from(auth_mutation)
         + usize::from(parsed.init)
         + usize::from(parsed.model_action.is_some())
-        + usize::from(parsed.provider_action.is_some());
+        + usize::from(parsed.provider_action.is_some())
+        + usize::from(parsed.preset_action.is_some())
+        + usize::from(parsed.budget_action.is_some());
     if network_mutations > 1 {
         return Err("config accepts only one network allow/deny mutation at a time".to_string());
     }
@@ -2468,7 +2547,7 @@ fn parse_config_args(args: Vec<String>) -> Result<ConfigArgs, String> {
     }
     if config_action_count > 1 {
         return Err(
-            "config accepts only one action at a time: init, auth, model, provider, or network"
+            "config accepts only one action at a time: init, auth, model, provider, preset, budget, or network"
                 .to_string(),
         );
     }
@@ -2477,6 +2556,13 @@ fn parse_config_args(args: Vec<String>) -> Result<ConfigArgs, String> {
     {
         return Err(
             "config model/provider cannot be combined with --force or --print-default".to_string(),
+        );
+    }
+    if (parsed.preset_action.is_some() || parsed.budget_action.is_some())
+        && (parsed.print_default || parsed.force)
+    {
+        return Err(
+            "config preset/budget cannot be combined with --force or --print-default".to_string(),
         );
     }
 
@@ -2517,6 +2603,38 @@ fn parse_config_provider_action(args: &[String]) -> Result<ConfigProviderAction,
         _ => {
             Err("config provider accepts at most two arguments: show|list|NAME [MODEL]".to_string())
         }
+    }
+}
+
+fn parse_config_preset_action(args: &[String]) -> Result<ConfigPresetAction, String> {
+    match args {
+        [] => Ok(ConfigPresetAction::Show),
+        [value] if matches!(value.as_str(), "show" | "status") => Ok(ConfigPresetAction::Show),
+        [value] if !value.starts_with('-') => Ok(ConfigPresetAction::Set(value.clone())),
+        [value] => Err(format!(
+            "unknown config preset argument `{value}`; expected show|auto|flash|pro"
+        )),
+        _ => Err("config preset accepts at most one argument: show|auto|flash|pro".to_string()),
+    }
+}
+
+fn parse_config_budget_action(args: &[String]) -> Result<ConfigBudgetAction, String> {
+    match args {
+        [] => Ok(ConfigBudgetAction::Show),
+        [value] if matches!(value.as_str(), "show" | "status") => Ok(ConfigBudgetAction::Show),
+        [value] if matches!(value.as_str(), "off" | "disable" | "disabled" | "0") => {
+            Ok(ConfigBudgetAction::SetMicrousd(0))
+        }
+        [value] if !value.starts_with('-') => {
+            let budget = value
+                .parse::<u64>()
+                .map_err(|_| "config budget expects MICROUSD or off".to_string())?;
+            Ok(ConfigBudgetAction::SetMicrousd(budget))
+        }
+        [value] => Err(format!(
+            "unknown config budget argument `{value}`; expected show|off|MICROUSD"
+        )),
+        _ => Err("config budget accepts at most one argument: show|off|MICROUSD".to_string()),
     }
 }
 
@@ -3128,6 +3246,8 @@ fn parse_benchmark_args(args: Vec<String>) -> BenchmarkArgs {
 fn parse_run_args(args: Vec<String>) -> RunArgs {
     let mut skill = None;
     let mut budget: Option<usize> = None;
+    let mut preset = None;
+    let mut pro_next = false;
     let mut benchmark_gate = false;
     let mut positional = Vec::new();
     let mut index = 0;
@@ -3146,6 +3266,16 @@ fn parse_run_args(args: Vec<String>) -> RunArgs {
                     }
                 }
                 index += 2;
+                continue;
+            }
+            "--preset" if index + 1 < args.len() => {
+                preset = Some(args[index + 1].clone());
+                index += 2;
+                continue;
+            }
+            "--pro-next" => {
+                pro_next = true;
+                index += 1;
                 continue;
             }
             "--benchmark-gate" => {
@@ -3168,8 +3298,135 @@ fn parse_run_args(args: Vec<String>) -> RunArgs {
         task,
         skill,
         budget,
+        preset,
+        pro_next,
         benchmark_gate,
     }
+}
+
+fn parse_stats_args(args: Vec<String>) -> Result<StatsArgs, String> {
+    let mut parsed = StatsArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--thread" if index + 1 < args.len() => {
+                parsed.thread = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--thread" => return Err("stats --thread requires an id".to_string()),
+            "--session" if index + 1 < args.len() => {
+                parsed.session = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--session" => return Err("stats --session requires an id".to_string()),
+            "--limit" if index + 1 < args.len() => {
+                parsed.limit = Some(
+                    args[index + 1]
+                        .parse::<usize>()
+                        .map_err(|_| "stats --limit must be a number".to_string())?,
+                );
+                index += 2;
+            }
+            "--limit" => return Err("stats --limit requires a number".to_string()),
+            "--json" => {
+                parsed.json = true;
+                index += 1;
+            }
+            other => {
+                return Err(format!(
+                    "unknown flag for `stats`: {other}; expected --thread|--session|--limit|--json"
+                ));
+            }
+        }
+    }
+    if parsed.thread.is_some() && parsed.session.is_some() {
+        return Err("stats accepts either --thread or --session, not both".to_string());
+    }
+    Ok(parsed)
+}
+
+fn parse_events_subcommand(args: Vec<String>) -> Result<EventsAction, String> {
+    let Some((action, rest)) = args.split_first() else {
+        return Err("events requires a sub-action: replay|diff".to_string());
+    };
+    match action.as_str() {
+        "replay" => parse_events_replay_args(rest).map(EventsAction::Replay),
+        "diff" => parse_events_diff_args(rest).map(EventsAction::Diff),
+        other => Err(format!(
+            "unknown events sub-action `{other}`; expected replay|diff"
+        )),
+    }
+}
+
+fn parse_events_replay_args(args: &[String]) -> Result<EventsReplayArgs, String> {
+    let mut thread = None;
+    let mut limit = None;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--limit" if index + 1 < args.len() => {
+                limit = Some(
+                    args[index + 1]
+                        .parse::<usize>()
+                        .map_err(|_| "events replay --limit must be a number".to_string())?,
+                );
+                index += 2;
+            }
+            "--limit" => return Err("events replay --limit requires a number".to_string()),
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown flag for `events replay`: {value}; expected --limit|--json"
+                ));
+            }
+            value => {
+                if thread.replace(value.to_string()).is_some() {
+                    return Err("events replay accepts exactly one thread id".to_string());
+                }
+                index += 1;
+            }
+        }
+    }
+    Ok(EventsReplayArgs {
+        thread: thread.ok_or_else(|| "events replay requires a thread id".to_string())?,
+        limit,
+        json,
+    })
+}
+
+fn parse_events_diff_args(args: &[String]) -> Result<EventsDiffArgs, String> {
+    let mut threads = Vec::new();
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown flag for `events diff`: {value}; expected --json"
+                ));
+            }
+            value => {
+                threads.push(value.to_string());
+                index += 1;
+            }
+        }
+    }
+    if threads.len() != 2 {
+        return Err("events diff requires left and right thread ids".to_string());
+    }
+    Ok(EventsDiffArgs {
+        left_thread: threads[0].clone(),
+        right_thread: threads[1].clone(),
+        json,
+    })
 }
 
 fn parse_exec_subcommand(args: Vec<String>) -> Result<ExecAction, String> {
@@ -4863,6 +5120,8 @@ fn default_agents_service_kind() -> AgentsServiceKind {
 fn parse_exec_args(args: Vec<String>) -> Result<ExecArgs, String> {
     let mut skill = None;
     let mut budget = None;
+    let mut preset = None;
+    let mut pro_next = false;
     let mut images = Vec::new();
     let mut json = false;
     let mut positional = Vec::new();
@@ -4888,6 +5147,15 @@ fn parse_exec_args(args: Vec<String>) -> Result<ExecArgs, String> {
                 index += 2;
             }
             "--budget" => return Err("exec --budget requires a value".to_string()),
+            "--preset" if index + 1 < args.len() => {
+                preset = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--preset" => return Err("exec --preset requires a value".to_string()),
+            "--pro-next" => {
+                pro_next = true;
+                index += 1;
+            }
             "--image" | "-i" if index + 1 < args.len() => {
                 images.extend(parse_image_flag_values(&args[index + 1]));
                 index += 2;
@@ -4912,6 +5180,8 @@ fn parse_exec_args(args: Vec<String>) -> Result<ExecArgs, String> {
         task,
         skill,
         budget,
+        preset,
+        pro_next,
         images,
         json,
     })
@@ -4920,6 +5190,8 @@ fn parse_exec_args(args: Vec<String>) -> Result<ExecArgs, String> {
 fn parse_exec_resume_args(args: Vec<String>) -> Result<ExecResumeArgs, String> {
     let mut skill = None;
     let mut budget = None;
+    let mut preset = None;
+    let mut pro_next = false;
     let mut images = Vec::new();
     let mut json = false;
     let mut last = false;
@@ -4950,6 +5222,15 @@ fn parse_exec_resume_args(args: Vec<String>) -> Result<ExecResumeArgs, String> {
                 index += 2;
             }
             "--budget" => return Err("exec resume --budget requires a value".to_string()),
+            "--preset" if index + 1 < args.len() => {
+                preset = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--preset" => return Err("exec resume --preset requires a value".to_string()),
+            "--pro-next" => {
+                pro_next = true;
+                index += 1;
+            }
             "--image" | "-i" if index + 1 < args.len() => {
                 images.extend(parse_image_flag_values(&args[index + 1]));
                 index += 2;
@@ -4990,6 +5271,8 @@ fn parse_exec_resume_args(args: Vec<String>) -> Result<ExecResumeArgs, String> {
         task,
         skill,
         budget,
+        preset,
+        pro_next,
         images,
         json,
     })
@@ -5022,7 +5305,7 @@ fn parse_dogfood_subcommand(args: Vec<String>) -> Result<DogfoodAction, String> 
     let action = iter
         .next()
         .ok_or_else(|| {
-            "dogfood requires a sub-action: run|external-fixture|external-evidence|replay-benchmark|live-plan|live-run|live-evidence|report|export-benchmark|promote-benchmark"
+            "dogfood requires a sub-action: run|external-fixture|external-evidence|repair-cache-evidence|replay-benchmark|live-plan|live-run|live-evidence|report|export-benchmark|promote-benchmark"
                 .to_string()
         })?;
     let rest: Vec<String> = iter.collect();
@@ -5034,6 +5317,9 @@ fn parse_dogfood_subcommand(args: Vec<String>) -> Result<DogfoodAction, String> 
         "external-evidence" | "external-fixture-evidence" | "verify-external-fixture-evidence" => {
             parse_dogfood_external_evidence_args(rest).map(DogfoodAction::ExternalEvidence)
         }
+        "repair-cache-evidence" | "repair-evidence" => Ok(DogfoodAction::RepairCacheEvidence(
+            parse_dogfood_repair_cache_evidence_args(rest)?,
+        )),
         "replay-benchmark" | "replay-bench" => {
             Ok(DogfoodAction::ReplayBenchmark(parse_dogfood_replay_args(rest)))
         }
@@ -5054,7 +5340,7 @@ fn parse_dogfood_subcommand(args: Vec<String>) -> Result<DogfoodAction, String> 
             )))
         }
         other => Err(format!(
-            "unknown dogfood sub-action `{other}`; expected run|external-fixture|external-evidence|replay-benchmark|live-plan|live-run|live-evidence|report|export-benchmark|promote-benchmark"
+            "unknown dogfood sub-action `{other}`; expected run|external-fixture|external-evidence|repair-cache-evidence|replay-benchmark|live-plan|live-run|live-evidence|report|export-benchmark|promote-benchmark"
         )),
     }
 }
@@ -5304,6 +5590,36 @@ fn parse_dogfood_external_evidence_args(
                 return Err(format!("{} requires a value", args[index]));
             }
             other => return Err(format!("unknown dogfood external-evidence flag `{other}`")),
+        }
+    }
+    Ok(evidence)
+}
+
+fn parse_dogfood_repair_cache_evidence_args(
+    args: Vec<String>,
+) -> Result<DogfoodRepairCacheEvidenceArgs, String> {
+    let mut evidence = DogfoodRepairCacheEvidenceArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--out" if index + 1 < args.len() => {
+                evidence.out = Some(args[index + 1].clone());
+                index += 2;
+                continue;
+            }
+            "--json" => {
+                evidence.json = true;
+                index += 1;
+                continue;
+            }
+            "--out" => {
+                return Err("dogfood repair-cache-evidence --out requires a path".to_string())
+            }
+            other => {
+                return Err(format!(
+                    "unknown dogfood repair-cache-evidence flag `{other}`; expected --out|--json"
+                ))
+            }
         }
     }
     Ok(evidence)
@@ -6493,6 +6809,7 @@ mod tests {
             }
             DogfoodAction::ExternalFixture(_) => panic!("expected dogfood run args"),
             DogfoodAction::ExternalEvidence(_) => panic!("expected dogfood run args"),
+            DogfoodAction::RepairCacheEvidence(_) => panic!("expected dogfood run args"),
             DogfoodAction::ReplayBenchmark(_) => panic!("expected dogfood run args"),
             DogfoodAction::LivePlan(_) => panic!("expected dogfood run args"),
             DogfoodAction::LiveRun(_) => panic!("expected dogfood run args"),
@@ -6556,6 +6873,7 @@ mod tests {
             }
             DogfoodAction::Run(_) => panic!("expected external fixture args"),
             DogfoodAction::ExternalEvidence(_) => panic!("expected external fixture args"),
+            DogfoodAction::RepairCacheEvidence(_) => panic!("expected external fixture args"),
             DogfoodAction::ReplayBenchmark(_) => panic!("expected external fixture args"),
             DogfoodAction::LivePlan(_) => panic!("expected external fixture args"),
             DogfoodAction::LiveRun(_) => panic!("expected external fixture args"),
@@ -6649,6 +6967,7 @@ mod tests {
             DogfoodAction::Run(_) => panic!("expected dogfood report args"),
             DogfoodAction::ExternalFixture(_) => panic!("expected dogfood report args"),
             DogfoodAction::ExternalEvidence(_) => panic!("expected dogfood report args"),
+            DogfoodAction::RepairCacheEvidence(_) => panic!("expected dogfood report args"),
             DogfoodAction::ReplayBenchmark(_) => panic!("expected dogfood report args"),
             DogfoodAction::LivePlan(_) => panic!("expected dogfood report args"),
             DogfoodAction::LiveRun(_) => panic!("expected dogfood report args"),
@@ -6667,6 +6986,28 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.contains("--require-category min-runs"));
+    }
+
+    #[test]
+    fn parses_dogfood_repair_cache_evidence_subcommand() {
+        let parsed = parse_dogfood_subcommand(vec![
+            "repair-cache-evidence".to_string(),
+            "--out".to_string(),
+            ".dscode/dogfood/repair-cache-evidence.json".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        match parsed {
+            DogfoodAction::RepairCacheEvidence(args) => {
+                assert_eq!(
+                    args.out.as_deref(),
+                    Some(".dscode/dogfood/repair-cache-evidence.json")
+                );
+                assert!(args.json);
+            }
+            other => panic!("expected repair/cache evidence args, got {other:?}"),
+        }
     }
 
     #[test]
@@ -6693,6 +7034,7 @@ mod tests {
             DogfoodAction::Run(_) => panic!("expected replay args"),
             DogfoodAction::ExternalFixture(_) => panic!("expected replay args"),
             DogfoodAction::ExternalEvidence(_) => panic!("expected replay args"),
+            DogfoodAction::RepairCacheEvidence(_) => panic!("expected replay args"),
             DogfoodAction::LivePlan(_) => panic!("expected replay args"),
             DogfoodAction::LiveRun(_) => panic!("expected replay args"),
             DogfoodAction::LiveEvidence(_) => panic!("expected replay args"),
@@ -6735,6 +7077,7 @@ mod tests {
             DogfoodAction::Run(_) => panic!("expected live plan args"),
             DogfoodAction::ExternalFixture(_) => panic!("expected live plan args"),
             DogfoodAction::ExternalEvidence(_) => panic!("expected live plan args"),
+            DogfoodAction::RepairCacheEvidence(_) => panic!("expected live plan args"),
             DogfoodAction::ReplayBenchmark(_) => panic!("expected live plan args"),
             DogfoodAction::LiveRun(_) => panic!("expected live plan args"),
             DogfoodAction::LiveEvidence(_) => panic!("expected live plan args"),
@@ -6794,6 +7137,7 @@ mod tests {
             DogfoodAction::Run(_) => panic!("expected live run args"),
             DogfoodAction::ExternalFixture(_) => panic!("expected live run args"),
             DogfoodAction::ExternalEvidence(_) => panic!("expected live run args"),
+            DogfoodAction::RepairCacheEvidence(_) => panic!("expected live run args"),
             DogfoodAction::ReplayBenchmark(_) => panic!("expected live run args"),
             DogfoodAction::LivePlan(_) => panic!("expected live run args"),
             DogfoodAction::LiveEvidence(_) => panic!("expected live run args"),
@@ -6841,6 +7185,7 @@ mod tests {
             DogfoodAction::Run(_) => panic!("expected live evidence args"),
             DogfoodAction::ExternalFixture(_) => panic!("expected live evidence args"),
             DogfoodAction::ExternalEvidence(_) => panic!("expected live evidence args"),
+            DogfoodAction::RepairCacheEvidence(_) => panic!("expected live evidence args"),
             DogfoodAction::ReplayBenchmark(_) => panic!("expected live evidence args"),
             DogfoodAction::LivePlan(_) => panic!("expected live evidence args"),
             DogfoodAction::LiveRun(_) => panic!("expected live evidence args"),
@@ -7384,6 +7729,9 @@ mod tests {
             "research".to_string(),
             "--budget".to_string(),
             "7".to_string(),
+            "--preset".to_string(),
+            "auto".to_string(),
+            "--pro-next".to_string(),
             "--benchmark-gate".to_string(),
             "inspect".to_string(),
             "repo".to_string(),
@@ -7393,11 +7741,98 @@ mod tests {
             Some(Command::Run(args)) => {
                 assert_eq!(args.skill.as_deref(), Some("research"));
                 assert_eq!(args.budget, Some(7));
+                assert_eq!(args.preset.as_deref(), Some("auto"));
+                assert!(args.pro_next);
                 assert!(args.benchmark_gate);
                 assert_eq!(args.task, "inspect".to_string());
             }
             other => panic!("expected Command::Run, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_stats_subcommand() {
+        let cli = Cli::from_argv(vec![
+            "stats".to_string(),
+            "--thread".to_string(),
+            "thread-123".to_string(),
+            "--limit".to_string(),
+            "25".to_string(),
+            "--json".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Stats(args)) => {
+                assert_eq!(args.thread.as_deref(), Some("thread-123"));
+                assert_eq!(args.session, None);
+                assert_eq!(args.limit, Some(25));
+                assert!(args.json);
+            }
+            other => panic!("expected Command::Stats, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_rejects_stats_thread_and_session_together() {
+        let error = Cli::from_argv(vec![
+            "stats".to_string(),
+            "--thread".to_string(),
+            "thread-1".to_string(),
+            "--session".to_string(),
+            "session-1".to_string(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("either --thread or --session"));
+    }
+
+    #[test]
+    fn cli_from_argv_routes_events_replay_subcommand() {
+        let cli = Cli::from_argv(vec![
+            "events".to_string(),
+            "replay".to_string(),
+            "thread-123".to_string(),
+            "--limit".to_string(),
+            "25".to_string(),
+            "--json".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Events(EventsAction::Replay(args))) => {
+                assert_eq!(args.thread, "thread-123");
+                assert_eq!(args.limit, Some(25));
+                assert!(args.json);
+            }
+            other => panic!("expected Command::Events replay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_events_diff_subcommand() {
+        let cli = Cli::from_argv(vec![
+            "events".to_string(),
+            "diff".to_string(),
+            "left-thread".to_string(),
+            "right-thread".to_string(),
+            "--json".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Events(EventsAction::Diff(args))) => {
+                assert_eq!(args.left_thread, "left-thread");
+                assert_eq!(args.right_thread, "right-thread");
+                assert!(args.json);
+            }
+            other => panic!("expected Command::Events diff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_rejects_unknown_events_subcommand() {
+        let error = Cli::from_argv(vec!["events".to_string(), "show".to_string()]).unwrap_err();
+        assert!(error.contains("unknown events sub-action"));
     }
 
     #[test]
@@ -7409,6 +7844,9 @@ mod tests {
             "debug".to_string(),
             "--budget".to_string(),
             "7".to_string(),
+            "--preset".to_string(),
+            "flash".to_string(),
+            "--pro-next".to_string(),
             "--image".to_string(),
             "a.png,b.jpg".to_string(),
             "-".to_string(),
@@ -7420,6 +7858,8 @@ mod tests {
                 assert!(args.json);
                 assert_eq!(args.skill.as_deref(), Some("debug"));
                 assert_eq!(args.budget, Some(7));
+                assert_eq!(args.preset.as_deref(), Some("flash"));
+                assert!(args.pro_next);
                 assert_eq!(args.images, vec!["a.png", "b.jpg"]);
                 assert_eq!(args.task, "-");
             }
@@ -8401,6 +8841,50 @@ mod tests {
         match cli.command {
             Some(Command::Config(args)) => {
                 assert_eq!(args.model_action, Some(ConfigModelAction::List));
+                assert!(!args.init);
+                assert!(!args.print_default);
+            }
+            other => panic!("expected Command::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_config_preset_set() {
+        let cli = Cli::from_argv(vec![
+            "config".to_string(),
+            "preset".to_string(),
+            "flash".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Config(args)) => {
+                assert_eq!(
+                    args.preset_action,
+                    Some(ConfigPresetAction::Set("flash".to_string()))
+                );
+                assert!(!args.init);
+                assert!(!args.print_default);
+            }
+            other => panic!("expected Command::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_from_argv_routes_config_budget_set() {
+        let cli = Cli::from_argv(vec![
+            "config".to_string(),
+            "budget".to_string(),
+            "2500".to_string(),
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Command::Config(args)) => {
+                assert_eq!(
+                    args.budget_action,
+                    Some(ConfigBudgetAction::SetMicrousd(2500))
+                );
                 assert!(!args.init);
                 assert!(!args.print_default);
             }

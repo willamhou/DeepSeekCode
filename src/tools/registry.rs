@@ -76,6 +76,13 @@ pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ToolMetadata {
+    pub read_only: bool,
+    pub parallel_safe: bool,
+    pub storm_exempt: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionRequest {
     pub kind: String,
@@ -92,6 +99,10 @@ impl ToolRegistry {
             .map(|tool| tool.name())
             .filter(|name| policy.allows_tool(name))
             .collect()
+    }
+
+    pub fn metadata(&self, name: &str) -> ToolMetadata {
+        tool_metadata_for_name(name)
     }
 
     pub fn execute(&self, name: &str, input: ToolInput) -> AppResult<ToolOutput> {
@@ -432,6 +443,107 @@ impl ToolRegistry {
 
         None
     }
+}
+
+pub fn tool_metadata_for_name(name: &str) -> ToolMetadata {
+    let read_only = matches!(
+        name,
+        "list_files"
+            | "list_dir"
+            | "read_file"
+            | "retrieve_tool_result"
+            | "search_text"
+            | "grep_files"
+            | "file_search"
+            | "web_run"
+            | "web_search"
+            | "fetch_url"
+            | "finance"
+            | "image_ocr"
+            | "image_analyze"
+            | "review"
+            | "pr_review_comment_plan"
+            | "github_issue_context"
+            | "github_pr_context"
+            | "tool_search_tool_regex"
+            | "tool_search_tool_bm25"
+            | "git_status"
+            | "git_diff"
+            | "git_log"
+            | "git_show"
+            | "git_blame"
+            | "project_map"
+            | "diagnostics"
+            | "validate_data"
+            | "recall_archive"
+            | "todo_list"
+            | "checklist_list"
+            | "task_list"
+            | "task_read"
+            | "agent_result"
+            | "agent_list"
+            | "pr_attempt_list"
+            | "pr_attempt_read"
+            | "exec_shell_wait"
+            | "exec_shell_wait_once"
+            | "task_shell_wait"
+            | "exec_shell_list"
+            | "exec_shell_show"
+            | "exec_shell_replay"
+            | "exec_shell_attach"
+            | "exec_shell_supervisor_status"
+            | "mcp_list_tools"
+            | "mcp_list_prompts"
+            | "mcp_get_prompt"
+            | "mcp_list_resources"
+            | "mcp_read_resource"
+            | "mcp_list_resource_templates"
+            | "rlm_process_sessions"
+            | "rlm_process_status"
+            | "rlm_process_events"
+            | "rlm_process_wait"
+            | "rlm_python_sessions"
+    );
+    let parallel_safe = matches!(
+        name,
+        "list_files" | "list_dir" | "read_file" | "search_text" | "git_status" | "git_diff"
+    );
+    ToolMetadata {
+        read_only,
+        parallel_safe,
+        storm_exempt: false,
+    }
+}
+
+pub fn execute_parallel_safe_tool(
+    name: &str,
+    input: ToolInput,
+    policy: &ExecutionPolicy,
+) -> AppResult<ToolOutput> {
+    if !policy.allows_tool(name) {
+        return Err(policy_denied(format!("tool blocked by policy: {name}")));
+    }
+    if !tool_metadata_for_name(name).parallel_safe {
+        return Err(app_error(format!("tool is not parallel-safe: {name}")));
+    }
+    match name {
+        "list_files" => ListFilesTool.execute(input),
+        "list_dir" => ListDirTool.execute(input),
+        "read_file" => ReadFileTool.execute(input),
+        "search_text" => SearchTextTool.execute(input),
+        "git_status" => GitStatusTool.execute(input),
+        "git_diff" => GitDiffTool.execute(input),
+        _ => Err(app_error(format!(
+            "parallel-safe tool executor missing implementation for {name}"
+        ))),
+    }
+    .map_err(|error| {
+        if error.downcast_ref::<crate::error::AppError>().is_some() {
+            error
+        } else {
+            tool_failure(error.to_string())
+        }
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -1205,6 +1317,25 @@ done
         assert!(names.contains(&"github_pr_review_comment"));
         assert!(names.contains(&"github_close_issue"));
         assert!(names.contains(&"diagnostics"));
+    }
+
+    #[test]
+    fn tool_metadata_marks_only_explicit_read_tools_parallel_safe() {
+        let registry = default_registry();
+
+        assert!(registry.metadata("read_file").read_only);
+        assert!(registry.metadata("read_file").parallel_safe);
+        assert!(registry.metadata("list_files").parallel_safe);
+        assert!(registry.metadata("search_text").parallel_safe);
+        assert!(registry.metadata("git_status").parallel_safe);
+        assert!(registry.metadata("git_diff").parallel_safe);
+
+        assert!(!registry.metadata("todo_add").read_only);
+        assert!(!registry.metadata("todo_add").parallel_safe);
+        assert!(!registry.metadata("run_shell").parallel_safe);
+        assert!(!registry.metadata("apply_patch").parallel_safe);
+        assert!(registry.metadata("mcp_read_resource").read_only);
+        assert!(!registry.metadata("mcp_read_resource").parallel_safe);
     }
 
     #[test]

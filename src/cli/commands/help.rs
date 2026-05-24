@@ -14,6 +14,8 @@ fn render_help(topics: &[String]) -> String {
         Some("quickstart") | Some("onboarding") => quickstart_help().to_string(),
         Some("run") => run_help().to_string(),
         Some("exec") => exec_help().to_string(),
+        Some("stats") => stats_help().to_string(),
+        Some("events") | Some("event") => events_help().to_string(),
         Some("benchmark") => benchmark_help().to_string(),
         Some("mcp") => mcp_help().to_string(),
         Some("hooks") => hooks_help().to_string(),
@@ -40,6 +42,8 @@ fn global_help() -> &'static str {
         "  deepseek quickstart              Show first-run readiness and next commands\n",
         "  deepseek run \"<task>\"             Run one coding task and exit\n",
         "  deepseek exec run \"<task>\"        Run a durable one-shot agent task\n",
+        "  deepseek stats                    Inspect runtime usage, cache, and repair evidence\n",
+        "  deepseek events replay <thread>   Summarize a runtime event timeline\n",
         "  deepseek task start \"<task>\"       Start an isolated background worktree task\n",
         "  deepseek benchmark                Run deterministic benchmark gates\n",
         "  deepseek dogfood <action>        Run self-verification and release evidence commands\n",
@@ -51,6 +55,8 @@ fn global_help() -> &'static str {
         "  tui                              Terminal workbench with sessions, tools, and approvals\n",
         "  run                              One-shot coding task\n",
         "  exec                             Durable exec/resume task runner\n",
+        "  stats                            Runtime usage, cache, repair, and prompt-layer stats\n",
+        "  events                           Runtime event replay and thread comparison evidence\n",
         "  agents                           Durable runtime, service, and shell supervisor tools\n",
         "  task                             Local background worktree task runner\n",
         "  quickstart                       First-run readiness, next commands, and starter tasks\n",
@@ -68,12 +74,17 @@ fn global_help() -> &'static str {
         "  deepseek tui\n",
         "  deepseek quickstart\n",
         "  deepseek run \"fix the failing tests and summarize the diff\"\n",
+        "  deepseek stats --json\n",
+        "  deepseek events replay thread-123 --limit 50\n",
+        "  deepseek events diff thread-before thread-after\n",
         "  deepseek dogfood live-plan --limit 10\n",
         "  deepseek dogfood live-run --limit 3\n",
         "\n",
         "More help:\n",
         "  deepseek help tui\n",
         "  deepseek help run\n",
+        "  deepseek help stats\n",
+        "  deepseek help events\n",
         "  deepseek help quickstart\n",
         "  deepseek help benchmark\n",
         "  deepseek help mcp\n",
@@ -137,6 +148,34 @@ fn exec_help() -> &'static str {
         "  deepseek exec resume [session-id] [--skill <name>] [--budget <1..200>] [--image <path>] [--json] [task]\n",
         "\n",
         "Runs or resumes durable coding-agent tasks with structured output support."
+    )
+}
+
+fn stats_help() -> &'static str {
+    concat!(
+        "DeepSeekCode stats\n",
+        "\n",
+        "Usage:\n",
+        "  deepseek stats [--thread <id>|--session <id>] [--limit <N>] [--json]\n",
+        "\n",
+        "Aggregates durable runtime usage records, prompt cache hit/miss tokens,\n",
+        "estimated cost, model split, repair events, repeated-tool suppressions, and\n",
+        "prompt-layer snapshots when they have been recorded by the runtime."
+    )
+}
+
+fn events_help() -> &'static str {
+    concat!(
+        "DeepSeekCode events\n",
+        "\n",
+        "Usage:\n",
+        "  deepseek events replay <thread-id> [--limit <N>] [--json]\n",
+        "  deepseek events diff <left-thread-id> <right-thread-id> [--json]\n",
+        "\n",
+        "`replay` renders a compact, chronological summary of durable runtime events.\n",
+        "`diff` compares two threads for cost, cache hit rate, tool calls, failed\n",
+        "tool calls, repair events, repeated-tool suppressions, and modified-file\n",
+        "evidence when file paths were recorded."
     )
 }
 
@@ -248,6 +287,9 @@ fn dogfood_help(topic: Option<&str>) -> &'static str {
         Some("external-fixture") | Some("external-write-fixture") => {
             dogfood_external_fixture_help()
         }
+        Some("repair-cache-evidence") | Some("repair-evidence") => {
+            dogfood_repair_cache_evidence_help()
+        }
         Some("replay-benchmark") | Some("replay-bench") => dogfood_replay_help(),
         Some("live-plan") | Some("plan-live") => dogfood_live_plan_help(),
         Some("live-run") | Some("run-live") => dogfood_live_run_help(),
@@ -262,6 +304,7 @@ fn dogfood_help(topic: Option<&str>) -> &'static str {
             "  deepseek dogfood run \"<task>\"\n",
             "  deepseek dogfood run --from-benchmark <case> [--manifest <path>]\n",
             "  deepseek dogfood external-fixture --workdir <path> \"<task>\"\n",
+            "  deepseek dogfood repair-cache-evidence [--out <path>] [--json]\n",
             "  deepseek dogfood replay-benchmark [--manifest <path>] [--category <name>] [--limit <n>]\n",
             "  deepseek dogfood live-plan [--limit <n>] [--json]\n",
             "  deepseek dogfood live-run [--limit <n>] [--category <name>] [--execute]\n",
@@ -274,6 +317,7 @@ fn dogfood_help(topic: Option<&str>) -> &'static str {
             "gates. Normal product use is `deepseek`, `deepseek tui`, or `deepseek run`.\n",
             "\n",
             "More help:\n",
+            "  deepseek help dogfood repair-cache-evidence\n",
             "  deepseek help dogfood replay-benchmark\n",
             "  deepseek help dogfood live-plan\n",
             "  deepseek help dogfood live-run\n",
@@ -307,6 +351,20 @@ fn dogfood_external_fixture_help() -> &'static str {
         "`--allow-offline` is only for rehearsal runs that will not satisfy release gates.\n",
         "`--evidence-out` writes a JSON summary with appended external-fixture rows and\n",
         "the dogfood ledger fingerprint for release evidence upload."
+    )
+}
+
+fn dogfood_repair_cache_evidence_help() -> &'static str {
+    concat!(
+        "DeepSeekCode dogfood repair-cache-evidence\n",
+        "\n",
+        "Usage:\n",
+        "  deepseek dogfood repair-cache-evidence [--out <path>] [--json]\n",
+        "\n",
+        "Generates deterministic runtime evidence for the DeepSeek-native repair/cache\n",
+        "loop: a malformed DeepSeek tool-call trace that fails strict parsing, the\n",
+        "same trace recovered through tool-call repair, prompt-layer events, and a\n",
+        "before/after cache hit-rate comparison. No model call is made."
     )
 }
 

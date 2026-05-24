@@ -3,18 +3,27 @@ use std::io::Write;
 
 /// Streaming callback contract.
 ///
-/// Per assistant turn, callers invoke methods in this order:
+/// Per assistant turn, callers invoke methods with these broad phases:
 ///
 /// 1. `on_reasoning_delta` — zero or more times for thinking-mode chunks
-/// 2. `on_text_delta` — zero or more times, only with non-empty chunks
-/// 3. `on_assistant_done` — exactly once, with the full concatenated text
-/// 4. `on_tool_call` — zero or one time, after `on_assistant_done`
+/// 2. `on_model_route` / `on_model_budget_warning` — optional model policy
+///    visibility before or between provider calls
+/// 3. `on_text_delta` — zero or more times, only with non-empty chunks
+/// 4. `on_tool_repair` — zero or more times when recoverable tool-call
+///    parsing issues were repaired
+/// 5. `on_tool_call` — zero or more times when the model selected tools
+/// 6. `on_assistant_done` — exactly once, with the full concatenated text
 ///
-/// Implementations may rely on this ordering.
+/// Streaming providers may discover repairs and tool calls only after the last
+/// frame, so implementations should not require repair/tool-call callbacks to
+/// be interleaved with text deltas.
 pub trait StreamEvents {
     fn on_reasoning_delta(&mut self, _chunk: &str) {}
+    fn on_model_route(&mut self, _preset: &str, _model: &str, _reason: &str, _escalated: bool) {}
+    fn on_model_budget_warning(&mut self, _used_microusd: u64, _budget_microusd: u64) {}
     fn on_text_delta(&mut self, chunk: &str);
     fn on_assistant_done(&mut self, full_text: &str);
+    fn on_tool_repair(&mut self, _kind: &str, _detail: &str) {}
     fn on_tool_call(&mut self, name: &str, input: &BTreeMap<String, String>);
 }
 
@@ -111,6 +120,37 @@ impl<W: Write> StreamEvents for TtyRenderer<W> {
         }
         let _ = write!(self.out, "{chunk}");
         let _ = self.out.flush();
+    }
+
+    fn on_model_route(&mut self, preset: &str, model: &str, reason: &str, escalated: bool) {
+        if !escalated {
+            return;
+        }
+        if self.use_ansi {
+            let _ = writeln!(
+                self.out,
+                "\x1b[2mmodel preset: {preset}\nescalating next call to {model}: {reason}\x1b[0m"
+            );
+        } else {
+            let _ = writeln!(
+                self.out,
+                "model preset: {preset}\nescalating next call to {model}: {reason}"
+            );
+        }
+    }
+
+    fn on_model_budget_warning(&mut self, used_microusd: u64, budget_microusd: u64) {
+        if self.use_ansi {
+            let _ = writeln!(
+                self.out,
+                "\x1b[33msession budget warning: {used_microusd}/{budget_microusd} microusd used\x1b[0m"
+            );
+        } else {
+            let _ = writeln!(
+                self.out,
+                "session budget warning: {used_microusd}/{budget_microusd} microusd used"
+            );
+        }
     }
 
     fn on_assistant_done(&mut self, _full_text: &str) {
@@ -221,6 +261,21 @@ mod tests {
             r.on_tool_call("git_diff", &args);
         });
         assert!(out.contains("\x1b[33m"), "out: {out:?}");
+    }
+
+    #[test]
+    fn model_route_prints_visible_auto_escalation() {
+        let out = render(false, |r| {
+            r.on_model_route(
+                "auto",
+                "deepseek-v4-pro",
+                "complex task or recovery signals",
+                true,
+            );
+        });
+
+        assert!(out.contains("model preset: auto"));
+        assert!(out.contains("escalating next call to deepseek-v4-pro"));
     }
 
     #[test]

@@ -6,12 +6,14 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::cli::app::{ExecAction, ExecArgs, ExecResumeArgs};
+use crate::cli::commands::config::apply_model_preset_override;
 use crate::config::load::load_or_default;
 use crate::config::types::AppConfig;
 use crate::core::context::TaskContext;
 use crate::core::loop_runtime::{
     AgentLoop, AgentLoopOptions, AgentRunEvents, RunResult, SharedAgentRunEvents, ToolEvent,
 };
+use crate::core::prompt_layers::prompt_layers_event_payload;
 use crate::core::rollback::RollbackStore;
 use crate::core::runtime::RuntimeStore;
 use crate::core::session::{SessionSnapshot, SessionStore};
@@ -28,7 +30,8 @@ pub fn run(action: ExecAction) -> AppResult<()> {
     }
 }
 
-fn run_exec(config: AppConfig, args: ExecArgs) -> AppResult<()> {
+fn run_exec(mut config: AppConfig, args: ExecArgs) -> AppResult<()> {
+    apply_model_preset_override(&mut config, args.preset.as_deref(), args.pro_next)?;
     let task = resolve_prompt_argument(&args.task)?;
     let image_inputs = load_image_inputs(&args.images)?;
     let task = task_with_image_references(task, &image_inputs);
@@ -43,7 +46,8 @@ fn run_exec(config: AppConfig, args: ExecArgs) -> AppResult<()> {
     )
 }
 
-fn run_exec_resume(config: AppConfig, args: ExecResumeArgs) -> AppResult<()> {
+fn run_exec_resume(mut config: AppConfig, args: ExecResumeArgs) -> AppResult<()> {
+    apply_model_preset_override(&mut config, args.preset.as_deref(), args.pro_next)?;
     let store = SessionStore::new(config.workspace.session_dir());
     let snapshot = store.load_latest(args.session.as_deref())?;
     let followup = args
@@ -162,6 +166,7 @@ fn run_task(
         RollbackStore::new(PathBuf::from(&config.workspace.config_dir).join("rollback"));
     let rollback_snapshot_id = create_exec_rollback_snapshot(&rollback_store, &task);
     let runtime_model = config.model.model.clone();
+    let runtime_session_budget_microusd = config.model.session_budget_microusd;
     let runtime_workspace = std::env::current_dir()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| ".".to_string());
@@ -193,6 +198,7 @@ fn run_task(
                 &task,
                 &runtime_workspace,
                 &runtime_model,
+                runtime_session_budget_microusd,
                 &result,
             )?;
             if let Some(snapshot_id) = rollback_snapshot_id {
@@ -238,10 +244,15 @@ fn record_exec_runtime(
     task: &str,
     workspace: &str,
     model: &str,
+    session_budget_microusd: u64,
     result: &RunResult,
 ) -> AppResult<ExecRuntimeRecord> {
     let title = runtime_thread_title(task);
-    let session = store.create_session(title.clone(), workspace.to_string())?;
+    let session = store.create_session_with_budget(
+        title.clone(),
+        workspace.to_string(),
+        (session_budget_microusd > 0).then_some(session_budget_microusd),
+    )?;
     let thread = store.create_thread_for_session(
         &session.id,
         title,
@@ -272,7 +283,7 @@ fn record_exec_runtime(
         "completed".to_string(),
     )?;
     let usage_model = result.usage.model.as_deref().unwrap_or(model);
-    store.append_usage_with_cache(
+    let usage = store.append_usage_with_cache(
         &thread.id,
         Some(&assistant.id),
         usage_model.to_string(),
@@ -282,6 +293,13 @@ fn record_exec_runtime(
         result.usage.prompt_cache_hit,
         result.usage.prompt_cache_miss,
     )?;
+    if !result.prompt_layers.is_empty() {
+        store.append_thread_event(
+            &thread.id,
+            "prompt_layers_recorded",
+            prompt_layers_event_payload(&assistant.id, &usage.id, &result.prompt_layers),
+        )?;
+    }
     store.create_task(
         Some(&session.id),
         Some(&thread.id),
@@ -358,7 +376,19 @@ impl StreamEvents for JsonStreamEvents {
         }
     }
 
+    fn on_model_route(&mut self, preset: &str, model: &str, reason: &str, escalated: bool) {
+        print_json_line(model_route_event(preset, model, reason, escalated));
+    }
+
+    fn on_model_budget_warning(&mut self, used_microusd: u64, budget_microusd: u64) {
+        print_json_line(model_budget_warning_event(used_microusd, budget_microusd));
+    }
+
     fn on_assistant_done(&mut self, _full_text: &str) {}
+
+    fn on_tool_repair(&mut self, kind: &str, detail: &str) {
+        print_json_line(tool_repair_event(kind, detail));
+    }
 
     fn on_tool_call(&mut self, _name: &str, _input: &BTreeMap<String, String>) {}
 }
@@ -366,6 +396,10 @@ impl StreamEvents for JsonStreamEvents {
 struct JsonRunEvents;
 
 impl AgentRunEvents for JsonRunEvents {
+    fn on_prompt_layers(&mut self, snapshot: &crate::core::prompt_layers::PromptLayerSnapshot) {
+        print_json_line(prompt_layers_delta_event(snapshot));
+    }
+
     fn on_tool_call(&mut self, tool_name: &str, input: &BTreeMap<String, String>) {
         print_json_line(tool_call_parts_event(tool_name, input));
     }
@@ -414,6 +448,55 @@ fn tool_call_parts_event(tool_name: &str, input: &BTreeMap<String, String>) -> J
             input
                 .iter()
                 .map(|(key, value)| (key.clone(), JsonValue::String(value.clone())))
+                .collect(),
+        ),
+    );
+    JsonValue::Object(root)
+}
+
+fn prompt_layers_delta_event(
+    snapshot: &crate::core::prompt_layers::PromptLayerSnapshot,
+) -> JsonValue {
+    let mut root = BTreeMap::new();
+    root.insert(
+        "type".to_string(),
+        JsonValue::String("prompt_layers".to_string()),
+    );
+    root.insert(
+        "step".to_string(),
+        JsonValue::Number(snapshot.step.to_string()),
+    );
+    root.insert(
+        "estimated_tokens".to_string(),
+        JsonValue::Number(snapshot.estimated_tokens.to_string()),
+    );
+    root.insert(
+        "total_bytes".to_string(),
+        JsonValue::Number(snapshot.total_bytes.to_string()),
+    );
+    root.insert(
+        "layers".to_string(),
+        JsonValue::Array(
+            snapshot
+                .layers
+                .iter()
+                .map(|layer| {
+                    let mut item = BTreeMap::new();
+                    item.insert("name".to_string(), JsonValue::String(layer.name.clone()));
+                    item.insert(
+                        "text_sha256".to_string(),
+                        JsonValue::String(layer.text_sha256.clone()),
+                    );
+                    item.insert(
+                        "estimated_tokens".to_string(),
+                        JsonValue::Number(layer.estimated_tokens.to_string()),
+                    );
+                    item.insert(
+                        "cache_stable".to_string(),
+                        JsonValue::Bool(layer.cache_stable),
+                    );
+                    JsonValue::Object(item)
+                })
                 .collect(),
         ),
     );
@@ -487,6 +570,47 @@ fn assistant_reasoning_delta_event(message: &str) -> JsonValue {
     JsonValue::Object(root)
 }
 
+fn model_route_event(preset: &str, model: &str, reason: &str, escalated: bool) -> JsonValue {
+    let mut root = BTreeMap::new();
+    root.insert(
+        "type".to_string(),
+        JsonValue::String("model_route".to_string()),
+    );
+    root.insert("preset".to_string(), JsonValue::String(preset.to_string()));
+    root.insert("model".to_string(), JsonValue::String(model.to_string()));
+    root.insert("reason".to_string(), JsonValue::String(reason.to_string()));
+    root.insert("escalated".to_string(), JsonValue::Bool(escalated));
+    JsonValue::Object(root)
+}
+
+fn model_budget_warning_event(used_microusd: u64, budget_microusd: u64) -> JsonValue {
+    let mut root = BTreeMap::new();
+    root.insert(
+        "type".to_string(),
+        JsonValue::String("model_budget_warning".to_string()),
+    );
+    root.insert(
+        "used_microusd".to_string(),
+        JsonValue::Number(used_microusd.to_string()),
+    );
+    root.insert(
+        "budget_microusd".to_string(),
+        JsonValue::Number(budget_microusd.to_string()),
+    );
+    JsonValue::Object(root)
+}
+
+fn tool_repair_event(kind: &str, detail: &str) -> JsonValue {
+    let mut root = BTreeMap::new();
+    root.insert(
+        "type".to_string(),
+        JsonValue::String("tool_call_repair".to_string()),
+    );
+    root.insert("kind".to_string(), JsonValue::String(kind.to_string()));
+    root.insert("detail".to_string(), JsonValue::String(detail.to_string()));
+    JsonValue::Object(root)
+}
+
 fn assistant_final_event(result: &RunResult) -> JsonValue {
     let failed_tool_calls = result
         .tool_events
@@ -553,6 +677,7 @@ fn status_label(status: ObservationStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::prompt_layers::{PromptLayerRecord, PromptLayerSnapshot};
     use crate::model::protocol::TokenUsage;
 
     #[test]
@@ -594,6 +719,7 @@ mod tests {
                 status: ObservationStatus::Ok,
             }],
             usage: TokenUsage::new(12, 3),
+            prompt_layers: Vec::new(),
         };
 
         let call = json_value_to_string(&tool_call_parts_event(
@@ -628,6 +754,18 @@ mod tests {
             final_message: "done".to_string(),
             tool_events: Vec::new(),
             usage,
+            prompt_layers: vec![PromptLayerSnapshot {
+                step: 1,
+                total_bytes: 12,
+                estimated_tokens: 3,
+                layers: vec![PromptLayerRecord {
+                    name: "system_static".to_string(),
+                    text_sha256: "abc123".to_string(),
+                    bytes: 12,
+                    estimated_tokens: 3,
+                    cache_stable: true,
+                }],
+            }],
         };
 
         let runtime_record = record_exec_runtime(
@@ -635,6 +773,7 @@ mod tests {
             "Inspect the runtime\nwith details",
             ".",
             "deepseek-coder",
+            1200,
             &result,
         )
         .unwrap();
@@ -654,6 +793,8 @@ mod tests {
         );
         assert_eq!(runtime_record.session_id, sessions[0].id);
         assert_eq!(runtime_record.thread_id, threads[0].id);
+        assert_eq!(sessions[0].session_budget_microusd, Some(1200));
+        assert_eq!(threads[0].session_budget_microusd, Some(1200));
         let turns = store.list_turns(&threads[0].id).unwrap();
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, "user");
@@ -677,11 +818,13 @@ mod tests {
         assert_eq!(tasks[0].kind, "exec");
         assert_eq!(tasks[0].status, "completed");
         let events = store.read_events(&threads[0].id, 0).unwrap();
-        assert_eq!(events.len(), 7);
+        assert_eq!(events.len(), 8);
         assert_eq!(events[2].kind, "item_recorded");
         assert_eq!(events[4].kind, "item_recorded");
         assert_eq!(events[5].kind, "usage_recorded");
-        assert_eq!(events[6].kind, "task_recorded");
+        assert_eq!(events[6].kind, "prompt_layers_recorded");
+        assert!(json_value_to_string(&events[6].payload).contains(&usage[0].id));
+        assert_eq!(events[7].kind, "task_recorded");
     }
 
     #[test]

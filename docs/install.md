@@ -370,6 +370,7 @@ deepseek version
 ```bash
 deepseek quickstart
 deepseek config init
+deepseek config preset auto
 deepseek doctor
 ```
 
@@ -406,18 +407,25 @@ DEEPSEEK_API_KEY=...
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=auto # auto | deepseek-v4-flash | deepseek-v4-pro | deepseek-chat
 DEEPSEEK_REASONING_EFFORT=off # off | high | max | auto
+DSCODE_TOOL_SCHEMA_FLATTENING=auto # auto | off
 DSCODE_VISION_API_KEY_ENV=OPENAI_API_KEY # optional image_analyze vision tool
 DSCODE_VISION_BASE_URL=https://api.openai.com/v1
 DSCODE_VISION_MODEL=gpt-4.1
 ```
 
-如果 `.env` 或 shell 环境里设置了 `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` / `DEEPSEEK_REASONING_EFFORT`，它们会覆盖 `.dscode/config.toml` 里的 `model.base_url` / `model.model` / `model.reasoning_effort`。
+如果 `.env` 或 shell 环境里设置了 `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` /
+`DEEPSEEK_REASONING_EFFORT` / `DSCODE_TOOL_SCHEMA_FLATTENING`，它们会覆盖
+`.dscode/config.toml` 里的 `model.base_url` / `model.model` /
+`model.reasoning_effort` / `model.tool_schema_flattening`。
 `DSCODE_VISION_BASE_URL` / `DSCODE_VISION_MODEL` / `DSCODE_VISION_API_KEY_ENV`
 会覆盖 `image_analyze` 使用的 `vision.base_url` / `vision.model` /
 `vision.api_key_env`。
 `model.model = "auto"` 会按任务复杂度路由：简单/探测任务走 `deepseek-v4-flash`，规划、审查、架构、安全、迁移和多轮恢复类任务走 `deepseek-v4-pro`；Runtime usage 会记录实际使用的模型名，而不是只记录 `auto`。
 `model.reasoning_effort = "off"` 会显式发送 DeepSeek V4 `thinking.disabled`；
 `"high"` / `"max"` 会发送官方 thinking mode 和 reasoning effort 参数；`"auto"` 会随模型路由在 `off` / `high` / `max` 间切换。
+`model.tool_schema_flattening = "auto"` 会在工具 schema 过深或参数过多时把嵌套 object
+字段展平成 `target.path` 这类参数，并在执行工具前恢复成原始嵌套 JSON 参数；`"off"` 会保留
+provider 原始 schema。
 `reasoning_content` / `thinking_delta` 会进入 stream events；agent loop 会把最近几步的
 reasoning 摘要和 assistant message 一起回放到后续请求，TUI runtime stream 也会把
 reasoning delta 保存为 durable `reasoning` item。默认仍保持 `off`，直到 provider-native
@@ -566,8 +574,11 @@ curl http://127.0.0.1:8765/runtime
 - `deepseek update download-plan [--version ... --base-url ... --platform ... --json]`：打印当前平台 release archive、checksum、验证和解压命令，可指向自有镜像目录
 - `deepseek update release-smoke [--version ... --repo ... --base-url ... --platform ... --out ... --keep-workdir --json]`：下载、校验并执行当前平台 release binary install smoke
 - `deepseek update publish-status [--dist ... --npm-dist ... --live-evidence-verification ... --strict --json]`：检查 npm/Homebrew 发布所需 token、tap 配置、平台包、release checksum 和 online dogfood evidence
+- `deepseek stats [--thread <id>|--session <id>] [--limit <N>] [--json]`：汇总 durable runtime usage、cache hit/miss、估算成本、model split、repair/suppression 和 prompt-layer 证据
+- `deepseek events replay <thread-id> [--limit <N>] [--json]` / `deepseek events diff <left-thread-id> <right-thread-id> [--json]`：把 runtime events/items/usage 转成可读 replay 或线程对比证据，覆盖 cost/cache/tool/failure/file-modification signals
 - `deepseek pr live-status <pr> [--require-write --json]`：只读检查真实 GitHub PR 是否具备 live review/retry fixture 前置条件
 - `deepseek config provider [show|list|<name> [model]]` / `deepseek config model [show|list|<model>]`：查看或切换首跑 provider/model 配置；例如 `deepseek config provider deepseek pro`
+- `deepseek config preset [show|auto|flash|pro]` / `deepseek config budget [show|off|MICROUSD]`：查看或切换 DeepSeek V4 路由 preset，并设置可选 session 估算成本预算；TUI/daemon runtime session 会把 active budget 同步到 session/thread metadata、跨进程恢复 durable usage 成本，`off` 会清掉 runtime limit
 - `deepseek config auth [ENV] --stdin`：从 stdin 安全写入 `.env`，避免把 API key 放进 shell argv
 - `deepseek config network allow|deny <host>`：把网络 host 策略写回项目 `.dscode/config.toml`，用于持久化 web/search/fetch 的允许或拒绝规则
 - `deepseek agents run-task <task-id>`：认领并执行 pending durable runtime task，写回同一 thread 的 turns/items/usage/status

@@ -373,7 +373,7 @@ impl Tool for ExecShellWaitTool {
                         app_error(format!("unknown background shell task: {task_id}"))
                     })?;
                 drop(manager);
-                wait_for_shell_logs_to_settle(&record_dir, deadline);
+                wait_for_shell_logs_to_settle(&record_dir, shell_log_settle_deadline(deadline));
                 let mut manager = shell_manager().lock().unwrap();
                 if !manager.contains(task_id) {
                     return Ok(ToolOutput {
@@ -4488,14 +4488,25 @@ fn wait_for_shell_logs_to_settle(record_dir: &Path, deadline: Instant) {
         thread::sleep(Duration::from_millis(25));
         let current = shell_log_totals(record_dir);
         if current == previous {
-            stable_polls += 1;
-            if stable_polls >= 4 {
-                break;
+            if current != (0, 0) {
+                stable_polls += 1;
+                if stable_polls >= 4 {
+                    break;
+                }
             }
         } else {
             stable_polls = 0;
             previous = current;
         }
+    }
+}
+
+fn shell_log_settle_deadline(timeout_deadline: Instant) -> Instant {
+    let minimum = Instant::now() + Duration::from_millis(FINISHED_LOG_SETTLE_MS);
+    if timeout_deadline > minimum {
+        timeout_deadline
+    } else {
+        minimum
     }
 }
 

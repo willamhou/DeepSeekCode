@@ -3093,6 +3093,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
                 status: crate::model::protocol::ObservationStatus::Failed,
             }],
             usage: crate::model::protocol::TokenUsage::default(),
+            prompt_layers: Vec::new(),
         };
         let evaluation = case.evaluate(&result);
         assert!(!evaluation.passed);
@@ -3523,6 +3524,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
                 status: crate::model::protocol::ObservationStatus::Ok,
             }],
             usage: crate::model::protocol::TokenUsage::default(),
+            prompt_layers: Vec::new(),
         };
         let evaluation = case.evaluate(&result);
         assert!(evaluation.passed);
@@ -3565,6 +3567,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
                 status: crate::model::protocol::ObservationStatus::Ok,
             }],
             usage: crate::model::protocol::TokenUsage::default(),
+            prompt_layers: Vec::new(),
         };
         let evaluation = case.evaluate(&result);
         assert!(evaluation.passed);
@@ -3614,6 +3617,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
                 },
             ],
             usage: crate::model::protocol::TokenUsage::default(),
+            prompt_layers: Vec::new(),
         };
         let evaluation = case.evaluate(&result);
         assert!(evaluation.passed);
@@ -3659,6 +3663,7 @@ seed_observations = "search_text:failed:no matches || recovery_hint:ok:after=sea
                 status: crate::model::protocol::ObservationStatus::Ok,
             }],
             usage: crate::model::protocol::TokenUsage::default(),
+            prompt_layers: Vec::new(),
         };
         let evaluation = case.evaluate(&result);
         assert!(evaluation.passed);
