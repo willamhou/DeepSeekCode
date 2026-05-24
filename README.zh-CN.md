@@ -2,14 +2,13 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md) | [日本語](./README.ja-JP.md)
 
-DeepSeekCode 是一个 DeepSeek-first 的终端代码智能体，也是本地
-TUI/runtime workbench。它面向真实写代码循环：阅读仓库、修改文件、运行检查、
-查看结果，然后继续在同一个终端里迭代。
+DeepSeekCode 是一个 DeepSeek-first 的终端 code agent，面向本地开发闭环：
+阅读仓库、修改文件、运行检查、查看 diff，然后继续在同一个终端里迭代。
 
-> 当前状态：已经可以用于 dogfood 和仓库内编码任务。`v0.1.1` 已有 GitHub
-> Release 二进制包和实测可用的 GHCR 镜像；裸 `deepseek` TUI 入口已经在
-> Linux、macOS、Windows CI 里做真实 smoke。hosted GitHub 写入 workflow
-> 证据已经记录；hosted IDE 证据和 npm/Homebrew 发布仍需要外部凭据或机器。
+> Public beta 状态：今天已经可以用于 Linux/macOS dogfood 和仓库内代码任务。
+> `v0.1.1` 已提供 GitHub Release 二进制、实测 GHCR 镜像、TUI/service smoke gate、
+> `deepseek quickstart` 和 release-binary smoke verifier。Homebrew、npm registry
+> 发布、更广的外部仓库证据，以及更精致的发布素材仍属于产品硬化工作。
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
@@ -20,35 +19,20 @@ TUI/runtime workbench。它面向真实写代码循环：阅读仓库、修改�
   <img src="./docs/demo/deepseek-code-model-demo.svg" alt="DeepSeekCode 真实 model-backed demo：修复失败 Rust 测试并完成验证" width="100%">
 </p>
 
-## 现在能做什么
+## 为什么做它
 
-- 在真实 TTY 中运行 `deepseek` 会直接打开全屏 coding-agent 终端
-  workbench；`deepseek chat` 仍保留行式 REPL。
-- 用 `deepseek run` 执行一次性代码任务。
-- 用 `deepseek tui` 显式打开键盘驱动的终端 workbench，支持 Plan / Agent /
-  YOLO 模式。
-- 在 `.dscode/runtime/` 下持久化 sessions、threads、turns、items、
-  events、tasks、usage 和 automations。
-- 支持文件读取/搜索、补丁应用、diff review、todo、rollback snapshot、
-  notes、memory、hooks、skills 和 subagents。
-- 支持 OpenAI-compatible 的单个 tool call 与同轮 batch tool calls，每个调用都会
-  走正常的 hook、permission 和 recovery 路径。
-- 支持带权限门控的 shell 执行，以及后台 shell job、wait/poll、replay、
-  attach snapshot、bounded interactive attach、stdin、resize metadata、cancel 和 workspace
-  shell-supervisor protocol bridge。
-- Runtime approval 支持批准一次和本会话批准；安全命令变体按组复用，拒绝仍按
-  exact fingerprint 生效。
-- 支持本地 HTTP/SSE runtime、ACP stdio adapter、MCP client/server tooling，
-  以及 TUI 内的 MCP 管理界面。
-- 支持 guided `/setup` onboarding，包括 first-run done/todo/review 状态、
-  provider/model picker、TUI masked auth，以及 CLI stdin auth 持久化。
-- 支持 RLM 递归/长输入分析、model-session context、live queue status、
-  event replay、cancel、recover 和 drain 控制。
-- 支持 LSP-backed 与 fallback diagnostics，并能输出 JSON/JSONL watch。
-- 已实测 `v0.1.1` 的 Linux x64、macOS x64、macOS arm64、Windows x64
-  Release assets、GHCR 镜像，以及 npm/Homebrew 发布元数据。
-- 支持 opt-in 的外部 write-fixture dogfood：先做 preflight，运行时复制到
-  isolated workdir，并在 report 里统计证据。
+DeepSeekCode 的目标不是普通聊天壳，而是更接近 Claude Code CLI / Codex CLI
+的终端开发体验。默认路径是 terminal-first、repo-aware：
+
+- 在真实 TTY 中运行 `deepseek` 会打开全屏 coding-agent TUI。
+- `deepseek chat` 保留行式 REPL。
+- `deepseek run` 执行一次性代码任务。
+- sessions、threads、events、tasks、usage 和 automations 会持久化到
+  `.dscode/runtime/`。
+- 文件工具、patch、diff review、rollback、todos、hooks、skills、subagents、
+  diagnostics、MCP/ACP、本地 runtime API 共用同一套 permission 和 recovery 路径。
+- shell 支持前台命令、后台 jobs、replay、bounded interactive attach、stdin、
+  resize metadata、cancel 和本地 shell-supervisor bridge。
 
 ## 快速开始
 
@@ -80,7 +64,7 @@ tar -xzf deepseek-linux-x64.tar.gz
 docker run --rm ghcr.io/willamhou/deepseekcode:0.1.1 version
 ```
 
-或者从本地 checkout 安装：
+本地 checkout 安装：
 
 ```bash
 cargo install --path .
@@ -90,19 +74,12 @@ printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
 deepseek doctor --json
 ```
 
-执行一个代码任务：
+执行代码任务：
 
 ```bash
 deepseek
 deepseek chat
 deepseek run "explain the current repository structure"
-```
-
-显式启动 TUI：
-
-```bash
-deepseek tui
-deepseek tui --demo --once
 ```
 
 启动本地 runtime 并让 TUI 连接：
@@ -114,152 +91,79 @@ deepseek tui --runtime-url http://127.0.0.1:13000
 
 真实模型调用需要设置 `DEEPSEEK_API_KEY`。本地 `.env` 文件会被 git 忽略。
 
-## 当前差距
+## 已经可用
 
-DeepSeekCode 已经可以直接拿来写自己的代码，但还没有达到 Claude Code CLI /
-Codex CLI 的产品成熟度。如果只看 Linux/macOS 本地 coding-agent CLI，剩余差距主要是
-证据厚度和分发打磨：
+- 全屏 TUI：Plan / Agent / YOLO 模式、approval modal、command palette、
+  setup/onboarding、provider/model picker 和 MCP 管理。
+- REPL：raw-mode line editor、history、session list/load completion、
+  SIGINT cancel、`/save`、`/load`、`/sessions` 和 custom slash commands。
+- OpenAI-compatible 单个 tool call 与同轮 batch tool calls，都会经过正常的
+  hook、permission 和 recovery 层。
+- `deepseek quickstart` 与 `deepseek quickstart --json` 提供首跑检查。
+- 本地 HTTP/SSE runtime、ACP stdio adapter、MCP client/server surface，以及由
+  trust/approval 控制的 side-effect tooling。
+- RLM helpers：递归/长输入分析、model-session context、live queue status、
+  event replay、cancel、recover 和 drain controls。
+- Linux/macOS/Windows entrypoint 已纳入 CI smoke；release assets 覆盖 Linux x64、
+  macOS x64、macOS arm64 和 Windows x64。
+- 已提交真实 model-backed README demo，并记录 online multi-file external fixture
+  证据。
 
-- Linux/macOS shell/runtime 和 multi-file fixture scaffold 已有 hosted CI
-  证据；PR #16 / CI run #39 是当前全平台绿色 run，release binary 证据等待
-  下一次 release matrix 产出；
-- disposable Python invoice fixture 已有 online multi-file external evidence
-  和 verifier 结果；继续增加外部样本属于可选加固；
-- Homebrew 发布仍缺 tap 凭据；
-- 已提交 model-backed SVG 之外，可选的更精致 GIF/MP4 录屏素材。
+## 当前限制
 
-Windows ConPTY/service proof、hosted IDE 证据和 npm 发布属于更大的产品硬化目标，
-不再阻塞 Linux/macOS 本地 CLI milestone。
+如果目标收敛到 Linux/macOS 本地 CLI，核心交互闭环已经成立。剩余差距主要是证据厚度
+和分发打磨：
 
-当前状态、下一步路线和最终目标见 [docs/current-status.md](./docs/current-status.md)。
+- 下一轮 release matrix 需要补 release-binary shell/runtime smoke 证据；本地可用
+  `deepseek update release-smoke --version <version>` 复验；
+- Homebrew tap 凭据与公开 tap 安装验证；
+- Python invoice 样本之外，可选再补更多真实外部 repo fixtures；
+- 已提交 model-backed SVG 之外，可选补 GIF/MP4 发布素材。
 
-## Demo 素材
+Windows 长尾 service proof、hosted IDE 证据和 npm registry 发布属于更大的产品硬化，
+不是 Linux/macOS 本地 code-agent CLI milestone 的 blocker。
 
-README 里的 demo 图是从确定性 TUI snapshot 生成的 animated SVG。用仓库内置
-recorder 重新生成 animated 和 static 两个 SVG 素材：
+## 证据与检查
 
-```bash
-docs/demo/record-readme-demo.sh
-```
-
-`docs/demo/deepseek-code-tui.svg` 保留为静态 snapshot。已提交的
-`docs/demo/deepseek-code-model-demo.svg` 来自通过 verifier 的真实 transcript，
-内容包括失败的 Rust 测试、模型修改、通过的 `cargo test` 和最终 diff。后续发布页
-仍可再补更精致的 GIF/MP4。生成素材统一放在 `docs/demo/`。
-
-真实 model-backed demo 的源证据可以用 disposable fixture recorder 捕获：
-
-```bash
-docs/demo/record-model-backed-demo.sh --dry-run
-printf '%s\n' '<deepseek-api-key>' > /tmp/deepseek-demo.key
-chmod 600 /tmp/deepseek-demo.key
-DEEPSEEK_DEMO_KEY_FILE=/tmp/deepseek-demo.key docs/demo/record-model-backed-demo.sh
-latest_log=$(ls -t docs/demo/deepseek-code-model-demo-*.log | head -n 1)
-docs/demo/verify-model-backed-demo.js "$latest_log"
-docs/demo/render-model-backed-demo-svg.js "$latest_log" --out docs/demo/deepseek-code-model-demo.svg
-```
-
-## 开发检查
+常用本地检查：
 
 ```bash
 cargo fmt --check
 cargo test --lib -- --test-threads=1
-cargo package --allow-dirty
 node scripts/check-secrets.js
-docs/demo/verify-model-backed-demo.js --self-test
-docs/demo/render-model-backed-demo-svg.js --self-test
-deepseek tui --demo --once
-deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
-```
-
-npm wrapper 元数据检查：
-
-```bash
-node npm/scripts/check-version-sync.js
-DEEPSEEK_BINARY=target/debug/deepseek node npm/scripts/test-tui-entrypoint-wrapper.js
-node packaging/homebrew/verify-formula.js
-```
-
-发布准备状态：
-
-```bash
-deepseek update publish-status
-deepseek update publish-status --dist dist-assets --npm-dist npm-dist \
-  --live-evidence-verification .dscode/dogfood/live-evidence-verification.json \
-  --strict
+deepseek quickstart --json
 deepseek update publish-status --json
 deepseek update release-smoke --version 0.1.1 --json
-deepseek agents service-doctor --kind all --workdir "$PWD" --bin "$(command -v deepseek)" --json
-mkdir -p /tmp/dsc-smk
-deepseek agents service-smoke --workdir /tmp/dsc-smk --bin "$(command -v deepseek)" --json
-deepseek agents shell-fixture-smoke --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
 
-PR/CI 工作流检查：
+发布和 dogfood 证据见：
 
-```bash
-deepseek pr live-status owner/repo#42
-deepseek pr live-status owner/repo#42 --require-write
-deepseek pr live-status owner/repo#42 --json
-```
-
-外部 write-fixture 证据需要一个位于当前 checkout 之外的 disposable git 仓库。
-命令会先 dry-run 检查，然后在 isolated copy 中执行，并把结果写入 dogfood report：
-
-```bash
-fixture_dir=/tmp/deepseek-external-fixtures/python-invoice-multifile
-scripts/create-multifile-external-fixture.sh "$fixture_dir"
-task='replace `return amount - discount` with `return max(amount - discount, 0.0)` in src/invoice_math/pricing.py and replace `Invoice total` with `Final total` in src/invoice_math/summary.py, validate with python3 -m unittest discover -s tests'
-deepseek dogfood external-fixture --workdir "$fixture_dir" --dry-run "$task"
-deepseek dogfood external-fixture --workdir "$fixture_dir" \
-  --evidence-out .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
-  "$task"
-deepseek dogfood external-evidence \
-  --file .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
-  --out .dscode/dogfood/external-fixture-python-invoice-multifile-verification.json \
-  --require-successful-external-fixtures 1
-deepseek dogfood report --limit 10
-deepseek dogfood live-plan --limit 10
-deepseek dogfood live-run --limit 3 --json
-deepseek dogfood live-run --limit 3 --evidence-out .dscode/dogfood/live-evidence.json --execute
-deepseek dogfood live-evidence --file .dscode/dogfood/live-evidence.json \
-  --out .dscode/dogfood/live-evidence-verification.json \
-  --require-benchmark-gate --require-report-gate
-deepseek dogfood report --limit 20 \
-  --require-min-runs 100 \
-  --require-success-rate 90 \
-  --require-live-runs 100 \
-  --require-live-success-rate 90 \
-  --require-recent-clean 20 \
-  --require-external-write-fixtures 3 \
-  --require-category write_validate:25:90 \
-  --require-category recovery:25:90 \
-  --require-category pr_workflow:25:90 \
-  --require-live-category write_validate:25:90 \
-  --require-live-category recovery:25:90 \
-  --require-live-category pr_workflow:25:90
-```
+- [Release checklist](./docs/release.md)
+- [Dogfood evidence](./docs/dogfood-evidence.md)
+- [Current status](./docs/current-status.md)
 
 ## 文档
 
 - [安装](./docs/install.md)
+- [Public beta 指南](./docs/public-beta.md)
+- [当前状态与路线](./docs/current-status.md)
+- [发布 checklist](./docs/release.md)
+- [Dogfood 证据](./docs/dogfood-evidence.md)
+- [Demo 素材](./docs/demo/README.md)
 - [架构](./docs/architecture.md)
 - [Runtime contract](./docs/runtime.md)
 - [TUI workbench](./docs/tui.md)
 - [REPL mode](./docs/repl.md)
-- [Streaming](./docs/streaming.md)
 - [Agent tasks](./docs/agents.md)
-- [Todo tool](./docs/todos.md)
+- [Skills and profiles](./docs/skills-and-profiles.md)
 - [PR / CI integration](./docs/pr-integration.md)
-- [Release checklist](./docs/release.md)
 - [Roadmap](./docs/roadmap.md)
 - [Changelog](./CHANGELOG.md)
 
 ## 仓库说明
 
-这个仓库公开用于透明协作。公开可见不代表除了 [LICENSE](./LICENSE) 之外的额外
-开源授权。
+这个仓库公开是为了透明和协作。公开可见不代表在 [LICENSE](./LICENSE) 之外授予额外的
+开源许可。
 
-不要提交本地凭据、API key、runtime state 或私有 `.env` 文件。已跟踪示例只使用
-占位符。
+不要提交本地凭据、API keys、runtime state 或私有 `.env` 文件。已跟踪示例只使用占位符。

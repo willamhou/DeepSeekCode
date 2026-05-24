@@ -2,16 +2,15 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md) | [日本語](./README.ja-JP.md)
 
-DeepSeekCode is a DeepSeek-first terminal coding agent and local TUI/runtime
-workbench. It is built for the loop you actually use while programming:
-inspect a repository, edit files, run checks, review the result, and keep
-iterating from the same terminal.
+DeepSeekCode is a DeepSeek-first terminal code agent for the local development
+loop: inspect a repository, edit files, run checks, review the diff, and keep
+working from the same terminal.
 
-> Status: usable for dogfooding and repository work. `v0.1.1` has GitHub
-> Release binaries and a verified GHCR image; the bare `deepseek` TUI entrypoint
-> is CI-smoked on Linux, macOS, and Windows. Hosted GitHub write workflow
-> evidence is recorded; hosted IDE evidence and npm/Homebrew publishing still
-> need external credentials or machines.
+> Public beta status: usable today for Linux/macOS dogfooding and repository
+> work. `v0.1.1` ships GitHub Release binaries, a verified GHCR image, TUI and
+> service smoke gates, `deepseek quickstart`, and a release-binary smoke
+> verifier. Homebrew, npm registry publishing, broader external repo evidence,
+> and richer launch media are still product-hardening work.
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
@@ -22,35 +21,22 @@ iterating from the same terminal.
   <img src="./docs/demo/deepseek-code-model-demo.svg" alt="DeepSeekCode real model-backed demo: failing Rust test fixed and validated" width="100%">
 </p>
 
-## What Works Today
+## Why It Exists
 
-- `deepseek` starts the full-screen coding-agent terminal workbench when run in
-  a real TTY; `deepseek chat` keeps the line-oriented REPL available.
-- `deepseek run` for one-shot coding tasks.
-- `deepseek tui` for a keyboard-driven terminal workbench with Plan / Agent /
-  YOLO modes.
-- Durable sessions, threads, turns, items, events, tasks, usage, and
-  automations under `.dscode/runtime/`.
-- File read/search, patch application, diff review, todo tracking, rollback
-  snapshots, notes, memory, hooks, skills, and subagents.
-- OpenAI-compatible single and same-turn batch tool calls, with every call run
-  through the normal hook, permission, and recovery paths.
-- Permission-gated shell execution plus background shell jobs, wait/poll,
-  replay, attach snapshots, bounded interactive attach, stdin, resize metadata,
-  cancellation, and a workspace shell-supervisor protocol bridge.
-- Runtime approvals support approve-once and approve-for-session, with grouped
-  safe command variants and exact denial scoping.
-- Local HTTP/SSE runtime, ACP stdio adapter, MCP client/server tooling, and TUI
-  MCP management screens.
-- Guided `/setup` onboarding with first-run done/todo/review state,
-  provider/model pickers, masked TUI auth, and CLI stdin auth persistence.
-- RLM helpers for recursive/long-input analysis, model-session context, live
-  queue status, event replay, cancellation, recovery, and drain controls.
-- LSP-backed and fallback diagnostics runners with JSON/JSONL watch output.
-- Verified `v0.1.1` release assets for Linux x64, macOS x64, macOS arm64, and
-  Windows x64, plus a GHCR image and npm/Homebrew packaging metadata.
-- Opt-in external write-fixture dogfood runs with preflight, isolated workdir
-  copies, and report evidence counters.
+DeepSeekCode is meant to feel closer to Claude Code CLI or Codex CLI than to a
+plain chat wrapper. The default path is terminal-first and repo-aware:
+
+- `deepseek` opens the full-screen coding-agent TUI in a real TTY.
+- `deepseek chat` keeps the line-oriented REPL available.
+- `deepseek run` executes one-shot coding tasks.
+- Sessions, threads, events, tasks, usage, and automations are persisted under
+  `.dscode/runtime/`.
+- File tools, patching, diff review, rollback snapshots, todos, hooks, skills,
+  subagents, diagnostics, MCP/ACP, and local runtime APIs share the same
+  permission and recovery paths.
+- Shell work supports foreground commands, background jobs, replay, bounded
+  interactive attach, stdin, resize metadata, cancellation, and a local
+  shell-supervisor bridge.
 
 ## Quick Start
 
@@ -82,7 +68,7 @@ Or run the published container:
 docker run --rm ghcr.io/willamhou/deepseekcode:0.1.1 version
 ```
 
-Or use a local checkout:
+For a local checkout:
 
 ```bash
 cargo install --path .
@@ -100,14 +86,6 @@ deepseek chat
 deepseek run "explain the current repository structure"
 ```
 
-Start the TUI explicitly:
-
-```bash
-deepseek tui
-deepseek tui --demo --once
-deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
-```
-
 Start the local runtime and connect the TUI:
 
 ```bash
@@ -118,155 +96,76 @@ deepseek tui --runtime-url http://127.0.0.1:13000
 Set `DEEPSEEK_API_KEY` for real model calls. Local `.env` files are ignored by
 git.
 
-## Current Gap
+## What Works
 
-DeepSeekCode is close enough to use as its own coding CLI, but it is not yet at
-Claude Code CLI / Codex CLI polish. For a Linux/macOS local coding-agent CLI,
-the remaining gaps are mostly evidence depth and distribution polish:
+- Full-screen TUI with Plan / Agent / YOLO modes, approval modals, command
+  palette, setup/onboarding, provider/model picker, and MCP management.
+- REPL with raw-mode line editing, history, session list/load completion,
+  SIGINT cancellation, `/save`, `/load`, `/sessions`, and custom slash commands.
+- OpenAI-compatible single and same-turn batch tool calls, routed through the
+  normal hook, permission, and recovery layers.
+- Guided first-run checks through `deepseek quickstart` and
+  `deepseek quickstart --json`.
+- Local HTTP/SSE runtime, ACP stdio adapter, MCP client/server surfaces, and
+  side-effect tooling behind explicit trust/approval controls.
+- RLM helpers for recursive and long-input analysis, model-session context,
+  live queue status, event replay, cancellation, recovery, and drain controls.
+- CI-smoked Linux/macOS/Windows entrypoints plus release assets for Linux x64,
+  macOS x64, macOS arm64, and Windows x64.
+- Verified model-backed README demo and online multi-file external fixture
+  evidence for the current release-readiness path.
 
-- Linux/macOS shell/runtime and multi-file fixture scaffold evidence is now
-  recorded in hosted CI; PR #16 / CI run #39 is the current all-platform green
-  run, and release-binary evidence will come from the next release matrix run;
-- online multi-file external fixture evidence is now recorded and verified for
-  the disposable Python invoice fixture; additional external samples are
-  optional hardening;
-- Homebrew publishing, still blocked on tap credentials;
-- optional polished GIF/MP4 capture beyond the committed model-backed SVG.
+## Current Limits
 
-Windows ConPTY/service proof, hosted IDE evidence, and npm publishing remain
-broader product-hardening work, but they are not blockers for the Linux/macOS
-local CLI milestone.
+For the Linux/macOS local CLI milestone, the core interaction loop is already in
+place. The remaining gaps are mainly evidence depth and distribution polish:
 
-See [docs/current-status.md](./docs/current-status.md) for the current Chinese
-status, roadmap, and final target.
+- next-release matrix evidence for release-binary shell/runtime smoke, with
+  `deepseek update release-smoke --version <version>` available for local
+  rechecks;
+- Homebrew tap credentials and public tap installation verification;
+- optional additional external repo fixtures beyond the Python invoice sample;
+- optional GIF/MP4 launch media beyond the committed model-backed SVG.
 
-## Demo Asset
+Windows long-tail service proof, hosted IDE evidence, and npm registry
+publishing are broader product-hardening work. They are not blockers for the
+Linux/macOS local code-agent CLI milestone.
 
-The README demo image is an animated SVG generated from the deterministic TUI
-snapshot. Regenerate both README SVG assets with the repo-native recorder:
+## Evidence
 
-```bash
-docs/demo/record-readme-demo.sh
-```
-
-`docs/demo/deepseek-code-tui.svg` remains as a static snapshot. The committed
-model-backed SVG, `docs/demo/deepseek-code-model-demo.svg`, is generated from a
-verified transcript of a failing Rust test, model edit, passing `cargo test`,
-and final diff. A polished GIF/MP4 can still be added later for launch pages.
-Keep generated media under `docs/demo/`.
-
-To capture source evidence for that model-backed demo, run the disposable
-fixture recorder:
-
-```bash
-docs/demo/record-model-backed-demo.sh --dry-run
-printf '%s\n' '<deepseek-api-key>' > /tmp/deepseek-demo.key
-chmod 600 /tmp/deepseek-demo.key
-DEEPSEEK_DEMO_KEY_FILE=/tmp/deepseek-demo.key docs/demo/record-model-backed-demo.sh
-latest_log=$(ls -t docs/demo/deepseek-code-model-demo-*.log | head -n 1)
-docs/demo/verify-model-backed-demo.js "$latest_log"
-docs/demo/render-model-backed-demo-svg.js "$latest_log" --out docs/demo/deepseek-code-model-demo.svg
-```
-
-## Development Checks
+Useful local checks:
 
 ```bash
 cargo fmt --check
 cargo test --lib -- --test-threads=1
-cargo package --allow-dirty
 node scripts/check-secrets.js
-docs/demo/verify-model-backed-demo.js --self-test
-docs/demo/render-model-backed-demo-svg.js --self-test
-deepseek tui --demo --once
-```
-
-For npm wrapper metadata:
-
-```bash
-node npm/scripts/check-version-sync.js
-DEEPSEEK_BINARY=target/debug/deepseek node npm/scripts/test-tui-entrypoint-wrapper.js
-node packaging/homebrew/verify-formula.js
-```
-
-For release readiness:
-
-```bash
-deepseek update publish-status
-deepseek update publish-status --dist dist-assets --npm-dist npm-dist \
-  --live-evidence-verification .dscode/dogfood/live-evidence-verification.json \
-  --strict
+deepseek quickstart --json
 deepseek update publish-status --json
 deepseek update release-smoke --version 0.1.1 --json
-deepseek agents service-doctor --kind all --workdir "$PWD" --bin "$(command -v deepseek)" --json
-mkdir -p /tmp/dsc-smk
-deepseek agents service-smoke --workdir /tmp/dsc-smk --bin "$(command -v deepseek)" --json
-deepseek agents shell-fixture-smoke --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
 
-For PR/CI workflow checks:
+For release and dogfood evidence, see:
 
-```bash
-deepseek pr live-status owner/repo#42
-deepseek pr live-status owner/repo#42 --require-write
-deepseek pr live-status owner/repo#42 --json
-```
-
-For opt-in external write-fixture evidence, use a disposable git repository
-outside this checkout. The command dry-runs preflight first, then runs against
-an isolated copy and records the result in the dogfood report:
-
-```bash
-fixture_dir=/tmp/deepseek-external-fixtures/python-invoice-multifile
-scripts/create-multifile-external-fixture.sh "$fixture_dir"
-task='replace `return amount - discount` with `return max(amount - discount, 0.0)` in src/invoice_math/pricing.py and replace `Invoice total` with `Final total` in src/invoice_math/summary.py, validate with python3 -m unittest discover -s tests'
-deepseek dogfood external-fixture --workdir "$fixture_dir" --dry-run "$task"
-deepseek dogfood external-fixture --workdir "$fixture_dir" \
-  --evidence-out .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
-  "$task"
-deepseek dogfood external-evidence \
-  --file .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
-  --out .dscode/dogfood/external-fixture-python-invoice-multifile-verification.json \
-  --require-successful-external-fixtures 1
-deepseek dogfood report --limit 10
-deepseek dogfood live-plan --limit 10
-deepseek dogfood live-run --limit 3
-deepseek dogfood live-run --limit 3 --json
-deepseek dogfood live-run --limit 3 --evidence-out .dscode/dogfood/live-evidence.json --execute
-deepseek dogfood live-evidence --file .dscode/dogfood/live-evidence.json \
-  --out .dscode/dogfood/live-evidence-verification.json \
-  --require-benchmark-gate --require-report-gate
-deepseek dogfood report --limit 20 \
-  --require-min-runs 100 \
-  --require-success-rate 90 \
-  --require-live-runs 100 \
-  --require-live-success-rate 90 \
-  --require-recent-clean 20 \
-  --require-external-write-fixtures 3 \
-  --require-category write_validate:25:90 \
-  --require-category recovery:25:90 \
-  --require-category pr_workflow:25:90 \
-  --require-live-category write_validate:25:90 \
-  --require-live-category recovery:25:90 \
-  --require-live-category pr_workflow:25:90
-```
-
-`live-evidence --require-report-gate` verifies the structured gate, rechecks the
-ledger fingerprint from the evidence file, and matches appended case evidence
-back to current ledger rows.
+- [Release checklist](./docs/release.md)
+- [Dogfood evidence](./docs/dogfood-evidence.md)
+- [Current status](./docs/current-status.md)
 
 ## Documentation
 
 - [Install](./docs/install.md)
+- [Public beta guide](./docs/public-beta.md)
+- [Current status and roadmap](./docs/current-status.md)
+- [Release checklist](./docs/release.md)
+- [Dogfood evidence](./docs/dogfood-evidence.md)
+- [Demo assets](./docs/demo/README.md)
 - [Architecture](./docs/architecture.md)
 - [Runtime contract](./docs/runtime.md)
 - [TUI workbench](./docs/tui.md)
 - [REPL mode](./docs/repl.md)
-- [Streaming](./docs/streaming.md)
 - [Agent tasks](./docs/agents.md)
-- [Todo tool](./docs/todos.md)
+- [Skills and profiles](./docs/skills-and-profiles.md)
 - [PR / CI integration](./docs/pr-integration.md)
-- [Release checklist](./docs/release.md)
 - [Roadmap](./docs/roadmap.md)
 - [Changelog](./CHANGELOG.md)
 

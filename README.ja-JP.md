@@ -2,16 +2,15 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md) | [日本語](./README.ja-JP.md)
 
-DeepSeekCode は DeepSeek-first のターミナル向けコーディングエージェントであり、
-ローカル TUI/runtime workbench です。実際の開発ループ、つまりリポジトリを読む、
-ファイルを編集する、チェックを走らせる、結果を確認する、そして同じターミナルで
-反復する流れを前提に作られています。
+DeepSeekCode は DeepSeek-first のターミナル code agent です。ローカル開発の
+ループ、つまりリポジトリを読み、ファイルを編集し、チェックを実行し、diff を確認し、
+同じターミナルで作業を続ける流れを前提にしています。
 
-> 状態: dogfood とリポジトリ内の開発作業には利用できます。`v0.1.1` では
-> GitHub Release のバイナリと検証済み GHCR イメージを公開済みです。bare
-> `deepseek` TUI entrypoint は Linux、macOS、Windows CI で smoke 済みです。
-> hosted GitHub write workflow evidence は記録済みです。hosted IDE evidence と
-> npm/Homebrew の公開には外部の資格情報や実行環境がまだ必要です。
+> Public beta status: Linux/macOS の dogfood とリポジトリ作業には今日から利用できます。
+> `v0.1.1` は GitHub Release binaries、検証済み GHCR image、TUI/service smoke gates、
+> `deepseek quickstart`、release-binary smoke verifier を備えています。Homebrew、
+> npm registry publishing、より広い external repo evidence、リッチな launch media は
+> 引き続き product-hardening work です。
 
 <p align="center">
   <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
@@ -22,37 +21,22 @@ DeepSeekCode は DeepSeek-first のターミナル向けコーディングエー
   <img src="./docs/demo/deepseek-code-model-demo.svg" alt="DeepSeekCode real model-backed demo: failing Rust test fixed and validated" width="100%">
 </p>
 
-## 現在できること
+## 目的
 
-- 実 TTY で `deepseek` を実行すると full-screen coding-agent terminal
-  workbench が起動します。`deepseek chat` で行指向 REPL も使えます。
-- `deepseek run` で単発のコーディングタスクを実行できます。
-- `deepseek tui` で明示的にキーボード操作のターミナル workbench を開き、
-  Plan / Agent / YOLO モードを切り替えられます。
-- `.dscode/runtime/` 以下に sessions、threads、turns、items、events、tasks、
-  usage、automations を永続化します。
-- ファイルの読み取り/検索、パッチ適用、diff review、todo、rollback snapshot、
-  notes、memory、hooks、skills、subagents を扱えます。
-- OpenAI-compatible の単一 tool call と同一ターンの batch tool calls に対応し、
-  各呼び出しは通常の hook、permission、recovery 経路を通ります。
-- 権限ゲート付き shell 実行に加えて、バックグラウンド shell job、wait/poll、
-  replay、attach snapshot、bounded interactive attach、stdin、resize metadata、cancel、workspace
-  shell-supervisor protocol bridge をサポートします。
-- Runtime approval は approve-once と approve-for-session に対応し、安全な
-  コマンド変種はグループで再利用し、denial は exact fingerprint で扱います。
-- ローカル HTTP/SSE runtime、ACP stdio adapter、MCP client/server tooling、
-  TUI 内の MCP 管理画面を備えています。
-- guided `/setup` onboarding、first-run done/todo/review state、
-  provider/model picker、TUI masked auth、CLI stdin auth persistence を
-  サポートします。
-- RLM helper による再帰/長文入力の分析、model-session context、live queue
-  status、event replay、cancel、recover、drain control をサポートします。
-- LSP-backed diagnostics と fallback diagnostics を実行でき、JSON/JSONL watch
-  出力にも対応します。
-- 検証済み `v0.1.1` の Linux x64、macOS x64、macOS arm64、Windows x64
-  Release assets、GHCR イメージ、npm/Homebrew 公開用メタデータがあります。
-- opt-in の external write-fixture dogfood をサポートします。preflight、
-  isolated workdir copy、report の evidence counter を備えています。
+DeepSeekCode は単なる chat wrapper ではなく、Claude Code CLI / Codex CLI に近い
+ターミナル開発体験を目指しています。デフォルトの流れは terminal-first で
+repo-aware です。
+
+- 実 TTY で `deepseek` を実行すると full-screen coding-agent TUI が開きます。
+- `deepseek chat` で line-oriented REPL も使えます。
+- `deepseek run` で単発の coding task を実行できます。
+- sessions、threads、events、tasks、usage、automations は `.dscode/runtime/`
+  に永続化されます。
+- file tools、patch、diff review、rollback、todos、hooks、skills、subagents、
+  diagnostics、MCP/ACP、local runtime APIs は同じ permission と recovery path を使います。
+- shell work は foreground commands、background jobs、replay、bounded
+  interactive attach、stdin、resize metadata、cancellation、local shell-supervisor
+  bridge をサポートします。
 
 ## クイックスタート
 
@@ -78,13 +62,13 @@ tar -xzf deepseek-linux-x64.tar.gz
 ./deepseek version
 ```
 
-または公開済みコンテナを実行:
+または公開済み container を実行:
 
 ```bash
 docker run --rm ghcr.io/willamhou/deepseekcode:0.1.1 version
 ```
 
-またはローカル checkout からインストール:
+local checkout からインストール:
 
 ```bash
 cargo install --path .
@@ -94,7 +78,7 @@ printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
 deepseek doctor --json
 ```
 
-コーディングタスクを実行:
+coding task を実行:
 
 ```bash
 deepseek
@@ -102,172 +86,91 @@ deepseek chat
 deepseek run "explain the current repository structure"
 ```
 
-TUI を明示的に起動:
-
-```bash
-deepseek tui
-deepseek tui --demo --once
-```
-
-ローカル runtime を起動し、TUI から接続:
+local runtime を起動して TUI から接続:
 
 ```bash
 deepseek serve --http --addr 127.0.0.1:13000
 deepseek tui --runtime-url http://127.0.0.1:13000
 ```
 
-実モデル呼び出しには `DEEPSEEK_API_KEY` を設定してください。ローカルの `.env`
-ファイルは git から無視されます。
+実モデル呼び出しには `DEEPSEEK_API_KEY` を設定してください。local `.env` files は
+git から無視されます。
 
-## 現在の差分
+## 利用できる機能
 
-DeepSeekCode は自身の開発に使える段階ですが、Claude Code CLI / Codex CLI
-ほどの製品成熟度にはまだ届いていません。Linux/macOS のローカル coding-agent
-CLI に絞ると、残差は主に evidence depth と配布面の polish です。
+- Full-screen TUI: Plan / Agent / YOLO modes、approval modal、command palette、
+  setup/onboarding、provider/model picker、MCP management。
+- REPL: raw-mode line editor、history、session list/load completion、SIGINT cancel、
+  `/save`、`/load`、`/sessions`、custom slash commands。
+- OpenAI-compatible single tool call と same-turn batch tool calls。どちらも通常の
+  hook、permission、recovery layer を通ります。
+- `deepseek quickstart` と `deepseek quickstart --json` による first-run checks。
+- Local HTTP/SSE runtime、ACP stdio adapter、MCP client/server surface、明示的な
+  trust/approval で制御される side-effect tooling。
+- RLM helpers: recursive/long-input analysis、model-session context、live queue
+  status、event replay、cancel、recover、drain controls。
+- Linux/macOS/Windows entrypoints は CI smoke 済み。release assets は Linux x64、
+  macOS x64、macOS arm64、Windows x64 を含みます。
+- 実 model-backed README demo と online multi-file external fixture evidence を
+  記録済みです。
 
-- Linux/macOS shell/runtime と multi-file fixture scaffold の hosted CI
-  evidence は記録済みです。PR #16 / CI run #39 が現在の全 platform green
-  run で、release binary evidence は次回 release matrix run で取得します。
-- disposable Python invoice fixture の online multi-file external evidence と
-  verifier 結果は記録済みです。追加の外部サンプルは任意の hardening です。
-- Homebrew 公開。tap 資格情報が未設定です。
-- コミット済み model-backed SVG を超える、任意の polish 済み GIF/MP4 キャプチャ。
+## 現在の制限
 
-Windows ConPTY/service proof、hosted IDE evidence、npm publishing はより広い
-product hardening ですが、Linux/macOS ローカル CLI milestone の blocker ではありません。
+Linux/macOS local CLI milestone に絞れば、中心となる interaction loop はすでに
+成立しています。残りは主に evidence depth と distribution polish です。
 
-現在の状態、次の作業、最終目標は
-[docs/current-status.md](./docs/current-status.md) にまとめています。
+- next-release matrix で release-binary shell/runtime smoke evidence を補強すること。
+  local recheck には `deepseek update release-smoke --version <version>` を使えます。
+- Homebrew tap credentials と public tap install verification。
+- Python invoice sample 以外の optional external repo fixtures。
+- committed model-backed SVG 以外の optional GIF/MP4 launch media。
 
-## Demo 素材
+Windows long-tail service proof、hosted IDE evidence、npm registry publishing は
+より広い product hardening であり、Linux/macOS local code-agent CLI milestone の
+blocker ではありません。
 
-README の demo 画像は決定的な TUI snapshot から生成した animated SVG です。
-repo-native recorder で animated / static の両方を再生成します。
+## Evidence
 
-```bash
-docs/demo/record-readme-demo.sh
-```
-
-`docs/demo/deepseek-code-tui.svg` は静的 snapshot として残しています。コミット済みの
-`docs/demo/deepseek-code-model-demo.svg` は verifier を通した実 transcript から生成され、
-失敗する Rust テスト、モデルによる編集、通過する `cargo test`、最終 diff を含みます。
-公開ページ向けには、後から polish 済み GIF/MP4 を追加できます。生成したメディアは
-`docs/demo/` に置きます。
-
-実モデル demo の元証拠は disposable fixture recorder で取得できます。
-
-```bash
-docs/demo/record-model-backed-demo.sh --dry-run
-printf '%s\n' '<deepseek-api-key>' > /tmp/deepseek-demo.key
-chmod 600 /tmp/deepseek-demo.key
-DEEPSEEK_DEMO_KEY_FILE=/tmp/deepseek-demo.key docs/demo/record-model-backed-demo.sh
-latest_log=$(ls -t docs/demo/deepseek-code-model-demo-*.log | head -n 1)
-docs/demo/verify-model-backed-demo.js "$latest_log"
-docs/demo/render-model-backed-demo-svg.js "$latest_log" --out docs/demo/deepseek-code-model-demo.svg
-```
-
-## 開発チェック
+よく使う local checks:
 
 ```bash
 cargo fmt --check
 cargo test --lib -- --test-threads=1
-cargo package --allow-dirty
 node scripts/check-secrets.js
-docs/demo/verify-model-backed-demo.js --self-test
-docs/demo/render-model-backed-demo-svg.js --self-test
-deepseek tui --demo --once
-deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
-```
-
-npm wrapper メタデータ:
-
-```bash
-node npm/scripts/check-version-sync.js
-DEEPSEEK_BINARY=target/debug/deepseek node npm/scripts/test-tui-entrypoint-wrapper.js
-node packaging/homebrew/verify-formula.js
-```
-
-リリース準備状態:
-
-```bash
-deepseek update publish-status
-deepseek update publish-status --dist dist-assets --npm-dist npm-dist \
-  --live-evidence-verification .dscode/dogfood/live-evidence-verification.json \
-  --strict
+deepseek quickstart --json
 deepseek update publish-status --json
 deepseek update release-smoke --version 0.1.1 --json
-deepseek agents service-doctor --kind all --workdir "$PWD" --bin "$(command -v deepseek)" --json
-mkdir -p /tmp/dsc-smk
-deepseek agents service-smoke --workdir /tmp/dsc-smk --bin "$(command -v deepseek)" --json
-deepseek agents shell-fixture-smoke --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
 
-PR/CI workflow チェック:
+release と dogfood evidence:
 
-```bash
-deepseek pr live-status owner/repo#42
-deepseek pr live-status owner/repo#42 --require-write
-deepseek pr live-status owner/repo#42 --json
-```
+- [Release checklist](./docs/release.md)
+- [Dogfood evidence](./docs/dogfood-evidence.md)
+- [Current status](./docs/current-status.md)
 
-external write-fixture の証拠には、この checkout の外にある disposable git
-repository を使います。まず dry-run で preflight し、その後 isolated copy で
-実行して dogfood report に記録します。
-
-```bash
-fixture_dir=/tmp/deepseek-external-fixtures/python-invoice-multifile
-scripts/create-multifile-external-fixture.sh "$fixture_dir"
-task='replace `return amount - discount` with `return max(amount - discount, 0.0)` in src/invoice_math/pricing.py and replace `Invoice total` with `Final total` in src/invoice_math/summary.py, validate with python3 -m unittest discover -s tests'
-deepseek dogfood external-fixture --workdir "$fixture_dir" --dry-run "$task"
-deepseek dogfood external-fixture --workdir "$fixture_dir" \
-  --evidence-out .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
-  "$task"
-deepseek dogfood external-evidence \
-  --file .dscode/dogfood/external-fixture-python-invoice-multifile-evidence.json \
-  --out .dscode/dogfood/external-fixture-python-invoice-multifile-verification.json \
-  --require-successful-external-fixtures 1
-deepseek dogfood report --limit 10
-deepseek dogfood live-plan --limit 10
-deepseek dogfood live-run --limit 3 --json
-deepseek dogfood live-run --limit 3 --evidence-out .dscode/dogfood/live-evidence.json --execute
-deepseek dogfood live-evidence --file .dscode/dogfood/live-evidence.json \
-  --out .dscode/dogfood/live-evidence-verification.json \
-  --require-benchmark-gate --require-report-gate
-deepseek dogfood report --limit 20 \
-  --require-min-runs 100 \
-  --require-success-rate 90 \
-  --require-live-runs 100 \
-  --require-live-success-rate 90 \
-  --require-recent-clean 20 \
-  --require-external-write-fixtures 3 \
-  --require-category write_validate:25:90 \
-  --require-category recovery:25:90 \
-  --require-category pr_workflow:25:90 \
-  --require-live-category write_validate:25:90 \
-  --require-live-category recovery:25:90 \
-  --require-live-category pr_workflow:25:90
-```
-
-## ドキュメント
+## Documentation
 
 - [Install](./docs/install.md)
+- [Public beta guide](./docs/public-beta.md)
+- [Current status and roadmap](./docs/current-status.md)
+- [Release checklist](./docs/release.md)
+- [Dogfood evidence](./docs/dogfood-evidence.md)
+- [Demo assets](./docs/demo/README.md)
 - [Architecture](./docs/architecture.md)
 - [Runtime contract](./docs/runtime.md)
 - [TUI workbench](./docs/tui.md)
 - [REPL mode](./docs/repl.md)
-- [Streaming](./docs/streaming.md)
 - [Agent tasks](./docs/agents.md)
-- [Todo tool](./docs/todos.md)
+- [Skills and profiles](./docs/skills-and-profiles.md)
 - [PR / CI integration](./docs/pr-integration.md)
-- [Release checklist](./docs/release.md)
 - [Roadmap](./docs/roadmap.md)
 - [Changelog](./CHANGELOG.md)
 
-## リポジトリについて
+## Repository Notes
 
-このリポジトリは透明性と共同作業のために公開されています。公開されていることは、
-[LICENSE](./LICENSE) に記載された条件を超える追加のオープンソース許諾を意味しません。
+このリポジトリは透明性と協力のために公開されています。公開されていることは、
+[LICENSE](./LICENSE) の範囲を超える別の open-source grant を意味しません。
 
-ローカル資格情報、API key、runtime state、非公開の `.env` ファイルをコミットしないで
-ください。追跡されているサンプルはプレースホルダーのみを使っています。
+local credentials、API keys、runtime state、private `.env` files をコミットしないでください。
+tracked examples は placeholder のみを使います。
