@@ -29,9 +29,9 @@ Use this concise public-beta claim:
 
 ## Recommended Launch Order
 
-1. Review the committed README demo media, including the 2048 terminal SVG and
-   gameplay GIF/MP4, and refresh only if the UI or positioning changed
-   materially.
+1. Review the committed README demo media, including the interactive 2048
+   terminal SVG and gameplay GIF/MP4, and refresh only if the UI or positioning
+   changed materially.
 2. Upload a repository social preview image in GitHub repository settings.
 3. Post the GitHub release or repository link on personal channels.
 4. Post a technical feedback thread with [hacker-news.md](./hacker-news.md).

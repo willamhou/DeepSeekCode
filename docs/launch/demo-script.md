@@ -48,15 +48,17 @@ git diff --stat
 git diff
 ```
 
-For the 2048 launch asset:
+For the scripted 2048 launch harness:
 
 ```bash
 DEEPSEEK_2048_KEY_FILE=/tmp/deepseek-2048.key docs/demo/record-2048-demo.sh
 DEEPSEEK_2048_KEY_FILE=/tmp/deepseek-2048.key docs/demo/record-2048-demo.sh --serve
 ```
 
-If a live model call is too slow for a public recording, use the committed
-model-backed SVG in the README and record a shorter install/quickstart clip.
+For the README hero asset, prefer an interactive `deepseek chat` recording like
+the committed 2048 SVG. If a live model call is too slow for a public recording,
+use the committed model-backed SVG in the README and record a shorter
+install/quickstart clip.
 
 ## What To Emphasize On Screen
 

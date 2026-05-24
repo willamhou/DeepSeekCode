@@ -42,9 +42,10 @@ dogfood 证据。
 - online dogfood release gate 已达到 100+ model-backed run 口径；当前 live plan 曾显示
   `105` 条 online run、`99` 条 success，分类为 `write_validate 29/30`、
   `recovery 23/25`、`pr_workflow 47/50`。
-- README 首屏已切换到真实 2048 过程录屏：终端 SVG 展示 DeepSeekCode 从空 repo 写出
-  app.js/index.html/styles.css、完成校验和 diff；配套 GIF/MP4 展示同一次生成结果的
-  浏览器试玩。TUI 和 edit/test SVG 已降级为补充 demo/evidence。
+- README 首屏已切换到真实交互式 2048 过程录屏：终端 SVG 展示 `deepseek chat`
+  从空 repo 接收用户 prompt、写出 `2048.html`、完成 shell 校验并总结运行方式；配套
+  GIF/MP4 展示同一次生成结果的浏览器试玩。旧 scripted 2048、TUI 和 edit/test SVG
+  已降级为补充 demo/evidence。
 - `v0.1.3` 已发布 GitHub Release binaries，并通过 Release Matrix：
   https://github.com/willamhou/DeepSeekCode/actions/runs/26351958964
 - `v0.1.3` release assets 覆盖 Linux x64、Linux arm64、macOS x64、macOS arm64 和
@@ -121,8 +122,9 @@ dogfood 证据。
 > arm64, clean hosted release-smoke evidence, a verified Homebrew tap, a 100-run
 > online dogfood release gate, verified online multi-file external fixture
 > evidence, real hosted GitHub workflow evidence, and committed real
-> model-backed README 2048 terminal and gameplay demo media. The supplemental
-> TUI and edit/test demos remain available as evidence links. The
+> model-backed README interactive 2048 terminal and gameplay demo media. The
+> supplemental scripted 2048, TUI, and edit/test demos remain available as
+> evidence links. The
 > remaining Linux/macOS CLI work is broader external sample depth and continuing
 > documentation polish; hosted IDE, Windows/service proof, and npm publishing
 > remain broader product-hardening work.

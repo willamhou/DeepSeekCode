@@ -12,16 +12,16 @@ DeepSeekCode 是一个 DeepSeek-first 的终端 code agent，面向本地开发�
 > 仓库证据，以及更广的 hosted product proof 仍属于产品硬化工作。
 
 <p align="center">
-  <strong>DeepSeekCode 从空仓库写出可玩的 2048 游戏</strong><br>
-  <img src="./docs/demo/deepseek-code-2048-terminal-demo.svg" alt="DeepSeekCode 终端录屏：真实 model-backed CLI 从空仓库生成可玩的 2048 游戏" width="100%">
+  <strong>DeepSeekCode 交互式 REPL 从空仓库写出可玩的 2048 游戏</strong><br>
+  <img src="./docs/demo/deepseek-code-2048-interactive-demo.svg" alt="DeepSeekCode 交互式 REPL 录屏：真实 model-backed CLI 从空仓库生成可玩的 2048 游戏" width="100%">
 </p>
 
 <p align="center">
   <strong>生成后的游戏，本地试玩</strong><br>
-  <a href="./docs/demo/deepseek-code-2048-gameplay.mp4">
-    <img src="./docs/demo/deepseek-code-2048-gameplay.gif" alt="DeepSeekCode 真实 model-backed 2048 demo：从空仓库生成可玩的浏览器游戏" width="100%">
+  <a href="./docs/demo/deepseek-code-2048-interactive-gameplay.mp4">
+    <img src="./docs/demo/deepseek-code-2048-interactive-gameplay.gif" alt="DeepSeekCode 真实 model-backed 2048 demo：交互式 REPL 生成可玩的浏览器游戏" width="100%">
   </a><br>
-  <sub>两段录屏来自同一次真实 DeepSeekCode 运行，目标仓库是一个空的临时 Web repo。</sub>
+  <sub>两段录屏来自同一次真实交互式 <code>deepseek chat</code> 运行，目标仓库是一个空的临时 Web repo。</sub>
 </p>
 
 ## 为什么做它
@@ -153,7 +153,8 @@ deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 - [Release checklist](./docs/release.md)
 - [Dogfood evidence](./docs/dogfood-evidence.md)
 - [Current status](./docs/current-status.md)
-- 补充 demo：[TUI 录屏](./docs/demo/deepseek-code-tui-demo.svg) 和
+- 补充 demo：[scripted 2048 capture](./docs/demo/deepseek-code-2048-terminal-demo.svg)、
+  [TUI 录屏](./docs/demo/deepseek-code-tui-demo.svg) 和
   [model-backed 编辑/测试闭环](./docs/demo/deepseek-code-model-demo.svg)
 
 ## 文档

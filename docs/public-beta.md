@@ -81,8 +81,9 @@ deepseek run "summarize this repository and identify the main test command"
 
 The strongest current proof points are:
 
-- the README 2048 demo pair: a real terminal recording of DeepSeekCode writing
-  the app, plus GIF/MP4 browser gameplay from the same generated repo;
+- the README 2048 demo pair: a real interactive `deepseek chat` recording of
+  DeepSeekCode writing the app, plus GIF/MP4 browser gameplay from the same
+  generated repo;
 - supplemental TUI and model-backed edit/test SVGs in `docs/demo/`;
 - `deepseek quickstart` and `deepseek doctor --json` for first-run readiness;
 - CI-smoked TUI entrypoints and service/shell fixtures;
@@ -109,9 +110,9 @@ Keep these caveats visible when promoting the project:
   evidence base stronger.
 - Hosted IDE evidence and broader Windows service proof are outside the current
   Linux/macOS local CLI milestone.
-- The committed 2048 terminal SVG and gameplay GIF/MP4 should still be reviewed
-  in context before each major push, especially if README positioning or release
-  copy changes.
+- The committed interactive 2048 terminal SVG and gameplay GIF/MP4 should still
+  be reviewed in context before each major push, especially if README
+  positioning or release copy changes.
 
 ## Promotion Checklist
 
