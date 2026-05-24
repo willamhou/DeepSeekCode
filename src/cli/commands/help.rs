@@ -14,6 +14,7 @@ fn render_help(topics: &[String]) -> String {
         Some("quickstart") | Some("onboarding") => quickstart_help().to_string(),
         Some("run") => run_help().to_string(),
         Some("exec") => exec_help().to_string(),
+        Some("config") => config_help().to_string(),
         Some("stats") => stats_help().to_string(),
         Some("events") | Some("event") => events_help().to_string(),
         Some("benchmark") => benchmark_help().to_string(),
@@ -55,6 +56,7 @@ fn global_help() -> &'static str {
         "  tui                              Terminal workbench with sessions, tools, and approvals\n",
         "  run                              One-shot coding task\n",
         "  exec                             Durable exec/resume task runner\n",
+        "  config                           Workspace provider, model, preset, budget, auth, and network config\n",
         "  stats                            Runtime usage, cache, repair, and prompt-layer stats\n",
         "  events                           Runtime event replay and thread comparison evidence\n",
         "  agents                           Durable runtime, service, and shell supervisor tools\n",
@@ -83,6 +85,7 @@ fn global_help() -> &'static str {
         "More help:\n",
         "  deepseek help tui\n",
         "  deepseek help run\n",
+        "  deepseek help config\n",
         "  deepseek help stats\n",
         "  deepseek help events\n",
         "  deepseek help quickstart\n",
@@ -148,6 +151,26 @@ fn exec_help() -> &'static str {
         "  deepseek exec resume [session-id] [--skill <name>] [--budget <1..200>] [--preset <auto|flash|pro>] [--pro-next] [--image <path>] [--json] [task]\n",
         "\n",
         "Runs or resumes durable coding-agent tasks with structured output support."
+    )
+}
+
+fn config_help() -> &'static str {
+    concat!(
+        "DeepSeekCode config\n",
+        "\n",
+        "Usage:\n",
+        "  deepseek config init [--force]\n",
+        "  deepseek config auth [ENV] --stdin\n",
+        "  deepseek config provider [show|list|<name> [model]]\n",
+        "  deepseek config model [show|list|<model>]\n",
+        "  deepseek config preset [show|auto|flash|pro]\n",
+        "  deepseek config budget [show|off|MICROUSD|raise MICROUSD|+MICROUSD]\n",
+        "  deepseek config network allow|deny <host>\n",
+        "  deepseek config --print-default\n",
+        "\n",
+        "Manages project configuration for provider/model selection, DeepSeek V4\n",
+        "routing presets, optional session budget limits, safe API-key setup, and\n",
+        "persistent network policy."
     )
 }
 
@@ -493,6 +516,16 @@ mod tests {
         let exec_help = render_help(&["exec".to_string()]);
         assert!(exec_help.contains("--preset <auto|flash|pro>"));
         assert!(exec_help.contains("--pro-next"));
+    }
+
+    #[test]
+    fn config_help_documents_first_run_and_routing_surfaces() {
+        let help = render_help(&["config".to_string()]);
+        assert!(help.contains("config provider [show|list|<name> [model]]"));
+        assert!(help.contains("config model [show|list|<model>]"));
+        assert!(help.contains("config preset [show|auto|flash|pro]"));
+        assert!(help.contains("config budget [show|off|MICROUSD|raise MICROUSD|+MICROUSD]"));
+        assert!(help.contains("config auth [ENV] --stdin"));
     }
 
     #[test]
