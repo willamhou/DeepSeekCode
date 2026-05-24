@@ -222,7 +222,9 @@ docker run --rm ghcr.io/willamhou/deepseekcode:0.1.2 version
 ```
 
 同一次 tag 发布会写入 `<version>`、`v<version>` 和 `latest` 三个 tag；镜像名会按
-GHCR 要求转成小写。`v0.1.2` 的公开镜像已经通过 pull 和 `version` smoke test。
+GHCR 要求转成小写。`v0.1.2` 的 workflow 已推送公开 registry manifest，digest 为
+`sha256:c927e14280c6a7f41a11811a23d0f7824eaf936cdd58ca2f7a7f28d62b12d75a`；有 Docker
+权限的机器仍应按上面的 `docker run` 命令做本地 pull/run smoke。
 
 npm wrapper 位于 `npm/`，用于发布时把平台 binary 包装成 `deepseek` 命令。root 包通过 optional dependency 解析当前平台的 binary 包，例如 `@deepseek-code/cli-linux-x64`、`@deepseek-code/cli-macos-arm64`、`@deepseek-code/cli-macos-x64` 和 `@deepseek-code/cli-windows-x64`。发布前至少验证 wrapper 语法、平台包解析和本地 binary 转发：
 
