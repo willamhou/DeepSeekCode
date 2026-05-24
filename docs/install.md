@@ -2,6 +2,20 @@
 
 `deepseek` 是默认命令名。推荐先安装，再用 `deepseek version` 和 `deepseek quickstart` 做最小验证。
 
+## Homebrew
+
+macOS/Linux 推荐从公开 tap 安装：
+
+```bash
+brew tap willamhou/deepseekcode
+brew install deepseek
+deepseek version
+deepseek quickstart
+deepseek doctor --json
+```
+
+`v0.1.3` 的 tap 已通过 macOS x64 和 macOS arm64 Homebrew Smoke 验证。
+
 ## 从源码安装
 
 从公开仓库直接安装：
@@ -222,7 +236,8 @@ docker run --rm ghcr.io/willamhou/deepseekcode:0.1.3 version
 ```
 
 同一次 tag 发布会写入 `<version>`、`v<version>` 和 `latest` 三个 tag；镜像名会按
-GHCR 要求转成小写。每次发布后都要读取公开 registry manifest 并记录真实 digest；
+GHCR 要求转成小写。`v0.1.3` 的公开 registry manifest digest 为
+`sha256:f7f1574e100bd491cf2e8ddfa4aefccca5a957867b97199fd930f0e6b0af9fc9`；
 有 Docker 权限的机器仍应按上面的 `docker run` 命令做本地 pull/run smoke。
 
 npm wrapper 位于 `npm/`，用于发布时把平台 binary 包装成 `deepseek` 命令。root 包通过 optional dependency 解析当前平台的 binary 包，例如 `@deepseek-code/cli-linux-x64`、`@deepseek-code/cli-linux-arm64`、`@deepseek-code/cli-macos-arm64`、`@deepseek-code/cli-macos-x64` 和 `@deepseek-code/cli-windows-x64`。发布前至少验证 wrapper 语法、平台包解析和本地 binary 转发：
@@ -247,9 +262,9 @@ npm tarball，并在 tag run 且配置 `NPM_TOKEN` 时先发布平台包，再�
 齐全；加 `--json` 会输出 `deepseek.publish_status.v1`，便于 CI 或 release
 脚本消费。输出中的 `public_install` 会区分 source checkout、GitHub Release、
 npm、Homebrew、GHCR 和 Cargo registry 当前是 `source_available`、
-`ready_to_publish`、`requires_publish` 还是 `source_only_policy`。每次 tag 发布后
-都要重新记录 GitHub Release、GHCR、npm 和 Homebrew 的真实状态；在配置
-registry/tap 凭据并完成外部验证前，不要把 npm/Homebrew 写成已可用。
+`ready_to_publish`、`requires_publish` 还是 `source_only_policy`。`v0.1.3` 的
+GitHub Release、GHCR 和 Homebrew tap 已完成公开验证；npm registry 仍未发布，
+因为 repository secrets 中没有 `NPM_TOKEN`，tag workflow 明确跳过 npm publish。
 
 ## Runtime 服务模板
 
@@ -269,7 +284,7 @@ Linux 用户通常把 `services/systemd/*.service` 安装到
 install、start、status、logs、restart、stop、disable/unload 和 runtime
 health-check 命令；命令只生成文件，不会自动 enable、load 或 start。
 
-## Homebrew
+## Homebrew Formula
 
 Homebrew formula 模板位于 `packaging/homebrew/deepseek.rb`。它指向 GitHub
 release assets：
@@ -282,7 +297,9 @@ release assets：
 正式发布前必须把 formula 里的 `sha256` 占位值替换为对应 release asset 的真实
 SHA-256。GitHub `Release Matrix` workflow 会为每个 archive 上传旁路
 `.sha256` 文件并创建 signed artifact attestations，优先使用这些值填写
-formula，确保 tap 和发布资产完全一致。安装前可用 `gh attestation verify
+formula，确保 tap 和发布资产完全一致。`v0.1.3` 的 tap formula 已用 release asset
+SHA-256 更新，并通过 Homebrew Smoke run `26352180898` 在 macOS x64/arm64 上完成
+公开 tap 安装验证。安装前可用 `gh attestation verify
 <archive> --repo <owner>/<repo>` 验证 provenance。然后运行：
 
 ```bash

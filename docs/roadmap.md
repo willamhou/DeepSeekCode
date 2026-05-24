@@ -24,21 +24,26 @@ DeepSeekCode is now usable for Linux/macOS dogfooding and repository work:
 - verified online multi-file external fixture evidence is tracked for the
   Python invoice, Rust order, and Node task-report samples under
   `.dscode/dogfood/`.
+- `v0.1.3` ships GitHub Release assets for Linux x64, Linux arm64, macOS x64,
+  macOS arm64, and Windows x64, with Release Smoke evidence for Linux/macOS
+  public downloads:
+  https://github.com/willamhou/DeepSeekCode/actions/runs/26352088322
+- the public Homebrew tap is verified on macOS x64 and macOS arm64:
+  https://github.com/willamhou/DeepSeekCode/actions/runs/26352180898
 
 The Linux/macOS local code-agent CLI milestone is effectively established. The
-remaining work is mostly release hardening, external evidence depth, publishing,
-and documentation polish.
+remaining work is mostly external evidence depth, npm publishing, installed
+service proof, and documentation polish.
 
 ## Near-Term Priorities
 
 ### 1. Release Hardening For Linux/macOS
 
-- Run the next release matrix and preserve release-binary smoke evidence for
-  Linux/macOS TUI entrypoint, shell fixture, service smoke, task worktree smoke,
-  GitHub bridge smoke, and multi-file fixture scaffold.
+- Keep the release matrix green for Linux x64, Linux arm64, macOS x64,
+  macOS arm64, and Windows x64.
 - Use `deepseek update release-smoke --version <version>` on Linux x64,
-  macOS x64, and macOS arm64 to validate downloaded release binaries outside
-  the source checkout.
+  Linux arm64, macOS x64, and macOS arm64 to validate downloaded release
+  binaries outside the source checkout.
 - Keep `deepseek update publish-status --strict` fail-closed on verified online
   dogfood evidence, release assets, npm package artifacts, Homebrew checksums,
   and public install readiness.
@@ -46,15 +51,16 @@ and documentation polish.
 
 ### 2. Homebrew And npm Publishing
 
-- Configure `HOMEBREW_TAP_REPOSITORY` and `HOMEBREW_TAP_TOKEN`.
-- Publish and verify the generated `Formula/deepseek.rb` against the GitHub
-  Release archives and `.sha256` files.
+- Homebrew is published and verified for `v0.1.3`; keep the tap formula aligned
+  with GitHub Release archives and `.sha256` files.
+- Configure `HOMEBREW_TAP_TOKEN` so future tag workflows can update the tap
+  automatically.
 - Configure `NPM_TOKEN` / `NODE_AUTH_TOKEN`.
 - Publish platform npm packages and the root wrapper, then verify public
   `npm install` produces a working `deepseek` command.
 
-For the Linux/macOS CLI milestone, Homebrew is higher priority than npm because
-it is the most natural install path for macOS users.
+For the Linux/macOS CLI milestone, Homebrew is now the verified installer path;
+npm remains useful for Node-oriented users but is not the primary blocker.
 
 ### 3. More External Model-Backed Samples
 
@@ -91,10 +97,9 @@ For the Linux/macOS local CLI milestone, stop treating new work as blocking once
 these are true:
 
 - hosted Linux/macOS CI gates remain green;
-- release-binary Linux/macOS smoke evidence exists from the next release matrix;
+- release-binary Linux/macOS smoke evidence exists for the latest release;
 - at least one verified online multi-file external fixture remains tracked;
-- Homebrew public install is either published and verified, or explicitly marked
-  blocked on tap credentials;
+- Homebrew public install remains published and verified;
 - README and install docs show `deepseek quickstart` as the accurate first-run
   path.
 
