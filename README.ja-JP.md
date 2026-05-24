@@ -182,6 +182,14 @@ release と dogfood evidence:
 - [Roadmap](./docs/roadmap.md)
 - [Changelog](./CHANGELOG.md)
 
+## Acknowledgements
+
+DeepSeekCode は独立実装ですが、一部の compatibility surface と terminal-agent
+workflow ideas は [Hmbown/CodeWhale](https://github.com/Hmbown/CodeWhale)
+（formerly DeepSeek-TUI）から示唆を受けています。DeepSeekCode は CodeWhale の
+source code を vendored しておらず、コピーもしていません。互換性の作業は interface
+and workflow parity として追跡しています。
+
 ## Repository Notes
 
 このリポジトリは透明性と協力のために公開されています。公開されていることは、

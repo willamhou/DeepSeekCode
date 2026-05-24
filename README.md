@@ -184,6 +184,14 @@ For release and dogfood evidence, see:
 - [Roadmap](./docs/roadmap.md)
 - [Changelog](./CHANGELOG.md)
 
+## Acknowledgements
+
+DeepSeekCode is independently implemented, but several compatibility surfaces
+and terminal-agent workflow ideas were informed by
+[Hmbown/CodeWhale](https://github.com/Hmbown/CodeWhale), formerly
+DeepSeek-TUI. DeepSeekCode does not vendor or copy CodeWhale source code; the
+compatibility work is tracked as interface and workflow parity.
+
 ## Repository Notes
 
 This repository is public for transparency and collaboration. Public visibility

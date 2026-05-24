@@ -176,6 +176,12 @@ deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 - [Roadmap](./docs/roadmap.md)
 - [Changelog](./CHANGELOG.md)
 
+## 致谢
+
+DeepSeekCode 为独立实现，但部分兼容接口和终端 agent 工作流设计参考了
+[Hmbown/CodeWhale](https://github.com/Hmbown/CodeWhale)（原 DeepSeek-TUI）。
+DeepSeekCode 没有 vendored 或复制 CodeWhale 源码；相关工作主要是接口与工作流兼容。
+
 ## 仓库说明
 
 这个仓库公开是为了透明和协作。公开可见不代表在 [LICENSE](./LICENSE) 之外授予额外的
