@@ -1,7 +1,8 @@
 # Demo Script
 
 Use this to record a 30-60 second launch demo. The goal is to show the product
-working, not to explain every feature.
+working, not to explain every feature. For the most visual launch asset, start
+with the 2048 recorder in [../demo/README.md](../demo/README.md).
 
 ## Recording Setup
 
@@ -16,11 +17,11 @@ working, not to explain every feature.
 
 1. Install or verify the CLI.
 2. Run first-run checks.
-3. Open a small repo.
-4. Ask DeepSeekCode to inspect the repo and make a bounded change.
+3. Open an empty 2048 demo repo or a small disposable code repo.
+4. Ask DeepSeekCode to make a bounded change or generate the playable 2048 app.
 5. Approve file/shell actions.
-6. Show the diff.
-7. Run tests.
+6. Show the generated files or diff.
+7. Run tests, validation, or local browser preview.
 8. Close with the GitHub repo URL.
 
 ## Command Flow
@@ -47,6 +48,13 @@ git diff --stat
 git diff
 ```
 
+For the 2048 launch asset:
+
+```bash
+DEEPSEEK_2048_KEY_FILE=/tmp/deepseek-2048.key docs/demo/record-2048-demo.sh
+DEEPSEEK_2048_KEY_FILE=/tmp/deepseek-2048.key docs/demo/record-2048-demo.sh --serve
+```
+
 If a live model call is too slow for a public recording, use the committed
 model-backed SVG in the README and record a shorter install/quickstart clip.
 
@@ -59,6 +67,8 @@ model-backed SVG in the README and record a shorter install/quickstart clip.
 - The agent reads repo context before editing.
 - File changes are reviewable with `git diff`.
 - Tests or checks run in the same terminal loop.
+- The 2048 demo reaches a visual, playable result rather than only a terminal
+  transcript.
 - The project is public beta and asks for real terminal-workflow feedback.
 
 ## Social Preview Brief

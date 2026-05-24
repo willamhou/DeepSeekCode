@@ -73,8 +73,11 @@ dogfood 证据。
 - 入口：`deepseek`、`deepseek chat`、`deepseek run`、`deepseek tui`、`deepseek exec`。
 - TUI：Plan / Agent / YOLO 模式、approval modal、command palette、session/thread 视图、
   MCP 管理、setup/onboarding、provider/model picker。
-- 首跑：`deepseek quickstart` 以只读方式展示 workspace config、API key env、TTY 状态、
-  下一步命令和 starter tasks；`--json` 可用于安装验证和自动化排障。
+- 首跑：`deepseek quickstart` 以只读方式展示 workspace config、API key env、model/base
+  URL、TTY 状态、下一步命令和 starter tasks；`deepseek config provider
+  [show|list|<name> [model]]`、`deepseek config model [show|list|<model>]` 和
+  `deepseek config auth [ENV] --stdin` 已支持 provider/model 选择与安全 `.env` 写入；
+  `--json` 可用于安装验证和自动化排障。
 - REPL：raw-mode line editor、history、session list/load completion、SIGINT cancel、
   `/save`、`/load`、`/sessions`、custom slash commands。
 - Runtime：`.dscode/runtime/` 下持久化 sessions、threads、turns、items、events、
@@ -106,8 +109,10 @@ dogfood 证据。
    已手动发布并验证。
 3. 在干净 Linux/macOS 机器上安装 systemd/launchd user services，记录
    `service-doctor --installed` 和 `service-smoke --installed` 证据。
-4. 补真实 VS Code CLI runner 或 manual GUI fixture 证据。
-5. 持续和 Claude Code CLI / Codex CLI / DeepSeek-TUI 做核心 loop 对照，只保留会影响真实用户使用的差距。
+4. 产出并审核基于 `docs/demo/record-2048-demo.sh` 的 30-60 秒 GIF/MP4，
+   展示从空 repo 到可玩 2048 的 model-backed 可视化流程。
+5. 补真实 VS Code CLI runner 或 manual GUI fixture 证据。
+6. 持续和 Claude Code CLI / Codex CLI / DeepSeek-TUI 做核心 loop 对照，只保留会影响真实用户使用的差距。
 
 ## 推荐公开表述
 

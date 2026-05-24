@@ -17,6 +17,11 @@ model-backed transcript. It shows the source-evidence loop: failing `cargo test`
 `deepseek exec`, a one-line Rust patch, and passing `cargo test`. A polished GIF
 or MP4 can still be added later for launch pages.
 
+`record-2048-demo.sh` captures a more visual launch demo: an empty disposable
+web repository, a model-backed `deepseek exec` run that builds a playable 2048
+game with plain HTML/CSS/JS, file validation, `git diff --stat`, and an
+optional local preview server for browser gameplay capture.
+
 ## Model-Backed Demo Capture
 
 Use `record-model-backed-demo.sh` to capture real model-backed CLI evidence
@@ -61,3 +66,30 @@ The verifier can be checked without a model call:
 docs/demo/verify-model-backed-demo.js --self-test
 docs/demo/render-model-backed-demo-svg.js --self-test
 ```
+
+## 2048 Launch Demo Capture
+
+Dry-run the 2048 capture plan without creating a repo or spending model calls:
+
+```bash
+docs/demo/record-2048-demo.sh --dry-run
+docs/demo/record-2048-demo.sh --redaction-self-test
+```
+
+Record a real model-backed transcript:
+
+```bash
+printf '%s\n' '<deepseek-api-key>' > /tmp/deepseek-2048.key
+chmod 600 /tmp/deepseek-2048.key
+DEEPSEEK_2048_KEY_FILE=/tmp/deepseek-2048.key docs/demo/record-2048-demo.sh
+```
+
+Record with a local preview server for GIF/MP4 capture:
+
+```bash
+DEEPSEEK_2048_KEY_FILE=/tmp/deepseek-2048.key docs/demo/record-2048-demo.sh --serve
+```
+
+The script prints the disposable demo repo and transcript path. Keep raw
+transcripts only after reviewing them for local paths and generated content
+quality. Use `--cleanup` only after recording any browser gameplay you need.
