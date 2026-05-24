@@ -14,20 +14,16 @@ working from the same terminal.
 > are still product-hardening work.
 
 <p align="center">
-  <img src="./docs/demo/deepseek-code-tui-demo.svg" alt="DeepSeekCode animated TUI demo recording" width="100%">
+  <strong>DeepSeekCode writes a playable 2048 game from an empty repo</strong><br>
+  <img src="./docs/demo/deepseek-code-2048-terminal-demo.svg" alt="DeepSeekCode terminal recording: model-backed CLI creates a playable 2048 game from an empty repo" width="100%">
 </p>
 
 <p align="center">
-  <strong>Real model-backed edit and test loop</strong><br>
-  <img src="./docs/demo/deepseek-code-model-demo.svg" alt="DeepSeekCode real model-backed demo: failing Rust test fixed and validated" width="100%">
-</p>
-
-<p align="center">
-  <strong>Model-backed 2048 launch demo</strong><br>
+  <strong>Generated game, played locally</strong><br>
   <a href="./docs/demo/deepseek-code-2048-gameplay.mp4">
     <img src="./docs/demo/deepseek-code-2048-gameplay.gif" alt="DeepSeekCode model-backed 2048 demo: empty repo to playable browser game" width="100%">
   </a><br>
-  <sub>Generated from a real DeepSeekCode run against an empty disposable web repo.</sub>
+  <sub>Both recordings come from the same real DeepSeekCode run against an empty disposable web repo.</sub>
 </p>
 
 ## Why It Exists
@@ -165,6 +161,8 @@ For release and dogfood evidence, see:
 - [Release checklist](./docs/release.md)
 - [Dogfood evidence](./docs/dogfood-evidence.md)
 - [Current status](./docs/current-status.md)
+- Additional demos: [TUI recording](./docs/demo/deepseek-code-tui-demo.svg)
+  and [model-backed edit/test loop](./docs/demo/deepseek-code-model-demo.svg)
 
 ## Documentation
 

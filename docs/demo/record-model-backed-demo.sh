@@ -104,6 +104,7 @@ redact_demo_stream() {
         line = redact_all(line, secrets[i], replacements[i])
       }
       print line
+      fflush()
     }
   '
 }

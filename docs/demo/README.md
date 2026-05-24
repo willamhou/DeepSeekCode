@@ -1,6 +1,11 @@
 # Demo Assets
 
-`deepseek-code-tui-demo.svg` is the animated README demo generated from the
+`deepseek-code-2048-terminal-demo.svg` is the primary README demo: an animated
+terminal recording of a real model-backed DeepSeekCode run that starts with an
+empty disposable web repo, writes a playable 2048 app, validates the files, and
+prints the final diff evidence.
+
+`deepseek-code-tui-demo.svg` is the older animated TUI demo generated from the
 deterministic TUI snapshot. `deepseek-code-tui.svg` is the static fallback from
 the same snapshot.
 
@@ -22,8 +27,9 @@ game with plain HTML/CSS/JS, file validation, `git diff --stat`, and an
 optional local preview server for browser gameplay capture.
 
 The committed `deepseek-code-2048-gameplay.gif` and
-`deepseek-code-2048-gameplay.mp4` are generated from a reviewed real
-model-backed 2048 transcript and browser gameplay capture.
+`deepseek-code-2048-gameplay.mp4` show the generated browser game being played
+locally. They are recorded from the same generated 2048 repo as the current
+terminal recording.
 
 ## Model-Backed Demo Capture
 
