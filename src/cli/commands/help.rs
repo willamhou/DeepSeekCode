@@ -147,6 +147,7 @@ fn exec_help() -> &'static str {
         "DeepSeekCode exec\n",
         "\n",
         "Usage:\n",
+        "  deepseek exec [--skill <name>] [--budget <1..200>] [--preset <auto|flash|pro>] [--pro-next] [--image <path>] [--json] \"<task>\"\n",
         "  deepseek exec run [--skill <name>] [--budget <1..200>] [--preset <auto|flash|pro>] [--pro-next] [--image <path>] [--json] \"<task>\"\n",
         "  deepseek exec resume [session-id] [--skill <name>] [--budget <1..200>] [--preset <auto|flash|pro>] [--pro-next] [--image <path>] [--json] [task]\n",
         "\n",
@@ -543,6 +544,7 @@ mod tests {
         assert!(run_help.contains("--pro-next"));
 
         let exec_help = render_help(&["exec".to_string()]);
+        assert!(exec_help.contains("deepseek exec [--skill <name>]"));
         assert!(exec_help.contains("--preset <auto|flash|pro>"));
         assert!(exec_help.contains("--pro-next"));
     }
