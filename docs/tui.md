@@ -158,10 +158,10 @@ Current surfaces:
 - composer and command-palette editing preserve terminal modifier keys, including
   Ctrl-based line, word, and cursor controls
 - task panel with active thread status, runtime item count, item state/type
-  progress counts, latest item summary, recent runtime tasks, active-thread
-  automations, usage total, cache-hit rate, cache chart, estimated cost,
-  input/output cost split, cost chart, and 1M-context policy when usage records
-  exist
+  progress counts, latest item summary, live agent timeline, recent runtime
+  tasks, active-thread automations, usage total, cache-hit rate, cache chart,
+  estimated cost, input/output cost split, cost chart, and 1M-context policy
+  when usage records exist
 - command palette with local UI commands and active-thread runtime actions
 - command palette history with `Up` / `Down` recall while the palette is active
 - command palette prefix completion with `Tab` for built-in workbench commands
@@ -221,6 +221,9 @@ Current surfaces:
 - active-thread runtime items are summarized in the task panel with state/type
   counts and the latest item, so streamed agent progress and tool activity are
   visible while a background run is active
+- running agent turns show a compact task-panel timeline with current step,
+  recent tool, elapsed time, pending approvals, queued follow-up messages, and
+  next-action hints
 - persisted reasoning items can be inspected from the command palette with
   `reasoning`, `reasoning latest`, `reasoning show <selector>`, and
   `reasoning search <query>`; the same panel exposes `reasoning replay <N>` and

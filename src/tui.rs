@@ -6014,6 +6014,76 @@ impl TuiApp {
         tasks
     }
 
+    fn agent_timeline_lines(&self, thread: &TuiThread) -> Vec<String> {
+        let items = self.active_thread_items();
+        let active_tasks = self.active_thread_tasks();
+        let running_task = active_tasks
+            .iter()
+            .copied()
+            .find(|task| task.status == "running");
+        let running_assistant = items.iter().rev().copied().find(|item| {
+            item.status == "running"
+                && item.item_type == "message"
+                && item.role.as_deref() == Some("assistant")
+        });
+        let active_tool = items.iter().rev().copied().find(|item| {
+            item.item_type == "tool_call" && matches!(item.status.as_str(), "running" | "pending")
+        });
+        let recent_tool = items
+            .iter()
+            .rev()
+            .copied()
+            .find(|item| matches!(item.item_type.as_str(), "tool_call" | "tool_result"));
+        let pending_approvals = self
+            .approvals
+            .iter()
+            .filter(|approval| approval.is_pending() && approval.thread_id == thread.id)
+            .count();
+        let queued_messages = self
+            .queued_messages
+            .iter()
+            .filter(|message| message.thread_id == thread.id)
+            .count();
+
+        if running_task.is_none()
+            && running_assistant.is_none()
+            && active_tool.is_none()
+            && pending_approvals == 0
+            && queued_messages == 0
+        {
+            return Vec::new();
+        }
+
+        let mut lines = vec!["Agent timeline".to_string()];
+        lines.push(format!(
+            "Current step: {}",
+            agent_current_step_label(
+                running_assistant,
+                active_tool,
+                running_task,
+                pending_approvals,
+                queued_messages,
+            )
+        ));
+        if let Some(tool) = recent_tool {
+            lines.push(format!("Recent tool: {}", tool_item_timeline_label(tool)));
+        } else {
+            lines.push("Recent tool: none yet".to_string());
+        }
+        lines.push(format!(
+            "Elapsed: {}",
+            running_task_elapsed_label(running_task)
+        ));
+        lines.push(format!("Pending approvals: {pending_approvals}"));
+        lines.push(format!("Queued messages: {queued_messages}"));
+        if pending_approvals > 0 {
+            lines.push("Next action: answer approval with !".to_string());
+        } else if queued_messages > 0 && running_assistant.is_some() {
+            lines.push("Next action: queued follow-up sends after idle".to_string());
+        }
+        lines
+    }
+
     fn active_task_by_id(&self, task_id: &str) -> Option<&TuiTaskRecord> {
         self.active_thread_tasks()
             .into_iter()
@@ -6611,6 +6681,10 @@ impl TuiApp {
             format!("Reasoning replay: latest {}", self.reasoning_replay_limit),
             format!("Event seq: {}", thread.event_seq),
         ];
+        let agent_timeline_lines = self.agent_timeline_lines(&thread);
+        if !agent_timeline_lines.is_empty() {
+            self.tasks.extend(agent_timeline_lines);
+        }
         self.tasks.extend(item_progress_lines);
         let active_task_lines = {
             let active_tasks = self.active_thread_tasks();
@@ -16017,6 +16091,74 @@ fn task_progress_lines(task: &TuiTaskRecord, selected: bool, bulk_selected: bool
     ]
 }
 
+fn agent_current_step_label(
+    running_assistant: Option<&TuiItem>,
+    active_tool: Option<&TuiItem>,
+    running_task: Option<&TuiTaskRecord>,
+    pending_approvals: usize,
+    queued_messages: usize,
+) -> String {
+    if pending_approvals > 0 {
+        return format!("{pending_approvals} approval(s) pending");
+    }
+    if let Some(tool) = active_tool {
+        return format!(
+            "#{} {}",
+            tool.index,
+            clip_line(&tool_item_timeline_label(tool), 74)
+        );
+    }
+    if let Some(item) = running_assistant {
+        return format!(
+            "#{} assistant streaming ({} chars)",
+            item.index,
+            item.content.chars().count()
+        );
+    }
+    if let Some(task) = running_task {
+        return format!("task {} running", short_task_id(&task.id));
+    }
+    if queued_messages > 0 {
+        return format!("idle; {queued_messages} queued message(s)");
+    }
+    "idle".to_string()
+}
+
+fn running_task_elapsed_label(task: Option<&TuiTaskRecord>) -> String {
+    let Some(task) = task else {
+        return "not running".to_string();
+    };
+    let Some(started) = tui_goal_system_time(&task.updated_at) else {
+        return "unknown".to_string();
+    };
+    started
+        .elapsed()
+        .map(format_tui_goal_elapsed)
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn tool_item_timeline_label(item: &TuiItem) -> String {
+    let tool = item_content_field(&item.content, "tool").unwrap_or_else(|| item.item_type.clone());
+    let target = item_content_field(&item.content, "target");
+    let base = match target {
+        Some(target) if !target.trim().is_empty() => {
+            format!("{} [{}] {}", tool, item.status, target.trim())
+        }
+        _ => format!("{} [{}]", tool, item.status),
+    };
+    clip_line(&base, 88)
+}
+
+fn item_content_field(content: &str, field: &str) -> Option<String> {
+    let prefix = format!("{field}:");
+    content.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(&prefix)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
 fn runtime_item_progress_lines(items: &[&TuiItem]) -> Vec<String> {
     if items.is_empty() {
         return Vec::new();
@@ -20240,8 +20382,17 @@ model.model = "deepseek-v4-pro"
             Vec::new(),
         );
 
-        let output = render_once(&app, 140, 40).unwrap();
+        let task_lines = app.tasks.join("\n");
+        assert!(task_lines.contains("Agent timeline"));
+        assert!(task_lines.contains("Current step: #0 assistant streaming"));
+        assert!(task_lines.contains("Recent tool: tool_call [completed]"));
+        assert!(task_lines.contains("Elapsed:"));
+        assert!(task_lines.contains("Pending approvals: 0"));
+        assert!(task_lines.contains("Queued messages: 0"));
+
+        let output = render_once(&app, 220, 40).unwrap();
         assert!(output.contains("Runtime items: 2"));
+        assert!(output.contains("Agent timeline"));
         assert!(output.contains("Item states:"));
         assert!(output.contains("running=1"));
         assert!(output.contains("completed=1"));
@@ -20254,6 +20405,91 @@ model.model = "deepseek-v4-pro"
         assert!(output.contains("Task states: running=1"));
         assert!(output.contains("Task [running] task-one"));
         assert!(output.contains("agent updated epoch+2"));
+    }
+
+    #[test]
+    fn task_panel_timeline_surfaces_pending_approval_and_queue() {
+        let sessions = vec![TuiSession {
+            id: "session-one".to_string(),
+            title: "One".to_string(),
+            workspace: ".".to_string(),
+            status: "active".to_string(),
+            active_thread_id: Some("thread-one".to_string()),
+            thread_count: 1,
+        }];
+        let threads = vec![TuiThread {
+            id: "thread-one".to_string(),
+            session_id: Some("session-one".to_string()),
+            title: "First thread".to_string(),
+            mode: "agent".to_string(),
+            status: "active".to_string(),
+            latest_turn_id: Some("turn-one".to_string()),
+            event_seq: 1,
+        }];
+        let items = vec![
+            TuiItem {
+                id: "item-assistant".to_string(),
+                thread_id: "thread-one".to_string(),
+                turn_id: Some("turn-one".to_string()),
+                index: 0,
+                item_type: "message".to_string(),
+                role: Some("assistant".to_string()),
+                content: "working".to_string(),
+                status: "running".to_string(),
+            },
+            TuiItem {
+                id: "item-tool".to_string(),
+                thread_id: "thread-one".to_string(),
+                turn_id: Some("turn-one".to_string()),
+                index: 1,
+                item_type: "tool_call".to_string(),
+                role: None,
+                content: "tool: run_shell\ntarget: cargo test\nstatus: pending\napproval: shell cargo test\ninput: command=cargo test".to_string(),
+                status: "pending".to_string(),
+            },
+        ];
+        let tasks = vec![runtime_task(
+            "task-running",
+            "running",
+            "agent run: execute tests",
+            "epoch+2",
+        )];
+        let approvals = vec![TuiApprovalRequest {
+            id: "approval-one".to_string(),
+            thread_id: "thread-one".to_string(),
+            turn_id: Some("turn-one".to_string()),
+            tool: "run_shell".to_string(),
+            kind: "shell".to_string(),
+            target: "cargo test".to_string(),
+            fingerprint: "perm:shell:run_shell:cargo-test".to_string(),
+            grouping_fingerprint: "perm-group:shell:cargo".to_string(),
+            status: "pending".to_string(),
+        }];
+        let mut app = TuiApp::with_runtime_usage_tasks_and_approvals(
+            sessions,
+            threads,
+            items,
+            tasks,
+            Vec::new(),
+            approvals,
+        );
+        app.queued_messages.push_back(TuiQueuedMessage {
+            thread_id: "thread-one".to_string(),
+            content: "run the next check".to_string(),
+            preset_override: None,
+        });
+        app.refresh_runtime_view();
+
+        let task_lines = app.tasks.join("\n");
+        assert!(task_lines.contains("Agent timeline"));
+        assert!(task_lines.contains("Current step: 1 approval(s) pending"));
+        assert!(task_lines.contains("Recent tool: run_shell [pending] cargo test"));
+        assert!(task_lines.contains("Pending approvals: 1"));
+        assert!(task_lines.contains("Queued messages: 1"));
+        assert!(task_lines.contains("Next action: answer approval with !"));
+
+        let output = render_once(&app, 220, 42).unwrap();
+        assert!(output.contains("Agent timeline"));
     }
 
     #[test]

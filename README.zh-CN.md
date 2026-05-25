@@ -149,8 +149,8 @@ deepseek tui --runtime-url http://127.0.0.1:13000
 
 ## 已经可用
 
-- 全屏 TUI：Plan / Agent / YOLO 模式、approval modal、command palette、
-  setup/onboarding、provider/model picker 和 MCP 管理。
+- 全屏 TUI：Plan / Agent / YOLO 模式、approval modal、实时 agent task timeline、
+  command palette、setup/onboarding、provider/model picker 和 MCP 管理。
 - REPL：raw-mode line editor、history、session list/load completion、
   SIGINT cancel、`/save`、`/load`、`/sessions` 和 custom slash commands。
 - OpenAI-compatible 单个 tool call 与同轮 batch tool calls，都会经过正常的
