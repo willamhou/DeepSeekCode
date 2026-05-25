@@ -11,8 +11,8 @@ DeepSeekCode 的目标是成为一个 DeepSeek-first 的 code agent CLI：用户
 当前执行口径收敛到 Linux/macOS 本地 code agent CLI。只要用户能在 Linux/macOS 安装并
 运行 `deepseek`，稳定进入 TUI/REPL，完成模型读写代码、shell 验证、diff review、
 resume 和本地 runtime/shell-supervisor 工作流，就可以认为这个 milestone 成立。
-Windows、hosted IDE 和 npm 发布属于更大的产品硬化目标；Homebrew 已是经过 smoke
-验证的 Linux/macOS 分发路径。
+Windows 和 hosted IDE 属于更大的产品硬化目标；Homebrew 已是经过 smoke
+验证的 Linux/macOS 分发路径，npm/npx 正在作为 `v0.1.4` 补齐给 Node 用户的公开安装路径。
 
 ## 当前判断
 
@@ -23,7 +23,7 @@ dogfood 证据。
 
 但它还不是“可以公开宣称等同 Claude Code CLI / Codex CLI”的成熟产品。剩余差距主要是：
 
-- npm registry 的发布凭据与公开安装验证；
+- `v0.1.4` tag workflow 的 npm publish 与公开安装复验；
 - 更多真实外部 repo 样本；
 - 持续维护精简的新用户文档、public beta 说明和故障排查路径；
 - hosted IDE、真实安装后的 systemd/launchd service smoke，以及更广的 Windows 长尾验证。
@@ -62,9 +62,9 @@ dogfood 证据。
   `brew tap willamhou/deepseekcode && brew install deepseek` 已通过 macOS x64/arm64
   Homebrew Smoke：
   https://github.com/willamhou/DeepSeekCode/actions/runs/26352180898
-- `v0.1.3` npm packaging metadata、download-plan 和 publish-status 检查已就绪；
-  npm registry 发布因 repository secrets 中缺少 `NPM_TOKEN` 被 tag workflow 明确跳过，
-  当前 `npm view @deepseek-code/cli` 仍为 registry 404。
+- `v0.1.4` 已准备作为 npm/npx 发布补丁版本：Cargo、npm root wrapper、平台包、
+  release-smoke 默认值和 Homebrew formula metadata 已同步到 `0.1.4`；GitHub
+  Actions `NPM_TOKEN` 已配置，tag workflow 将发布平台 npm 包和 root wrapper。
 - PR #18 增加 `deepseek quickstart` / `deepseek onboarding` 首跑检查，并通过 CI：
   https://github.com/willamhou/DeepSeekCode/actions/runs/26335387193
 - PR #19 增加 `deepseek update release-smoke`，用于发布二进制复验，并通过 CI：
@@ -148,9 +148,11 @@ dogfood 证据。
    events replay <thread>` 和 `deepseek events diff <left> <right>` 初版也已接入
    runtime events/items/usage，可输出 text 或 JSON 证据；`deepseek dogfood
    repair-cache-evidence --json` 已补齐确定性的 before/after repair/cache 证据。
-2. 配置 `NPM_TOKEN` 并发布 npm wrapper，验证 `npm install` 后裸 `deepseek` 入口。
-3. 配置 `HOMEBREW_TAP_TOKEN`，让后续 tag workflow 自动更新 tap；当前 `v0.1.3` tap
-   已手动发布并验证。
+2. 发布 `v0.1.4` tag，等待 npm publish job 完成，并验证
+   `npm install -g @deepseek-code/cli` / `npx @deepseek-code/cli` 后裸
+   `deepseek` 入口。
+3. 配置 `HOMEBREW_TAP_TOKEN`，让后续 tag workflow 自动更新 tap；当前已验证的公开
+   tap evidence 来自 `v0.1.3`，`v0.1.4` 需要 tag workflow 或手动 tap 更新后复验。
 4. 在干净 Linux/macOS 机器上安装 systemd/launchd user services，记录
    `service-doctor --installed` 和 `service-smoke --installed` 证据。
 5. 补真实 VS Code CLI runner 或 manual GUI fixture 证据。
@@ -168,6 +170,6 @@ dogfood 证据。
 > model-backed README interactive 2048 terminal and gameplay demo media. The
 > supplemental scripted 2048, TUI, and edit/test demos remain available as
 > evidence links. The
-> remaining Linux/macOS CLI work is broader external sample depth and continuing
-> documentation polish; hosted IDE, Windows/service proof, and npm publishing
-> remain broader product-hardening work.
+> remaining Linux/macOS CLI work is broader external sample depth, npm/npx
+> publish verification, and continuing documentation polish; hosted IDE and
+> Windows/service proof remain broader product-hardening work.

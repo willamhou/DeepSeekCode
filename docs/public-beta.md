@@ -15,8 +15,8 @@ The honest public-beta claim is:
 > DeepSeekCode is usable today for Linux/macOS dogfooding and repository work,
 > with a full-screen TUI, REPL, durable runtime, permissioned tools, shell/PTY
 > workflows, release binaries, a verified Homebrew tap, a model-backed README
-> demo set, online dogfood evidence, and first-run checks. npm distribution,
-> broader external samples, and hosted product evidence are still in progress.
+> demo set, online dogfood evidence, first-run checks, and npm/npx packaging.
+> Broader external samples and hosted product evidence are still in progress.
 
 Do not describe the project as fully equivalent to Claude Code CLI or Codex CLI
 yet. The local loop is close enough to dogfood, but the public install and
@@ -35,13 +35,23 @@ Good public-beta users:
 
 Less ideal users for this phase:
 
-- users who require npm as the only install path;
 - users who need polished hosted IDE flows;
 - Windows-only users who expect service-level parity with Linux/macOS.
 
 ## First-Run Path
 
 Recommended path for public-beta testers:
+
+```bash
+npm install -g @deepseek-code/cli
+deepseek quickstart
+deepseek config init
+printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
+deepseek doctor --json
+deepseek
+```
+
+Homebrew remains available for macOS/Linux users:
 
 ```bash
 brew tap willamhou/deepseekcode
@@ -67,8 +77,8 @@ deepseek
 For release archive users, start with:
 
 ```bash
-deepseek update download-plan --version 0.1.3
-deepseek update release-smoke --version 0.1.3 --json
+deepseek update download-plan --version 0.1.4
+deepseek update release-smoke --version 0.1.4 --json
 ```
 
 Then try a bounded task in an existing repository:
@@ -87,8 +97,10 @@ The strongest current proof points are:
 - supplemental TUI and model-backed edit/test SVGs in `docs/demo/`;
 - `deepseek quickstart` and `deepseek doctor --json` for first-run readiness;
 - CI-smoked TUI entrypoints and service/shell fixtures;
-- `deepseek update release-smoke --version 0.1.3 --json` for release binary
+- `deepseek update release-smoke --version 0.1.4 --json` for release binary
   verification on the current platform;
+- `npm install -g @deepseek-code/cli` and `npx @deepseek-code/cli` as the
+  Node-oriented install path after the `v0.1.4` publish job completes;
 - verified Homebrew tap install on macOS x64 and macOS arm64;
 - online Python, Rust, and Node external fixture evidence recorded through
   dogfood tooling;
@@ -102,10 +114,11 @@ Use [docs/current-status.md](./current-status.md) for the exact state and
 
 Keep these caveats visible when promoting the project:
 
-- npm registry publishing is product-hardening work, not the primary install
-  path yet.
+- npm publishing depends on the `v0.1.4` tag workflow and the configured
+  `NPM_TOKEN`; verify the registry before making npm the only install command.
 - Homebrew is published, but future tag automation still needs
-  `HOMEBREW_TAP_TOKEN`; `v0.1.3` was updated manually after the tag run.
+  `HOMEBREW_TAP_TOKEN`; verify the tap again after the `v0.1.4` release assets
+  are published and the formula is refreshed.
 - More online model-backed runs against larger external fixtures would make the
   evidence base stronger.
 - Hosted IDE evidence and broader Windows service proof are outside the current
@@ -124,7 +137,7 @@ cargo test --lib -- --test-threads=1
 node scripts/check-secrets.js
 deepseek quickstart --json
 deepseek update publish-status --json
-deepseek update release-smoke --version 0.1.3 --json
+deepseek update release-smoke --version 0.1.4 --json
 ```
 
 Also check:
@@ -150,7 +163,7 @@ Longer public-beta copy:
 > DeepSeekCode is a public-beta terminal code agent built around DeepSeek and
 > local repository work. It can inspect files, apply patches, run checks, review
 > diffs, resume sessions, and drive shell workflows from the terminal. The
-> Linux/macOS local CLI loop is ready for dogfooding, Homebrew is verified for
-> macOS installs, and README launch media now includes a model-backed 2048 demo;
-> npm distribution, broader external repo samples, and hosted IDE evidence are
-> still being hardened.
+> Linux/macOS local CLI loop is ready for dogfooding, npm/Homebrew/release
+> archive installs are the public distribution paths, and README launch media
+> now includes a model-backed 2048 demo; broader external repo samples and
+> hosted IDE evidence are still being hardened.

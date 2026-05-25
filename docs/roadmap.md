@@ -26,14 +26,15 @@ DeepSeekCode is now usable for Linux/macOS dogfooding and repository work:
   `.dscode/dogfood/`.
 - `v0.1.3` ships GitHub Release assets for Linux x64, Linux arm64, macOS x64,
   macOS arm64, and Windows x64, with Release Smoke evidence for Linux/macOS
-  public downloads:
+  public downloads; `v0.1.4` is the npm/npx distribution patch queued for the
+  next tag workflow:
   https://github.com/willamhou/DeepSeekCode/actions/runs/26352088322
 - the public Homebrew tap is verified on macOS x64 and macOS arm64:
   https://github.com/willamhou/DeepSeekCode/actions/runs/26352180898
 
 The Linux/macOS local code-agent CLI milestone is effectively established. The
-remaining work is mostly external evidence depth, npm publishing, installed
-service proof, and documentation polish.
+remaining work is mostly external evidence depth, npm/npx publish verification,
+installed service proof, and documentation polish.
 
 ## Near-Term Priorities
 
@@ -52,15 +53,15 @@ service proof, and documentation polish.
 ### 2. Homebrew And npm Publishing
 
 - Homebrew is published and verified for `v0.1.3`; keep the tap formula aligned
-  with GitHub Release archives and `.sha256` files.
+  with GitHub Release archives and `.sha256` files as `v0.1.4` rolls out.
 - Configure `HOMEBREW_TAP_TOKEN` so future tag workflows can update the tap
   automatically.
-- Configure `NPM_TOKEN` / `NODE_AUTH_TOKEN`.
-- Publish platform npm packages and the root wrapper, then verify public
-  `npm install` produces a working `deepseek` command.
+- `NPM_TOKEN` is now configured for GitHub Actions.
+- Publish `v0.1.4` platform npm packages and the root wrapper, then verify
+  public `npm install` / `npx` produce a working `deepseek` command.
 
-For the Linux/macOS CLI milestone, Homebrew is now the verified installer path;
-npm remains useful for Node-oriented users but is not the primary blocker.
+For the Linux/macOS CLI milestone, Homebrew is already a verified installer path;
+npm/npx is the current distribution push for Node-oriented users.
 
 ### 3. DeepSeek-Native Agent Loop Hardening
 

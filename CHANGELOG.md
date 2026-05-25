@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.1.4 - 2026-05-25
+
+npm/npx distribution and public evidence refresh.
+
+### Added
+
+- npm-first README quick start for `npm install -g @deepseek-code/cli` and
+  `npx @deepseek-code/cli`.
+- Public evidence summary page for demos, repair/cache runtime proof, external
+  fixtures, and release/install checks.
+- DeepSeek official integration PR draft copy for agent directories and docs.
+
+### Changed
+
+- Bumped Cargo, npm root wrapper, npm platform packages, release-smoke default,
+  and Homebrew formula metadata to `0.1.4`.
+- Launch copy now treats npm as the primary distribution push for this patch
+  release instead of a deferred caveat.
+
+### Verification
+
+- `cargo fmt --check`
+- `cargo test --lib`
+- `npm --prefix npm test`
+- `node npm/scripts/check-version-sync.js`
+- `node scripts/check-secrets.js`
+
 ## 0.1.3 - 2026-05-24
 
 Linux arm64 distribution hardening.

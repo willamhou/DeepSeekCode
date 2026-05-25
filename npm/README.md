@@ -2,6 +2,21 @@
 
 This package is the npm command wrapper for the `deepseek` CLI.
 
+## Install
+
+```bash
+npm install -g @deepseek-code/cli
+deepseek version
+deepseek quickstart
+```
+
+Run without installing:
+
+```bash
+npx @deepseek-code/cli version
+npx @deepseek-code/cli quickstart
+```
+
 Published installs resolve the binary from the platform-specific optional npm
 package for the current host:
 

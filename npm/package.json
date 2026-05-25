@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-code/cli",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "npm wrapper for the DeepSeek Code CLI",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://github.com/willamhou/DeepSeekCode",
@@ -13,11 +13,11 @@
     "deepseek": "bin/deepseek.js"
   },
   "optionalDependencies": {
-    "@deepseek-code/cli-linux-arm64": "0.1.3",
-    "@deepseek-code/cli-linux-x64": "0.1.3",
-    "@deepseek-code/cli-macos-arm64": "0.1.3",
-    "@deepseek-code/cli-macos-x64": "0.1.3",
-    "@deepseek-code/cli-windows-x64": "0.1.3"
+    "@deepseek-code/cli-linux-arm64": "0.1.4",
+    "@deepseek-code/cli-linux-x64": "0.1.4",
+    "@deepseek-code/cli-macos-arm64": "0.1.4",
+    "@deepseek-code/cli-macos-x64": "0.1.4",
+    "@deepseek-code/cli-windows-x64": "0.1.4"
   },
   "files": [
     "bin",

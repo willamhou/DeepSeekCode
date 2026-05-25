@@ -3,8 +3,8 @@
 This directory contains public-beta launch copy and checklists for
 DeepSeekCode. Keep these materials aligned with
 [current status](../current-status.md): Linux/macOS local CLI dogfooding is the
-main claim; npm registry publishing and broader hosted product evidence are not
-live yet.
+main claim; `v0.1.4` is the npm/npx distribution push, and broader hosted
+product evidence is not live yet.
 
 ## Primary Message
 
@@ -14,15 +14,15 @@ and stay inside the same terminal loop.
 
 Use this concise public-beta claim:
 
-> DeepSeekCode v0.1.3 is a public-beta, DeepSeek-first code-agent CLI for
-> Linux/macOS. It ships GitHub Release binaries, Linux arm64 support, verified
-> macOS Homebrew install, GHCR image, and release-smoke evidence for the local
-> terminal coding loop.
+> DeepSeekCode v0.1.4 is a public-beta, DeepSeek-first code-agent CLI for
+> Linux/macOS. It ships npm/npx packaging, GitHub Release binaries, Linux arm64
+> support, verified Homebrew install, GHCR image, and release-smoke evidence for
+> the local terminal coding loop.
 
 ## Links
 
 - Repository: <https://github.com/willamhou/DeepSeekCode>
-- Release: <https://github.com/willamhou/DeepSeekCode/releases/tag/v0.1.3>
+- Release: <https://github.com/willamhou/DeepSeekCode/releases/tag/v0.1.4>
 - Install guide: <https://github.com/willamhou/DeepSeekCode/blob/main/docs/install.md>
 - Current status: <https://github.com/willamhou/DeepSeekCode/blob/main/docs/current-status.md>
 - Public beta guide: <https://github.com/willamhou/DeepSeekCode/blob/main/docs/public-beta.md>
@@ -49,8 +49,10 @@ Run these before a meaningful public push:
 cargo fmt --check
 cargo test --lib -- --test-threads=1
 node scripts/check-secrets.js
+npm view @deepseek-code/cli version
+npx @deepseek-code/cli version
 deepseek quickstart --json
-deepseek update release-smoke --version 0.1.3 --json
+deepseek update release-smoke --version 0.1.4 --json
 ```
 
 Also verify:
@@ -61,8 +63,8 @@ Also verify:
 - Linux users can find release archive and source-install paths in the README
   and install guide.
 - `docs/current-status.md` still reflects the latest release evidence.
-- Known caveats are visible: npm is not live, Windows is not the current public
-  beta focus, and hosted product evidence is still broader hardening work.
+- Known caveats are visible: Windows is not the current public beta focus, and
+  hosted product evidence is still broader hardening work.
 
 ## Tone
 

@@ -7,11 +7,11 @@ loop: inspect a repository, edit files, run checks, review the diff, and keep
 working from the same terminal.
 
 > Public beta status: usable today for Linux/macOS dogfooding and repository
-> work. `v0.1.3` ships GitHub Release binaries, a verified GHCR image, TUI and
+> work. `v0.1.4` ships GitHub Release binaries, a verified GHCR image, TUI and
 > service smoke gates, `deepseek quickstart`, a release-binary smoke verifier,
-> a verified Homebrew tap, and model-backed README launch media. npm registry
-> publishing, larger external repo evidence, and broader hosted product proof
-> are still product-hardening work.
+> a verified Homebrew tap, npm/npx packaging, and model-backed README launch
+> media. Larger external repo evidence and broader hosted product proof are
+> still product-hardening work.
 
 <p align="center">
   <strong>DeepSeekCode interactive REPL builds a playable 2048 game from an empty repo</strong><br>
@@ -45,6 +45,21 @@ plain chat wrapper. The default path is terminal-first and repo-aware:
 
 ## Quick Start
 
+Install with npm:
+
+```bash
+npm install -g @deepseek-code/cli
+deepseek version
+deepseek quickstart
+```
+
+Or run without installing:
+
+```bash
+npx @deepseek-code/cli version
+npx @deepseek-code/cli quickstart
+```
+
 Install with Homebrew (verified on macOS x64/arm64):
 
 ```bash
@@ -66,11 +81,11 @@ deepseek doctor --json
 Or download a release archive:
 
 ```bash
-deepseek update download-plan --version 0.1.3
+deepseek update download-plan --version 0.1.4
 curl -L -o deepseek-linux-x64.tar.gz \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.3/deepseek-linux-x64.tar.gz
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.4/deepseek-linux-x64.tar.gz
 curl -L -o deepseek-linux-x64.tar.gz.sha256 \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.3/deepseek-linux-x64.tar.gz.sha256
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.4/deepseek-linux-x64.tar.gz.sha256
 shasum -a 256 -c deepseek-linux-x64.tar.gz.sha256
 tar -xzf deepseek-linux-x64.tar.gz
 ./deepseek version
@@ -79,7 +94,7 @@ tar -xzf deepseek-linux-x64.tar.gz
 Or run the published container:
 
 ```bash
-docker run --rm ghcr.io/willamhou/deepseekcode:0.1.3 version
+docker run --rm ghcr.io/willamhou/deepseekcode:0.1.4 version
 ```
 
 For a local checkout:
@@ -142,9 +157,8 @@ git.
 ## Current Limits
 
 For the Linux/macOS local CLI milestone, the core interaction loop is already in
-place. The remaining gaps are mainly evidence depth and distribution polish:
+place. The remaining gaps are mainly evidence depth and product hardening:
 
-- npm registry publishing and public `npm install` verification;
 - optional larger external repo fixtures beyond the disposable Python/Rust/Node
   samples.
 
@@ -166,13 +180,14 @@ deepseek stats --json
 deepseek events replay <thread-id> --limit 50
 deepseek events diff <before-thread-id> <after-thread-id> --json
 deepseek update publish-status --json
-deepseek update release-smoke --version 0.1.3 --json
+deepseek update release-smoke --version 0.1.4 --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
 
 For release and dogfood evidence, see:
 
 - [Release checklist](./docs/release.md)
+- [Evidence summary](./docs/evidence.md)
 - [Dogfood evidence](./docs/dogfood-evidence.md)
 - [Current status](./docs/current-status.md)
 - Additional demos: [scripted 2048 capture](./docs/demo/deepseek-code-2048-terminal-demo.svg),
@@ -186,6 +201,7 @@ For release and dogfood evidence, see:
 - [Current status and roadmap](./docs/current-status.md)
 - [Launch kit](./docs/launch/README.md)
 - [Release checklist](./docs/release.md)
+- [Evidence summary](./docs/evidence.md)
 - [Dogfood evidence](./docs/dogfood-evidence.md)
 - [Demo assets](./docs/demo/README.md)
 - [Architecture](./docs/architecture.md)

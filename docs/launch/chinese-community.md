@@ -6,23 +6,31 @@
 ## 标题
 
 ```text
-我做了一个类似 Claude Code 的 DeepSeek 终端代码 Agent，macOS 可 brew 安装，Linux 有 release 包
+我做了一个类似 Claude Code 的 DeepSeek 终端代码 Agent，可以 npm/npx 或 brew 安装
 ```
 
 更克制的版本：
 
 ```text
-DeepSeekCode v0.1.3：一个 DeepSeek-first 的终端 code-agent CLI
+DeepSeekCode v0.1.4：一个 DeepSeek-first 的终端 code-agent CLI
 ```
 
 ## 长帖
 
 ```text
-最近把 DeepSeekCode 推到了 v0.1.3 public beta。
+最近把 DeepSeekCode 推到了 v0.1.4 public beta。
 
 它是一个 DeepSeek-first 的终端 code agent，目标是做一个更接近 Claude Code / Codex CLI 的本地开发闭环：在终端里看仓库、改文件、跑检查、看 diff，然后继续同一个 session 迭代。
 
-现在 macOS 可以直接用 Homebrew 试：
+现在可以直接用 npm 试：
+
+npm install -g @deepseek-code/cli
+deepseek config init
+printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
+deepseek quickstart
+deepseek
+
+也可以用 Homebrew：
 
 brew tap willamhou/deepseekcode
 brew install deepseek
@@ -31,7 +39,7 @@ printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
 deepseek quickstart
 deepseek
 
-Linux 用户可以走 GitHub Release archive 或源码安装；v0.1.3 的 Linux x64 / Linux arm64 release assets 已经纳入 release-smoke。
+Linux 用户可以走 GitHub Release archive 或源码安装；v0.1.4 的 Linux x64 / Linux arm64 release assets 已经纳入 release-smoke。
 
 这版补齐了几个之前不敢公开推的东西：
 
@@ -44,7 +52,6 @@ Linux 用户可以走 GitHub Release archive 或源码安装；v0.1.3 的 Linux 
 
 当前边界也写清楚了：
 
-- npm 还没正式发布
 - Windows 不是这一阶段重点
 - 还需要更多外部真实仓库 dogfood 样本
 - 更适合愿意折腾终端和本地 code-agent workflow 的用户
@@ -58,11 +65,14 @@ https://github.com/willamhou/DeepSeekCode
 ## 短帖
 
 ```text
-DeepSeekCode v0.1.3 public beta 发了。
+DeepSeekCode v0.1.4 public beta 发了。
 
 一个 DeepSeek-first 的终端 code-agent CLI，面向 Linux/macOS 本地开发闭环：看仓库、改文件、跑命令、看 diff、继续 session。
 
-macOS 安装：
+npm 安装：
+npm install -g @deepseek-code/cli
+
+macOS 也可以用 Homebrew：
 brew tap willamhou/deepseekcode
 brew install deepseek
 deepseek config init
@@ -83,5 +93,5 @@ https://github.com/willamhou/DeepSeekCode
 - 节点：`分享创造` 或 `程序员`。
 - 标题不要写成营销口号，直接讲「我做了什么」。
 - 开头先给安装命令，再讲状态和限制。
-- 明确说 npm 未发布，避免用户第一时间问 `npm install`。
+- 明确说 npm 是新发布路径；如果 registry 还在同步，就给 Homebrew 和 release archive 作为 fallback。
 - 不要引导点赞；只请求试用反馈和 issue。

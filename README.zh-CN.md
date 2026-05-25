@@ -6,10 +6,10 @@ DeepSeekCode 是一个 DeepSeek-first 的终端 code agent，面向本地开发�
 阅读仓库、修改文件、运行检查、查看 diff，然后继续在同一个终端里迭代。
 
 > Public beta 状态：今天已经可以用于 Linux/macOS dogfood 和仓库内代码任务。
-> `v0.1.3` 已提供 GitHub Release 二进制、实测 GHCR 镜像、TUI/service smoke gate、
+> `v0.1.4` 已提供 GitHub Release 二进制、实测 GHCR 镜像、TUI/service smoke gate、
 > `deepseek quickstart`、release-binary smoke verifier 和已验证的 Homebrew tap。
-> README 中也已经有真实 model-backed 发布素材。npm registry 发布、更大型的外部
-> 仓库证据，以及更广的 hosted product proof 仍属于产品硬化工作。
+> README 中也已经有真实 model-backed 发布素材。`v0.1.4` 开始补齐 npm/npx
+> 安装入口；更大型的外部仓库证据和更广的 hosted product proof 仍属于产品硬化工作。
 
 <p align="center">
   <strong>DeepSeekCode 交互式 REPL 从空仓库写出可玩的 2048 游戏</strong><br>
@@ -41,6 +41,21 @@ DeepSeekCode 的目标不是普通聊天壳，而是更接近 Claude Code CLI / 
 
 ## 快速开始
 
+通过 npm 安装：
+
+```bash
+npm install -g @deepseek-code/cli
+deepseek version
+deepseek quickstart
+```
+
+或者不安装直接运行：
+
+```bash
+npx @deepseek-code/cli version
+npx @deepseek-code/cli quickstart
+```
+
 通过 Homebrew 安装（已验证 macOS x64/arm64）：
 
 ```bash
@@ -62,11 +77,11 @@ deepseek doctor --json
 或者下载 release archive：
 
 ```bash
-deepseek update download-plan --version 0.1.3
+deepseek update download-plan --version 0.1.4
 curl -L -o deepseek-linux-x64.tar.gz \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.3/deepseek-linux-x64.tar.gz
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.4/deepseek-linux-x64.tar.gz
 curl -L -o deepseek-linux-x64.tar.gz.sha256 \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.3/deepseek-linux-x64.tar.gz.sha256
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.4/deepseek-linux-x64.tar.gz.sha256
 shasum -a 256 -c deepseek-linux-x64.tar.gz.sha256
 tar -xzf deepseek-linux-x64.tar.gz
 ./deepseek version
@@ -75,7 +90,7 @@ tar -xzf deepseek-linux-x64.tar.gz
 或者运行已发布的容器镜像：
 
 ```bash
-docker run --rm ghcr.io/willamhou/deepseekcode:0.1.3 version
+docker run --rm ghcr.io/willamhou/deepseekcode:0.1.4 version
 ```
 
 本地 checkout 安装：
@@ -126,9 +141,8 @@ deepseek tui --runtime-url http://127.0.0.1:13000
 ## 当前限制
 
 如果目标收敛到 Linux/macOS 本地 CLI，核心交互闭环已经成立。剩余差距主要是证据厚度
-和分发打磨：
+和产品硬化：
 
-- npm registry 发布和公开 `npm install` 验证；
 - disposable Python/Rust/Node 样本之外，可选再补更大型的真实外部 repo fixtures。
 
 Windows 长尾 service proof、hosted IDE 证据和真实安装后的 service proof 属于更大的
@@ -144,7 +158,7 @@ cargo test --lib -- --test-threads=1
 node scripts/check-secrets.js
 deepseek quickstart --json
 deepseek update publish-status --json
-deepseek update release-smoke --version 0.1.3 --json
+deepseek update release-smoke --version 0.1.4 --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
 
