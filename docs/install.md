@@ -4,8 +4,8 @@
 
 ## npm / npx
 
-Node 用户可以用 npm 安装 root wrapper。发布后的 root 包会通过 optional
-dependency 拉取当前平台对应的 binary 包：
+Node 用户可以用 npm 安装 root wrapper。root 包会通过 optional dependency
+拉取当前平台对应的 binary 包：
 
 ```bash
 npm install -g @deepseek-code/cli
@@ -21,8 +21,9 @@ npx @deepseek-code/cli version
 npx @deepseek-code/cli quickstart
 ```
 
-`v0.1.4` 是 npm/npx 发布补丁版本；如果你正在 release workflow 完成前阅读本文，
-先用 `npm view @deepseek-code/cli version` 确认 registry 已经可见。
+`v0.1.4` 的 npm/npx 包已发布并通过 registry、`npx` 和干净目录 install smoke
+验证。发布前或升级后可用 `npm view @deepseek-code/cli version` 复查 registry
+可见版本。
 
 ## Homebrew
 
@@ -37,9 +38,9 @@ deepseek doctor --json
 ```
 
 `v0.1.3` 的 tap 已通过 macOS x64 和 macOS arm64 Homebrew Smoke 验证。
-Linux 用户也可以使用下面的 release archive 或源码安装路径；`v0.1.3`
-的 Linux x64 和 Linux arm64 release assets 已通过 Release Smoke 验证。`v0.1.4`
-tag workflow 完成后会刷新 release assets 和 tap metadata。
+Linux 用户也可以使用下面的 release archive 或源码安装路径；`v0.1.4`
+的 Linux x64 和 Linux arm64 release assets 已经发布。后续配置
+`HOMEBREW_TAP_TOKEN` 后，tag workflow 可以自动刷新 tap metadata 并复验。
 
 ## 从源码安装
 
@@ -285,7 +286,8 @@ deepseek update publish-status --json
 Release Matrix 会把每个平台的 release binary stage 到
 `npm/platforms/<platform>/bin`，先 smoke-run staged package binary，再打出平台
 npm tarball，并在 tag run 且配置 `NPM_TOKEN` 时先发布平台包，再发布 root wrapper
-包。
+包；如果 tag run 的 npm publish 阶段需要恢复，也可以用 manual `NPM Publish`
+workflow 从已完成的 Release Matrix artifacts 重新发布。
 正式发布前可以在下载 workflow artifacts 后运行
 `deepseek update publish-status --dist dist-assets --npm-dist npm-dist --live-evidence-verification .dscode/dogfood/live-evidence-verification.json --strict`
 检查 npm token、平台 tarball、Homebrew tap 配置、release `.sha256` 文件和带 MCP
@@ -294,8 +296,9 @@ dynamic/resource loop-surface 覆盖与 gate 的近期已验证 online dogfood e
 脚本消费。输出中的 `public_install` 会区分 source checkout、GitHub Release、
 npm、Homebrew、GHCR 和 Cargo registry 当前是 `source_available`、
 `ready_to_publish`、`requires_publish` 还是 `source_only_policy`。`v0.1.4`
-的发布目标是让 tag workflow 在已有 `NPM_TOKEN` 下发布平台 npm 包和 root wrapper；
-workflow 完成后用 `npm view @deepseek-code/cli version` 和干净安装 smoke 复验。
+已通过 manual `NPM Publish` workflow run `26379649992` 发布；发布后已用
+`npm view @deepseek-code/cli version`、`npx @deepseek-code/cli@0.1.4 version`
+和干净目录 `npm install @deepseek-code/cli@0.1.4` 复验。
 
 ## Runtime 服务模板
 

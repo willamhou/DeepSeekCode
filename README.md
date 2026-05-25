@@ -9,7 +9,7 @@ working from the same terminal.
 > Public beta status: usable today for Linux/macOS dogfooding and repository
 > work. `v0.1.4` ships GitHub Release binaries, a verified GHCR image, TUI and
 > service smoke gates, `deepseek quickstart`, a release-binary smoke verifier,
-> a verified Homebrew tap, npm/npx packaging, and model-backed README launch
+> a verified Homebrew tap, verified npm/npx install paths, and model-backed README launch
 > media. Larger external repo evidence and broader hosted product proof are
 > still product-hardening work.
 

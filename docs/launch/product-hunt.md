@@ -2,8 +2,8 @@
 
 Product Hunt is better as a second launch after the current public beta gets
 more developer feedback. Use this file to prepare assets, but do not treat
-Product Hunt as the immediate next step until npm publish is verified and launch
-media includes a short video-friendly cut.
+Product Hunt as the immediate next step until launch media includes a short
+video-friendly cut.
 
 ## Go / No-Go
 
@@ -20,7 +20,7 @@ Go when:
 No-go when:
 
 - install requires cloning the repo for most users;
-- npm registry is still unavailable or package install fails on clean machines;
+- npm registry install regresses or package install fails on clean machines;
 - no one can try the product without waiting for access;
 - the launch page only describes the project instead of showing it working.
 

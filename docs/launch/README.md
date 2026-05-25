@@ -15,7 +15,7 @@ and stay inside the same terminal loop.
 Use this concise public-beta claim:
 
 > DeepSeekCode v0.1.4 is a public-beta, DeepSeek-first code-agent CLI for
-> Linux/macOS. It ships npm/npx packaging, GitHub Release binaries, Linux arm64
+> Linux/macOS. It ships verified npm/npx install paths, GitHub Release binaries, Linux arm64
 > support, verified Homebrew install, GHCR image, and release-smoke evidence for
 > the local terminal coding loop.
 
@@ -38,8 +38,8 @@ Use this concise public-beta claim:
 5. Post Chinese community copy from [chinese-community.md](./chinese-community.md).
 6. Use [social-posts.md](./social-posts.md) for X, LinkedIn, Discord, Slack, and
    follow-up posts.
-7. Treat [product-hunt.md](./product-hunt.md) as a later launch unless npm is
-   published and broader install evidence is current.
+7. Treat [product-hunt.md](./product-hunt.md) as a later launch after a short
+   video-friendly demo cut and broader public-beta feedback are ready.
 
 ## Preflight
 

@@ -110,6 +110,11 @@ deepseek update publish-status --json
 Hosted release gates build release binaries for Linux x64, Linux arm64, macOS
 x64, macOS arm64, and Windows x64. The release workflow also stages platform npm
 packages and publishes the root npm wrapper when `NPM_TOKEN` is configured.
+The `v0.1.4` Release Matrix run `26379123804` produced the GitHub Release
+assets and GHCR image.
+For `v0.1.4`, the manual `NPM Publish` retry workflow run `26379649992`
+published the platform packages and root wrapper, and registry/clean-machine
+smoke verified `deepseek 0.1.4` through both `npx` and `npm install`.
 
 ## Known Limits
 

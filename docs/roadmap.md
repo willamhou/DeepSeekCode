@@ -24,17 +24,16 @@ DeepSeekCode is now usable for Linux/macOS dogfooding and repository work:
 - verified online multi-file external fixture evidence is tracked for the
   Python invoice, Rust order, and Node task-report samples under
   `.dscode/dogfood/`.
-- `v0.1.3` ships GitHub Release assets for Linux x64, Linux arm64, macOS x64,
-  macOS arm64, and Windows x64, with Release Smoke evidence for Linux/macOS
-  public downloads; `v0.1.4` is the npm/npx distribution patch queued for the
-  next tag workflow:
-  https://github.com/willamhou/DeepSeekCode/actions/runs/26352088322
+- `v0.1.4` ships GitHub Release assets for Linux x64, Linux arm64, macOS x64,
+  macOS arm64, and Windows x64, with Release Matrix evidence for public
+  downloads and a verified npm/npx distribution path:
+  https://github.com/willamhou/DeepSeekCode/actions/runs/26379123804
 - the public Homebrew tap is verified on macOS x64 and macOS arm64:
   https://github.com/willamhou/DeepSeekCode/actions/runs/26352180898
 
 The Linux/macOS local code-agent CLI milestone is effectively established. The
-remaining work is mostly external evidence depth, npm/npx publish verification,
-installed service proof, and documentation polish.
+remaining work is mostly external evidence depth, installed service proof, and
+documentation polish.
 
 ## Near-Term Priorities
 
@@ -56,12 +55,13 @@ installed service proof, and documentation polish.
   with GitHub Release archives and `.sha256` files as `v0.1.4` rolls out.
 - Configure `HOMEBREW_TAP_TOKEN` so future tag workflows can update the tap
   automatically.
-- `NPM_TOKEN` is now configured for GitHub Actions.
-- Publish `v0.1.4` platform npm packages and the root wrapper, then verify
-  public `npm install` / `npx` produce a working `deepseek` command.
+- `v0.1.4` platform npm packages and the root wrapper are published and
+  verified. Keep the Release Matrix npm publish path idempotent and keep the
+  manual `NPM Publish` retry workflow available for recovery from completed
+  release artifacts.
 
 For the Linux/macOS CLI milestone, Homebrew is already a verified installer path;
-npm/npx is the current distribution push for Node-oriented users.
+npm/npx is now the verified distribution path for Node-oriented users.
 
 ### 3. DeepSeek-Native Agent Loop Hardening
 

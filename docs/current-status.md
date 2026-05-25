@@ -11,8 +11,8 @@ DeepSeekCode 的目标是成为一个 DeepSeek-first 的 code agent CLI：用户
 当前执行口径收敛到 Linux/macOS 本地 code agent CLI。只要用户能在 Linux/macOS 安装并
 运行 `deepseek`，稳定进入 TUI/REPL，完成模型读写代码、shell 验证、diff review、
 resume 和本地 runtime/shell-supervisor 工作流，就可以认为这个 milestone 成立。
-Windows 和 hosted IDE 属于更大的产品硬化目标；Homebrew 已是经过 smoke
-验证的 Linux/macOS 分发路径，npm/npx 正在作为 `v0.1.4` 补齐给 Node 用户的公开安装路径。
+Windows 和 hosted IDE 属于更大的产品硬化目标；Homebrew 与 npm/npx 都已经是经过
+验证的 Linux/macOS 分发路径，分别覆盖 Homebrew 用户和 Node-oriented 用户。
 
 ## 当前判断
 
@@ -23,7 +23,6 @@ dogfood 证据。
 
 但它还不是“可以公开宣称等同 Claude Code CLI / Codex CLI”的成熟产品。剩余差距主要是：
 
-- `v0.1.4` tag workflow 的 npm publish 与公开安装复验；
 - 更多真实外部 repo 样本；
 - 持续维护精简的新用户文档、public beta 说明和故障排查路径；
 - hosted IDE、真实安装后的 systemd/launchd service smoke，以及更广的 Windows 长尾验证。
@@ -49,22 +48,23 @@ dogfood 证据。
   从空 repo 接收用户 prompt、写出 `2048.html`、完成 shell 校验并总结运行方式；配套
   GIF/MP4 展示同一次生成结果的浏览器试玩。旧 scripted 2048、TUI 和 edit/test SVG
   已降级为补充 demo/evidence。
-- `v0.1.3` 已发布 GitHub Release binaries，并通过 Release Matrix：
-  https://github.com/willamhou/DeepSeekCode/actions/runs/26351958964
-- `v0.1.3` release assets 覆盖 Linux x64、Linux arm64、macOS x64、macOS arm64 和
+- `v0.1.4` 已发布 GitHub Release binaries，并通过 Release Matrix：
+  https://github.com/willamhou/DeepSeekCode/actions/runs/26379123804
+- `v0.1.4` release assets 覆盖 Linux x64、Linux arm64、macOS x64、macOS arm64 和
   Windows x64；新增 Linux arm64 build 在 hosted `ubuntu-24.04-arm` 上完整通过。
 - `v0.1.3` Release Smoke 已在干净 hosted Linux x64、Linux arm64、macOS x64 和
   macOS arm64 runner 上验证公开 release binary 下载、checksum、解压和 install smoke：
-  https://github.com/willamhou/DeepSeekCode/actions/runs/26352088322
-- `v0.1.3` GHCR image 已由 workflow 推送，公开 registry manifest 可读取，digest 为
-  `sha256:f7f1574e100bd491cf2e8ddfa4aefccca5a957867b97199fd930f0e6b0af9fc9`。
+  https://github.com/willamhou/DeepSeekCode/actions/runs/26352088322 。`v0.1.4`
+  已生成同平台 release assets，后续 clean-machine release-smoke 可用同一命令刷新。
+- `v0.1.4` GHCR image 已由 workflow 推送，公开 registry manifest 可读取。
 - Homebrew tap 已发布到 `willamhou/homebrew-deepseekcode`，canonical tap 命令
   `brew tap willamhou/deepseekcode && brew install deepseek` 已通过 macOS x64/arm64
   Homebrew Smoke：
   https://github.com/willamhou/DeepSeekCode/actions/runs/26352180898
-- `v0.1.4` 已准备作为 npm/npx 发布补丁版本：Cargo、npm root wrapper、平台包、
-  release-smoke 默认值和 Homebrew formula metadata 已同步到 `0.1.4`；GitHub
-  Actions `NPM_TOKEN` 已配置，tag workflow 将发布平台 npm 包和 root wrapper。
+- `v0.1.4` npm/npx 已发布并验证：平台包和 root wrapper 均已在 npm registry
+  可见，manual npm publish workflow run `26379649992` 通过；`npm view
+  @deepseek-code/cli version`、`npx @deepseek-code/cli@0.1.4 version` 和干净目录
+  `npm install @deepseek-code/cli@0.1.4` 均验证到 `deepseek 0.1.4`。
 - PR #18 增加 `deepseek quickstart` / `deepseek onboarding` 首跑检查，并通过 CI：
   https://github.com/willamhou/DeepSeekCode/actions/runs/26335387193
 - PR #19 增加 `deepseek update release-smoke`，用于发布二进制复验，并通过 CI：
@@ -148,9 +148,8 @@ dogfood 证据。
    events replay <thread>` 和 `deepseek events diff <left> <right>` 初版也已接入
    runtime events/items/usage，可输出 text 或 JSON 证据；`deepseek dogfood
    repair-cache-evidence --json` 已补齐确定性的 before/after repair/cache 证据。
-2. 发布 `v0.1.4` tag，等待 npm publish job 完成，并验证
-   `npm install -g @deepseek-code/cli` / `npx @deepseek-code/cli` 后裸
-   `deepseek` 入口。
+2. 保持 npm publish workflow 的幂等发布与 manual retry 路径可用；后续发布继续用
+   `npm view`、`npx` 和干净安装 smoke 复验。
 3. 配置 `HOMEBREW_TAP_TOKEN`，让后续 tag workflow 自动更新 tap；当前已验证的公开
    tap evidence 来自 `v0.1.3`，`v0.1.4` 需要 tag workflow 或手动 tap 更新后复验。
 4. 在干净 Linux/macOS 机器上安装 systemd/launchd user services，记录
@@ -170,6 +169,6 @@ dogfood 证据。
 > model-backed README interactive 2048 terminal and gameplay demo media. The
 > supplemental scripted 2048, TUI, and edit/test demos remain available as
 > evidence links. The
-> remaining Linux/macOS CLI work is broader external sample depth, npm/npx
-> publish verification, and continuing documentation polish; hosted IDE and
+> remaining Linux/macOS CLI work is broader external sample depth and
+> continuing documentation polish; hosted IDE and
 > Windows/service proof remain broader product-hardening work.

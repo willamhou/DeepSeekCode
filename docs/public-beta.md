@@ -14,8 +14,9 @@ The honest public-beta claim is:
 
 > DeepSeekCode is usable today for Linux/macOS dogfooding and repository work,
 > with a full-screen TUI, REPL, durable runtime, permissioned tools, shell/PTY
-> workflows, release binaries, a verified Homebrew tap, a model-backed README
-> demo set, online dogfood evidence, first-run checks, and npm/npx packaging.
+> workflows, release binaries, a verified Homebrew tap, verified npm/npx
+> install paths, a model-backed README demo set, online dogfood evidence, and
+> first-run checks.
 > Broader external samples and hosted product evidence are still in progress.
 
 Do not describe the project as fully equivalent to Claude Code CLI or Codex CLI
@@ -99,8 +100,8 @@ The strongest current proof points are:
 - CI-smoked TUI entrypoints and service/shell fixtures;
 - `deepseek update release-smoke --version 0.1.4 --json` for release binary
   verification on the current platform;
-- `npm install -g @deepseek-code/cli` and `npx @deepseek-code/cli` as the
-  Node-oriented install path after the `v0.1.4` publish job completes;
+- `npm install -g @deepseek-code/cli` and `npx @deepseek-code/cli` as verified
+  Node-oriented install paths for `v0.1.4`;
 - verified Homebrew tap install on macOS x64 and macOS arm64;
 - online Python, Rust, and Node external fixture evidence recorded through
   dogfood tooling;
@@ -114,8 +115,8 @@ Use [docs/current-status.md](./current-status.md) for the exact state and
 
 Keep these caveats visible when promoting the project:
 
-- npm publishing depends on the `v0.1.4` tag workflow and the configured
-  `NPM_TOKEN`; verify the registry before making npm the only install command.
+- Keep an npm install/npx smoke in release preflight after any packaging or
+  workflow change.
 - Homebrew is published, but future tag automation still needs
   `HOMEBREW_TAP_TOKEN`; verify the tap again after the `v0.1.4` release assets
   are published and the formula is refreshed.

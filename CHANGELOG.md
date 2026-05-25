@@ -20,6 +20,8 @@ npm/npx distribution and public evidence refresh.
   release instead of a deferred caveat.
 - Release npm publishing now uses absolute tarball paths and a reusable manual
   retry workflow for publishing packages from a completed Release Matrix run.
+- `v0.1.4` npm packages are published and verified through npm registry lookup,
+  `npx`, and clean-directory install smoke.
 
 ### Verification
 
@@ -28,6 +30,9 @@ npm/npx distribution and public evidence refresh.
 - `npm --prefix npm test`
 - `node npm/scripts/check-version-sync.js`
 - `node scripts/check-secrets.js`
+- manual `NPM Publish` workflow run `26379649992`
+- `npx @deepseek-code/cli@0.1.4 version`
+- clean-directory `npm install @deepseek-code/cli@0.1.4` smoke
 
 ## 0.1.3 - 2026-05-24
 
