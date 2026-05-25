@@ -3862,6 +3862,15 @@ fn render_tools(
     schema_flattening: ToolSchemaFlattening,
     envelope: fn(&ToolSpec) -> String,
 ) -> String {
+    #[cfg(debug_assertions)]
+    {
+        let missing = missing_tool_specs(names);
+        debug_assert!(
+            missing.is_empty(),
+            "missing model tool specs for available tool(s): {}",
+            missing.join(", ")
+        );
+    }
     let tools = names
         .iter()
         .filter_map(|name| {
@@ -3939,6 +3948,14 @@ pub(crate) fn static_tool_search_catalog() -> Vec<(&'static str, &'static str, &
     TOOL_SPECS
         .iter()
         .map(|spec| (spec.name, spec.description, spec.properties_json))
+        .collect()
+}
+
+fn missing_tool_specs(names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| raw_tool_spec(name).is_none())
+        .cloned()
         .collect()
 }
 
@@ -4218,6 +4235,18 @@ const TOOL_SPECS: &[StaticToolSpec] = &[
         name: "exec_shell_wait",
         description: "Wait for or poll a background exec_shell task and return incremental output.",
         properties_json: r#"{"task_id":{"type":"string","description":"Task id returned by exec_shell background=true."},"id":{"type":"string","description":"Alias for task_id."},"cwd":{"type":"string","description":"Working directory used to find detached durable shell records."},"timeout_ms":{"type":"string","description":"Maximum wait milliseconds, default 5000."},"wait":{"type":"string","description":"Set false to poll once without waiting."}}"#,
+        required_json: r#"["task_id"]"#,
+    },
+    StaticToolSpec {
+        name: "exec_shell_list",
+        description: "List in-process and detached durable background exec_shell jobs visible from a workspace directory.",
+        properties_json: r#"{"cwd":{"type":"string","description":"Working directory used to filter and find detached durable shell records. Defaults to `.`."}}"#,
+        required_json: r#"[]"#,
+    },
+    StaticToolSpec {
+        name: "exec_shell_show",
+        description: "Show one in-process or detached durable background exec_shell job snapshot by task_id.",
+        properties_json: r#"{"task_id":{"type":"string","description":"Task id returned by exec_shell background=true."},"id":{"type":"string","description":"Alias for task_id."},"cwd":{"type":"string","description":"Working directory used to find detached durable shell records. Defaults to `.`."}}"#,
         required_json: r#"["task_id"]"#,
     },
     StaticToolSpec {
@@ -6209,6 +6238,71 @@ mod tests {
     }
 
     #[test]
+    fn static_tool_specs_have_unique_names_and_valid_json_schemas() {
+        let mut seen = std::collections::BTreeSet::new();
+        for spec in super::TOOL_SPECS {
+            assert!(seen.insert(spec.name), "duplicate tool spec: {}", spec.name);
+            let properties = crate::util::json::parse_json_value(spec.properties_json)
+                .unwrap_or_else(|error| {
+                    panic!("invalid properties JSON for {}: {error}", spec.name)
+                });
+            assert!(
+                matches!(properties, crate::util::json::JsonValue::Object(_)),
+                "properties_json for {} must be a JSON object",
+                spec.name
+            );
+            let required = crate::util::json::parse_json_value(spec.required_json)
+                .unwrap_or_else(|error| panic!("invalid required JSON for {}: {error}", spec.name));
+            assert!(
+                matches!(required, crate::util::json::JsonValue::Array(_)),
+                "required_json for {} must be a JSON array",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn default_registry_tools_have_model_tool_specs() {
+        let mut config = crate::config::types::AppConfig::default();
+        config.memory.enabled = true;
+        let mcp_root = unique_planner_dir().join("mcp-schema-coverage");
+        fs::create_dir_all(&mcp_root).unwrap();
+        let mcp_file = mcp_root.join("mcp.json");
+        fs::write(
+            &mcp_file,
+            r#"{"mcpServers":{"fake":{"disabled":true,"transport":"stdio"}}}"#,
+        )
+        .unwrap();
+        config.mcp.project_file = mcp_file.display().to_string();
+        config.mcp.user_file = mcp_root.join("missing-user.json").display().to_string();
+
+        let registry = crate::tools::registry::default_registry_with_context(
+            config,
+            0,
+            std::rc::Rc::new(std::cell::RefCell::new(
+                crate::core::todos::TodoList::default(),
+            )),
+        );
+        let policy = crate::tools::registry::ExecutionPolicy::new(
+            &crate::config::types::ApprovalConfig::default(),
+            None,
+        );
+        let names = registry
+            .names_for_policy(&policy)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let missing = super::missing_tool_specs(&names);
+
+        let _ = fs::remove_dir_all(mcp_root);
+        assert!(
+            missing.is_empty(),
+            "registry tool(s) missing model tool specs: {}",
+            missing.join(", ")
+        );
+    }
+
+    #[test]
     fn tool_fields_are_omitted_for_no_tool_requests() {
         assert_eq!(openai_tool_fields(&[], ReasoningTier::Off), "");
         assert_eq!(anthropic_tool_fields(&[], ReasoningTier::Off), "");
@@ -6727,6 +6821,8 @@ mod tests {
             "task_shell_start".to_string(),
             "task_shell_wait".to_string(),
             "exec_shell_wait".to_string(),
+            "exec_shell_list".to_string(),
+            "exec_shell_show".to_string(),
             "exec_shell_replay".to_string(),
             "exec_shell_attach".to_string(),
             "exec_shell_supervisor_status".to_string(),
@@ -6747,6 +6843,8 @@ mod tests {
         assert!(openai.contains("\"name\":\"task_shell_wait\""));
         assert!(openai.contains("\"gate\""));
         assert!(openai.contains("\"name\":\"exec_shell_wait\""));
+        assert!(openai.contains("\"name\":\"exec_shell_list\""));
+        assert!(openai.contains("\"name\":\"exec_shell_show\""));
         assert!(openai.contains("\"name\":\"exec_shell_replay\""));
         assert!(openai.contains("\"limit_bytes\""));
         assert!(openai.contains("\"tail\""));

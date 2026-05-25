@@ -1780,6 +1780,16 @@ fn derive_recovery_hint_after_failure(
     primary_file: Option<&str>,
     observations: &[Observation],
 ) -> Option<String> {
+    if latest_failure_is_unknown_tool(observations) {
+        return format_recovery_hint(
+            tool_name,
+            preferred_tool_discovery_tool(available_tools)?,
+            "model requested an unknown tool; search available tool definitions before retrying or choose one listed in Available tools",
+            Some(tool_name),
+            None,
+        );
+    }
+
     if is_mcp_tool_name(tool_name)
         && available_tools.iter().any(|tool| tool == "mcp_list_tools")
         && observations
@@ -1819,6 +1829,16 @@ fn derive_recovery_hint_after_failure(
         ),
         _ => None,
     }
+}
+
+fn latest_failure_is_unknown_tool(observations: &[Observation]) -> bool {
+    observations.last().is_some_and(|observation| {
+        observation.is_failure()
+            && observation
+                .summary
+                .to_ascii_lowercase()
+                .contains("unknown tool")
+    })
 }
 
 fn is_mcp_tool_name(tool_name: &str) -> bool {
@@ -1916,6 +1936,22 @@ fn preferred_listing_or_search_tool(available_tools: &[String]) -> Option<&'stat
         Some("list_files")
     } else if available_tools.iter().any(|tool| tool == "search_text") {
         Some("search_text")
+    } else {
+        None
+    }
+}
+
+fn preferred_tool_discovery_tool(available_tools: &[String]) -> Option<&'static str> {
+    if available_tools
+        .iter()
+        .any(|tool| tool == "tool_search_tool_bm25")
+    {
+        Some("tool_search_tool_bm25")
+    } else if available_tools
+        .iter()
+        .any(|tool| tool == "tool_search_tool_regex")
+    {
+        Some("tool_search_tool_regex")
     } else {
         None
     }
@@ -2682,6 +2718,47 @@ mod tests {
         let hint = super::derive_replan_hint("read_file", "No such file", &observations)
             .expect("expected replan hint");
         assert!(hint.contains("multiple recovery hints"));
+    }
+
+    #[test]
+    fn derive_recovery_hint_for_unknown_tool_uses_tool_search() {
+        let observations = vec![Observation::failed(
+            "apply_file_patch",
+            "unknown tool: apply_file_patch",
+        )];
+        let tools = vec![
+            "read_file".to_string(),
+            "tool_search_tool_regex".to_string(),
+            "tool_search_tool_bm25".to_string(),
+        ];
+        let hint = super::derive_recovery_hint_after_failure(
+            "apply_file_patch",
+            &tools,
+            None,
+            &observations,
+        )
+        .expect("expected unknown-tool recovery hint");
+
+        assert!(hint.contains("next=tool_search_tool_bm25"));
+        assert!(hint.contains("query=apply_file_patch"));
+        assert!(hint.contains("unknown tool"));
+    }
+
+    #[test]
+    fn derive_recovery_hint_for_unknown_tool_requires_discovery_tool() {
+        let observations = vec![Observation::failed(
+            "apply_file_patch",
+            "unknown tool: apply_file_patch",
+        )];
+        let tools = vec!["read_file".to_string(), "list_files".to_string()];
+
+        assert!(super::derive_recovery_hint_after_failure(
+            "apply_file_patch",
+            &tools,
+            None,
+            &observations,
+        )
+        .is_none());
     }
 
     #[test]

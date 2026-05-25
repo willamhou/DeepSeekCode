@@ -78,6 +78,15 @@ execute. Hooks can add context, deny actions, or inject shell environment keys.
 Tool results are summarized into observations and persisted into runtime records
 when a durable thread is active.
 
+The execution registry and model-facing tool schemas are treated as one
+contract. Static registry tools must have OpenAI/Anthropic tool specs, and tests
+cover the default registry with memory/MCP bridge tools enabled so a new local
+tool cannot be registered without a model schema. Dynamic MCP tools use cached
+remote schemas when available and fall back to a generic JSON-arguments schema.
+If a model still asks for an unknown tool, the loop records the failure and adds
+a recovery hint pointing back to tool discovery instead of silently repeating the
+bad call.
+
 ### Durable Runtime
 
 The runtime store lives under `.dscode/runtime/` and records:
