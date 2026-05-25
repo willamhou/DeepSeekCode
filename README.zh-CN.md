@@ -2,14 +2,41 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md) | [日本語](./README.ja-JP.md)
 
+[![CI](https://github.com/willamhou/DeepSeekCode/actions/workflows/ci.yml/badge.svg)](https://github.com/willamhou/DeepSeekCode/actions/workflows/ci.yml)
+[![Release Matrix](https://github.com/willamhou/DeepSeekCode/actions/workflows/release.yml/badge.svg)](https://github.com/willamhou/DeepSeekCode/actions/workflows/release.yml)
+[![npm](https://img.shields.io/npm/v/%40deepseek-code%2Fcli?label=npm)](https://www.npmjs.com/package/@deepseek-code/cli)
+[![GitHub release](https://img.shields.io/github/v/release/willamhou/DeepSeekCode)](https://github.com/willamhou/DeepSeekCode/releases/latest)
+
 DeepSeekCode 是一个 DeepSeek-first 的终端 code agent，面向本地开发闭环：
 阅读仓库、修改文件、运行检查、查看 diff，然后继续在同一个终端里迭代。
 
 > Public beta 状态：今天已经可以用于 Linux/macOS dogfood 和仓库内代码任务。
-> `v0.1.4` 已提供 GitHub Release 二进制、实测 GHCR 镜像、TUI/service smoke gate、
-> `deepseek quickstart`、release-binary smoke verifier 和已验证的 Homebrew tap。
-> README 中也已经有真实 model-backed 发布素材。`v0.1.4` 开始补齐 npm/npx
-> 安装入口；更大型的外部仓库证据和更广的 hosted product proof 仍属于产品硬化工作。
+> `v0.1.5` 已提供 GitHub Release 二进制、实测 GHCR 镜像、TUI/service smoke gate、
+> `deepseek quickstart`、release-binary smoke verifier、已验证的 Homebrew tap、
+> 已验证的 npm/npx 安装入口，以及真实 model-backed README 发布素材。更大型的
+> 外部仓库证据和更广的 hosted product proof 仍属于产品硬化工作。
+
+## 快速试用
+
+```bash
+npm install -g @deepseek-code/cli
+deepseek quickstart
+deepseek
+```
+
+不安装直接运行：
+
+```bash
+npx @deepseek-code/cli quickstart
+```
+
+Homebrew：
+
+```bash
+brew tap willamhou/deepseekcode
+brew install deepseek
+deepseek quickstart
+```
 
 <p align="center">
   <strong>DeepSeekCode 交互式 REPL 从空仓库写出可玩的 2048 游戏</strong><br>
@@ -77,11 +104,11 @@ deepseek doctor --json
 或者下载 release archive：
 
 ```bash
-deepseek update download-plan --version 0.1.4
+deepseek update download-plan --version 0.1.5
 curl -L -o deepseek-linux-x64.tar.gz \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.4/deepseek-linux-x64.tar.gz
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.5/deepseek-linux-x64.tar.gz
 curl -L -o deepseek-linux-x64.tar.gz.sha256 \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.4/deepseek-linux-x64.tar.gz.sha256
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.5/deepseek-linux-x64.tar.gz.sha256
 shasum -a 256 -c deepseek-linux-x64.tar.gz.sha256
 tar -xzf deepseek-linux-x64.tar.gz
 ./deepseek version
@@ -90,7 +117,7 @@ tar -xzf deepseek-linux-x64.tar.gz
 或者运行已发布的容器镜像：
 
 ```bash
-docker run --rm ghcr.io/willamhou/deepseekcode:0.1.4 version
+docker run --rm ghcr.io/willamhou/deepseekcode:0.1.5 version
 ```
 
 本地 checkout 安装：
@@ -158,13 +185,14 @@ cargo test --lib -- --test-threads=1
 node scripts/check-secrets.js
 deepseek quickstart --json
 deepseek update publish-status --json
-deepseek update release-smoke --version 0.1.4 --json
+deepseek update release-smoke --version 0.1.5 --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
 
 发布和 dogfood 证据见：
 
 - [Release checklist](./docs/release.md)
+- [Evidence summary](./docs/evidence.md)
 - [Dogfood evidence](./docs/dogfood-evidence.md)
 - [Current status](./docs/current-status.md)
 - 补充 demo：[scripted 2048 capture](./docs/demo/deepseek-code-2048-terminal-demo.svg)、
@@ -178,6 +206,7 @@ deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 - [当前状态与路线](./docs/current-status.md)
 - [宣发素材包](./docs/launch/README.md)
 - [发布 checklist](./docs/release.md)
+- [Evidence summary](./docs/evidence.md)
 - [Dogfood 证据](./docs/dogfood-evidence.md)
 - [Demo 素材](./docs/demo/README.md)
 - [架构](./docs/architecture.md)

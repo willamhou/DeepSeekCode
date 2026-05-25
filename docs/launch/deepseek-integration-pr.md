@@ -3,6 +3,13 @@
 Use this copy when proposing DeepSeekCode for DeepSeek agent integration lists
 or `awesome-deepseek-agent` style directories.
 
+The current `deepseek-ai/awesome-deepseek-agent` contribution format requires:
+
+- English and Simplified Chinese guide files under `docs/`;
+- README table entries in both `README.md` and `README.zh-CN.md`;
+- current model names: `deepseek-v4-pro` and `deepseek-v4-flash`;
+- mention of the 1M context window and max/high reasoning effort support.
+
 ## Short Entry
 
 ```markdown
@@ -56,3 +63,247 @@ Evidence:
   PR body.
 - Keep the wording precise: DeepSeekCode is independently implemented and does
   not vendor DeepSeek-TUI/CodeWhale or Reasonix source.
+
+## README Table Entry
+
+Insert alphabetically near the other `Deep...` tools.
+
+```markdown
+| **DeepSeekCode** | DeepSeek-first terminal code agent for local repository work with TUI, REPL, npm/npx, Homebrew, release binaries, MCP/ACP, and durable runtime evidence. | [Guide](./docs/deepseekcode.md) |
+```
+
+Simplified Chinese table entry:
+
+```markdown
+| **DeepSeekCode** | 面向本地仓库工作的 DeepSeek-first 终端 code agent，支持 TUI、REPL、npm/npx、Homebrew、release binaries、MCP/ACP 和持久 runtime 证据。 | [指南](./docs/deepseekcode.zh-CN.md) |
+```
+
+## English Guide Body
+
+Save as `docs/deepseekcode.md` in the integration-list PR.
+
+~~~markdown
+[English](./deepseekcode.md) | [简体中文](./deepseekcode.zh-CN.md) · [← Back](../README.md)
+
+# Integrate with DeepSeekCode
+
+DeepSeekCode is a DeepSeek-first terminal code agent for Linux/macOS local
+repository work. It provides a full-screen TUI, line-oriented REPL, and
+one-shot `deepseek run` mode for inspecting repositories, editing files,
+running checks, reviewing diffs, and resuming local sessions.
+
+- **GitHub:** <https://github.com/willamhou/DeepSeekCode>
+- **npm:** <https://www.npmjs.com/package/@deepseek-code/cli>
+
+#### 1. Install DeepSeekCode
+
+Choose one of:
+
+```sh
+# npm
+npm install -g @deepseek-code/cli
+
+# no-install run
+npx @deepseek-code/cli version
+
+# Homebrew
+brew tap willamhou/deepseekcode
+brew install deepseek
+
+# source install
+cargo install --git https://github.com/willamhou/DeepSeekCode.git --locked
+```
+
+Verify:
+
+```sh
+deepseek version
+deepseek quickstart
+```
+
+#### 2. Get a DeepSeek API Key
+
+Get your API key from the [DeepSeek Platform](https://platform.deepseek.com/api_keys).
+
+DeepSeekCode can read `DEEPSEEK_API_KEY` from the environment. For local project
+setup:
+
+```sh
+deepseek config init
+printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
+deepseek doctor --json
+```
+
+#### 3. Enter a project directory and launch
+
+```sh
+cd /path/to/my-project
+deepseek
+```
+
+Useful entry points:
+
+```sh
+deepseek chat
+deepseek run --preset auto "summarize this repository and identify the main test command"
+deepseek quickstart --json
+```
+
+#### Model presets
+
+DeepSeekCode supports DeepSeek V4 model presets:
+
+- `flash` routes to DeepSeek-V4-Flash for cost-efficient iteration;
+- `pro` routes to DeepSeek-V4-Pro for harder turns;
+- `auto` starts cost-aware and can escalate when local failure signals indicate
+  that Pro is useful.
+
+Configure the default preset:
+
+```sh
+deepseek config preset auto
+```
+
+DeepSeek V4 supports a 1M-token context window. DeepSeekCode tracks prompt-layer
+diagnostics, cache hit/miss data, and model route information through
+`deepseek stats` and runtime events. DeepSeek-V4-Pro reasoning effort can be
+used at high or max levels where the provider endpoint exposes that control.
+
+#### Runtime evidence
+
+DeepSeekCode exposes local evidence surfaces:
+
+```sh
+deepseek stats --json
+deepseek events replay <thread-id> --limit 50
+deepseek events diff <before-thread-id> <after-thread-id> --json
+deepseek dogfood repair-cache-evidence --json
+```
+
+Release evidence for the current public beta is linked from:
+
+<https://github.com/willamhou/DeepSeekCode/blob/main/docs/evidence.md>
+~~~
+
+## Simplified Chinese Guide Body
+
+Save as `docs/deepseekcode.zh-CN.md` in the integration-list PR.
+
+~~~markdown
+[English](./deepseekcode.md) | [简体中文](./deepseekcode.zh-CN.md) · [← 返回](../README.zh-CN.md)
+
+# 集成 DeepSeekCode
+
+DeepSeekCode 是一个 DeepSeek-first 的 Linux/macOS 终端 code agent，面向本地仓库工作。
+它提供全屏 TUI、行式 REPL 和一次性 `deepseek run` 模式，用于阅读仓库、修改文件、
+运行检查、查看 diff，并从本地持久 session 中继续工作。
+
+- **GitHub:** <https://github.com/willamhou/DeepSeekCode>
+- **npm:** <https://www.npmjs.com/package/@deepseek-code/cli>
+
+#### 1. 安装 DeepSeekCode
+
+任选一种方式：
+
+```sh
+# npm
+npm install -g @deepseek-code/cli
+
+# 不安装直接运行
+npx @deepseek-code/cli version
+
+# Homebrew
+brew tap willamhou/deepseekcode
+brew install deepseek
+
+# 源码安装
+cargo install --git https://github.com/willamhou/DeepSeekCode.git --locked
+```
+
+验证安装：
+
+```sh
+deepseek version
+deepseek quickstart
+```
+
+#### 2. 获取 DeepSeek API Key
+
+从 [DeepSeek Platform](https://platform.deepseek.com/api_keys) 获取 API key。
+
+DeepSeekCode 可以从环境变量读取 `DEEPSEEK_API_KEY`。本地项目初始化可以这样做：
+
+```sh
+deepseek config init
+printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
+deepseek doctor --json
+```
+
+#### 3. 进入项目目录并启动
+
+```sh
+cd /path/to/my-project
+deepseek
+```
+
+常用入口：
+
+```sh
+deepseek chat
+deepseek run --preset auto "summarize this repository and identify the main test command"
+deepseek quickstart --json
+```
+
+#### 模型预设
+
+DeepSeekCode 支持 DeepSeek V4 模型预设：
+
+- `flash` 使用 DeepSeek-V4-Flash，适合低成本迭代；
+- `pro` 使用 DeepSeek-V4-Pro，适合更难的任务；
+- `auto` 先走成本友好的路径，并在本地失败信号表明需要 Pro 时升级。
+
+配置默认预设：
+
+```sh
+deepseek config preset auto
+```
+
+DeepSeek V4 支持 1M token 上下文窗口。DeepSeekCode 会通过 `deepseek stats` 和
+runtime events 记录 prompt-layer diagnostics、cache hit/miss 和模型路由信息。
+当 provider endpoint 暴露相关控制时，DeepSeek-V4-Pro reasoning effort 可使用 high
+或 max 等级。
+
+#### Runtime 证据
+
+DeepSeekCode 提供本地证据入口：
+
+```sh
+deepseek stats --json
+deepseek events replay <thread-id> --limit 50
+deepseek events diff <before-thread-id> <after-thread-id> --json
+deepseek dogfood repair-cache-evidence --json
+```
+
+当前 public beta 的发布证据见：
+
+<https://github.com/willamhou/DeepSeekCode/blob/main/docs/evidence.md>
+~~~
+
+## PR Body
+
+```markdown
+Add DeepSeekCode to the DeepSeek agent integration list.
+
+DeepSeekCode is a DeepSeek-first terminal code agent for Linux/macOS local
+repository work. The guide covers installation, API-key configuration, first
+run, model presets, 1M-context awareness, and local runtime evidence commands.
+
+Checks:
+- English and Simplified Chinese guide files included.
+- README table entries included.
+- Uses current model names: `deepseek-v4-pro` and `deepseek-v4-flash`.
+- Mentions DeepSeek V4 1M context support.
+- Mentions high/max reasoning effort support where the provider exposes it.
+- Current public release is verified through npm/npx, Homebrew, GitHub Release,
+  Release Smoke, and Release Matrix evidence linked from the project docs.
+```

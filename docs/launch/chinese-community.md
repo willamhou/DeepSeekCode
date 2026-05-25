@@ -6,7 +6,7 @@
 ## 标题
 
 ```text
-我做了一个类似 Claude Code 的 DeepSeek 终端代码 Agent，可以 npm/npx 或 brew 安装
+我做了一个 DeepSeek-first 终端代码 Agent，可以 npm/npx 或 brew 安装
 ```
 
 更克制的版本：
@@ -48,7 +48,8 @@ Linux 用户可以走 GitHub Release archive 或源码安装；v0.1.5 的 Linux 
 - 已验证的 macOS Homebrew tap
 - GHCR 镜像
 - release-smoke：从公开 release 下载、校验 sha256、解压并跑最小验证
-- README 里有真实 model-backed 的编辑/测试闭环 demo
+- README 里有真实交互式 2048 demo：从空 repo 输入 prompt，生成
+  `2048.html`，完成校验，再展示本地浏览器试玩
 
 当前边界也写清楚了：
 
@@ -58,6 +59,11 @@ Linux 用户可以走 GitHub Release archive 或源码安装；v0.1.5 的 Linux 
 
 Repo:
 https://github.com/willamhou/DeepSeekCode
+
+证据：
+- Release Matrix：26380726246
+- Release Smoke：26380981708
+- Homebrew Smoke：26380934049
 
 如果你平时用 Claude Code、Codex CLI 或其他终端 code agent，比较想听你们对 first-run、approval flow、shell 行为、repo editing 体验的反馈。
 ```

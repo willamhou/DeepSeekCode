@@ -23,22 +23,29 @@ Use this concise public-beta claim:
 
 - Repository: <https://github.com/willamhou/DeepSeekCode>
 - Release: <https://github.com/willamhou/DeepSeekCode/releases/tag/v0.1.5>
+- Release Matrix evidence: <https://github.com/willamhou/DeepSeekCode/actions/runs/26380726246>
+- Release Smoke evidence: <https://github.com/willamhou/DeepSeekCode/actions/runs/26380981708>
+- Homebrew Smoke evidence: <https://github.com/willamhou/DeepSeekCode/actions/runs/26380934049>
+- npm package: <https://www.npmjs.com/package/@deepseek-code/cli>
 - Install guide: <https://github.com/willamhou/DeepSeekCode/blob/main/docs/install.md>
 - Current status: <https://github.com/willamhou/DeepSeekCode/blob/main/docs/current-status.md>
 - Public beta guide: <https://github.com/willamhou/DeepSeekCode/blob/main/docs/public-beta.md>
 
 ## Recommended Launch Order
 
-1. Review the committed README demo media, including the interactive 2048
+1. Run the [launch-day checklist](./launch-day-checklist.md).
+2. Review the committed README demo media, including the interactive 2048
    terminal SVG and gameplay GIF/MP4, and refresh only if the UI or positioning
    changed materially.
-2. Upload a repository social preview image in GitHub repository settings.
-3. Post the GitHub release or repository link on personal channels.
-4. Post a technical feedback thread with [hacker-news.md](./hacker-news.md).
-5. Post Chinese community copy from [chinese-community.md](./chinese-community.md).
-6. Use [social-posts.md](./social-posts.md) for X, LinkedIn, Discord, Slack, and
+3. Upload a repository social preview image in GitHub repository settings.
+4. Post the GitHub release or repository link on personal channels.
+5. Post a technical feedback thread with [hacker-news.md](./hacker-news.md).
+6. Post Chinese community copy from [chinese-community.md](./chinese-community.md).
+7. Use [social-posts.md](./social-posts.md) for X, LinkedIn, Discord, Slack, and
    follow-up posts.
-7. Treat [product-hunt.md](./product-hunt.md) as a later launch after a short
+8. Prepare a PR for DeepSeek integration lists using
+   [deepseek-integration-pr.md](./deepseek-integration-pr.md).
+9. Treat [product-hunt.md](./product-hunt.md) as a later launch after a short
    video-friendly demo cut and broader public-beta feedback are ready.
 
 ## Preflight

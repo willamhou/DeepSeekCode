@@ -2,16 +2,43 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md) | [日本語](./README.ja-JP.md)
 
+[![CI](https://github.com/willamhou/DeepSeekCode/actions/workflows/ci.yml/badge.svg)](https://github.com/willamhou/DeepSeekCode/actions/workflows/ci.yml)
+[![Release Matrix](https://github.com/willamhou/DeepSeekCode/actions/workflows/release.yml/badge.svg)](https://github.com/willamhou/DeepSeekCode/actions/workflows/release.yml)
+[![npm](https://img.shields.io/npm/v/%40deepseek-code%2Fcli?label=npm)](https://www.npmjs.com/package/@deepseek-code/cli)
+[![GitHub release](https://img.shields.io/github/v/release/willamhou/DeepSeekCode)](https://github.com/willamhou/DeepSeekCode/releases/latest)
+
 DeepSeekCode は DeepSeek-first のターミナル code agent です。ローカル開発の
 ループ、つまりリポジトリを読み、ファイルを編集し、チェックを実行し、diff を確認し、
 同じターミナルで作業を続ける流れを前提にしています。
 
 > Public beta status: Linux/macOS の dogfood とリポジトリ作業には今日から利用できます。
-> `v0.1.4` は GitHub Release binaries、検証済み GHCR image、TUI/service smoke gates、
-> `deepseek quickstart`、release-binary smoke verifier、検証済み Homebrew tap を
-> 備え、npm/npx install path と README の model-backed launch media も含まれています。
+> `v0.1.5` は GitHub Release binaries、検証済み GHCR image、TUI/service smoke gates、
+> `deepseek quickstart`、release-binary smoke verifier、検証済み Homebrew tap、
+> 検証済み npm/npx install paths、README の model-backed launch media を含みます。
 > より大きな external repo evidence と broader hosted product proof は引き続き
 > product-hardening work です。
+
+## Quick Try
+
+```bash
+npm install -g @deepseek-code/cli
+deepseek quickstart
+deepseek
+```
+
+Run without installing:
+
+```bash
+npx @deepseek-code/cli quickstart
+```
+
+Homebrew:
+
+```bash
+brew tap willamhou/deepseekcode
+brew install deepseek
+deepseek quickstart
+```
 
 <p align="center">
   <strong>DeepSeekCode interactive REPL builds a playable 2048 game from an empty repo</strong><br>
@@ -81,11 +108,11 @@ deepseek doctor --json
 または release archive をダウンロード:
 
 ```bash
-deepseek update download-plan --version 0.1.4
+deepseek update download-plan --version 0.1.5
 curl -L -o deepseek-linux-x64.tar.gz \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.4/deepseek-linux-x64.tar.gz
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.5/deepseek-linux-x64.tar.gz
 curl -L -o deepseek-linux-x64.tar.gz.sha256 \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.4/deepseek-linux-x64.tar.gz.sha256
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.5/deepseek-linux-x64.tar.gz.sha256
 shasum -a 256 -c deepseek-linux-x64.tar.gz.sha256
 tar -xzf deepseek-linux-x64.tar.gz
 ./deepseek version
@@ -94,7 +121,7 @@ tar -xzf deepseek-linux-x64.tar.gz
 または公開済み container を実行:
 
 ```bash
-docker run --rm ghcr.io/willamhou/deepseekcode:0.1.4 version
+docker run --rm ghcr.io/willamhou/deepseekcode:0.1.5 version
 ```
 
 local checkout からインストール:
@@ -164,13 +191,14 @@ cargo test --lib -- --test-threads=1
 node scripts/check-secrets.js
 deepseek quickstart --json
 deepseek update publish-status --json
-deepseek update release-smoke --version 0.1.4 --json
+deepseek update release-smoke --version 0.1.5 --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
 
 release と dogfood evidence:
 
 - [Release checklist](./docs/release.md)
+- [Evidence summary](./docs/evidence.md)
 - [Dogfood evidence](./docs/dogfood-evidence.md)
 - [Current status](./docs/current-status.md)
 - Additional demos: [scripted 2048 capture](./docs/demo/deepseek-code-2048-terminal-demo.svg),
@@ -184,6 +212,7 @@ release と dogfood evidence:
 - [Current status and roadmap](./docs/current-status.md)
 - [Launch kit](./docs/launch/README.md)
 - [Release checklist](./docs/release.md)
+- [Evidence summary](./docs/evidence.md)
 - [Dogfood evidence](./docs/dogfood-evidence.md)
 - [Demo assets](./docs/demo/README.md)
 - [Architecture](./docs/architecture.md)

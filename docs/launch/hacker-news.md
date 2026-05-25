@@ -1,7 +1,9 @@
 # Hacker News Launch Copy
 
 Use this when posting a Show HN or a regular HN link. The preferred link is the
-repository, because the README contains installation commands and proof links.
+repository, because the README contains installation commands, demo media, and
+proof links. Show HN should point to something people can try immediately, so
+avoid linking only to a blog post or release announcement.
 
 ## Title Options
 
@@ -41,6 +43,10 @@ GitHub Release binaries, Linux x64/arm64 and macOS x64/arm64 assets, a verified
 Homebrew tap, a GHCR image, and release-smoke checks that download and validate
 the public release assets.
 
+The README includes a real interactive recording where `deepseek chat` starts
+from an empty repo, writes a playable 2048 game, and then shows the generated
+browser game running locally.
+
 Quick try with npm:
 
 npm install -g @deepseek-code/cli
@@ -65,6 +71,11 @@ coverage.
 What works today: full-screen TUI, REPL, one-shot run mode, repo-aware file
 tools, shell workflows with approvals, sessions/runtime state, MCP/ACP surfaces,
 rollback/diff review paths, and model-backed demo evidence in the README.
+
+Release evidence:
+- Release Matrix: https://github.com/willamhou/DeepSeekCode/actions/runs/26380726246
+- Release Smoke: https://github.com/willamhou/DeepSeekCode/actions/runs/26380981708
+- Homebrew Smoke: https://github.com/willamhou/DeepSeekCode/actions/runs/26380934049
 
 Current limits: Windows is not the public-beta focus, and I still want more
 external repo dogfood evidence and richer launch media.

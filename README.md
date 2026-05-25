@@ -2,6 +2,11 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md) | [日本語](./README.ja-JP.md)
 
+[![CI](https://github.com/willamhou/DeepSeekCode/actions/workflows/ci.yml/badge.svg)](https://github.com/willamhou/DeepSeekCode/actions/workflows/ci.yml)
+[![Release Matrix](https://github.com/willamhou/DeepSeekCode/actions/workflows/release.yml/badge.svg)](https://github.com/willamhou/DeepSeekCode/actions/workflows/release.yml)
+[![npm](https://img.shields.io/npm/v/%40deepseek-code%2Fcli?label=npm)](https://www.npmjs.com/package/@deepseek-code/cli)
+[![GitHub release](https://img.shields.io/github/v/release/willamhou/DeepSeekCode)](https://github.com/willamhou/DeepSeekCode/releases/latest)
+
 DeepSeekCode is a DeepSeek-first terminal code agent for the local development
 loop: inspect a repository, edit files, run checks, review the diff, and keep
 working from the same terminal.
@@ -9,9 +14,31 @@ working from the same terminal.
 > Public beta status: usable today for Linux/macOS dogfooding and repository
 > work. `v0.1.5` ships GitHub Release binaries, a verified GHCR image, TUI and
 > service smoke gates, `deepseek quickstart`, a release-binary smoke verifier,
-> a verified Homebrew tap, verified npm/npx install paths, and model-backed README launch
-> media. Larger external repo evidence and broader hosted product proof are
-> still product-hardening work.
+> a verified Homebrew tap, verified npm/npx install paths, and model-backed
+> README launch media. Larger external repo evidence and broader hosted product
+> proof are still product-hardening work.
+
+## Try It
+
+```bash
+npm install -g @deepseek-code/cli
+deepseek quickstart
+deepseek
+```
+
+No install:
+
+```bash
+npx @deepseek-code/cli quickstart
+```
+
+Homebrew:
+
+```bash
+brew tap willamhou/deepseekcode
+brew install deepseek
+deepseek quickstart
+```
 
 <p align="center">
   <strong>DeepSeekCode interactive REPL builds a playable 2048 game from an empty repo</strong><br>
