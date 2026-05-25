@@ -117,9 +117,8 @@ Keep these caveats visible when promoting the project:
 
 - Keep an npm install/npx smoke in release preflight after any packaging or
   workflow change.
-- Homebrew is published, but future tag automation still needs
-  `HOMEBREW_TAP_TOKEN`; verify the tap again after the `v0.1.4` release assets
-  are published and the formula is refreshed.
+- Homebrew is published and verified for `v0.1.4`; keep Homebrew Smoke in the
+  release checklist after every tap formula refresh.
 - More online model-backed runs against larger external fixtures would make the
   evidence base stronger.
 - Hosted IDE evidence and broader Windows service proof are outside the current

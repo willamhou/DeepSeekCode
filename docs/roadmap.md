@@ -29,7 +29,7 @@ DeepSeekCode is now usable for Linux/macOS dogfooding and repository work:
   downloads and a verified npm/npx distribution path:
   https://github.com/willamhou/DeepSeekCode/actions/runs/26379123804
 - the public Homebrew tap is verified on macOS x64 and macOS arm64:
-  https://github.com/willamhou/DeepSeekCode/actions/runs/26352180898
+  https://github.com/willamhou/DeepSeekCode/actions/runs/26380319039
 
 The Linux/macOS local code-agent CLI milestone is effectively established. The
 remaining work is mostly external evidence depth, installed service proof, and
@@ -51,10 +51,10 @@ documentation polish.
 
 ### 2. Homebrew And npm Publishing
 
-- Homebrew is published and verified for `v0.1.3`; keep the tap formula aligned
-  with GitHub Release archives and `.sha256` files as `v0.1.4` rolls out.
-- Configure `HOMEBREW_TAP_TOKEN` so future tag workflows can update the tap
-  automatically.
+- Homebrew is published and verified for `v0.1.4`; keep the tap formula aligned
+  with GitHub Release archives and `.sha256` files on each tag.
+- `HOMEBREW_TAP_TOKEN` and `HOMEBREW_TAP_REPOSITORY` are configured so future
+  tag workflows can update the tap automatically.
 - `v0.1.4` platform npm packages and the root wrapper are published and
   verified. Keep the Release Matrix npm publish path idempotent and keep the
   manual `NPM Publish` retry workflow available for recovery from completed

@@ -93,5 +93,5 @@ https://github.com/willamhou/DeepSeekCode
 - 节点：`分享创造` 或 `程序员`。
 - 标题不要写成营销口号，直接讲「我做了什么」。
 - 开头先给安装命令，再讲状态和限制。
-- 明确说 npm 是新发布路径；如果 registry 还在同步，就给 Homebrew 和 release archive 作为 fallback。
+- 明确说 npm/npx、Homebrew 和 release archive 都已经是可验证的公开安装路径。
 - 不要引导点赞；只请求试用反馈和 issue。

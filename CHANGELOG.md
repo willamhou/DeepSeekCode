@@ -22,6 +22,8 @@ npm/npx distribution and public evidence refresh.
   retry workflow for publishing packages from a completed Release Matrix run.
 - `v0.1.4` npm packages are published and verified through npm registry lookup,
   `npx`, and clean-directory install smoke.
+- Homebrew tap automation published `Formula/deepseek.rb` for `v0.1.4` and the
+  refreshed tap passed macOS x64/arm64 Homebrew Smoke.
 
 ### Verification
 
@@ -33,6 +35,8 @@ npm/npx distribution and public evidence refresh.
 - manual `NPM Publish` workflow run `26379649992`
 - `npx @deepseek-code/cli@0.1.4 version`
 - clean-directory `npm install @deepseek-code/cli@0.1.4` smoke
+- `Publish Homebrew Tap` job rerun from Release Matrix `26379123804`
+- Homebrew Smoke workflow run `26380319039`
 
 ## 0.1.3 - 2026-05-24
 

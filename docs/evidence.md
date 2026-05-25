@@ -28,6 +28,10 @@ deepseek version
 deepseek quickstart
 ```
 
+The `v0.1.4` tap formula was published to
+`willamhou/homebrew-deepseekcode` and Homebrew Smoke run `26380319039` verified
+macOS x64 and macOS arm64 install plus `doctor --json`.
+
 ```bash
 deepseek update download-plan --version 0.1.4
 deepseek update release-smoke --version 0.1.4 --json
@@ -115,6 +119,9 @@ assets and GHCR image.
 For `v0.1.4`, the manual `NPM Publish` retry workflow run `26379649992`
 published the platform packages and root wrapper, and registry/clean-machine
 smoke verified `deepseek 0.1.4` through both `npx` and `npm install`.
+The `Publish Homebrew Tap` job in the rerun of `26379123804` updated
+`Formula/deepseek.rb` to `0.1.4`; Homebrew Smoke run `26380319039` verified the
+published tap.
 
 ## Known Limits
 

@@ -37,10 +37,10 @@ deepseek quickstart
 deepseek doctor --json
 ```
 
-`v0.1.3` 的 tap 已通过 macOS x64 和 macOS arm64 Homebrew Smoke 验证。
+`v0.1.4` 的 tap 已通过 macOS x64 和 macOS arm64 Homebrew Smoke 验证。
 Linux 用户也可以使用下面的 release archive 或源码安装路径；`v0.1.4`
-的 Linux x64 和 Linux arm64 release assets 已经发布。后续配置
-`HOMEBREW_TAP_TOKEN` 后，tag workflow 可以自动刷新 tap metadata 并复验。
+的 Linux x64 和 Linux arm64 release assets 已经发布。后续 tag workflow 会用
+`HOMEBREW_TAP_TOKEN` 自动刷新 tap metadata，并应继续跑 Homebrew Smoke 复验。
 
 ## 从源码安装
 
@@ -331,9 +331,10 @@ release assets：
 正式发布前必须把 formula 里的 `sha256` 占位值替换为对应 release asset 的真实
 SHA-256。GitHub `Release Matrix` workflow 会为每个 archive 上传旁路
 `.sha256` 文件并创建 signed artifact attestations，优先使用这些值填写
-formula，确保 tap 和发布资产完全一致。当前公开 tap 安装验证来自 `v0.1.3`
-Homebrew Smoke run `26352180898` 的 macOS x64/arm64 结果；`v0.1.4` tag workflow
-生成真实 SHA-256 后需要自动或手动刷新 tap 并复验。安装前可用 `gh attestation verify
+formula，确保 tap 和发布资产完全一致。当前公开 tap 安装验证来自 `v0.1.4`
+Homebrew Smoke run `26380319039` 的 macOS x64/arm64 结果；Release Matrix 的
+Homebrew tap publish job 已用 release SHA-256 自动刷新 `Formula/deepseek.rb`。
+安装前可用 `gh attestation verify
 <archive> --repo <owner>/<repo>` 验证 provenance。然后运行：
 
 ```bash
