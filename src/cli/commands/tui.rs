@@ -6103,12 +6103,29 @@ fn run_tui_diff_command(app: &mut TuiApp, workspace: &Path) {
 }
 
 fn render_tui_diff_detail(workspace: &Path) -> AppResult<String> {
-    let names = git_diff_output(workspace, &["diff", "--name-only"])?;
-    let stat = git_diff_output(workspace, &["diff", "--stat"])?;
-    let files = names
+    let staged_names = git_diff_output(workspace, &["diff", "--cached", "--name-status"])?;
+    let unstaged_names = git_diff_output(workspace, &["diff", "--name-status"])?;
+    let untracked_names =
+        git_diff_output(workspace, &["ls-files", "--others", "--exclude-standard"])?;
+    let staged_stat = git_diff_output(workspace, &["diff", "--cached", "--stat"])?;
+    let unstaged_stat = git_diff_output(workspace, &["diff", "--stat"])?;
+    let staged_patch = git_diff_output(
+        workspace,
+        &["diff", "--cached", "--unified=3", "--no-ext-diff", "--"],
+    )?;
+    let unstaged_patch =
+        git_diff_output(workspace, &["diff", "--unified=3", "--no-ext-diff", "--"])?;
+
+    let staged_files = parse_git_name_status(&staged_names);
+    let unstaged_files = parse_git_name_status(&unstaged_names);
+    let untracked_files = untracked_names
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
+        .map(|path| DiffFileEntry {
+            display: format!("?? {path}"),
+            review_path: path.to_string(),
+        })
         .collect::<Vec<_>>();
 
     let mut detail = String::new();
@@ -6118,34 +6135,165 @@ fn render_tui_diff_detail(workspace: &Path) -> AppResult<String> {
     let _ = writeln!(detail, "Workspace: {}", workspace.display());
     let _ = writeln!(detail);
 
-    if files.is_empty() {
+    if staged_files.is_empty() && unstaged_files.is_empty() && untracked_files.is_empty() {
         let _ = writeln!(detail, "No changes since session start");
         return Ok(detail);
     }
 
-    let renamed_count = files.iter().filter(|file| file.contains(" -> ")).count();
-    if renamed_count > 0 {
-        let _ = writeln!(
-            detail,
-            "Changed files ({}, {} renamed):",
-            files.len(),
-            renamed_count
-        );
-    } else {
-        let _ = writeln!(detail, "Changed files ({}):", files.len());
-    }
-    for file in &files {
-        let _ = writeln!(detail, "{file}");
+    write_diff_file_section(&mut detail, "Staged files", &staged_files);
+    write_diff_file_section(&mut detail, "Unstaged files", &unstaged_files);
+    write_diff_file_section(&mut detail, "Untracked files", &untracked_files);
+
+    write_diff_stat_section(&mut detail, "Staged stat", &staged_stat);
+    write_diff_stat_section(&mut detail, "Unstaged stat", &unstaged_stat);
+
+    if !staged_patch.trim().is_empty() || !unstaged_patch.trim().is_empty() {
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Hunk preview");
+        let _ = writeln!(detail, "------------");
+        if !staged_patch.trim().is_empty() {
+            let _ = writeln!(detail, "Staged hunks:");
+            detail.push_str(&diff_hunk_preview(&staged_patch, 80));
+        }
+        if !unstaged_patch.trim().is_empty() {
+            if !staged_patch.trim().is_empty() {
+                let _ = writeln!(detail);
+            }
+            let _ = writeln!(detail, "Unstaged hunks:");
+            detail.push_str(&diff_hunk_preview(&unstaged_patch, 120));
+        }
     }
 
-    let stat = stat.trim();
-    if !stat.is_empty() {
-        let _ = writeln!(detail);
-        let _ = writeln!(detail, "Stat");
-        let _ = writeln!(detail, "----");
-        let _ = writeln!(detail, "{stat}");
-    }
+    write_diff_next_steps(
+        &mut detail,
+        staged_files
+            .iter()
+            .chain(unstaged_files.iter())
+            .chain(untracked_files.iter()),
+    );
     Ok(detail)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffFileEntry {
+    display: String,
+    review_path: String,
+}
+
+fn parse_git_name_status(output: &str) -> Vec<DiffFileEntry> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let parts = line.split('\t').collect::<Vec<_>>();
+            let status = parts.first()?.trim();
+            if status.is_empty() {
+                return None;
+            }
+            if status.starts_with('R') && parts.len() >= 3 {
+                let old = parts[1].trim();
+                let new = parts[2].trim();
+                return Some(DiffFileEntry {
+                    display: format!("{status} {old} -> {new}"),
+                    review_path: new.to_string(),
+                });
+            }
+            let path = parts.get(1)?.trim();
+            if path.is_empty() {
+                return None;
+            }
+            Some(DiffFileEntry {
+                display: format!("{status} {path}"),
+                review_path: path.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn write_diff_file_section(detail: &mut String, title: &str, files: &[DiffFileEntry]) {
+    let _ = writeln!(detail, "{title} ({}):", files.len());
+    if files.is_empty() {
+        let _ = writeln!(detail, "- none");
+    } else {
+        for file in files {
+            let _ = writeln!(detail, "- {}", file.display);
+        }
+    }
+    let _ = writeln!(detail);
+}
+
+fn write_diff_stat_section(detail: &mut String, title: &str, stat: &str) {
+    let stat = stat.trim();
+    if stat.is_empty() {
+        return;
+    }
+    let _ = writeln!(detail, "{title}");
+    let _ = writeln!(detail, "{}", "-".repeat(title.len()));
+    let _ = writeln!(detail, "{stat}");
+    let _ = writeln!(detail);
+}
+
+fn diff_hunk_preview(patch: &str, max_lines: usize) -> String {
+    let mut out = String::new();
+    let total_lines = patch.lines().count();
+    for line in patch.lines().take(max_lines) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    if total_lines > max_lines {
+        out.push_str(&format!(
+            "... {} more diff lines omitted\n",
+            total_lines - max_lines
+        ));
+    }
+    out
+}
+
+fn write_diff_next_steps<'a>(detail: &mut String, files: impl Iterator<Item = &'a DiffFileEntry>) {
+    let mut seen = BTreeSet::new();
+    let review_paths = files
+        .filter_map(|file| {
+            if file.review_path.trim().is_empty() || !seen.insert(file.review_path.clone()) {
+                None
+            } else {
+                Some(file.review_path.clone())
+            }
+        })
+        .take(3)
+        .collect::<Vec<_>>();
+
+    let _ = writeln!(detail);
+    let _ = writeln!(detail, "Next steps");
+    let _ = writeln!(detail, "----------");
+    if review_paths.is_empty() {
+        let _ = writeln!(detail, "- review <file> after selecting a changed file.");
+    } else {
+        for path in review_paths {
+            let _ = writeln!(detail, "- review {}", tui_command_arg(&path));
+        }
+    }
+    let _ = writeln!(
+        detail,
+        "- restore hunks last | restore hunk last <index> to inspect rollback hunks."
+    );
+    let _ = writeln!(
+        detail,
+        "- revert turn last to dry-run rollback; add --apply only after preview."
+    );
+    let _ = writeln!(
+        detail,
+        "- /status shows pending approvals, task state, usage, and queued messages."
+    );
+}
+
+fn tui_command_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| !ch.is_whitespace() && ch != '"' && ch != '\'')
+    {
+        value.to_string()
+    } else {
+        format!("{value:?}")
+    }
 }
 
 fn git_diff_output(workspace: &Path, args: &[&str]) -> AppResult<String> {
@@ -7354,11 +7502,20 @@ fn run_tui_agent_turn(
         "assistant".to_string(),
         "(assistant response running)".to_string(),
     )?;
-    if let Some(snapshot_id) = rollback_snapshot_id.as_deref() {
+    if let Some(snapshot) = rollback_snapshot_id.as_ref() {
         let _ = rollback_store.bind_snapshot_runtime(
-            snapshot_id,
+            &snapshot.id,
             Some(&thread_id),
             Some(&assistant.id),
+        );
+    }
+    if let Some(snapshot) = rollback_snapshot_id.as_ref() {
+        append_tui_rollback_visibility_item(
+            &store,
+            &thread_id,
+            &assistant.id,
+            snapshot,
+            live_tx.as_ref(),
         );
     }
     let assistant_item = store.append_item(
@@ -7599,13 +7756,43 @@ fn is_cjk_translation_char(ch: char) -> bool {
     )
 }
 
-fn create_tui_rollback_snapshot(store: &RollbackStore, prompt: &str) -> Option<String> {
+fn create_tui_rollback_snapshot(store: &RollbackStore, prompt: &str) -> Option<SnapshotRecord> {
     let workspace = std::env::current_dir().ok()?;
     let label = format!("tui rollback: {}", runtime_summary(prompt));
-    store
-        .create_snapshot(&workspace, label)
-        .ok()
-        .map(|snapshot| snapshot.id)
+    store.create_snapshot(&workspace, label).ok()
+}
+
+fn append_tui_rollback_visibility_item(
+    store: &RuntimeStore,
+    thread_id: &str,
+    turn_id: &str,
+    snapshot: &SnapshotRecord,
+    live_tx: Option<&Sender<TuiLiveEvent>>,
+) {
+    let content = render_tui_rollback_visibility_item(snapshot);
+    if let Ok(item) = store.append_item(
+        thread_id,
+        Some(turn_id),
+        "event".to_string(),
+        Some("system".to_string()),
+        content,
+        "completed".to_string(),
+    ) {
+        if let Some(tx) = live_tx {
+            let _ = tx.send(TuiLiveEvent::UpsertItem(item.into()));
+        }
+    }
+}
+
+fn render_tui_rollback_visibility_item(snapshot: &SnapshotRecord) -> String {
+    format!(
+        "rollback snapshot created\nsnapshot: {}\npatch bytes: {} (staged {}, unstaged {})\nuntracked entries: {}\npreview: restore show last\nhunks: restore hunks last | restore hunk last <index>\ndry-run rollback: revert turn last\napply after preview: revert turn last --apply",
+        snapshot.id,
+        snapshot.patch_bytes,
+        snapshot.staged_patch_bytes,
+        snapshot.unstaged_patch_bytes,
+        snapshot.untracked_entry_count(),
+    )
 }
 
 struct RuntimeItemStream {
@@ -13054,6 +13241,9 @@ shell_allowlist = ["git diff"]
         run_git(&root, &["add", "src.txt"]);
         run_git(&root, &["commit", "-m", "initial"]);
         fs::write(root.join("src.txt"), "before\nafter\n").unwrap();
+        fs::write(root.join("staged.txt"), "staged\n").unwrap();
+        run_git(&root, &["add", "staged.txt"]);
+        fs::write(root.join("untracked.txt"), "new file\n").unwrap();
 
         let store = RuntimeStore::new(root.join(".dscode/runtime"));
         let mut app = TuiApp::new(Vec::new());
@@ -13068,11 +13258,24 @@ shell_allowlist = ["git diff"]
         )
         .unwrap();
 
+        let (_, detail) = app.mcp_detail_for_test().expect("diff detail");
+        assert!(detail.contains("DeepSeekCode Diff"));
+        assert!(detail.contains("Staged files (1):"));
+        assert!(detail.contains("- A staged.txt"));
+        assert!(detail.contains("Unstaged files (1):"));
+        assert!(detail.contains("- M src.txt"));
+        assert!(detail.contains("Untracked files (1):"));
+        assert!(detail.contains("- ?? untracked.txt"));
+        assert!(detail.contains("src.txt"));
+        assert!(detail.contains("Staged stat"));
+        assert!(detail.contains("Unstaged stat"));
+        assert!(detail.contains("Hunk preview"));
+        assert!(detail.contains("+after"));
+        assert!(detail.contains("Next steps"));
+        assert!(detail.contains("review staged.txt"));
+        assert!(detail.contains("restore hunks last"));
+        assert!(detail.contains("revert turn last"));
         let output = render_once(&app, 160, 48).unwrap();
-        assert!(output.contains("DeepSeekCode Diff"));
-        assert!(output.contains("Changed files (1):"));
-        assert!(output.contains("src.txt"));
-        assert!(output.contains("Stat"));
         assert!(output.contains("diff shown"));
 
         let _ = fs::remove_dir_all(root);
@@ -13858,6 +14061,59 @@ shell_allowlist = ["git diff"]
         assert!(live_items
             .iter()
             .any(|item| item.item_type == "tool_result" && item.status == "completed"));
+    }
+
+    #[test]
+    fn rollback_visibility_item_records_snapshot_recovery_commands() {
+        let repo = temp_root("rollback-visibility-item");
+        fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["config", "user.email", "test@example.com"]);
+        run_git(&repo, &["config", "user.name", "Deepseek Test"]);
+        fs::write(repo.join("src.txt"), "before\n").unwrap();
+        run_git(&repo, &["add", "src.txt"]);
+        run_git(&repo, &["commit", "-m", "initial"]);
+        fs::write(repo.join("src.txt"), "before\nafter\n").unwrap();
+        fs::write(repo.join("new.txt"), "untracked\n").unwrap();
+
+        let store = RuntimeStore::new(repo.join(".dscode/runtime"));
+        let session = store
+            .create_session("Daily work".to_string(), repo.display().to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Runtime agent".to_string(),
+                repo.display().to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let turn = store
+            .append_turn(
+                &thread.id,
+                "assistant".to_string(),
+                "(assistant response running)".to_string(),
+            )
+            .unwrap();
+        let rollback_store = RollbackStore::new(repo.join(".dscode/rollback"));
+        let snapshot = rollback_store
+            .create_snapshot(&repo, "test rollback visibility".to_string())
+            .unwrap();
+
+        append_tui_rollback_visibility_item(&store, &thread.id, &turn.id, &snapshot, None);
+
+        let items = store.list_items(&thread.id, Some(&turn.id)).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].item_type, "event");
+        assert_eq!(items[0].role.as_deref(), Some("system"));
+        assert!(items[0].content.contains("rollback snapshot created"));
+        assert!(items[0].content.contains(&snapshot.id));
+        assert!(items[0].content.contains("restore show last"));
+        assert!(items[0].content.contains("restore hunks last"));
+        assert!(items[0].content.contains("revert turn last --apply"));
+
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]

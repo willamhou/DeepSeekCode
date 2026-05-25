@@ -103,8 +103,9 @@ Current surfaces:
   `trust [on|off|add <path>|remove <path>|list]` /
   `/trust [on|off|add <path>|remove <path>|list]`
 - local API key state cleanup with `logout` / `/logout`
-- workspace diff inspection with `diff` / `/diff`, showing changed tracked
-  files and `git diff --stat` for the selected session workspace
+- workspace diff inspection with `diff` / `/diff`, showing staged, unstaged,
+  and untracked files, hunk previews, diff stats, and review/rollback next-step
+  prompts for the selected session workspace
 - slash quit aliases with `exit` / `/exit`, `quit` / `/quit`, and `q` / `/q`
 - conversation reset with `clear` / `/clear`, creating a fresh empty active
   thread in the selected durable session without deleting older thread history
@@ -415,7 +416,7 @@ Command palette commands currently implemented:
 | `/name [args]` | Expand a custom markdown slash command from `.dscode/commands/name.md` or the configured user commands dir, then submit it to the active thread |
 | `init`, `/init` | Create project `AGENTS.md` instructions in the selected session workspace |
 | `rename <title>`, `/rename <title>` | Rename the selected durable session and persist the new title |
-| `diff`, `/diff` | Show changed tracked files and `git diff --stat` for the selected workspace |
+| `diff`, `/diff` | Show staged, unstaged, and untracked files with hunk previews, diff stats, and review/rollback next-step prompts |
 | `diff help`, `/diff help` | Show diff command behavior and the selected workspace |
 | `clear`, `/clear` | Start a fresh active thread in the selected durable session without deleting older history |
 | `clear help`, `/clear help` | Show clear/reset behavior and the current session/thread target |

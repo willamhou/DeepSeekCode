@@ -11903,14 +11903,14 @@ impl TuiApp {
         let _ = writeln!(detail);
         let _ = writeln!(
             detail,
-            "/diff shows changed tracked files and `git diff --stat` for the selected workspace."
+            "/diff shows staged, unstaged, and untracked files for the selected workspace."
         );
         let _ = writeln!(detail);
         push_status_row(&mut detail, "Workspace:", workspace);
         let _ = writeln!(detail);
         let _ = writeln!(
             detail,
-            "This is read-only and does not include untracked files."
+            "This is read-only and includes hunk previews plus review/rollback next steps."
         );
         detail
     }
@@ -15535,14 +15535,39 @@ fn format_transcript_item_lines(item: &TuiItem, verbose_transcript: bool) -> Vec
         let first = content_lines.next().unwrap_or("").trim();
         let mut lines = vec![format!("{role} [{}]: {first}", item.status)];
         lines.extend(content_lines.map(|line| format!("  {}", line.trim())));
+        if item.status == "failed" {
+            lines.extend(failed_item_recovery_lines(item));
+        }
         lines
     } else {
-        vec![format!(
+        let mut lines = vec![format!(
             "{} [{}]: {}",
             role,
             item.status,
             clip_line(&item.content, 120)
-        )]
+        )];
+        if item.status == "failed" {
+            lines.extend(failed_item_recovery_lines(item));
+        }
+        lines
+    }
+}
+
+fn failed_item_recovery_lines(item: &TuiItem) -> Vec<String> {
+    match item.item_type.as_str() {
+        "tool_result" => vec![
+            "  Recovery: /status | /diff | inspect the failed tool output".to_string(),
+            "  Retry: /retry or /edit after fixing the blocker".to_string(),
+            "  Rollback: restore show last | revert turn last".to_string(),
+        ],
+        "message" => vec![
+            "  Recovery: /status | /diff | /retry | /edit".to_string(),
+            "  Rollback: restore show last | revert turn last".to_string(),
+        ],
+        _ => vec![
+            "  Recovery: /status | /diff | /retry".to_string(),
+            "  Rollback: restore show last | revert turn last".to_string(),
+        ],
     }
 }
 
@@ -18586,6 +18611,30 @@ mod tests {
         assert!(output.contains("docs"));
         assert!(!output.contains("\x1b]8;;"));
         assert!(!output.contains("https://example.com/docs"));
+    }
+
+    #[test]
+    fn failed_transcript_items_show_recovery_actions() {
+        let item = TuiItem {
+            id: "item-failed".to_string(),
+            thread_id: "thread-one".to_string(),
+            turn_id: Some("turn-one".to_string()),
+            index: 1,
+            item_type: "tool_result".to_string(),
+            role: Some("tool".to_string()),
+            content: "run_shell failed: tests failed".to_string(),
+            status: "failed".to_string(),
+        };
+
+        let lines = format_transcript_item_lines(&item, false);
+
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("Recovery: /status | /diff")));
+        assert!(lines.iter().any(|line| line.contains("Retry: /retry")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("Rollback: restore show last")));
     }
 
     fn left_click(column: u16, row: u16) -> MouseEvent {
@@ -22382,7 +22431,7 @@ model.model = "deepseek-v4-pro"
         assert!(app.handle_key(KeyCode::Enter));
         let (kind, detail) = app.mcp_detail.as_ref().expect("diff help detail");
         assert_eq!(*kind, TuiMcpDetailKind::Diff);
-        assert!(detail.contains("/diff shows changed tracked files"));
+        assert!(detail.contains("/diff shows staged, unstaged, and untracked files"));
         assert_eq!(app.composer, "");
     }
 
