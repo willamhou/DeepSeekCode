@@ -101,3 +101,14 @@ https://github.com/willamhou/DeepSeekCode
 - 开头先给安装命令，再讲状态和限制。
 - 明确说 npm/npx、Homebrew 和 release archive 都已经是可验证的公开安装路径。
 - 不要引导点赞；只请求试用反馈和 issue。
+
+## 知乎发帖建议
+
+知乎适合发长文，不要只贴安装命令。建议用
+[下一轮宣发与录屏计划](./next-campaign-plan.md) 里的结构：
+
+- 为什么做一个 DeepSeek-first 终端 code agent。
+- 2048 录屏作为视觉入口。
+- 真实 repo 失败测试到修复作为能力证明。
+- TUI 的 approval、diff review、rollback 作为信任感证明。
+- 明确 public beta 边界：Linux/macOS 优先，Windows 和 hosted IDE 不是当前重点。

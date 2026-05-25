@@ -3,6 +3,8 @@
 Use this to record a 30-60 second launch demo. The goal is to show the product
 working, not to explain every feature. For the most visual launch asset, start
 with the 2048 recorder in [../demo/README.md](../demo/README.md).
+For the next campaign sequence and coding-ability proof matrix, use
+[next-campaign-plan.md](./next-campaign-plan.md).
 
 ## Recording Setup
 
@@ -23,6 +25,26 @@ with the 2048 recorder in [../demo/README.md](../demo/README.md).
 6. Show the generated files or diff.
 7. Run tests, validation, or local browser preview.
 8. Close with the GitHub repo URL.
+
+## Coding Ability Proofs
+
+Do not rely only on 2048. Use 2048 as the visual hook, then record at least one
+real repo task that proves the coding loop.
+
+Recommended proof order:
+
+1. Bugfix: failing test -> DeepSeekCode TUI -> code search/edit -> test fails
+   once if needed -> self-repair -> test passes -> `/diff`.
+2. Feature: existing repo -> bounded feature request -> multi-file diff ->
+   targeted tests pass.
+3. Recovery: intentionally keep a failed command in the recording and show the
+   agent reading the error, changing strategy, and rerunning validation.
+4. Trust flow: approval modal -> changed files/hunk preview -> rollback
+   snapshot -> dry-run restore.
+
+The strongest next recording is a small real bugfix. It should show the initial
+failing test and final passing test on screen; otherwise the clip mostly proves
+generation, not coding ability.
 
 ## Command Flow
 

@@ -34,18 +34,20 @@ Use this concise public-beta claim:
 ## Recommended Launch Order
 
 1. Run the [launch-day checklist](./launch-day-checklist.md).
-2. Review the committed README demo media, including the interactive 2048
+2. Use the [next campaign plan](./next-campaign-plan.md) to pick the day's
+   product/evidence task and matching promo angle.
+3. Review the committed README demo media, including the interactive 2048
    terminal SVG and gameplay GIF/MP4, and refresh only if the UI or positioning
    changed materially.
-3. Upload a repository social preview image in GitHub repository settings.
-4. Post the GitHub release or repository link on personal channels.
-5. Post a technical feedback thread with [hacker-news.md](./hacker-news.md).
-6. Post Chinese community copy from [chinese-community.md](./chinese-community.md).
-7. Use [social-posts.md](./social-posts.md) for X, LinkedIn, Discord, Slack, and
+4. Upload a repository social preview image in GitHub repository settings.
+5. Post the GitHub release or repository link on personal channels.
+6. Post a technical feedback thread with [hacker-news.md](./hacker-news.md).
+7. Post Chinese community copy from [chinese-community.md](./chinese-community.md).
+8. Use [social-posts.md](./social-posts.md) for X, LinkedIn, Discord, Slack, and
    follow-up posts.
-8. Prepare a PR for DeepSeek integration lists using
+9. Prepare a PR for DeepSeek integration lists using
    [deepseek-integration-pr.md](./deepseek-integration-pr.md).
-9. Treat [product-hunt.md](./product-hunt.md) as a later launch after a short
+10. Treat [product-hunt.md](./product-hunt.md) as a later launch after a short
    video-friendly demo cut and broader public-beta feedback are ready.
 
 ## Preflight
