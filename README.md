@@ -7,7 +7,7 @@ loop: inspect a repository, edit files, run checks, review the diff, and keep
 working from the same terminal.
 
 > Public beta status: usable today for Linux/macOS dogfooding and repository
-> work. `v0.1.4` ships GitHub Release binaries, a verified GHCR image, TUI and
+> work. `v0.1.5` ships GitHub Release binaries, a verified GHCR image, TUI and
 > service smoke gates, `deepseek quickstart`, a release-binary smoke verifier,
 > a verified Homebrew tap, verified npm/npx install paths, and model-backed README launch
 > media. Larger external repo evidence and broader hosted product proof are
@@ -81,11 +81,11 @@ deepseek doctor --json
 Or download a release archive:
 
 ```bash
-deepseek update download-plan --version 0.1.4
+deepseek update download-plan --version 0.1.5
 curl -L -o deepseek-linux-x64.tar.gz \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.4/deepseek-linux-x64.tar.gz
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.5/deepseek-linux-x64.tar.gz
 curl -L -o deepseek-linux-x64.tar.gz.sha256 \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.4/deepseek-linux-x64.tar.gz.sha256
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.5/deepseek-linux-x64.tar.gz.sha256
 shasum -a 256 -c deepseek-linux-x64.tar.gz.sha256
 tar -xzf deepseek-linux-x64.tar.gz
 ./deepseek version
@@ -94,7 +94,7 @@ tar -xzf deepseek-linux-x64.tar.gz
 Or run the published container:
 
 ```bash
-docker run --rm ghcr.io/willamhou/deepseekcode:0.1.4 version
+docker run --rm ghcr.io/willamhou/deepseekcode:0.1.5 version
 ```
 
 For a local checkout:
@@ -180,7 +180,7 @@ deepseek stats --json
 deepseek events replay <thread-id> --limit 50
 deepseek events diff <before-thread-id> <after-thread-id> --json
 deepseek update publish-status --json
-deepseek update release-smoke --version 0.1.4 --json
+deepseek update release-smoke --version 0.1.5 --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
 

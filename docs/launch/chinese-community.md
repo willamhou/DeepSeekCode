@@ -12,13 +12,13 @@
 更克制的版本：
 
 ```text
-DeepSeekCode v0.1.4：一个 DeepSeek-first 的终端 code-agent CLI
+DeepSeekCode v0.1.5：一个 DeepSeek-first 的终端 code-agent CLI
 ```
 
 ## 长帖
 
 ```text
-最近把 DeepSeekCode 推到了 v0.1.4 public beta。
+最近把 DeepSeekCode 推到了 v0.1.5 public beta。
 
 它是一个 DeepSeek-first 的终端 code agent，目标是做一个更接近 Claude Code / Codex CLI 的本地开发闭环：在终端里看仓库、改文件、跑检查、看 diff，然后继续同一个 session 迭代。
 
@@ -39,7 +39,7 @@ printf '%s\n' '<api-key>' | deepseek config auth DEEPSEEK_API_KEY --stdin
 deepseek quickstart
 deepseek
 
-Linux 用户可以走 GitHub Release archive 或源码安装；v0.1.4 的 Linux x64 / Linux arm64 release assets 已经纳入 release-smoke。
+Linux 用户可以走 GitHub Release archive 或源码安装；v0.1.5 的 Linux x64 / Linux arm64 release assets 已经纳入 release-smoke。
 
 这版补齐了几个之前不敢公开推的东西：
 
@@ -65,7 +65,7 @@ https://github.com/willamhou/DeepSeekCode
 ## 短帖
 
 ```text
-DeepSeekCode v0.1.4 public beta 发了。
+DeepSeekCode v0.1.5 public beta 发了。
 
 一个 DeepSeek-first 的终端 code-agent CLI，面向 Linux/macOS 本地开发闭环：看仓库、改文件、跑命令、看 diff、继续 session。
 

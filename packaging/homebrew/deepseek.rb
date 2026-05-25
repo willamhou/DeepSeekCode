@@ -1,24 +1,24 @@
 class Deepseek < Formula
   desc "DeepSeek-first terminal code agent"
   homepage "https://github.com/willamhou/DeepSeekCode"
-  version "0.1.4"
+  version "0.1.5"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.4/deepseek-macos-arm64.tar.gz"
+      url "https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.5/deepseek-macos-arm64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     else
-      url "https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.4/deepseek-macos-x64.tar.gz"
+      url "https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.5/deepseek-macos-x64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
 
   on_linux do
     if Hardware::CPU.intel?
-      url "https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.4/deepseek-linux-x64.tar.gz"
+      url "https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.5/deepseek-linux-x64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     elsif Hardware::CPU.arm64?
-      url "https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.4/deepseek-linux-arm64.tar.gz"
+      url "https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.5/deepseek-linux-arm64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     else
       odie "DeepSeekCode Homebrew formula currently publishes Linux x64 and arm64 only"

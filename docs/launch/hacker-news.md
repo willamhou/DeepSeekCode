@@ -17,7 +17,7 @@ Alternative:
 Show HN: DeepSeekCode - a terminal code agent for Linux and macOS
 ```
 
-Avoid version-only titles such as `DeepSeekCode v0.1.4 is out`; the release is
+Avoid version-only titles such as `DeepSeekCode v0.1.5 is out`; the release is
 not the story. The story is that people can install and try the terminal agent.
 
 ## Link
@@ -36,7 +36,7 @@ work. The goal is a Claude Code / Codex CLI-style loop for DeepSeek users:
 inspect a repo, edit files, run checks, review the diff, and keep working from
 the same terminal.
 
-The current public beta is focused on Linux/macOS. v0.1.4 has npm/npx packages,
+The current public beta is focused on Linux/macOS. v0.1.5 has npm/npx packages,
 GitHub Release binaries, Linux x64/arm64 and macOS x64/arm64 assets, a verified
 Homebrew tap, a GHCR image, and release-smoke checks that download and validate
 the public release assets.
@@ -59,7 +59,7 @@ deepseek quickstart
 deepseek
 
 Linux users can use the release archives or source install path from the
-README; Linux x64 and Linux arm64 release assets are part of the v0.1.4 smoke
+README; Linux x64 and Linux arm64 release assets are part of the v0.1.5 smoke
 coverage.
 
 What works today: full-screen TUI, REPL, one-shot run mode, repo-aware file

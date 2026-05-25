@@ -51,7 +51,7 @@ I built DeepSeekCode because I wanted a terminal-first code-agent workflow for D
 
 The current public beta focuses on Linux/macOS local repo work: inspect a repository, edit files, run commands, review diffs, and continue from the same terminal session.
 
-v0.1.4 includes npm/npx packages, GitHub Release binaries, Linux arm64 support, a verified Homebrew tap, GHCR publishing, release-smoke checks, and model-backed demo evidence in the README.
+v0.1.5 includes npm/npx packages, GitHub Release binaries, Linux arm64 support, a verified Homebrew tap, GHCR publishing, release-smoke checks, and model-backed demo evidence in the README.
 
 It is still early. Windows is not the current public-beta focus, and I am looking for feedback from people who already use terminal-first coding agents.
 ```

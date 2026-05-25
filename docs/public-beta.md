@@ -78,8 +78,8 @@ deepseek
 For release archive users, start with:
 
 ```bash
-deepseek update download-plan --version 0.1.4
-deepseek update release-smoke --version 0.1.4 --json
+deepseek update download-plan --version 0.1.5
+deepseek update release-smoke --version 0.1.5 --json
 ```
 
 Then try a bounded task in an existing repository:
@@ -98,10 +98,10 @@ The strongest current proof points are:
 - supplemental TUI and model-backed edit/test SVGs in `docs/demo/`;
 - `deepseek quickstart` and `deepseek doctor --json` for first-run readiness;
 - CI-smoked TUI entrypoints and service/shell fixtures;
-- `deepseek update release-smoke --version 0.1.4 --json` for release binary
+- `deepseek update release-smoke --version 0.1.5 --json` for release binary
   verification on the current platform;
 - `npm install -g @deepseek-code/cli` and `npx @deepseek-code/cli` as verified
-  Node-oriented install paths for `v0.1.4`;
+  Node-oriented install paths for `v0.1.5`;
 - verified Homebrew tap install on macOS x64 and macOS arm64;
 - online Python, Rust, and Node external fixture evidence recorded through
   dogfood tooling;
@@ -117,7 +117,7 @@ Keep these caveats visible when promoting the project:
 
 - Keep an npm install/npx smoke in release preflight after any packaging or
   workflow change.
-- Homebrew is published and verified for `v0.1.4`; keep Homebrew Smoke in the
+- Homebrew is published and verified for `v0.1.5`; keep Homebrew Smoke in the
   release checklist after every tap formula refresh.
 - More online model-backed runs against larger external fixtures would make the
   evidence base stronger.
@@ -137,7 +137,7 @@ cargo test --lib -- --test-threads=1
 node scripts/check-secrets.js
 deepseek quickstart --json
 deepseek update publish-status --json
-deepseek update release-smoke --version 0.1.4 --json
+deepseek update release-smoke --version 0.1.5 --json
 ```
 
 Also check:

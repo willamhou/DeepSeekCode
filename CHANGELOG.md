@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.5 - 2026-05-25
+
+Release automation evidence cleanup.
+
+### Changed
+
+- Bumped Cargo, npm root wrapper, npm platform packages, release-smoke default,
+  and Homebrew formula metadata to `0.1.5`.
+- Current public install and launch copy now points at `v0.1.5`.
+- This patch is intended to exercise the fixed npm publish script and configured
+  Homebrew tap credentials in a clean tag workflow.
+
+### Verification
+
+- `cargo fmt --check`
+- `cargo test --lib -- --test-threads=1`
+- `cargo package --allow-dirty`
+- `npm --prefix npm test`
+- `node npm/scripts/check-version-sync.js`
+- `node scripts/check-secrets.js`
+- `node packaging/homebrew/verify-formula.js`
+- root and platform `npm pack --dry-run`
+
 ## 0.1.4 - 2026-05-25
 
 npm/npx distribution and public evidence refresh.

@@ -3,7 +3,7 @@
 This directory contains public-beta launch copy and checklists for
 DeepSeekCode. Keep these materials aligned with
 [current status](../current-status.md): Linux/macOS local CLI dogfooding is the
-main claim; `v0.1.4` is the npm/npx distribution push, and broader hosted
+main claim; `v0.1.5` is the npm/npx distribution push, and broader hosted
 product evidence is not live yet.
 
 ## Primary Message
@@ -14,7 +14,7 @@ and stay inside the same terminal loop.
 
 Use this concise public-beta claim:
 
-> DeepSeekCode v0.1.4 is a public-beta, DeepSeek-first code-agent CLI for
+> DeepSeekCode v0.1.5 is a public-beta, DeepSeek-first code-agent CLI for
 > Linux/macOS. It ships verified npm/npx install paths, GitHub Release binaries, Linux arm64
 > support, verified Homebrew install, GHCR image, and release-smoke evidence for
 > the local terminal coding loop.
@@ -22,7 +22,7 @@ Use this concise public-beta claim:
 ## Links
 
 - Repository: <https://github.com/willamhou/DeepSeekCode>
-- Release: <https://github.com/willamhou/DeepSeekCode/releases/tag/v0.1.4>
+- Release: <https://github.com/willamhou/DeepSeekCode/releases/tag/v0.1.5>
 - Install guide: <https://github.com/willamhou/DeepSeekCode/blob/main/docs/install.md>
 - Current status: <https://github.com/willamhou/DeepSeekCode/blob/main/docs/current-status.md>
 - Public beta guide: <https://github.com/willamhou/DeepSeekCode/blob/main/docs/public-beta.md>
@@ -52,7 +52,7 @@ node scripts/check-secrets.js
 npm view @deepseek-code/cli version
 npx @deepseek-code/cli version
 deepseek quickstart --json
-deepseek update release-smoke --version 0.1.4 --json
+deepseek update release-smoke --version 0.1.5 --json
 ```
 
 Also verify:

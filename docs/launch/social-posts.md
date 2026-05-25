@@ -5,13 +5,13 @@ Use these for X, LinkedIn, Bluesky, Discord, Slack, or project update channels.
 ## One-Liner
 
 ```text
-DeepSeekCode v0.1.4 is a public-beta, DeepSeek-first terminal code agent for Linux/macOS: npm/npx install, Homebrew, release binaries, GHCR, Linux arm64, and release-smoke evidence.
+DeepSeekCode v0.1.5 is a public-beta, DeepSeek-first terminal code agent for Linux/macOS: npm/npx install, Homebrew, release binaries, GHCR, Linux arm64, and release-smoke evidence.
 ```
 
 ## X Thread
 
 ```text
-DeepSeekCode v0.1.4 public beta is out.
+DeepSeekCode v0.1.5 public beta is out.
 
 It is a DeepSeek-first terminal code agent for local repository work: inspect files, edit code, run checks, review diffs, and keep the session in one terminal.
 
@@ -54,11 +54,11 @@ I am looking for feedback from terminal-first coding-agent users: install fricti
 ## LinkedIn / Longer Update
 
 ```text
-I released DeepSeekCode v0.1.4 as a public beta.
+I released DeepSeekCode v0.1.5 as a public beta.
 
 DeepSeekCode is a DeepSeek-first terminal code agent for local repository work. It is built around a terminal-first loop: inspect a repo, edit files, run checks, review diffs, and continue from the same local session.
 
-The v0.1.4 release now has npm/npx packages, public GitHub Release binaries, Linux x64/arm64 and macOS x64/arm64 assets, a verified Homebrew tap, GHCR image publishing, and release-smoke checks against the published artifacts.
+The v0.1.5 release now has npm/npx packages, public GitHub Release binaries, Linux x64/arm64 and macOS x64/arm64 assets, a verified Homebrew tap, GHCR image publishing, and release-smoke checks against the published artifacts.
 
 npm install:
 
@@ -86,7 +86,7 @@ https://github.com/willamhou/DeepSeekCode
 ## Discord / Slack
 
 ```text
-I am dogfooding DeepSeekCode v0.1.4, a DeepSeek-first terminal code agent for Linux/macOS.
+I am dogfooding DeepSeekCode v0.1.5, a DeepSeek-first terminal code agent for Linux/macOS.
 
 npm install:
 npm install -g @deepseek-code/cli

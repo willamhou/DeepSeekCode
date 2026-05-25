@@ -21,7 +21,7 @@ npx @deepseek-code/cli version
 npx @deepseek-code/cli quickstart
 ```
 
-`v0.1.4` 的 npm/npx 包已发布并通过 registry、`npx` 和干净目录 install smoke
+`v0.1.5` 的 npm/npx 包已发布并通过 registry、`npx` 和干净目录 install smoke
 验证。发布前或升级后可用 `npm view @deepseek-code/cli version` 复查 registry
 可见版本。
 
@@ -37,8 +37,8 @@ deepseek quickstart
 deepseek doctor --json
 ```
 
-`v0.1.4` 的 tap 已通过 macOS x64 和 macOS arm64 Homebrew Smoke 验证。
-Linux 用户也可以使用下面的 release archive 或源码安装路径；`v0.1.4`
+`v0.1.5` 的 tap 已通过 macOS x64 和 macOS arm64 Homebrew Smoke 验证。
+Linux 用户也可以使用下面的 release archive 或源码安装路径；`v0.1.5`
 的 Linux x64 和 Linux arm64 release assets 已经发布。后续 tag workflow 会用
 `HOMEBREW_TAP_TOKEN` 自动刷新 tap metadata，并应继续跑 Homebrew Smoke 复验。
 
@@ -185,14 +185,14 @@ deepseek dogfood report --limit 20 \
 
 ## Release Binary
 
-GitHub Release 已经提供 `v0.1.4` 的 Linux x64、Linux arm64、macOS x64、
+GitHub Release 已经提供 `v0.1.5` 的 Linux x64、Linux arm64、macOS x64、
 macOS arm64 和 Windows x64 包，以及对应 `.sha256` 文件。例如 Linux x64：
 
 先让 CLI 根据当前平台打印下载、checksum 和解压命令：
 
 ```bash
-deepseek update download-plan --version 0.1.4
-deepseek update download-plan --version 0.1.4 --json
+deepseek update download-plan --version 0.1.5
+deepseek update download-plan --version 0.1.5 --json
 ```
 
 也可以让 CLI 直接完成当前平台 release binary smoke：下载 archive 和 `.sha256`、
@@ -201,15 +201,15 @@ deepseek update download-plan --version 0.1.4 --json
 release asset 的平台，例如 Linux x64、Linux arm64、macOS x64、macOS arm64：
 
 ```bash
-deepseek update release-smoke --version 0.1.4
-deepseek update release-smoke --version 0.1.4 --json
+deepseek update release-smoke --version 0.1.5
+deepseek update release-smoke --version 0.1.5 --json
 ```
 
 ```bash
 curl -L -o deepseek-linux-x64.tar.gz \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.4/deepseek-linux-x64.tar.gz
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.5/deepseek-linux-x64.tar.gz
 curl -L -o deepseek-linux-x64.tar.gz.sha256 \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.4/deepseek-linux-x64.tar.gz.sha256
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.5/deepseek-linux-x64.tar.gz.sha256
 shasum -a 256 -c deepseek-linux-x64.tar.gz.sha256
 tar -xzf deepseek-linux-x64.tar.gz
 ./deepseek version
@@ -220,7 +220,7 @@ tar -xzf deepseek-linux-x64.tar.gz
 
 ```bash
 DSCODE_RELEASE_BASE_URL=https://<mirror>/<release-assets> \
-  deepseek update download-plan --version 0.1.4
+  deepseek update download-plan --version 0.1.5
 ```
 
 本地 release binary 路径固定为：
@@ -263,8 +263,8 @@ docker run --rm deepseek-code:local version
 Tag 版 `Release Matrix` workflow 会把同一个 Dockerfile 构建并推送到 GHCR：
 
 ```bash
-docker pull ghcr.io/willamhou/deepseekcode:0.1.4
-docker run --rm ghcr.io/willamhou/deepseekcode:0.1.4 version
+docker pull ghcr.io/willamhou/deepseekcode:0.1.5
+docker run --rm ghcr.io/willamhou/deepseekcode:0.1.5 version
 ```
 
 同一次 tag 发布会写入 `<version>`、`v<version>` 和 `latest` 三个 tag；镜像名会按
@@ -295,10 +295,10 @@ dynamic/resource loop-surface 覆盖与 gate 的近期已验证 online dogfood e
 `deepseek.publish_status.v1`，便于 CI 或 release
 脚本消费。输出中的 `public_install` 会区分 source checkout、GitHub Release、
 npm、Homebrew、GHCR 和 Cargo registry 当前是 `source_available`、
-`ready_to_publish`、`requires_publish` 还是 `source_only_policy`。`v0.1.4`
-已通过 manual `NPM Publish` workflow run `26379649992` 发布；发布后已用
-`npm view @deepseek-code/cli version`、`npx @deepseek-code/cli@0.1.4 version`
-和干净目录 `npm install @deepseek-code/cli@0.1.4` 复验。
+`ready_to_publish`、`requires_publish` 还是 `source_only_policy`。每次 tag
+发布后都应使用 `npm view @deepseek-code/cli version`、
+`npx @deepseek-code/cli@<version> version` 和干净目录
+`npm install @deepseek-code/cli@<version>` 复验。
 
 ## Runtime 服务模板
 
@@ -331,8 +331,8 @@ release assets：
 正式发布前必须把 formula 里的 `sha256` 占位值替换为对应 release asset 的真实
 SHA-256。GitHub `Release Matrix` workflow 会为每个 archive 上传旁路
 `.sha256` 文件并创建 signed artifact attestations，优先使用这些值填写
-formula，确保 tap 和发布资产完全一致。当前公开 tap 安装验证来自 `v0.1.4`
-Homebrew Smoke run `26380319039` 的 macOS x64/arm64 结果；Release Matrix 的
+formula，确保 tap 和发布资产完全一致。当前公开 tap 安装验证来自 `v0.1.5`
+Homebrew Smoke 的 macOS x64/arm64 结果；Release Matrix 的
 Homebrew tap publish job 已用 release SHA-256 自动刷新 `Formula/deepseek.rb`。
 安装前可用 `gh attestation verify
 <archive> --repo <owner>/<repo>` 验证 provenance。然后运行：
