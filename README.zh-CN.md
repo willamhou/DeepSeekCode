@@ -196,7 +196,8 @@ deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 - [Dogfood evidence](./docs/dogfood-evidence.md)
 - [Current status](./docs/current-status.md)
 - 补充 demo：[scripted 2048 capture](./docs/demo/deepseek-code-2048-terminal-demo.svg)、
-  [TUI 录屏](./docs/demo/deepseek-code-tui-demo.svg) 和
+  [TUI 录屏](./docs/demo/deepseek-code-tui-demo.svg)、
+  [TUI 首跑 UX 证据](./docs/demo/deepseek-code-tui-ux-evidence.svg) 和
   [model-backed 编辑/测试闭环](./docs/demo/deepseek-code-model-demo.svg)
 
 ## 文档

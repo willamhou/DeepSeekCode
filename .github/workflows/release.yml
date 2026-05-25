@@ -211,13 +211,16 @@ jobs:
       - name: Secret Scan
         run: node scripts/check-secrets.js
 
-      - name: Model Demo Evidence Checks
+      - name: Demo Evidence Checks
         run: |
           bash -n docs/demo/record-model-backed-demo.sh
+          bash -n docs/demo/record-tui-ux-evidence.sh
           docs/demo/record-model-backed-demo.sh --dry-run
           docs/demo/record-model-backed-demo.sh --redaction-self-test
+          docs/demo/record-tui-ux-evidence.sh --dry-run
           docs/demo/verify-model-backed-demo.js --self-test
           docs/demo/render-model-backed-demo-svg.js --self-test
+          docs/demo/render-tui-ux-evidence-svg.js --self-test
 
       - name: Cargo Package Verify
         run: cargo package
@@ -322,6 +325,7 @@ jobs:
             echo "- external fixture catalog scaffold smoke"
             echo "- model-backed README demo evidence checks"
             echo "- model-backed README SVG render self-test"
+            echo "- TUI first-run UX evidence checks"
             echo "- Homebrew formula syntax and render smoke"
             echo "- DeepSeek loop repair/cache evidence and prompt-prefix stability gate"
             echo "- Docker artifact smoke"

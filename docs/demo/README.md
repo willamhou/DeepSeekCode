@@ -10,6 +10,11 @@ it.
 deterministic TUI snapshot. `deepseek-code-tui.svg` is the static fallback from
 the same snapshot.
 
+`deepseek-code-tui-ux-evidence.svg` is a deterministic no-model capture of the
+current TUI first-run UX. It creates a disposable small repo with a durable
+runtime session, runs `deepseek tui --once`, and verifies the setup guide for
+provider/model config, API key storage, workspace trust, and network policy.
+
 ```bash
 docs/demo/record-readme-demo.sh
 ```
@@ -82,6 +87,26 @@ The verifier can be checked without a model call:
 docs/demo/verify-model-backed-demo.js --self-test
 docs/demo/render-model-backed-demo-svg.js --self-test
 ```
+
+## TUI UX Evidence Capture
+
+Dry-run the deterministic TUI evidence plan without creating a repo:
+
+```bash
+docs/demo/record-tui-ux-evidence.sh --dry-run
+docs/demo/render-tui-ux-evidence-svg.js --self-test
+```
+
+Regenerate the reviewed TUI UX evidence log and SVG:
+
+```bash
+docs/demo/record-tui-ux-evidence.sh
+```
+
+The recorder does not call a model. It creates a temporary repo, writes minimal
+runtime session/thread records, captures four `deepseek tui --once` snapshots,
+and fails unless the TUI renders provider, API key, trust, and network setup
+next-step prompts.
 
 ## 2048 Launch Demo Capture
 

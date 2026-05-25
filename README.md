@@ -219,7 +219,8 @@ For release and dogfood evidence, see:
 - [Dogfood evidence](./docs/dogfood-evidence.md)
 - [Current status](./docs/current-status.md)
 - Additional demos: [scripted 2048 capture](./docs/demo/deepseek-code-2048-terminal-demo.svg),
-  [TUI recording](./docs/demo/deepseek-code-tui-demo.svg), and
+  [TUI recording](./docs/demo/deepseek-code-tui-demo.svg),
+  [TUI first-run UX evidence](./docs/demo/deepseek-code-tui-ux-evidence.svg), and
   [model-backed edit/test loop](./docs/demo/deepseek-code-model-demo.svg)
 
 ## Documentation

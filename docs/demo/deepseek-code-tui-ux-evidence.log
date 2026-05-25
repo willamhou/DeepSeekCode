@@ -1,0 +1,25 @@
+# DeepSeekCode TUI UX evidence
+workspace: /tmp/deepseek-code-tui-ux-evidence
+binary: target/debug/deepseek
+
+$ deepseek tui --once # fresh repo
+case: fresh repo without provider/model/auth
+expect: Setup guide -> Next setup: Choose provider -> Jump: /setup provider
+observed: Setup guide | Next setup: Choose provider | Jump: /setup provider
+
+$ deepseek tui --once # provider/model configured
+case: provider/model configured without API key
+expect: Next setup: Store API key -> Jump: /setup auth DSC_TUI_KEY
+observed: Next setup: Store API key | Jump: /setup auth DSC_TUI_KEY | Status: ready
+
+$ deepseek tui --once # API key available from .env
+case: API key present, trust not reviewed
+expect: Next setup: Inspect trust -> Jump: /setup trust
+observed: Next setup: Inspect trust | Jump: /setup trust | Status: ready
+
+$ deepseek tui --once # trust reviewed
+case: trust reviewed, network policy missing
+expect: Next setup: Review network -> Jump: /setup network
+observed: Next setup: Review network | Jump: /setup network | Status: ready
+
+status: ok

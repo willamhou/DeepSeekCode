@@ -47,7 +47,19 @@ empty disposable web repo and generates a playable 2048 game:
 - gameplay MP4: [`docs/demo/deepseek-code-2048-interactive-gameplay.mp4`](./demo/deepseek-code-2048-interactive-gameplay.mp4)
 
 Supplemental demos remain available for scripted 2048 capture, TUI surfaces,
-and model-backed edit/test loops under [`docs/demo/`](./demo/README.md).
+TUI first-run UX guidance, and model-backed edit/test loops under
+[`docs/demo/`](./demo/README.md).
+
+## TUI UX Evidence
+
+The TUI first-run evidence is a deterministic no-model capture against a
+disposable small repo. It validates that `deepseek tui --once` surfaces setup
+guidance for missing provider/model config, missing API key, unreviewed
+workspace trust, and missing network policy:
+
+- evidence SVG: [`docs/demo/deepseek-code-tui-ux-evidence.svg`](./demo/deepseek-code-tui-ux-evidence.svg)
+- evidence log: [`docs/demo/deepseek-code-tui-ux-evidence.log`](./demo/deepseek-code-tui-ux-evidence.log)
+- recorder: [`docs/demo/record-tui-ux-evidence.sh`](./demo/record-tui-ux-evidence.sh)
 
 ## Runtime Evidence
 

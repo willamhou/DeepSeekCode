@@ -77,10 +77,13 @@ jobs:
       - name: Demo Evidence Checks
         run: |
           bash -n docs/demo/record-model-backed-demo.sh
+          bash -n docs/demo/record-tui-ux-evidence.sh
           docs/demo/record-model-backed-demo.sh --dry-run
           docs/demo/record-model-backed-demo.sh --redaction-self-test
+          docs/demo/record-tui-ux-evidence.sh --dry-run
           docs/demo/verify-model-backed-demo.js --self-test
           docs/demo/render-model-backed-demo-svg.js --self-test
+          docs/demo/render-tui-ux-evidence-svg.js --self-test
 
       - name: npm Metadata Checks
         run: |
