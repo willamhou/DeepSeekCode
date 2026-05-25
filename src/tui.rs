@@ -13510,6 +13510,30 @@ impl TuiApp {
                     .count()
             ),
         );
+        let pending_active_approvals = active_approvals
+            .iter()
+            .copied()
+            .filter(|approval| approval.is_pending())
+            .collect::<Vec<_>>();
+        if !pending_active_approvals.is_empty() {
+            let _ = writeln!(detail, "Pending approval targets:");
+            for approval in pending_active_approvals.iter().take(5) {
+                let _ = writeln!(
+                    detail,
+                    "- {} [{}] {}",
+                    approval.tool,
+                    approval.kind,
+                    clip_line(&approval.target, 88)
+                );
+            }
+            if pending_active_approvals.len() > 5 {
+                let _ = writeln!(detail, "- ... {} more", pending_active_approvals.len() - 5);
+            }
+            let _ = writeln!(
+                detail,
+                "Approval keys: once=exact request, session=same group, deny=exact retry."
+            );
+        }
         push_status_row(
             &mut detail,
             "User inputs:",
@@ -15922,7 +15946,46 @@ fn render_task_record_detail(task: &TuiTaskRecord) -> String {
     let _ = writeln!(detail, "Summary");
     let _ = writeln!(detail, "-------");
     let _ = writeln!(detail, "{}", task.summary);
+    let next_steps = task_next_steps(task);
+    if !next_steps.is_empty() {
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Next steps");
+        let _ = writeln!(detail, "----------");
+        for step in next_steps {
+            let _ = writeln!(detail, "- {step}");
+        }
+    }
     detail
+}
+
+fn task_next_steps(task: &TuiTaskRecord) -> Vec<String> {
+    match task.status.as_str() {
+        "failed" => vec![
+            "Inspect the transcript/tool result items in this thread.".to_string(),
+            "Use /retry or /edit when the latest user request should be rerun.".to_string(),
+            "Use restore show last or revert turn last --apply when a local rollback snapshot exists."
+                .to_string(),
+        ],
+        "cancelled" => vec![
+            "Use /retry to fork and resubmit when the cancellation was intentional.".to_string(),
+            "Use /status to confirm there are no pending approvals or queued messages.".to_string(),
+        ],
+        "running" => vec![
+            "Press c to request active-turn cancellation.".to_string(),
+            format!("Use task cancel {} to cancel this runtime task.", task.id),
+        ],
+        "pending" => vec![
+            "Use task cancel <id> to stop it before execution.".to_string(),
+            "Use /status to confirm pending approvals, queued messages, and active thread state."
+                .to_string(),
+        ],
+        "paused" => vec![format!("Use task resume {} to continue this task.", task.id)],
+        "completed" => vec![
+            "Use /diff to inspect workspace changes.".to_string(),
+            "Use /review <target> or /export if you need a shareable audit trail.".to_string(),
+        ],
+        _ => Vec::new(),
+    }
 }
 
 fn short_task_id(id: &str) -> String {
@@ -18012,7 +18075,7 @@ fn draw_auth_modal(frame: &mut Frame, app: &TuiApp) {
 }
 
 fn draw_approval_modal(frame: &mut Frame, app: &TuiApp) {
-    let area = bottom_center_rect(frame.area(), 72, 12);
+    let area = bottom_center_rect(frame.area(), 78, 16);
     frame.render_widget(Clear, area);
     let lines = if let Some(command) = app.pending_shell_approval.as_deref() {
         vec![
@@ -18021,16 +18084,32 @@ fn draw_approval_modal(frame: &mut Frame, app: &TuiApp) {
             Line::from("Kind: shell"),
             Line::from(format!("Target: {}", clip_line(command, 58))),
             Line::from("Source: TUI command palette"),
-            Line::from("Key: local-shell"),
+            Line::from("Impact: runs a local foreground command"),
+            Line::from("Once: run only this command; no session approval is cached"),
             Line::from(""),
-            Line::from("[y] run once    [n] deny    [Esc] close"),
+            Line::from("[y/Enter] run once    [n/Esc] deny"),
         ]
     } else if let Some(approval) = app.active_approval() {
+        let pending_count = app
+            .approvals
+            .iter()
+            .filter(|request| request.is_pending())
+            .count();
         vec![
             Line::from("Approval Required"),
             Line::from(format!("Tool: {}", clip_line(&approval.tool, 48))),
             Line::from(format!("Kind: {}", clip_line(&approval.kind, 48))),
             Line::from(format!("Target: {}", clip_line(&approval.target, 58))),
+            Line::from(format!(
+                "Impact: {}",
+                approval_impact_hint(&approval.tool, &approval.kind)
+            )),
+            Line::from("Once: approve only this exact tool request"),
+            Line::from(format!(
+                "Session: remember {}",
+                approval_session_scope_hint(approval)
+            )),
+            Line::from("Deny: block this exact request and identical retry"),
             Line::from(format!(
                 "Key: {}",
                 clip_line(approval.fingerprint.as_str(), 58)
@@ -18040,8 +18119,9 @@ fn draw_approval_modal(frame: &mut Frame, app: &TuiApp) {
                 clip_line(approval.grouping_fingerprint.as_str(), 56)
             )),
             Line::from(format!("Thread: {}", approval.thread_id)),
+            Line::from(format!("Pending approvals: {pending_count}")),
             Line::from(""),
-            Line::from("[y] once    [a] session    [n] deny    [c] cancel run"),
+            Line::from("[y/Enter] once    [a] session    [n/Esc] deny    [c] cancel run"),
         ]
     } else {
         vec![
@@ -18051,12 +18131,41 @@ fn draw_approval_modal(frame: &mut Frame, app: &TuiApp) {
             Line::from("[Esc] close"),
         ]
     };
-    let modal = Paragraph::new(lines).alignment(Alignment::Center).block(
+    let modal = Paragraph::new(lines).alignment(Alignment::Left).block(
         Block::default()
             .borders(Borders::ALL)
             .title("Approval Modal"),
     );
     frame.render_widget(modal, area);
+}
+
+fn approval_impact_hint(tool: &str, kind: &str) -> &'static str {
+    if kind == "shell" || matches!(tool, "run_shell" | "exec_shell" | "task_shell_start") {
+        "runs a local command in the selected workspace"
+    } else if kind == "write" || matches!(tool, "apply_patch" | "write_file" | "edit_file") {
+        "may change files in the selected workspace"
+    } else if kind == "network" || matches!(tool, "fetch_url" | "web_search" | "web_run") {
+        "may contact a network host"
+    } else if kind == "mcp" || tool.starts_with("mcp_") {
+        "may call an external MCP server tool"
+    } else {
+        "requires explicit permission before execution"
+    }
+}
+
+fn approval_session_scope_hint(approval: &TuiApprovalRequest) -> &'static str {
+    let group = approval.grouping_fingerprint.as_str();
+    if group.starts_with("perm-group:shell:") {
+        "the same shell command group for this session"
+    } else if group.starts_with("perm-group:patch:") {
+        "the same patch path group for this session"
+    } else if group.starts_with("perm-group:write:") {
+        "the same write path group for this session"
+    } else if group.starts_with("perm-group:network:") {
+        "the same network host for this session"
+    } else {
+        "the same permission group for this session"
+    }
 }
 
 fn draw_user_input_modal(frame: &mut Frame, app: &TuiApp) {
@@ -20161,6 +20270,8 @@ model.model = "deepseek-v4-pro"
         assert!(detail.contains("Task id:"));
         assert!(detail.contains("task-one"));
         assert!(detail.contains("inspect failing integration test"));
+        assert!(detail.contains("Next steps"));
+        assert!(detail.contains("Use task cancel <id> to stop it before execution."));
 
         run_palette_command(&mut app, "/task cancel task-one");
         assert_eq!(
@@ -20170,6 +20281,26 @@ model.model = "deepseek-v4-pro"
             }]
         );
         assert!(app.status.contains("task cancel requested"));
+    }
+
+    #[test]
+    fn task_detail_surfaces_failed_task_recovery_hints() {
+        let mut app = app_with_runtime_tasks(vec![runtime_task(
+            "task-failed",
+            "failed",
+            "agent run failed: missing api key",
+            "epoch+2",
+        )]);
+
+        run_palette_command(&mut app, "/task show task-failed");
+
+        let detail = app.mcp_detail.as_ref().unwrap().1.as_str();
+        assert!(detail.contains("Status:"));
+        assert!(detail.contains("failed"));
+        assert!(detail.contains("Next steps"));
+        assert!(detail.contains("Inspect the transcript/tool result items"));
+        assert!(detail.contains("Use /retry or /edit"));
+        assert!(detail.contains("revert turn last --apply"));
     }
 
     #[test]
@@ -24122,6 +24253,10 @@ model.api_key_env = "OPENAI_API_KEY"
         assert!(detail.contains("pending=1"));
         assert!(detail.contains("Approvals:"));
         assert!(detail.contains("1 active, 1 pending total"));
+        assert!(detail.contains("Pending approval targets:"));
+        assert!(detail.contains("- shell [shell] cargo test"));
+        assert!(detail
+            .contains("Approval keys: once=exact request, session=same group, deny=exact retry."));
         assert!(detail.contains("Total tokens:"));
         assert!(detail.contains("1234"));
         assert!(detail.contains("Est. cost:"));
@@ -26237,6 +26372,11 @@ model.api_key_env = "OPENAI_API_KEY"
         assert!(output.contains("run_shell"));
         assert!(output.contains("shell"));
         assert!(output.contains("cargo test"));
+        assert!(output.contains("Impact: runs a local command"));
+        assert!(output.contains("Once: approve only this exact tool request"));
+        assert!(output.contains("Session: remember the same shell command group"));
+        assert!(output.contains("Deny: block this exact request"));
+        assert!(output.contains("Pending approvals: 1"));
 
         assert!(app.handle_key(KeyCode::Char('y')));
         assert!(!app.show_approval_modal);

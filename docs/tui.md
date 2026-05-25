@@ -196,6 +196,9 @@ Current surfaces:
   appended directly or through `POST /v1/threads/{id}/events`
 - approval accept/deny records durable `permission_response` events and can
   unblock permissioned tools for agent runs started from the TUI composer
+- approval modal text explains once/session/deny scope, the exact permission
+  key, the cached group key, and the likely impact class for shell, write,
+  network, and MCP requests
 - user-input modal backed by durable `user_input_request` runtime events;
   number keys choose predefined options, and `o` opens a short free-form Other
   answer editor that writes the same structured response event
@@ -204,6 +207,8 @@ Current surfaces:
 - active-thread runtime task records are loaded from `.dscode/runtime/tasks`
   and rendered in the task panel with status counts, short task ids, updated
   timestamps, clipped summaries, and a `>` marker for the selected task
+- task detail views include state-specific next-step hints for pending,
+  running, paused, completed, failed, and cancelled task records
 - task panel rows support cross-surface multi-select with Ctrl+click,
   drag-select, `task select all`, and `task select clear`; when tasks are
   selected, `task pause`, `task resume`, and `task cancel` operate on compatible
