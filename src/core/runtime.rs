@@ -1674,6 +1674,47 @@ impl RuntimeStore {
         Ok(event)
     }
 
+    pub fn append_permission_revoke_session(
+        &self,
+        thread_id: &str,
+        request_id: String,
+    ) -> AppResult<RuntimeEvent> {
+        validate_record_id(thread_id)?;
+        validate_record_id(&request_id)?;
+        self.ensure_dirs()?;
+        let mut thread = self.load_thread(thread_id)?;
+        let request_exists = self
+            .read_events(thread_id, 0)?
+            .iter()
+            .any(|event| event.id == request_id && event.kind == "permission_request");
+        if !request_exists {
+            return Err(app_error(format!(
+                "permission request not found: {request_id}"
+            )));
+        }
+        let event = self.append_event(
+            thread_id,
+            None,
+            "permission_revoke",
+            JsonValue::Object(object([
+                ("type", JsonValue::String("permission_revoke".to_string())),
+                ("request_id", JsonValue::String(request_id)),
+                ("scope", JsonValue::String("session".to_string())),
+            ])),
+        )?;
+        thread.updated_at = event.created_at.clone();
+        thread.event_seq = event.seq;
+        self.write_thread(&thread)?;
+        if let Some(session_id) = thread.session_id.as_deref() {
+            if let Ok(mut session) = self.load_session(session_id) {
+                session.active_thread_id = Some(thread.id.clone());
+                session.updated_at = thread.updated_at.clone();
+                self.write_session(&session)?;
+            }
+        }
+        Ok(event)
+    }
+
     pub fn append_user_input_request(
         &self,
         thread_id: &str,

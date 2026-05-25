@@ -1350,6 +1350,9 @@ fn handle_tui_http_action(
                 "recorded remote approval response: {request_id} {decision}"
             ));
         }
+        TuiAction::ShowApprovalAudit { .. } | TuiAction::RevokeApprovalSession { .. } => {
+            app.set_status("approval audit commands require local file-backed TUI".to_string());
+        }
         TuiAction::RespondUserInput {
             thread_id,
             turn_id,
@@ -1985,6 +1988,7 @@ fn mcp_detail_summary(
         TuiMcpDetailKind::Review => Err(app_error("review details are not MCP details")),
         TuiMcpDetailKind::Status => Err(app_error("status details are not MCP details")),
         TuiMcpDetailKind::Tokens => Err(app_error("token details are not MCP details")),
+        TuiMcpDetailKind::Approval => Err(app_error("approval details are not MCP details")),
         TuiMcpDetailKind::Translate => Err(app_error("translate details are not MCP details")),
         TuiMcpDetailKind::Cost => Err(app_error("cost details are not MCP details")),
         TuiMcpDetailKind::Cache => Err(app_error("cache details are not MCP details")),
@@ -4268,6 +4272,32 @@ fn handle_tui_action_with_live(
             )?;
             app.set_status(format!(
                 "recorded approval response: {request_id} {decision}"
+            ));
+        }
+        TuiAction::ShowApprovalAudit {
+            thread_id,
+            include_history,
+        } => {
+            let detail = render_tui_approval_audit(store, &thread_id, include_history)?;
+            app.set_mcp_detail(TuiMcpDetailKind::Approval, detail);
+            app.set_status(if include_history {
+                format!("approval history shown: {thread_id}")
+            } else {
+                format!("approval list shown: {thread_id}")
+            });
+        }
+        TuiAction::RevokeApprovalSession {
+            thread_id,
+            request_id,
+        } => {
+            let target = resolve_tui_approval_revoke_target(store, &thread_id, &request_id)?;
+            store.append_permission_revoke_session(&thread_id, target.request_id.clone())?;
+            let detail = render_tui_approval_audit(store, &thread_id, false)?;
+            app.set_mcp_detail(TuiMcpDetailKind::Approval, detail);
+            app.set_status(format!(
+                "revoked session approval: {} {}",
+                target.request_id,
+                clip_cli_line(&target.target, 80)
             ));
         }
         TuiAction::RespondUserInput {
@@ -8113,12 +8143,25 @@ fn cached_runtime_permission_decision(
         return Ok(None);
     };
     let mut requests = BTreeMap::<String, RuntimePermissionKeys>::new();
+    let mut session_approved = false;
+    let mut exact_denied = false;
     for event in store.read_events(thread_id, 0)? {
         if event.seq >= approval.seq {
             break;
         }
         if let Some(keys) = runtime_permission_request_keys(&event) {
             requests.insert(event.id.clone(), keys);
+            continue;
+        }
+        if let Some((request_id, scope)) = runtime_permission_revoke(&event) {
+            let Some(keys) = requests.get(&request_id) else {
+                continue;
+            };
+            if scope.as_deref() == Some("session")
+                && keys.grouping_fingerprint == current.grouping_fingerprint
+            {
+                session_approved = false;
+            }
             continue;
         }
         let Some((request_id, decision, scope)) = runtime_permission_response(&event) else {
@@ -8132,15 +8175,21 @@ fn cached_runtime_permission_decision(
                 if scope.as_deref() == Some("session")
                     && keys.grouping_fingerprint == current.grouping_fingerprint =>
             {
-                return Ok(Some(AgentApprovalDecision::Approved));
+                session_approved = true;
             }
             AgentApprovalDecision::Denied if keys.fingerprint == current.fingerprint => {
-                return Ok(Some(AgentApprovalDecision::Denied));
+                exact_denied = true;
             }
             _ => {}
         }
     }
-    Ok(None)
+    if exact_denied {
+        Ok(Some(AgentApprovalDecision::Denied))
+    } else if session_approved {
+        Ok(Some(AgentApprovalDecision::Approved))
+    } else {
+        Ok(None)
+    }
 }
 
 fn runtime_permission_request_keys(event: &RuntimeEvent) -> Option<RuntimePermissionKeys> {
@@ -8177,6 +8226,296 @@ fn runtime_permission_response(
         .and_then(json_as_string)
         .map(str::to_string);
     Some((request_id.to_string(), decision, scope))
+}
+
+fn runtime_permission_revoke(event: &RuntimeEvent) -> Option<(String, Option<String>)> {
+    if event.kind != "permission_revoke" {
+        return None;
+    }
+    let payload = json_as_object(&event.payload)?;
+    let request_id = payload.get("request_id").and_then(json_as_string)?;
+    let scope = payload
+        .get("scope")
+        .and_then(json_as_string)
+        .map(str::to_string);
+    Some((request_id.to_string(), scope))
+}
+
+#[derive(Debug, Clone)]
+struct ApprovalAuditRequest {
+    id: String,
+    seq: u64,
+    tool: String,
+    kind: String,
+    target: String,
+    grouping_fingerprint: String,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveSessionApproval {
+    request_id: String,
+    response_seq: u64,
+    tool: String,
+    kind: String,
+    target: String,
+    grouping_fingerprint: String,
+}
+
+fn render_tui_approval_audit(
+    store: &RuntimeStore,
+    thread_id: &str,
+    include_history: bool,
+) -> AppResult<String> {
+    let thread = store.load_thread(thread_id)?;
+    let events = store.read_events(thread_id, 0)?;
+    let requests = approval_audit_requests(&events);
+    let active_session = active_session_approvals(&events);
+    let responded_ids = events
+        .iter()
+        .filter_map(|event| runtime_permission_response(event).map(|(request_id, _, _)| request_id))
+        .collect::<BTreeSet<_>>();
+    let pending = requests
+        .values()
+        .filter(|request| !responded_ids.contains(&request.id))
+        .collect::<Vec<_>>();
+
+    let mut detail = String::new();
+    let _ = writeln!(detail, "DeepSeekCode Approval Audit");
+    let _ = writeln!(detail, "===========================");
+    let _ = writeln!(detail);
+    let _ = writeln!(detail, "Thread: {} [{}]", thread.title, thread.id);
+    let _ = writeln!(detail);
+
+    let _ = writeln!(detail, "Pending approvals ({}):", pending.len());
+    if pending.is_empty() {
+        let _ = writeln!(detail, "- none");
+    } else {
+        for request in pending.iter().take(10) {
+            let _ = writeln!(
+                detail,
+                "- {} #{} {} [{}] {}",
+                request.id,
+                request.seq,
+                request.tool,
+                request.kind,
+                clip_cli_line(&request.target, 92)
+            );
+        }
+        if pending.len() > 10 {
+            let _ = writeln!(detail, "- ... {} more", pending.len() - 10);
+        }
+    }
+    let _ = writeln!(detail);
+
+    let mut active = active_session.into_values().collect::<Vec<_>>();
+    active.sort_by_key(|approval| approval.response_seq);
+    let _ = writeln!(detail, "Cached session approvals ({}):", active.len());
+    if active.is_empty() {
+        let _ = writeln!(detail, "- none");
+    } else {
+        for approval in active.iter().rev().take(10) {
+            let _ = writeln!(
+                detail,
+                "- {} #{} {} [{}] {}",
+                approval.request_id,
+                approval.response_seq,
+                approval.tool,
+                approval.kind,
+                clip_cli_line(&approval.target, 92)
+            );
+            let _ = writeln!(
+                detail,
+                "  group: {}",
+                clip_cli_line(&approval.grouping_fingerprint, 92)
+            );
+            let _ = writeln!(
+                detail,
+                "  revoke: approval revoke session {}",
+                approval.request_id
+            );
+        }
+        if active.len() > 10 {
+            let _ = writeln!(detail, "- ... {} more", active.len() - 10);
+        }
+    }
+    let _ = writeln!(detail);
+    let _ = writeln!(detail, "Commands");
+    let _ = writeln!(detail, "--------");
+    let _ = writeln!(detail, "- approval             Open pending approval modal");
+    let _ = writeln!(
+        detail,
+        "- approval history     Show request/decision/revoke history"
+    );
+    let _ = writeln!(
+        detail,
+        "- approval revoke session <id|last>  Revoke cached session approval"
+    );
+
+    if include_history {
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "History");
+        let _ = writeln!(detail, "-------");
+        let mut rendered = 0_usize;
+        for event in events.iter().rev() {
+            match event.kind.as_str() {
+                "permission_request" => {
+                    if let Some(request) = requests.get(&event.id) {
+                        let _ = writeln!(
+                            detail,
+                            "- #{} request {} {} [{}] {}",
+                            request.seq,
+                            request.id,
+                            request.tool,
+                            request.kind,
+                            clip_cli_line(&request.target, 88)
+                        );
+                        rendered += 1;
+                    }
+                }
+                "permission_response" => {
+                    if let Some((request_id, decision, scope)) = runtime_permission_response(event)
+                    {
+                        let _ = writeln!(
+                            detail,
+                            "- #{} response {} {} scope={}",
+                            event.seq,
+                            request_id,
+                            agent_approval_decision_label(decision),
+                            scope.as_deref().unwrap_or("once")
+                        );
+                        rendered += 1;
+                    }
+                }
+                "permission_revoke" => {
+                    if let Some((request_id, scope)) = runtime_permission_revoke(event) {
+                        let _ = writeln!(
+                            detail,
+                            "- #{} revoke {} scope={}",
+                            event.seq,
+                            request_id,
+                            scope.as_deref().unwrap_or("session")
+                        );
+                        rendered += 1;
+                    }
+                }
+                _ => {}
+            }
+            if rendered >= 30 {
+                break;
+            }
+        }
+        if rendered == 0 {
+            let _ = writeln!(detail, "- no approval events recorded");
+        }
+    }
+
+    Ok(detail)
+}
+
+fn resolve_tui_approval_revoke_target(
+    store: &RuntimeStore,
+    thread_id: &str,
+    request_id: &str,
+) -> AppResult<ActiveSessionApproval> {
+    let events = store.read_events(thread_id, 0)?;
+    let active = active_session_approvals(&events)
+        .into_values()
+        .collect::<Vec<_>>();
+    if active.is_empty() {
+        return Err(app_error("no cached session approvals to revoke"));
+    }
+    if request_id == "last" {
+        return active
+            .into_iter()
+            .max_by_key(|approval| approval.response_seq)
+            .ok_or_else(|| app_error("no cached session approvals to revoke"));
+    }
+    active
+        .into_iter()
+        .find(|approval| approval.request_id == request_id)
+        .ok_or_else(|| {
+            app_error(format!(
+                "no active cached session approval for request: {request_id}"
+            ))
+        })
+}
+
+fn approval_audit_requests(events: &[RuntimeEvent]) -> BTreeMap<String, ApprovalAuditRequest> {
+    events
+        .iter()
+        .filter_map(approval_audit_request)
+        .map(|request| (request.id.clone(), request))
+        .collect()
+}
+
+fn approval_audit_request(event: &RuntimeEvent) -> Option<ApprovalAuditRequest> {
+    if event.kind != "permission_request" {
+        return None;
+    }
+    let payload = json_as_object(&event.payload)?;
+    let fingerprint = runtime_event_payload_string(payload, "fingerprint", "");
+    let grouping_fingerprint = runtime_event_payload_string(payload, "grouping_fingerprint", "");
+    Some(ApprovalAuditRequest {
+        id: event.id.clone(),
+        seq: event.seq,
+        tool: runtime_event_payload_string(payload, "tool", "unknown"),
+        kind: runtime_event_payload_string(payload, "kind", "permission"),
+        target: runtime_event_payload_string(payload, "target", ""),
+        grouping_fingerprint: if grouping_fingerprint.is_empty() {
+            fingerprint
+        } else {
+            grouping_fingerprint
+        },
+    })
+}
+
+fn active_session_approvals(events: &[RuntimeEvent]) -> BTreeMap<String, ActiveSessionApproval> {
+    let requests = approval_audit_requests(events);
+    let mut active = BTreeMap::<String, ActiveSessionApproval>::new();
+    for event in events {
+        if let Some((request_id, decision, scope)) = runtime_permission_response(event) {
+            if decision != AgentApprovalDecision::Approved || scope.as_deref() != Some("session") {
+                continue;
+            }
+            let Some(request) = requests.get(&request_id) else {
+                continue;
+            };
+            active.insert(
+                request.grouping_fingerprint.clone(),
+                ActiveSessionApproval {
+                    request_id: request.id.clone(),
+                    response_seq: event.seq,
+                    tool: request.tool.clone(),
+                    kind: request.kind.clone(),
+                    target: request.target.clone(),
+                    grouping_fingerprint: request.grouping_fingerprint.clone(),
+                },
+            );
+            continue;
+        }
+        if let Some((request_id, scope)) = runtime_permission_revoke(event) {
+            if scope.as_deref() != Some("session") {
+                continue;
+            }
+            let Some(request) = requests.get(&request_id) else {
+                continue;
+            };
+            active.remove(&request.grouping_fingerprint);
+        }
+    }
+    active
+}
+
+fn runtime_event_payload_string(
+    payload: &BTreeMap<String, JsonValue>,
+    key: &str,
+    fallback: &str,
+) -> String {
+    payload
+        .get(key)
+        .and_then(json_as_string)
+        .unwrap_or(fallback)
+        .to_string()
 }
 
 fn agent_approval_decision_label(decision: AgentApprovalDecision) -> &'static str {
@@ -11679,6 +12018,91 @@ shell_allowlist = ["git diff"]
     }
 
     #[test]
+    fn handle_tui_action_lists_and_revokes_session_approval() {
+        let store = temp_store("approval-audit");
+        let session = store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Runtime permissions".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let request = store
+            .append_permission_request(
+                &thread.id,
+                None,
+                "run_shell".to_string(),
+                "shell".to_string(),
+                "cargo test".to_string(),
+                BTreeMap::from([("command".to_string(), "cargo test".to_string())]),
+            )
+            .unwrap();
+        store
+            .append_permission_response_with_scope(
+                &thread.id,
+                None,
+                request.id.clone(),
+                "approved".to_string(),
+                Some("session".to_string()),
+            )
+            .unwrap();
+        let mut app = app_from_store(&store).unwrap();
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::ShowApprovalAudit {
+                thread_id: thread.id.clone(),
+                include_history: false,
+            },
+        )
+        .unwrap();
+
+        let (kind, detail) = app.mcp_detail_for_test().expect("approval audit detail");
+        assert_eq!(kind, TuiMcpDetailKind::Approval);
+        assert!(detail.contains("Cached session approvals (1):"));
+        assert!(detail.contains(&request.id));
+        assert!(detail.contains("approval revoke session"));
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::RevokeApprovalSession {
+                thread_id: thread.id.clone(),
+                request_id: "last".to_string(),
+            },
+        )
+        .unwrap();
+
+        let events = store.read_events(&thread.id, 0).unwrap();
+        assert_eq!(events.last().unwrap().kind, "permission_revoke");
+        let (_, detail) = app.mcp_detail_for_test().expect("approval revoke detail");
+        assert!(detail.contains("Cached session approvals (0):"));
+
+        handle_tui_action(
+            &store,
+            None,
+            &mut app,
+            TuiAction::ShowApprovalAudit {
+                thread_id: thread.id.clone(),
+                include_history: true,
+            },
+        )
+        .unwrap();
+        let (_, detail) = app.mcp_detail_for_test().expect("approval history detail");
+        assert!(detail.contains("History"));
+        assert!(detail.contains("revoke"));
+        assert!(detail.contains("response"));
+    }
+
+    #[test]
     fn handle_tui_action_records_user_input_response() {
         let store = temp_store("user-input-response");
         let session = store
@@ -14315,6 +14739,61 @@ shell_allowlist = ["git diff"]
         assert_eq!(
             cached_runtime_permission_decision(&store, &thread.id, &second).unwrap(),
             Some(AgentApprovalDecision::Approved)
+        );
+    }
+
+    #[test]
+    fn cached_runtime_permission_decision_ignores_revoked_session_approval() {
+        let store = temp_store("approval-session-revoked");
+        let session = store
+            .create_session("Daily work".to_string(), ".".to_string())
+            .unwrap();
+        let thread = store
+            .create_thread_for_session(
+                &session.id,
+                "Runtime permissions".to_string(),
+                ".".to_string(),
+                "deepseek-coder".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+
+        let first = store
+            .append_permission_request(
+                &thread.id,
+                None,
+                "run_shell".to_string(),
+                "shell".to_string(),
+                "cargo build".to_string(),
+                BTreeMap::from([("command".to_string(), "cargo build".to_string())]),
+            )
+            .unwrap();
+        store
+            .append_permission_response_with_scope(
+                &thread.id,
+                None,
+                first.id.clone(),
+                "approved".to_string(),
+                Some("session".to_string()),
+            )
+            .unwrap();
+        store
+            .append_permission_revoke_session(&thread.id, first.id)
+            .unwrap();
+        let second = store
+            .append_permission_request(
+                &thread.id,
+                None,
+                "run_shell".to_string(),
+                "shell".to_string(),
+                "cargo build --release".to_string(),
+                BTreeMap::from([("command".to_string(), "cargo build --release".to_string())]),
+            )
+            .unwrap();
+
+        assert_eq!(
+            cached_runtime_permission_decision(&store, &thread.id, &second).unwrap(),
+            None
         );
     }
 

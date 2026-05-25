@@ -200,6 +200,9 @@ Current surfaces:
 - approval modal text explains once/session/deny scope, the exact permission
   key, the cached group key, and the likely impact class for shell, write,
   network, and MCP requests
+- approval audit commands show pending requests, cached session approvals,
+  request/decision/revoke history, and can revoke cached session approval groups
+  with `approval revoke session <id|last>`
 - user-input modal backed by durable `user_input_request` runtime events;
   number keys choose predefined options, and `o` opens a short free-form Other
   answer editor that writes the same structured response event
@@ -585,7 +588,10 @@ Command palette commands currently implemented:
 | `restore hunks <id|last>`, `/restore hunks <id|last>`, `restore diff <id|last>`, `/restore diff <id|last>` | List parsed rollback patch hunks in the right-side detail panel |
 | `restore hunk <id|last> [index]`, `/restore hunk <id|last> [index]` | Show one 1-based rollback patch hunk |
 | `revert turn <id|last> [--apply]` | Dry-run or apply a local rollback snapshot and show the restore plan; `--apply` requires modal confirmation |
-| `approval` | Open the approval modal |
+| `approval`, `/approval` | Open the approval modal |
+| `approval list`, `/approval list` | Show pending approvals and cached session approvals for the active thread |
+| `approval history`, `/approval history` | Show durable approval request, decision, and revoke events for the active thread |
+| `approval revoke session [id|last]`, `/approval revoke session [id|last]` | Revoke a cached session approval so future matching requests ask again |
 | `cancel`, `stop` | Cancel the active running assistant turn |
 
 Current boundaries are explicit: this is a true TUI shell with a first

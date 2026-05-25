@@ -710,6 +710,7 @@ pub enum TuiMcpDetailKind {
     Review,
     Status,
     Tokens,
+    Approval,
     Translate,
     Cost,
     Cache,
@@ -773,6 +774,7 @@ impl TuiMcpDetailKind {
             Self::Review => "review",
             Self::Status => "status",
             Self::Tokens => "tokens",
+            Self::Approval => "approval",
             Self::Translate => "translate",
             Self::Cost => "cost",
             Self::Cache => "cache",
@@ -836,6 +838,7 @@ impl TuiMcpDetailKind {
             Self::Review => "Review",
             Self::Status => "Status",
             Self::Tokens => "Tokens",
+            Self::Approval => "Approval",
             Self::Translate => "Translate",
             Self::Cost => "Cost",
             Self::Cache => "Cache",
@@ -899,6 +902,7 @@ impl TuiMcpDetailKind {
             Self::Review => Self::Manager,
             Self::Status => Self::Manager,
             Self::Tokens => Self::Manager,
+            Self::Approval => Self::Manager,
             Self::Translate => Self::Manager,
             Self::Cost => Self::Manager,
             Self::Cache => Self::Manager,
@@ -962,6 +966,7 @@ impl TuiMcpDetailKind {
             Self::Review => Self::Manager,
             Self::Status => Self::Manager,
             Self::Tokens => Self::Manager,
+            Self::Approval => Self::Manager,
             Self::Translate => Self::Manager,
             Self::Cost => Self::Manager,
             Self::Cache => Self::Manager,
@@ -1348,6 +1353,15 @@ pub enum TuiClearCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TuiDiffCommand {
     Show,
+    Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuiApprovalCommand {
+    Show,
+    List,
+    History,
+    RevokeSession { request_id: String },
     Help,
 }
 
@@ -2831,6 +2845,30 @@ fn parse_tui_diff_command(line: &str) -> Option<Result<TuiDiffCommand, String>> 
     }
 }
 
+fn parse_tui_approval_command(line: &str) -> Option<Result<TuiApprovalCommand, String>> {
+    let trimmed = line.trim();
+    let rest = strip_tui_command_prefix(trimmed, "/approval")
+        .or_else(|| strip_tui_command_prefix(trimmed, "approval"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "/approve"))
+        .or_else(|| strip_tui_command_prefix(trimmed, "approve"))?;
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] | ["show" | "modal"] => Some(Ok(TuiApprovalCommand::Show)),
+        ["list" | "ls"] => Some(Ok(TuiApprovalCommand::List)),
+        ["history" | "log"] => Some(Ok(TuiApprovalCommand::History)),
+        ["revoke", "session"] => Some(Ok(TuiApprovalCommand::RevokeSession {
+            request_id: "last".to_string(),
+        })),
+        ["revoke", "session", request_id] => Some(Ok(TuiApprovalCommand::RevokeSession {
+            request_id: (*request_id).to_string(),
+        })),
+        ["help" | "--help" | "-h"] => Some(Ok(TuiApprovalCommand::Help)),
+        _ => Some(Err(
+            "usage: approval [list|history|revoke session [id|last]|help]".to_string(),
+        )),
+    }
+}
+
 fn parse_tui_subagents_command(line: &str) -> Option<Result<TuiSubagentsCommand, String>> {
     let trimmed = line.trim();
     let rest = strip_tui_command_prefix(trimmed, "/subagents")
@@ -3395,6 +3433,14 @@ pub enum TuiAction {
         request_id: String,
         decision: String,
         scope: Option<String>,
+    },
+    ShowApprovalAudit {
+        thread_id: String,
+        include_history: bool,
+    },
+    RevokeApprovalSession {
+        thread_id: String,
+        request_id: String,
     },
     RespondUserInput {
         thread_id: String,
@@ -4282,6 +4328,9 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "restore revert-turn ",
     "revert turn ",
     "approval",
+    "approval list",
+    "approval history",
+    "approval revoke session ",
     "cancel",
     "help",
     "help mode",
@@ -4520,6 +4569,11 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/restore apply-hunk ",
     "/restore check-hunk ",
     "/restore revert-turn ",
+    "/approval",
+    "/approval list",
+    "/approval history",
+    "/approval revoke session ",
+    "/approval help",
     "/mode",
     "/mode agent",
     "/mode plan",
@@ -7517,6 +7571,19 @@ impl TuiApp {
                     }
                     return true;
                 }
+                if let Some(command) = parse_tui_approval_command(&content) {
+                    match command {
+                        Ok(command) => {
+                            self.handle_approval_command(command);
+                            self.composer.clear();
+                            self.composer_cursor = 0;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                        }
+                    }
+                    return true;
+                }
                 if let Some(command) = parse_tui_hooks_command(&content) {
                     match command {
                         Ok(command) => {
@@ -8396,6 +8463,15 @@ impl TuiApp {
         if let Some(command) = parse_tui_diff_command(command) {
             match command {
                 Ok(command) => self.handle_diff_command(command),
+                Err(message) => {
+                    self.status = message;
+                }
+            }
+            return;
+        }
+        if let Some(command) = parse_tui_approval_command(command) {
+            match command {
+                Ok(command) => self.handle_approval_command(command),
                 Err(message) => {
                     self.status = message;
                 }
@@ -9418,7 +9494,7 @@ impl TuiApp {
             }
             ["cancel"] | ["stop"] => self.request_cancel_run(),
             ["help"] => {
-                self.status = "commands: mode plan|agent|yolo, diff, clear, change, system, edit, goal [objective|clear], sessions [filter], threads [filter], agent [N] <task>, subagents, rlm [N] <file_or_text>, relay [focus], task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], anchor [text|list|remove], queue [list|edit|drop|clear], share, export [path], mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval, cancel".to_string();
+                self.status = "commands: mode plan|agent|yolo, diff, clear, change, system, edit, goal [objective|clear], sessions [filter], threads [filter], agent [N] <task>, subagents, rlm [N] <file_or_text>, relay [focus], task <summary>|select all|select clear|pause [id]|resume [id]|cancel [id]|bulk pause|bulk resume|bulk cancel, shell <cmd>|list|show|wait|poll|stdin|close-stdin|cancel, stash [list|pop|clear], memory [show|path|clear|edit|help], anchor [text|list|remove], queue [list|edit|drop|clear], share, export [path], mcp manager|list|tools|prompts|resources|resource-templates|close|init|add|enable|disable|remove|user add|user enable|user disable|user remove|validate, diagnostics [--changed|paths...], restore snapshot|list|show, revert turn <id> [--apply], compact, approval [list|history|revoke session], cancel".to_string();
             }
             _ => {
                 self.status = format!("unknown command: {command}");
@@ -11911,6 +11987,99 @@ impl TuiApp {
         let _ = writeln!(
             detail,
             "This is read-only and includes hunk previews plus review/rollback next steps."
+        );
+        detail
+    }
+
+    fn handle_approval_command(&mut self, command: TuiApprovalCommand) {
+        match command {
+            TuiApprovalCommand::Show => {
+                if self.active_approval_id.is_none() {
+                    self.active_approval_id = self.next_pending_approval_id();
+                }
+                self.show_approval_modal = true;
+                self.status = "approval modal opened".to_string();
+            }
+            TuiApprovalCommand::List => self.request_approval_audit(false),
+            TuiApprovalCommand::History => self.request_approval_audit(true),
+            TuiApprovalCommand::RevokeSession { request_id } => {
+                self.request_approval_revoke_session(request_id)
+            }
+            TuiApprovalCommand::Help => {
+                self.set_mcp_detail(
+                    TuiMcpDetailKind::Approval,
+                    self.render_approval_help_detail(),
+                );
+                self.status = "approval help shown".to_string();
+            }
+        }
+    }
+
+    fn request_approval_audit(&mut self, include_history: bool) {
+        let Some(thread_id) = self.selected_thread_id.clone() else {
+            self.status = "approval audit requires an active thread".to_string();
+            return;
+        };
+        self.pending_actions.push(TuiAction::ShowApprovalAudit {
+            thread_id: thread_id.clone(),
+            include_history,
+        });
+        self.status = if include_history {
+            format!("approval history queued: {thread_id}")
+        } else {
+            format!("approval list queued: {thread_id}")
+        };
+    }
+
+    fn request_approval_revoke_session(&mut self, request_id: String) {
+        let Some(thread_id) = self.selected_thread_id.clone() else {
+            self.status = "approval revoke requires an active thread".to_string();
+            return;
+        };
+        self.pending_actions.push(TuiAction::RevokeApprovalSession {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        });
+        self.status = format!("approval session revoke queued: {request_id} in {thread_id}");
+    }
+
+    fn render_approval_help_detail(&self) -> String {
+        let mut detail = String::new();
+        let _ = writeln!(detail, "DeepSeekCode Approval");
+        let _ = writeln!(detail, "=====================");
+        let _ = writeln!(detail);
+        let _ = writeln!(
+            detail,
+            "Approval requests are durable runtime events. Session approvals are reused for the same grouped permission until revoked."
+        );
+        let _ = writeln!(detail);
+        match self.active_thread() {
+            Some(thread) => {
+                push_status_row(&mut detail, "Thread:", &thread.title);
+                push_status_row(&mut detail, "Thread id:", &thread.id);
+            }
+            None => {
+                let _ = writeln!(detail, "No active durable thread.");
+            }
+        }
+        let _ = writeln!(detail);
+        let _ = writeln!(detail, "Commands");
+        let _ = writeln!(detail, "--------");
+        let _ = writeln!(
+            detail,
+            "- approval              Open pending approval modal"
+        );
+        let _ = writeln!(
+            detail,
+            "- approval list         Show pending and cached approvals"
+        );
+        let _ = writeln!(
+            detail,
+            "- approval history      Show request/decision/revoke event history"
+        );
+        let _ = writeln!(
+            detail,
+            "- approval revoke session [id|last]  Revoke a cached session approval"
         );
         detail
     }
@@ -26497,6 +26666,66 @@ model.api_key_env = "OPENAI_API_KEY"
             }]
         );
         assert!(app.status.contains("approved for session"));
+    }
+
+    #[test]
+    fn approval_audit_commands_queue_runtime_actions() {
+        let sessions = vec![TuiSession {
+            id: "session-one".to_string(),
+            title: "One".to_string(),
+            workspace: ".".to_string(),
+            status: "active".to_string(),
+            active_thread_id: Some("thread-one".to_string()),
+            thread_count: 1,
+        }];
+        let threads = vec![TuiThread {
+            id: "thread-one".to_string(),
+            session_id: Some("session-one".to_string()),
+            title: "First thread".to_string(),
+            mode: "agent".to_string(),
+            status: "active".to_string(),
+            latest_turn_id: None,
+            event_seq: 1,
+        }];
+        let mut app = TuiApp::with_runtime(sessions, threads, Vec::new());
+
+        run_palette_command(&mut app, "approval list");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::ShowApprovalAudit {
+                thread_id: "thread-one".to_string(),
+                include_history: false,
+            }]
+        );
+
+        run_palette_command(&mut app, "approval history");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::ShowApprovalAudit {
+                thread_id: "thread-one".to_string(),
+                include_history: true,
+            }]
+        );
+
+        app.composer_focused = true;
+        app.composer = "/approval revoke session last".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::RevokeApprovalSession {
+                thread_id: "thread-one".to_string(),
+                request_id: "last".to_string(),
+            }]
+        );
+
+        app.composer = "/approval help".to_string();
+        app.composer_cursor = app.composer.len();
+        assert!(app.handle_key(KeyCode::Enter));
+        let (kind, detail) = app.mcp_detail.as_ref().expect("approval help detail");
+        assert_eq!(*kind, TuiMcpDetailKind::Approval);
+        assert!(detail.contains("approval history"));
+        assert!(detail.contains("approval revoke session"));
     }
 
     #[test]
