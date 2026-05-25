@@ -158,10 +158,10 @@ Current surfaces:
 - composer and command-palette editing preserve terminal modifier keys, including
   Ctrl-based line, word, and cursor controls
 - task panel with active thread status, runtime item count, item state/type
-  progress counts, latest item summary, live agent timeline, recent runtime
-  tasks, active-thread automations, usage total, cache-hit rate, cache chart,
-  estimated cost, input/output cost split, cost chart, and 1M-context policy
-  when usage records exist
+  progress counts, latest item summary, first-run setup guidance, live agent
+  timeline, recent runtime tasks, active-thread automations, usage total,
+  cache-hit rate, cache chart, estimated cost, input/output cost split, cost
+  chart, and 1M-context policy when usage records exist
 - command palette with local UI commands and active-thread runtime actions
 - command palette history with `Up` / `Down` recall while the palette is active
 - command palette prefix completion with `Tab` for built-in workbench commands
@@ -221,6 +221,9 @@ Current surfaces:
 - active-thread runtime items are summarized in the task panel with state/type
   counts and the latest item, so streamed agent progress and tool activity are
   visible while a background run is active
+- first-run setup gaps are summarized in the task panel with `/setup wizard`
+  and direct jump commands for provider, model, API key, trust, and network
+  policy setup
 - running agent turns show a compact task-panel timeline with current step,
   recent tool, elapsed time, pending approvals, queued follow-up messages, and
   next-action hints
@@ -384,8 +387,8 @@ Command palette commands currently implemented:
 | `help <command>`, `/help <command>` | Show command-specific usage, aliases, and description |
 | `settings`, `/settings`, `config`, `/config` | Show mode, config file locations, and focused configuration command entry points |
 | `setup`, `onboarding`, `doctor`, `/setup`, `/onboarding`, `/doctor` | Show a read-only onboarding checklist with selected workspace config, model, API key env, live-model readiness, and next commands |
-| `setup wizard`, `/setup wizard` | Open the first-run stepper with per-step done/todo/review state for provider, model, auth, trust, theme, and language setup |
-| `setup provider|model|auth [ENV]|trust|theme|language|settings`, `/setup provider|model|auth [ENV]|trust|theme|language|settings` | Jump from onboarding into guided provider/model pickers, the masked credential wizard, trust, theme, language-output, or settings controls |
+| `setup wizard`, `/setup wizard` | Open the first-run stepper with per-step done/todo/review state for provider, model, auth, trust, network, theme, and language setup |
+| `setup provider|model|auth [ENV]|trust|network|theme|language|settings`, `/setup provider|model|auth [ENV]|trust|network|theme|language|settings` | Jump from onboarding into guided provider/model pickers, the masked credential wizard, trust, network policy, theme, language-output, or settings controls |
 | `config tui`, `config native`, `config web`, `/config tui`, `/config native`, `/config web` | Show the requested config surface and focused DeepSeekCode config commands |
 | `config model [pick\|show\|list\|preset <auto\|flash\|pro>\|<name>]`, `/config model [pick\|show\|list\|preset <auto\|flash\|pro>\|<name>]` | Route to selected workspace model picker, inspection, catalog, preset, or update commands |
 | `config provider [pick\|show\|list\|<name> [model]]`, `/config provider [pick\|show\|list\|<name> [model]]` | Route to provider preset picker, inspection, or updates |

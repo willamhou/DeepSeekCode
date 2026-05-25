@@ -3927,7 +3927,9 @@ fn handle_tui_action_with_live(
                 TuiMcpDetailKind::Network,
                 format_network_policy_summary(&summary),
             );
+            let setup_status = status.clone();
             app.set_status(status);
+            app.complete_setup_wizard_active_step("network", &["network"], &setup_status);
         }
         TuiAction::Lsp { workspace, command } => {
             let workspace = Path::new(&workspace);

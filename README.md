@@ -155,9 +155,9 @@ git.
 
 ## What Works
 
-- Full-screen TUI with Plan / Agent / YOLO modes, approval modals, live agent
-  task timeline, command palette, setup/onboarding, provider/model picker, and
-  MCP management.
+- Full-screen TUI with Plan / Agent / YOLO modes, approval modals, first-run
+  setup guidance, live agent task timeline, command palette, provider/model
+  picker, and MCP management.
 - REPL with raw-mode line editing, history, session list/load completion,
   SIGINT cancellation, `/save`, `/load`, `/sessions`, and custom slash commands.
 - OpenAI-compatible single and same-turn batch tool calls, with independent

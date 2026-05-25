@@ -1734,6 +1734,7 @@ enum TuiSetupCommand {
     Model,
     Auth { env_name: Option<String> },
     Trust,
+    Network,
     Theme,
     Language,
     Settings,
@@ -1773,6 +1774,11 @@ const TUI_SETUP_WIZARD_STEPS: &[TuiSetupWizardStep] = &[
         key: "trust",
         title: "Inspect trust",
         hint: "Show workspace trust controls",
+    },
+    TuiSetupWizardStep {
+        key: "network",
+        title: "Review network",
+        hint: "Show network policy controls",
     },
     TuiSetupWizardStep {
         key: "theme",
@@ -3191,13 +3197,14 @@ fn parse_tui_setup_command(line: &str) -> Option<Result<TuiSetupCommand, String>
             }))
         }
         ["trust" | "permissions"] => Some(Ok(TuiSetupCommand::Trust)),
+        ["network" | "net" | "policy"] => Some(Ok(TuiSetupCommand::Network)),
         ["theme" | "appearance"] => Some(Ok(TuiSetupCommand::Theme)),
         ["language" | "locale" | "translate" | "translation"] => {
             Some(Ok(TuiSetupCommand::Language))
         }
         ["settings" | "config"] => Some(Ok(TuiSetupCommand::Settings)),
         _ => Some(Err(
-            "usage: setup [wizard|provider|model|auth [ENV]|trust|theme|language|settings]"
+            "usage: setup [wizard|provider|model|auth [ENV]|trust|network|theme|language|settings]"
                 .to_string(),
         )),
     }
@@ -3806,7 +3813,7 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         category: "Workbench",
         name: "setup",
         aliases: &["onboarding", "doctor"],
-        usage: "/setup [wizard|provider|model|auth [ENV]|trust|theme|language|settings]",
+        usage: "/setup [wizard|provider|model|auth [ENV]|trust|network|theme|language|settings]",
         description: "Show onboarding status or jump into guided setup controls.",
     },
     TuiHelpCommandInfo {
@@ -4345,6 +4352,7 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "setup auth",
     "setup auth ",
     "setup trust",
+    "setup network",
     "setup theme",
     "setup language",
     "setup settings",
@@ -4387,6 +4395,7 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/setup auth",
     "/setup auth ",
     "/setup trust",
+    "/setup network",
     "/setup theme",
     "/setup language",
     "/setup settings",
@@ -6084,6 +6093,33 @@ impl TuiApp {
         lines
     }
 
+    fn setup_guidance_lines(&self) -> Vec<String> {
+        let workspace = self.selected_workspace_string();
+        let states = self.setup_wizard_step_states_for_workspace(&workspace);
+        let Some((step, state)) =
+            TUI_SETUP_WIZARD_STEPS
+                .iter()
+                .zip(states.iter())
+                .find(|(step, state)| {
+                    !state.done
+                        && matches!(
+                            step.key,
+                            "provider" | "model" | "auth" | "trust" | "network"
+                        )
+                })
+        else {
+            return Vec::new();
+        };
+        let done = states.iter().filter(|state| state.done).count();
+        vec![
+            "Setup guide".to_string(),
+            format!("Setup progress: {done}/{} complete", states.len()),
+            format!("Next setup: {} ({})", step.title, state.detail),
+            "Run: /setup wizard".to_string(),
+            format!("Jump: {}", setup_wizard_step_command(step.key, &workspace)),
+        ]
+    }
+
     fn active_task_by_id(&self, task_id: &str) -> Option<&TuiTaskRecord> {
         self.active_thread_tasks()
             .into_iter()
@@ -6651,6 +6687,10 @@ impl TuiApp {
                 "Bind approval modal to write/shell/MCP permission requests".to_string(),
                 "Add live runtime refresh for session and thread updates".to_string(),
             ];
+            let setup_guidance_lines = self.setup_guidance_lines();
+            if !setup_guidance_lines.is_empty() {
+                self.tasks.extend(setup_guidance_lines);
+            }
             return;
         };
         self.ensure_selected_task();
@@ -6681,6 +6721,13 @@ impl TuiApp {
             format!("Reasoning replay: latest {}", self.reasoning_replay_limit),
             format!("Event seq: {}", thread.event_seq),
         ];
+        let setup_guidance_lines = self.setup_guidance_lines();
+        if !setup_guidance_lines.is_empty()
+            && self.active_thread_tasks().is_empty()
+            && self.active_running_assistant_item().is_none()
+        {
+            self.tasks.extend(setup_guidance_lines);
+        }
         let agent_timeline_lines = self.agent_timeline_lines(&thread);
         if !agent_timeline_lines.is_empty() {
             self.tasks.extend(agent_timeline_lines);
@@ -12463,11 +12510,19 @@ impl TuiApp {
         let config_path = tui_setup_config_path(workspace_path);
         let config_present = config_path.exists();
         let (config, _) = read_tui_setup_config(&config_path);
+        let network_policy_configured = tui_network_policy_configured(&config_path);
         let trust = WorkspaceTrust::load_for(workspace_path);
         TUI_SETUP_WIZARD_STEPS
             .iter()
             .map(|step| {
-                self.setup_wizard_step_state(*step, workspace_path, &config, config_present, &trust)
+                self.setup_wizard_step_state(
+                    *step,
+                    workspace_path,
+                    &config,
+                    config_present,
+                    network_policy_configured,
+                    &trust,
+                )
             })
             .collect()
     }
@@ -12478,6 +12533,7 @@ impl TuiApp {
         workspace: &Path,
         config: &AppConfig,
         config_present: bool,
+        network_policy_configured: bool,
         trust: &WorkspaceTrust,
     ) -> TuiSetupWizardStepState {
         let completed_in_session = self.setup_wizard_completed_steps.contains(step.key);
@@ -12538,6 +12594,21 @@ impl TuiApp {
                     TuiSetupWizardStepState {
                         tag: "review",
                         detail: "inspect permissions".to_string(),
+                        done: false,
+                    }
+                }
+            }
+            "network" => {
+                if completed_in_session || network_policy_configured {
+                    TuiSetupWizardStepState {
+                        tag: "done",
+                        detail: setup_wizard_network_detail(&config.network.default),
+                        done: true,
+                    }
+                } else {
+                    TuiSetupWizardStepState {
+                        tag: "review",
+                        detail: "default allow; review policy".to_string(),
                         done: false,
                     }
                 }
@@ -12646,6 +12717,7 @@ impl TuiApp {
             "model" => self.request_model_command(TuiModelCommand::Pick),
             "auth" => self.open_auth_modal(None),
             "trust" => self.request_trust_command(TuiTrustCommand::Show),
+            "network" => self.request_network_command(TuiNetworkCommand::List),
             "theme" => {
                 self.show_theme_detail();
                 let status = self.status.clone();
@@ -12765,6 +12837,7 @@ impl TuiApp {
             TuiSetupCommand::Model => self.request_model_command(TuiModelCommand::Pick),
             TuiSetupCommand::Auth { env_name } => self.open_auth_modal(env_name),
             TuiSetupCommand::Trust => self.request_trust_command(TuiTrustCommand::Show),
+            TuiSetupCommand::Network => self.request_network_command(TuiNetworkCommand::List),
             TuiSetupCommand::Theme => self.show_theme_detail(),
             TuiSetupCommand::Language => self.show_translation_detail(),
             TuiSetupCommand::Settings => self.show_settings_detail(),
@@ -12787,6 +12860,7 @@ impl TuiApp {
         let (config, active_profile) = read_tui_setup_config(&config_path);
         let api_key_present = tui_auth_env_present(Path::new(workspace), &config.model.api_key_env);
         let ready_for_live_model = config_present && api_key_present;
+        let network_policy_configured = tui_network_policy_configured(&config_path);
         let wizard_states = self.setup_wizard_step_states_for_workspace(workspace);
         let wizard_done = wizard_states.iter().filter(|state| state.done).count();
 
@@ -12841,6 +12915,15 @@ impl TuiApp {
             "Setup wizard:",
             &format!("{wizard_done}/{} complete", wizard_states.len()),
         );
+        let network_policy_status = if network_policy_configured {
+            format!(
+                "reviewed ({})",
+                setup_wizard_network_detail(&config.network.default)
+            )
+        } else {
+            "not reviewed (default allow)".to_string()
+        };
+        push_status_row(&mut detail, "Network policy:", &network_policy_status);
         let _ = writeln!(detail);
         let _ = writeln!(detail, "Wizard Steps");
         let _ = writeln!(detail, "------------");
@@ -12873,6 +12956,10 @@ impl TuiApp {
             );
             let _ = writeln!(detail, "- export {}=...", config.model.api_key_env);
         }
+        if !network_policy_configured {
+            let _ = writeln!(detail, "- /setup network");
+            let _ = writeln!(detail, "- /network default prompt");
+        }
         let _ = writeln!(detail, "- deepseek doctor");
         let _ = writeln!(detail, "- deepseek smoke");
         let _ = writeln!(detail);
@@ -12883,6 +12970,7 @@ impl TuiApp {
         let _ = writeln!(detail, "- /setup model       Open model picker");
         let _ = writeln!(detail, "- /setup auth [ENV]  Open masked credential wizard");
         let _ = writeln!(detail, "- /setup trust       Inspect workspace trust");
+        let _ = writeln!(detail, "- /setup network     Inspect network policy");
         let _ = writeln!(detail, "- /setup theme       Show theme controls");
         let _ = writeln!(detail, "- /setup language    Show language-output controls");
         let _ = writeln!(
@@ -12895,6 +12983,7 @@ impl TuiApp {
         let _ = writeln!(detail, "- /provider pick");
         let _ = writeln!(detail, "- /model pick");
         let _ = writeln!(detail, "- /trust list");
+        let _ = writeln!(detail, "- /network list");
         let _ = writeln!(detail, "- /settings");
         detail
     }
@@ -17014,6 +17103,11 @@ fn apply_tui_setup_config_key(
         "model.model" => config.model.model = parsed,
         "model.api_key_env" => config.model.api_key_env = parsed,
         "model.reasoning_effort" => config.model.reasoning_effort = parsed,
+        "network.default" => config.network.default = parsed,
+        "network.allow" => config.network.allow = tui_config_string_list_value(value),
+        "network.deny" => config.network.deny = tui_config_string_list_value(value),
+        "network.audit" => config.network.audit = tui_config_bool_value(value),
+        "network.audit_path" => config.network.audit_path = parsed,
         "workspace.active_profile" => *active_profile = Some(parsed),
         _ => {}
     }
@@ -17031,6 +17125,27 @@ fn apply_tui_setup_env_overrides(config: &mut AppConfig) {
     }
     if let Some(reasoning_effort) = first_nonempty_tui_env(&["DEEPSEEK_REASONING_EFFORT"]) {
         config.model.reasoning_effort = reasoning_effort;
+    }
+    if let Some(default) =
+        first_nonempty_tui_env(&["DSCODE_NETWORK_DEFAULT", "DEEPSEEK_NETWORK_DEFAULT"])
+    {
+        config.network.default = default;
+    }
+    if let Some(allow) = first_nonempty_tui_env(&["DSCODE_NETWORK_ALLOW", "DEEPSEEK_NETWORK_ALLOW"])
+    {
+        config.network.allow = tui_env_list_value(&allow);
+    }
+    if let Some(deny) = first_nonempty_tui_env(&["DSCODE_NETWORK_DENY", "DEEPSEEK_NETWORK_DENY"]) {
+        config.network.deny = tui_env_list_value(&deny);
+    }
+    if let Some(audit) = first_nonempty_tui_env(&["DSCODE_NETWORK_AUDIT", "DEEPSEEK_NETWORK_AUDIT"])
+    {
+        config.network.audit = tui_config_bool_value(&audit);
+    }
+    if let Some(audit_path) =
+        first_nonempty_tui_env(&["DSCODE_NETWORK_AUDIT_PATH", "DEEPSEEK_NETWORK_AUDIT_PATH"])
+    {
+        config.network.audit_path = audit_path;
     }
 }
 
@@ -17067,6 +17182,49 @@ fn setup_wizard_provider_detail(base_url: &str) -> String {
         .unwrap_or_else(|| clip_line(base_url, 34))
 }
 
+fn setup_wizard_step_command(step_key: &str, workspace: &str) -> String {
+    match step_key {
+        "provider" => "/setup provider".to_string(),
+        "model" => "/setup model".to_string(),
+        "auth" => {
+            let config_path = tui_setup_config_path(Path::new(workspace));
+            let (config, _) = read_tui_setup_config(&config_path);
+            format!("/setup auth {}", config.model.api_key_env)
+        }
+        "trust" => "/setup trust".to_string(),
+        "network" => "/setup network".to_string(),
+        "theme" => "/setup theme".to_string(),
+        "language" => "/setup language".to_string(),
+        _ => "/setup wizard".to_string(),
+    }
+}
+
+fn setup_wizard_network_detail(default_policy: &str) -> String {
+    format!("default {}", clip_line(default_policy, 24))
+}
+
+fn tui_network_policy_configured(config_path: &Path) -> bool {
+    first_nonempty_tui_env(&[
+        "DSCODE_NETWORK_DEFAULT",
+        "DEEPSEEK_NETWORK_DEFAULT",
+        "DSCODE_NETWORK_ALLOW",
+        "DEEPSEEK_NETWORK_ALLOW",
+        "DSCODE_NETWORK_DENY",
+        "DEEPSEEK_NETWORK_DENY",
+        "DSCODE_NETWORK_AUDIT",
+        "DEEPSEEK_NETWORK_AUDIT",
+    ])
+    .is_some()
+        || fs::read_to_string(config_path)
+            .ok()
+            .map(|content| {
+                config_assignments(&content)
+                    .iter()
+                    .any(|(key, _)| key.starts_with("network."))
+            })
+            .unwrap_or(false)
+}
+
 fn tui_config_string_value(value: &str) -> String {
     let trimmed = value.trim();
     if let Some(value) = parse_basic_toml_string(trimmed) {
@@ -17078,6 +17236,34 @@ fn tui_config_string_value(value: &str) -> String {
         .unwrap_or(trimmed)
         .trim()
         .to_string()
+}
+
+fn tui_config_bool_value(value: &str) -> bool {
+    matches!(
+        tui_config_string_value(value)
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn tui_env_list_value(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn tui_config_string_list_value(value: &str) -> Vec<String> {
+    let trimmed = value.trim().trim_start_matches('[').trim_end_matches(']');
+    trimmed
+        .split(',')
+        .map(tui_config_string_value)
+        .filter(|item| !item.trim().is_empty())
+        .collect()
 }
 
 fn parse_basic_toml_string(value: &str) -> Option<String> {
@@ -19506,6 +19692,14 @@ mod tests {
             "DEEPSEEK_MODEL",
             "DEEPSEEK_API_KEY_ENV",
             "DEEPSEEK_REASONING_EFFORT",
+            "DSCODE_NETWORK_DEFAULT",
+            "DEEPSEEK_NETWORK_DEFAULT",
+            "DSCODE_NETWORK_ALLOW",
+            "DEEPSEEK_NETWORK_ALLOW",
+            "DSCODE_NETWORK_DENY",
+            "DEEPSEEK_NETWORK_DENY",
+            "DSCODE_NETWORK_AUDIT",
+            "DEEPSEEK_NETWORK_AUDIT",
         ]);
         let root = temp_root("setup-command");
         let config_dir = root.join(".dscode");
@@ -19555,6 +19749,7 @@ api_key_env = "{env_name}"
         assert!(detail.contains("deepseek-v4-pro"));
         assert!(detail.contains(&env_name));
         assert!(detail.contains("Live model:"));
+        assert!(detail.contains("Network policy:"));
         assert!(detail.contains("deepseek doctor"));
         assert!(detail.contains("/provider pick"));
 
@@ -19569,6 +19764,7 @@ api_key_env = "{env_name}"
         assert_eq!(*kind, TuiMcpDetailKind::Setup);
         assert!(detail.contains("Read-only onboarding check"));
         assert!(detail.contains("/setup provider"));
+        assert!(detail.contains("/setup network"));
         assert!(detail.contains("/setup language"));
     }
 
@@ -19650,6 +19846,15 @@ api_key_env = "{env_name}"
             }]
         );
 
+        run_palette_command(&mut app, "setup network");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Network {
+                workspace: "/tmp/deepseek-guided-setup".to_string(),
+                command: TuiNetworkCommand::List,
+            }]
+        );
+
         run_palette_command(&mut app, "setup theme");
         let (kind, detail) = app.mcp_detail.as_ref().expect("theme detail");
         assert_eq!(*kind, TuiMcpDetailKind::Theme);
@@ -19691,6 +19896,7 @@ api_key_env = "{env_name}"
         assert!(rendered.contains("Setup Wizard"));
         assert!(rendered.contains("Choose provider"));
         assert!(rendered.contains("Store API key"));
+        assert!(rendered.contains("Review network"));
 
         assert!(app.handle_key(KeyCode::Down));
         assert_eq!(app.setup_wizard_step, 1);
@@ -19755,6 +19961,7 @@ api_key_env = "{env_name}"
         assert!(rendered.contains("Progress:"));
         assert!(rendered.contains("[todo  ] Choose provider"));
         assert!(rendered.contains("[review] Inspect trust"));
+        assert!(rendered.contains("[review] Review network"));
 
         assert!(app.handle_key(KeyCode::Enter));
         assert!(app.show_provider_picker);
@@ -19776,7 +19983,7 @@ model.model = "deepseek-v4-pro"
         assert_eq!(app.setup_wizard_step, 2);
         assert!(app.status.contains("setup wizard advanced: auth"));
         let rendered = render_once(&app, 110, 36).expect("setup wizard advances");
-        assert!(rendered.contains("Progress: 2/6 complete"));
+        assert!(rendered.contains("Progress: 2/7 complete"));
         assert!(rendered.contains("[done  ] Choose provider"));
         assert!(rendered.contains("[done  ] Choose model"));
         assert!(rendered.contains("[todo  ] Store API key"));
@@ -19794,9 +20001,89 @@ model.model = "deepseek-v4-pro"
         );
         assert_eq!(app.setup_wizard_step, 3);
         let rendered = render_once(&app, 110, 36).expect("auth state renders");
-        assert!(rendered.contains("Progress: 3/6 complete"));
+        assert!(rendered.contains("Progress: 3/7 complete"));
         assert!(rendered.contains("DSCODE_TEST_SETUP_"));
         assert!(!rendered.contains("sk-test-secret"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn task_panel_surfaces_first_run_setup_guidance() {
+        let _env = EnvRestore::unset(&[
+            "DSCODE_PROFILE",
+            "DEEPSEEK_PROFILE",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_API_KEY_ENV",
+            "DEEPSEEK_REASONING_EFFORT",
+            "DSCODE_NETWORK_DEFAULT",
+            "DEEPSEEK_NETWORK_DEFAULT",
+            "DSCODE_NETWORK_ALLOW",
+            "DEEPSEEK_NETWORK_ALLOW",
+            "DSCODE_NETWORK_DENY",
+            "DEEPSEEK_NETWORK_DENY",
+            "DSCODE_NETWORK_AUDIT",
+            "DEEPSEEK_NETWORK_AUDIT",
+        ]);
+        let root = temp_root("setup-guidance");
+        fs::create_dir_all(&root).unwrap();
+        let workspace = root.display().to_string();
+        let mut app = TuiApp::with_runtime(
+            vec![TuiSession {
+                id: "session-one".to_string(),
+                title: "One".to_string(),
+                workspace: workspace.clone(),
+                status: "active".to_string(),
+                active_thread_id: Some("thread-one".to_string()),
+                thread_count: 1,
+            }],
+            vec![TuiThread {
+                id: "thread-one".to_string(),
+                session_id: Some("session-one".to_string()),
+                title: "First thread".to_string(),
+                mode: "agent".to_string(),
+                status: "active".to_string(),
+                latest_turn_id: None,
+                event_seq: 1,
+            }],
+            Vec::new(),
+        );
+
+        let task_lines = app.tasks.join("\n");
+        assert!(task_lines.contains("Setup guide"));
+        assert!(task_lines.contains("Next setup: Choose provider"));
+        assert!(task_lines.contains("Run: /setup wizard"));
+        assert!(task_lines.contains("Jump: /setup provider"));
+
+        fs::create_dir_all(root.join(".dscode")).unwrap();
+        let env_name = format!("DSCODE_TEST_SETUP_GUIDANCE_KEY_{}", std::process::id());
+        fs::write(
+            root.join(".dscode/config.toml"),
+            format!(
+                r#"model.base_url = "https://api.deepseek.com"
+model.api_key_env = "{env_name}"
+model.model = "deepseek-v4-pro"
+"#
+            ),
+        )
+        .unwrap();
+        app.refresh_runtime_view();
+        let task_lines = app.tasks.join("\n");
+        assert!(task_lines.contains("Next setup: Store API key"));
+        assert!(task_lines.contains(&format!("Jump: /setup auth {env_name}")));
+
+        fs::write(root.join(".env"), format!("{env_name}=sk-test-secret\n")).unwrap();
+        app.refresh_runtime_view();
+        let task_lines = app.tasks.join("\n");
+        assert!(task_lines.contains("Next setup: Inspect trust"));
+        assert!(task_lines.contains("Jump: /setup trust"));
+
+        app.setup_wizard_completed_steps.insert("trust".to_string());
+        app.refresh_runtime_view();
+        let task_lines = app.tasks.join("\n");
+        assert!(task_lines.contains("Next setup: Review network"));
+        assert!(task_lines.contains("Jump: /setup network"));
 
         let _ = fs::remove_dir_all(root);
     }
