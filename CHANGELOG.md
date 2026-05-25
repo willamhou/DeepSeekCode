@@ -11,6 +11,9 @@ Release automation evidence cleanup.
 - Current public install and launch copy now points at `v0.1.5`.
 - This patch is intended to exercise the fixed npm publish script and configured
   Homebrew tap credentials in a clean tag workflow.
+- The `v0.1.5` evidence chain now records a fully green Release Matrix,
+  hosted Release Smoke, verified Homebrew Smoke, npm registry lookup, `npx`,
+  clean-directory `npm install`, and GHCR manifest inspection.
 
 ### Verification
 
@@ -22,6 +25,15 @@ Release automation evidence cleanup.
 - `node scripts/check-secrets.js`
 - `node packaging/homebrew/verify-formula.js`
 - root and platform `npm pack --dry-run`
+- Release Matrix workflow run `26380726246`
+- Release Smoke workflow run `26380981708`
+- Homebrew Smoke workflow run `26380934049`
+- CI workflow run `26380721222`
+- `gh release view v0.1.5 --repo willamhou/DeepSeekCode`
+- `npm view` for `@deepseek-code/cli@0.1.5` and all five platform packages
+- `npx --cache /tmp/deepseek-npx-cache-015-26380726246 -y @deepseek-code/cli@0.1.5 version`
+- clean-directory `npm install @deepseek-code/cli@0.1.5` smoke
+- `docker buildx imagetools inspect ghcr.io/willamhou/deepseekcode:v0.1.5`
 
 ## 0.1.4 - 2026-05-25
 

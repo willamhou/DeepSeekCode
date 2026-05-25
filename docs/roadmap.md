@@ -24,12 +24,18 @@ DeepSeekCode is now usable for Linux/macOS dogfooding and repository work:
 - verified online multi-file external fixture evidence is tracked for the
   Python invoice, Rust order, and Node task-report samples under
   `.dscode/dogfood/`.
-- `v0.1.4` ships GitHub Release assets for Linux x64, Linux arm64, macOS x64,
-  macOS arm64, and Windows x64, with Release Matrix evidence for public
-  downloads and a verified npm/npx distribution path:
-  https://github.com/willamhou/DeepSeekCode/actions/runs/26379123804
+- `v0.1.5` ships GitHub Release assets for Linux x64, Linux arm64, macOS x64,
+  macOS arm64, and Windows x64, with a fully green Release Matrix covering
+  release assets, npm publishing, Homebrew tap publishing, and GHCR:
+  https://github.com/willamhou/DeepSeekCode/actions/runs/26380726246
+- `v0.1.5` public release archives are verified on hosted Linux x64, Linux
+  arm64, macOS x64, and macOS arm64 by Release Smoke:
+  https://github.com/willamhou/DeepSeekCode/actions/runs/26380981708
+- `v0.1.5` npm/npx packages are published and verified through registry lookup,
+  `npx @deepseek-code/cli@0.1.5 version`, and clean-directory
+  `npm install @deepseek-code/cli@0.1.5`.
 - the public Homebrew tap is verified on macOS x64 and macOS arm64:
-  https://github.com/willamhou/DeepSeekCode/actions/runs/26380319039
+  https://github.com/willamhou/DeepSeekCode/actions/runs/26380934049
 
 The Linux/macOS local code-agent CLI milestone is effectively established. The
 remaining work is mostly external evidence depth, installed service proof, and
@@ -51,11 +57,11 @@ documentation polish.
 
 ### 2. Homebrew And npm Publishing
 
-- Homebrew is published and verified for `v0.1.4`; keep the tap formula aligned
+- Homebrew is published and verified for `v0.1.5`; keep the tap formula aligned
   with GitHub Release archives and `.sha256` files on each tag.
 - `HOMEBREW_TAP_TOKEN` and `HOMEBREW_TAP_REPOSITORY` are configured so future
   tag workflows can update the tap automatically.
-- `v0.1.4` platform npm packages and the root wrapper are published and
+- `v0.1.5` platform npm packages and the root wrapper are published and
   verified. Keep the Release Matrix npm publish path idempotent and keep the
   manual `NPM Publish` retry workflow available for recovery from completed
   release artifacts.

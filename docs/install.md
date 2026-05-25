@@ -23,7 +23,7 @@ npx @deepseek-code/cli quickstart
 
 `v0.1.5` 的 npm/npx 包已发布并通过 registry、`npx` 和干净目录 install smoke
 验证。发布前或升级后可用 `npm view @deepseek-code/cli version` 复查 registry
-可见版本。
+可见版本。当前发布证据见 Release Matrix run `26380726246`。
 
 ## Homebrew
 
@@ -37,7 +37,8 @@ deepseek quickstart
 deepseek doctor --json
 ```
 
-`v0.1.5` 的 tap 已通过 macOS x64 和 macOS arm64 Homebrew Smoke 验证。
+`v0.1.5` 的 tap 已通过 macOS x64 和 macOS arm64 Homebrew Smoke 验证：
+`26380934049`。
 Linux 用户也可以使用下面的 release archive 或源码安装路径；`v0.1.5`
 的 Linux x64 和 Linux arm64 release assets 已经发布。后续 tag workflow 会用
 `HOMEBREW_TAP_TOKEN` 自动刷新 tap metadata，并应继续跑 Homebrew Smoke 复验。
@@ -186,7 +187,9 @@ deepseek dogfood report --limit 20 \
 ## Release Binary
 
 GitHub Release 已经提供 `v0.1.5` 的 Linux x64、Linux arm64、macOS x64、
-macOS arm64 和 Windows x64 包，以及对应 `.sha256` 文件。例如 Linux x64：
+macOS arm64 和 Windows x64 包，以及对应 `.sha256` 文件。Release Smoke run
+`26380981708` 已在 Linux x64、Linux arm64、macOS x64 和 macOS arm64 runner 上
+验证下载、checksum、解压和 install smoke。例如 Linux x64：
 
 先让 CLI 根据当前平台打印下载、checksum 和解压命令：
 

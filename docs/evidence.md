@@ -28,13 +28,13 @@ deepseek version
 deepseek quickstart
 ```
 
-The `v0.1.4` tap formula was published to
-`willamhou/homebrew-deepseekcode` and Homebrew Smoke run `26380319039` verified
+The `v0.1.5` tap formula was published to
+`willamhou/homebrew-deepseekcode` and Homebrew Smoke run `26380934049` verified
 macOS x64 and macOS arm64 install plus `doctor --json`.
 
 ```bash
-deepseek update download-plan --version 0.1.4
-deepseek update release-smoke --version 0.1.4 --json
+deepseek update download-plan --version 0.1.5
+deepseek update release-smoke --version 0.1.5 --json
 ```
 
 ## Model-Backed Demo
@@ -114,14 +114,17 @@ deepseek update publish-status --json
 Hosted release gates build release binaries for Linux x64, Linux arm64, macOS
 x64, macOS arm64, and Windows x64. The release workflow also stages platform npm
 packages and publishes the root npm wrapper when `NPM_TOKEN` is configured.
-The `v0.1.4` Release Matrix run `26379123804` produced the GitHub Release
-assets and GHCR image.
-For `v0.1.4`, the manual `NPM Publish` retry workflow run `26379649992`
-published the platform packages and root wrapper, and registry/clean-machine
-smoke verified `deepseek 0.1.4` through both `npx` and `npm install`.
-The `Publish Homebrew Tap` job in the rerun of `26379123804` updated
-`Formula/deepseek.rb` to `0.1.4`; Homebrew Smoke run `26380319039` verified the
-published tap.
+The `v0.1.5` Release Matrix run `26380726246` produced the GitHub Release
+assets, published npm packages, updated the Homebrew tap, and pushed the GHCR
+image.
+The `v0.1.5` Release Smoke run `26380981708` verified public release archive
+download, checksum, extraction, and install smoke on Linux x64, Linux arm64,
+macOS x64, and macOS arm64.
+For `v0.1.5`, registry and clean-machine smoke verified `deepseek 0.1.5`
+through both `npx @deepseek-code/cli@0.1.5 version` and a clean-directory
+`npm install @deepseek-code/cli@0.1.5`.
+Homebrew Smoke run `26380934049` verified the published tap on macOS x64 and
+macOS arm64.
 
 ## Known Limits
 
