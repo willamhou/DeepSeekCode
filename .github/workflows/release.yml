@@ -465,11 +465,7 @@ jobs:
             echo "NPM_TOKEN is not configured; skipping npm publish."
             exit 0
           fi
-          test -n "$(find npm-dist -name '*.tgz' -print -quit)"
-          for package in npm-dist/*.tgz; do
-            npm publish "$package" --access public
-          done
-          (cd npm && npm publish --access public)
+          node npm/scripts/publish-npm-packages.js --dist npm-dist --root npm
 
   publish-homebrew-tap:
     name: Publish Homebrew Tap

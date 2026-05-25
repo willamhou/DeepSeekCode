@@ -18,6 +18,8 @@ npm/npx distribution and public evidence refresh.
   and Homebrew formula metadata to `0.1.4`.
 - Launch copy now treats npm as the primary distribution push for this patch
   release instead of a deferred caveat.
+- Release npm publishing now uses absolute tarball paths and a reusable manual
+  retry workflow for publishing packages from a completed Release Matrix run.
 
 ### Verification
 
