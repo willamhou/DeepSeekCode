@@ -83,13 +83,18 @@ fn apply_text_replacement_with_session(
             Box::new(error) as Box<dyn std::error::Error>
         }
     })?;
-    let updated = apply_replacement(&original, find, replace, replace_all)?;
+    let (updated, tolerant) = apply_replacement(&original, find, replace, replace_all)?;
     fs::write(path, updated)?;
 
     let mut summary = format!(
-        "Updated {} using {} replacement mode.",
+        "Updated {} using {} replacement mode{}.",
         path.display(),
-        if replace_all { "global" } else { "single" }
+        if replace_all { "global" } else { "single" },
+        if tolerant {
+            " (whitespace-tolerant match)"
+        } else {
+            ""
+        }
     );
     summary.push_str(&format!(
         "\nmeta.replacement_fingerprint={}",
@@ -106,27 +111,78 @@ fn apply_text_replacement_with_session(
     Ok(ToolOutput { summary })
 }
 
+/// Returns the updated text and whether a whitespace-tolerant fallback was used.
 fn apply_replacement(
     original: &str,
     find: &str,
     replace: &str,
     replace_all: bool,
-) -> AppResult<String> {
+) -> AppResult<(String, bool)> {
     if find.is_empty() {
         return Err(app_error("find string cannot be empty"));
     }
 
-    if !original.contains(find) {
-        return Err(app_error("find string not found in target file"));
+    if original.contains(find) {
+        let updated = if replace_all {
+            original.replace(find, replace)
+        } else {
+            original.replacen(find, replace, 1)
+        };
+        return Ok((updated, false));
     }
 
-    let updated = if replace_all {
-        original.replace(find, replace)
-    } else {
-        original.replacen(find, replace, 1)
-    };
+    // Exact match failed. Models frequently reproduce a find block that is
+    // line-for-line correct after trimming but not byte-exact (indentation,
+    // trailing spaces, or imperfectly stripped read_file line-number prefixes).
+    // Most languages ignore that whitespace, so locating the right region is
+    // what matters. Fall back to a trimmed line-block match, but only for a
+    // single edit on LF text and only when exactly one location matches, so we
+    // never guess at an ambiguous target.
+    if !replace_all && !original.contains('\r') {
+        if let Some(updated) = whitespace_tolerant_replacement(original, find, replace) {
+            return Ok((updated, true));
+        }
+    }
 
-    Ok(updated)
+    Err(app_error("find string not found in target file"))
+}
+
+/// Locate `find` in `original` comparing lines by trimmed content, and splice in
+/// `replace`. Returns None unless exactly one line-block matches.
+fn whitespace_tolerant_replacement(original: &str, find: &str, replace: &str) -> Option<String> {
+    let find_lines: Vec<&str> = find.lines().collect();
+    if find_lines.is_empty() {
+        return None;
+    }
+    let original_lines: Vec<&str> = original.lines().collect();
+    let window = find_lines.len();
+    if window > original_lines.len() {
+        return None;
+    }
+
+    let mut match_start: Option<usize> = None;
+    for start in 0..=(original_lines.len() - window) {
+        let block_matches = (0..window)
+            .all(|offset| original_lines[start + offset].trim() == find_lines[offset].trim());
+        if block_matches {
+            if match_start.is_some() {
+                // Ambiguous: more than one trimmed match. Refuse to guess.
+                return None;
+            }
+            match_start = Some(start);
+        }
+    }
+
+    let start = match_start?;
+    let mut result: Vec<&str> = Vec::with_capacity(original_lines.len());
+    result.extend_from_slice(&original_lines[..start]);
+    result.extend(replace.lines());
+    result.extend_from_slice(&original_lines[start + window..]);
+    let mut updated = result.join("\n");
+    if original.ends_with('\n') {
+        updated.push('\n');
+    }
+    Some(updated)
 }
 
 fn replacement_fingerprint(find: &str, replace: &str) -> String {
@@ -708,19 +764,64 @@ mod tests {
 
     #[test]
     fn replaces_first_occurrence_only() {
-        let updated = apply_replacement("a b a", "a", "x", false).unwrap();
+        let (updated, tolerant) = apply_replacement("a b a", "a", "x", false).unwrap();
         assert_eq!(updated, "x b a");
+        assert!(!tolerant, "exact match must not report tolerant fallback");
     }
 
     #[test]
     fn replaces_all_occurrences() {
-        let updated = apply_replacement("a b a", "a", "x", true).unwrap();
+        let (updated, tolerant) = apply_replacement("a b a", "a", "x", true).unwrap();
         assert_eq!(updated, "x b x");
+        assert!(!tolerant);
     }
 
     #[test]
     fn errors_when_find_is_missing() {
         let error = apply_replacement("hello", "missing", "x", false).unwrap_err();
+        assert!(error.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn tolerant_match_applies_across_indentation_difference() {
+        // find reproduces the lines but with the wrong (zero) indentation, as a
+        // model often does after stripping read_file's line-number prefix.
+        let original = "fn f() {\n    let x = 1;\n    x\n}\n";
+        let find = "let x = 1;\nx";
+        let replace = "let x = 2;\n    x";
+        let (updated, tolerant) = apply_replacement(original, find, replace, false).unwrap();
+        assert!(tolerant, "indentation-only mismatch should use tolerant path");
+        assert!(updated.contains("let x = 2;"));
+        assert!(!updated.contains("let x = 1;"));
+        assert!(updated.ends_with('\n'), "trailing newline must be preserved");
+    }
+
+    #[test]
+    fn tolerant_match_refuses_ambiguous_target() {
+        // Two trimmed-equal blocks: refuse to guess which one to edit.
+        let original = "if x:\n    pass\nif x:\n    pass\n";
+        let find = "if x:\npass";
+        let error = apply_replacement(original, find, "CHANGED", false).unwrap_err();
+        assert!(error.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn tolerant_match_skipped_for_crlf_files() {
+        // CRLF files are left to exact matching so the fallback never rewrites
+        // line endings across the whole file.
+        let original = "  alpha\r\n  beta\r\n";
+        let find = "alpha\nbeta";
+        let error = apply_replacement(original, find, "X", false).unwrap_err();
+        assert!(error.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn tolerant_match_not_used_for_replace_all() {
+        // Global replace stays strict; a non-exact find errors instead of
+        // tolerant-matching at one site.
+        let original = "  a = 1\n  a = 1\n";
+        let find = "a = 1\na = 1";
+        let error = apply_replacement(original, find, "X", true).unwrap_err();
         assert!(error.to_string().contains("not found"));
     }
 
