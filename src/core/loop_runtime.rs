@@ -489,7 +489,15 @@ impl AgentLoop {
         // model retries cannot duplicate writes, shell actions, MCP calls, or task
         // mutations.
         let mut recent_call_fingerprints: Vec<String> = Vec::new();
+        // Fix A: parallel track of inspection targets (path/query), so re-reads
+        // that vary only by size caps still count as repeats.
+        let mut recent_inspection_fingerprints: Vec<String> = Vec::new();
         const REPEAT_WINDOW: usize = 3;
+        // Fix B: force a decision once the model has inspected this many tool
+        // steps in a row without making any edit.
+        const INSPECTION_WITHOUT_EDIT_LIMIT: usize = 4;
+        let mut steps_without_edit: usize = 0;
+        let mut emitted_stuck_directive = false;
         for step in 0..steps {
             check_cancelled(cancel_check.as_ref())?;
             if session_budget_microusd > 0 {
@@ -629,6 +637,8 @@ impl AgentLoop {
             };
 
             let mut tool_call_index = 0;
+            let mut step_attempted_tool = false;
+            let mut step_executed_edit = false;
             while tool_call_index < tool_calls.len() {
                 if let Some(consumed) = maybe_execute_parallel_safe_chunk(
                     &tool_calls[tool_call_index..],
@@ -646,6 +656,7 @@ impl AgentLoop {
                     &mut recent_call_fingerprints,
                     REPEAT_WINDOW,
                 )? {
+                    step_attempted_tool = true;
                     tool_call_index += consumed;
                     continue;
                 }
@@ -655,6 +666,7 @@ impl AgentLoop {
                     mut input,
                 } = tool_calls[tool_call_index].clone();
                 tool_call_index += 1;
+                step_attempted_tool = true;
                 check_cancelled(cancel_check.as_ref())?;
                 let mut event_input = input.args.clone();
                 let mut fingerprint = tool_call_fingerprint(&tool_name, &event_input);
@@ -682,6 +694,25 @@ impl AgentLoop {
                         .filter(|fp| **fp == fingerprint)
                         .count();
                 }
+                // Fix A: read_file/search_text/list_files have no advancing
+                // cursor, so re-issuing the same target with a different
+                // max_lines/limit returns a prefix of identical content. The
+                // exact-args fingerprint misses this (a different max_lines looks
+                // "new"), so also count repeats by inspection target.
+                let inspection_target = read_inspection_target(&tool_name, &event_input);
+                let inspection_count_in_window = inspection_target
+                    .as_ref()
+                    .map(|target| {
+                        recent_inspection_fingerprints
+                            .iter()
+                            .rev()
+                            .take(REPEAT_WINDOW)
+                            .filter(|fp| *fp == target)
+                            .count()
+                    })
+                    .unwrap_or(0);
+                let effective_repeat_count = same_count_in_window.max(inspection_count_in_window);
+
                 emit_tool_call(run_events.as_ref(), &tool_name, &event_input);
 
                 // Phase 10c-2: compute fingerprint and check window BEFORE executing.
@@ -689,13 +720,20 @@ impl AgentLoop {
                 // Trim to keep memory bounded over long runs (only the last
                 // REPEAT_WINDOW are ever read).
                 trim_recent_call_fingerprints(&mut recent_call_fingerprints, REPEAT_WINDOW);
+                if let Some(target) = &inspection_target {
+                    recent_inspection_fingerprints.push(target.clone());
+                    trim_recent_call_fingerprints(
+                        &mut recent_inspection_fingerprints,
+                        REPEAT_WINDOW,
+                    );
+                }
 
                 let repeat_threshold = repeat_short_circuit_threshold(&tool_name, &event_input);
-                if same_count_in_window >= repeat_threshold {
+                if effective_repeat_count >= repeat_threshold {
                     let stuck_msg = repeat_short_circuit_message(
                         &tool_name,
                         &event_input,
-                        same_count_in_window + 1,
+                        effective_repeat_count + 1,
                         REPEAT_WINDOW,
                     );
                     if let Some(renderer) = renderer.as_mut() {
@@ -725,11 +763,21 @@ impl AgentLoop {
                 // Observation BEFORE running the tool. Avoids burying the warning in the
                 // tail of a long tool output that head_trim / Todos summarize would eat,
                 // and works for both Ok and Err result paths.
-                if same_count_in_window == 1 && repeat_threshold > 1 {
+                if effective_repeat_count == 1 && repeat_threshold > 1 {
                     let warning = format!(
-                            "⚠ stuck-warning: '{tool_name}' was called with the same args last step. If output is unchanged, try a DIFFERENT approach (todo_write to plan, gh/curl for research, different path/args, or move to the next step)."
+                            "⚠ stuck-warning: '{tool_name}' was called on the same target last step. If output is unchanged, try a DIFFERENT approach (apply_patch to make the fix, todo_write to plan, a different path/args, or move to the next step)."
                         );
                     observations.push(Observation::ok("stuck-warning", warning));
+                }
+
+                // After an edit attempt the file may change and a corrective
+                // re-read is legitimate, so clear the repeat windows. Otherwise
+                // Fix A would block the fresh read the model needs to fix a
+                // non-matching patch anchor, trapping it between a failed patch
+                // and a suppressed re-read.
+                if is_edit_tool(&tool_name) {
+                    recent_inspection_fingerprints.clear();
+                    recent_call_fingerprints.clear();
                 }
 
                 match hooks.pre_tool_use(&context.task, &tool_name, &input) {
@@ -938,6 +986,9 @@ impl AgentLoop {
                 match tool_result {
                     Ok(mut output) => {
                         check_cancelled(cancel_check.as_ref())?;
+                        if is_edit_tool(&tool_name) {
+                            step_executed_edit = true;
+                        }
                         if tool_name == "dispatch_subagent" {
                             if let Some(delegated_task) = event_input.get("task") {
                                 if todos
@@ -1048,6 +1099,30 @@ impl AgentLoop {
                         );
                     }
                 }
+            }
+
+            // Fix B: after sustained inspection with no edit, force a decision.
+            // Emitted as a failure observation so compaction never supersedes it.
+            if step_executed_edit {
+                steps_without_edit = 0;
+                emitted_stuck_directive = false;
+            } else if step_attempted_tool {
+                steps_without_edit += 1;
+            }
+            if steps_without_edit >= INSPECTION_WITHOUT_EDIT_LIMIT && !emitted_stuck_directive {
+                let directive = format!(
+                    "⛔ stuck-directive: {steps_without_edit} tool steps have run with no edit. You already have enough context — make the change now with apply_patch (or write_file), or finish and state why no edit is needed. Do NOT read or search the same target again."
+                );
+                if let Some(renderer) = renderer.as_mut() {
+                    renderer.paint_tool_result(
+                        crate::ui::stream::ToolResultKind::Failed,
+                        "stuck-directive",
+                        "stuck",
+                        &directive,
+                    );
+                }
+                observations.push(Observation::failed("stuck-directive", directive));
+                emitted_stuck_directive = true;
             }
         }
 
@@ -1207,6 +1282,48 @@ fn tool_call_fingerprint(tool_name: &str, event_input: &BTreeMap<String, String>
             .map(|(key, value)| format!("{key}={value}"))
             .collect::<Vec<_>>()
             .join("|")
+    )
+}
+
+/// Identity-only fingerprint for read-only inspection tools.
+///
+/// read_file/search_text/list_files have no advancing cursor — they only vary
+/// by size caps (max_lines, limit, max_results), so re-issuing the same target
+/// returns a prefix of identical content. The exact-args fingerprint misses
+/// this (a different max_lines looks "new"), so repeat detection also keys on
+/// the inspection target returned here. Returns None for tools without a
+/// redundant-by-target identity; those rely on the exact fingerprint instead.
+fn read_inspection_target(
+    tool_name: &str,
+    event_input: &BTreeMap<String, String>,
+) -> Option<String> {
+    match tool_name {
+        "read_file" => event_input
+            .get("path")
+            .map(|path| format!("read_file:{path}")),
+        "search_text" | "grep_files" => event_input
+            .get("query")
+            .or_else(|| event_input.get("pattern"))
+            .or_else(|| event_input.get("q"))
+            .map(|query| format!("search_text:{query}")),
+        "list_files" | "list_dir" => {
+            let root = event_input
+                .get("root")
+                .or_else(|| event_input.get("path"))
+                .map(String::as_str)
+                .unwrap_or(".");
+            Some(format!("list_files:{root}"))
+        }
+        _ => None,
+    }
+}
+
+/// Tools that mutate workspace files. A step that runs one of these resets the
+/// "inspection without edit" counter that drives the stuck-directive.
+fn is_edit_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "apply_patch" | "write_file" | "edit_file" | "fim_edit"
     )
 }
 
@@ -1806,6 +1923,13 @@ fn derive_recovery_hint_after_failure(
     }
 
     match tool_name {
+        "apply_patch" | "write_file" | "edit_file" | "fim_edit" => format_recovery_hint(
+            tool_name,
+            "read_file",
+            "the edit did not apply: the find text must match the file byte-for-byte. Read the target once, then retry apply_patch with the SMALLEST unique anchor (1-3 lines copied exactly, no line-number prefixes) instead of reproducing a whole function or block",
+            None,
+            None,
+        ),
         "read_file" => format_recovery_hint(
             "read_file",
             preferred_search_or_listing_tool(available_tools)?,
@@ -3968,6 +4092,180 @@ mod cr1_regression_test {
             result.tool_events[2].status,
             crate::model::protocol::ObservationStatus::Failed
         ));
+    }
+
+    #[test]
+    fn read_inspection_target_ignores_size_caps_and_skips_non_inspection_tools() {
+        let mut read = BTreeMap::new();
+        read.insert("path".to_string(), "src/lib.rs".to_string());
+        read.insert("max_lines".to_string(), "200".to_string());
+        let mut read_smaller = BTreeMap::new();
+        read_smaller.insert("path".to_string(), "src/lib.rs".to_string());
+        read_smaller.insert("max_lines".to_string(), "40".to_string());
+        // Same path, different size cap -> identical inspection target.
+        assert_eq!(
+            super::read_inspection_target("read_file", &read),
+            super::read_inspection_target("read_file", &read_smaller)
+        );
+        assert_eq!(
+            super::read_inspection_target("read_file", &read).as_deref(),
+            Some("read_file:src/lib.rs")
+        );
+        // apply_patch is not a redundant-by-target inspection tool.
+        assert_eq!(super::read_inspection_target("apply_patch", &read), None);
+        assert!(super::is_edit_tool("apply_patch"));
+        assert!(!super::is_edit_tool("read_file"));
+    }
+
+    /// Emits `read_file` against the SAME path but a DIFFERENT `max_lines` each
+    /// step, so the exact-args fingerprint differs every time. Without Fix A the
+    /// model could re-read forever; with it the redundant re-read short-circuits.
+    struct VaryingReadScriptedClient {
+        max_calls: usize,
+        calls: RefCell<usize>,
+    }
+
+    impl ModelClient for VaryingReadScriptedClient {
+        fn respond(
+            &self,
+            _input: ModelRequest,
+            _events: &mut dyn StreamEvents,
+        ) -> crate::error::AppResult<(ModelResponse, Option<TokenUsage>)> {
+            let n = *self.calls.borrow();
+            *self.calls.borrow_mut() = n + 1;
+            let action = if n < self.max_calls {
+                let mut tin = ToolInput::new();
+                tin.args
+                    .insert("path".to_string(), "src/lib.rs".to_string());
+                let max_lines = match n {
+                    0 => "200",
+                    1 => "100",
+                    _ => "40",
+                };
+                tin.args
+                    .insert("max_lines".to_string(), max_lines.to_string());
+                ModelAction::CallTool {
+                    tool_name: "read_file".to_string(),
+                    input: tin,
+                }
+            } else {
+                ModelAction::Finish
+            };
+            Ok((
+                ModelResponse {
+                    message: format!("step {n}"),
+                    action,
+                },
+                None,
+            ))
+        }
+    }
+
+    #[test]
+    fn fix_a_redundant_reread_with_varied_size_cap_short_circuits() {
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("dummy".to_string(), None);
+        let client = VaryingReadScriptedClient {
+            max_calls: 5,
+            calls: RefCell::new(0),
+        };
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 4,
+                    initial_observations: Vec::new(),
+                    todos: Rc::new(RefCell::new(TodoList::default())),
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+        // step 1 + 2 read (different max_lines), step 3 must short-circuit even
+        // though the exact args differ, because the inspection target repeats.
+        assert!(result.tool_events.len() >= 3, "expected >=3 tool events");
+        let third = &result.tool_events[2].output;
+        assert!(
+            third.contains("repeated identical tool call detected"),
+            "3rd same-target read must short-circuit despite varied max_lines: {third}"
+        );
+        assert!(matches!(
+            result.tool_events[2].status,
+            crate::model::protocol::ObservationStatus::Failed
+        ));
+    }
+
+    /// Reads a DIFFERENT path each step (so Fix A never triggers) and never
+    /// edits, modeling the "understands but won't act" loop.
+    struct InspectionNoEditClient {
+        captured_observations: RefCell<Vec<Vec<crate::model::protocol::Observation>>>,
+        max_calls: usize,
+        calls: RefCell<usize>,
+    }
+
+    impl ModelClient for InspectionNoEditClient {
+        fn respond(
+            &self,
+            input: ModelRequest,
+            _events: &mut dyn StreamEvents,
+        ) -> crate::error::AppResult<(ModelResponse, Option<TokenUsage>)> {
+            self.captured_observations
+                .borrow_mut()
+                .push(input.observations.clone());
+            let n = *self.calls.borrow();
+            *self.calls.borrow_mut() = n + 1;
+            let action = if n < self.max_calls {
+                let mut tin = ToolInput::new();
+                tin.args
+                    .insert("path".to_string(), format!("src/does_not_exist_{n}.rs"));
+                ModelAction::CallTool {
+                    tool_name: "read_file".to_string(),
+                    input: tin,
+                }
+            } else {
+                ModelAction::Finish
+            };
+            Ok((
+                ModelResponse {
+                    message: format!("step {n}"),
+                    action,
+                },
+                None,
+            ))
+        }
+    }
+
+    #[test]
+    fn fix_b_sustained_inspection_without_edit_emits_stuck_directive() {
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("dummy".to_string(), None);
+        let client = InspectionNoEditClient {
+            captured_observations: RefCell::new(Vec::new()),
+            max_calls: 8,
+            calls: RefCell::new(0),
+        };
+        let _ = agent.run_with_client(
+            context,
+            AgentLoopOptions {
+                steps: 8,
+                initial_observations: Vec::new(),
+                todos: Rc::new(RefCell::new(TodoList::default())),
+                ..AgentLoopOptions::default()
+            },
+            &client,
+        );
+        let captures = client.captured_observations.borrow();
+        let saw_directive = captures.iter().any(|obs| {
+            obs.iter()
+                .any(|o| o.tool_name == "stuck-directive" && o.is_failure())
+        });
+        assert!(
+            saw_directive,
+            "after sustained inspection with no edit, a later request must carry a \
+             stuck-directive failure observation"
+        );
     }
 
     #[test]
