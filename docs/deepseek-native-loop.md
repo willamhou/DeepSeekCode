@@ -499,8 +499,9 @@ DeepSeek-first defaults.
 
 Status on 2026-05-24: initial parallel-safe read dispatch landed. The tool
 registry now exposes conservative `read_only` and `parallel_safe` metadata.
-The agent loop splits same-turn batches into contiguous safe chunks and runs
-only opt-in read tools concurrently when hooks and permission prompts are not in
+OpenAI-compatible requests now allow provider same-turn tool batches, and the
+agent loop splits those batches into contiguous safe chunks and runs only
+opt-in read tools concurrently when hooks and permission prompts are not in
 play. The parallel-safe local read set is `list_files`, `list_dir`,
 `read_file`, `retrieve_tool_result`, `search_text`, `grep_files`,
 `file_search`, `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame`,

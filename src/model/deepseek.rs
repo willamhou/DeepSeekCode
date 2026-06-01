@@ -3826,7 +3826,7 @@ fn openai_tool_fields_with_schema_mode(
         "\"tool_choice\":\"auto\","
     };
     format!(
-        "{}\"parallel_tool_calls\":false,\"tools\":{},",
+        "{}\"parallel_tool_calls\":true,\"tools\":{},",
         tool_choice_field,
         build_openai_tools_with_schema_mode(names, schema_flattening)
     )
@@ -6309,7 +6309,7 @@ mod tests {
 
         let openai = openai_tool_fields(&["read_file".to_string()], ReasoningTier::Off);
         assert!(openai.contains("\"tool_choice\":\"auto\""));
-        assert!(openai.contains("\"parallel_tool_calls\":false"));
+        assert!(openai.contains("\"parallel_tool_calls\":true"));
         assert!(openai.contains("\"tools\":["));
 
         let anthropic = anthropic_tool_fields(&["read_file".to_string()], ReasoningTier::Off);
@@ -7950,7 +7950,7 @@ mod tests {
 
         let openai = openai_tool_fields(&names, ReasoningTier::Off);
         assert!(openai.contains("\"tool_choice\":\"auto\""));
-        assert!(openai.contains("\"parallel_tool_calls\":false"));
+        assert!(openai.contains("\"parallel_tool_calls\":true"));
         assert!(openai.contains("\"tools\":["));
 
         let anthropic = anthropic_tool_fields(&names, ReasoningTier::Off);
@@ -11593,7 +11593,7 @@ diff --git a/src/cli/app.rs b/src/cli/app.rs\n";
 
     #[test]
     fn parse_openai_stream_preserves_parallel_tool_calls() {
-        // Some OpenAI-compatible gateways may ignore `parallel_tool_calls:false`.
+        // OpenAI-compatible gateways may emit same-turn batches when requested.
         // Preserve every indexed call so the agent loop can execute the batch and
         // return all observations on the next model turn.
         let body = concat!(
