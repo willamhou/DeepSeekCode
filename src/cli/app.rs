@@ -5936,11 +5936,7 @@ fn parse_dogfood_report_args(args: Vec<String>) -> Result<DogfoodReportArgs, Str
                 continue;
             }
             "--limit" if index + 1 < args.len() => {
-                if let Ok(limit) = args[index + 1].parse::<usize>() {
-                    if (1..=500).contains(&limit) {
-                        report.limit = Some(limit);
-                    }
-                }
+                report.limit = Some(parse_required_usize("--limit", &args[index + 1], 1, 500)?);
                 index += 2;
                 continue;
             }
@@ -6024,7 +6020,9 @@ fn parse_dogfood_report_args(args: Vec<String>) -> Result<DogfoodReportArgs, Str
                 index += 2;
                 continue;
             }
-            "--require-min-runs"
+            "--out"
+            | "--limit"
+            | "--require-min-runs"
             | "--require-success-rate"
             | "--require-live-runs"
             | "--require-live-success-rate"
@@ -6035,9 +6033,12 @@ fn parse_dogfood_report_args(args: Vec<String>) -> Result<DogfoodReportArgs, Str
             | "--require-live-category" => {
                 return Err(format!("{} requires a value", args[index]));
             }
-            _ => {}
+            other => {
+                return Err(format!(
+                    "unknown flag for `dogfood report`: {other}; expected --out|--limit|--require-min-runs|--require-success-rate|--require-live-runs|--require-live-success-rate|--require-live-recent-days|--require-external-write-fixtures|--require-recent-clean|--require-category|--require-live-category"
+                ));
+            }
         }
-        index += 1;
     }
 
     Ok(report)
@@ -7040,6 +7041,44 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.contains("--require-category min-runs"));
+    }
+
+    #[test]
+    fn dogfood_report_rejects_unknown_flags() {
+        let error =
+            parse_dogfood_subcommand(vec!["report".to_string(), "--json".to_string()]).unwrap_err();
+        assert!(error.contains("unknown flag for `dogfood report`: --json"));
+        assert!(error.contains("--require-live-recent-days"));
+    }
+
+    #[test]
+    fn dogfood_report_rejects_invalid_limit() {
+        let zero = parse_dogfood_subcommand(vec![
+            "report".to_string(),
+            "--limit".to_string(),
+            "0".to_string(),
+        ])
+        .unwrap_err();
+        assert!(zero.contains("--limit requires an integer between 1 and 500"));
+
+        let non_number = parse_dogfood_subcommand(vec![
+            "report".to_string(),
+            "--limit".to_string(),
+            "many".to_string(),
+        ])
+        .unwrap_err();
+        assert!(non_number.contains("--limit requires an integer between 1 and 500"));
+    }
+
+    #[test]
+    fn dogfood_report_reports_missing_values() {
+        let limit = parse_dogfood_subcommand(vec!["report".to_string(), "--limit".to_string()])
+            .unwrap_err();
+        assert_eq!(limit, "--limit requires a value");
+
+        let out =
+            parse_dogfood_subcommand(vec!["report".to_string(), "--out".to_string()]).unwrap_err();
+        assert_eq!(out, "--out requires a value");
     }
 
     #[test]
