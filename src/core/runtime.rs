@@ -3445,7 +3445,7 @@ fn pricing_for_model(model: &str) -> Option<DeepSeekPricing> {
             cache_hit_microusd_per_million: 3_625,
             cache_miss_microusd_per_million: 435_000,
             output_microusd_per_million: 870_000,
-            source: "DeepSeek V4 Pro official USD pricing, 75% promo through 2026-05-31",
+            source: "DeepSeek V4 Pro official USD pricing, adjusted to 1/4 of original after 2026-05-31 promotion",
         });
     }
     if model.contains("deepseek-v4-flash")
@@ -4025,6 +4025,25 @@ mod tests {
             reloaded.thread_budget_snapshot(&left.id).unwrap().unwrap(),
             snapshot
         );
+    }
+
+    #[test]
+    fn deepseek_v4_pricing_sources_match_post_promotion_rates() {
+        let pro =
+            estimate_deepseek_cost_microusd("deepseek-v4-pro", 1_000_000, 1_000_000, 1_000_000)
+                .expect("V4 Pro pricing should be recognized");
+        assert_eq!(pro.input, 438_625);
+        assert_eq!(pro.output, 870_000);
+        assert_eq!(pro.total, 1_308_625);
+        assert!(pro.source.contains("adjusted to 1/4 of original"));
+        assert!(!pro.source.contains("through 2026-05-31"));
+
+        let flash =
+            estimate_deepseek_cost_microusd("deepseek-v4-flash", 1_000_000, 1_000_000, 1_000_000)
+                .expect("V4 Flash pricing should be recognized");
+        assert_eq!(flash.input, 142_800);
+        assert_eq!(flash.output, 280_000);
+        assert_eq!(flash.total, 422_800);
     }
 
     #[test]
