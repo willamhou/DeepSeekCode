@@ -593,6 +593,47 @@ done"#;
     }
 
     #[test]
+    fn scavenge_caps_repaired_call_count() {
+        let mut text = String::new();
+        for index in 0..(MAX_SCAVENGED_CALLS + 2) {
+            text.push_str(&format!(
+                r#"{{"tool_name":"read_file","arguments":{{"path":"src/{index}.rs"}}}}"#
+            ));
+        }
+
+        let (calls, notes) = scavenge_tool_calls(&text, &["read_file"]);
+        assert_eq!(calls.len(), MAX_SCAVENGED_CALLS);
+        assert_eq!(notes.len(), MAX_SCAVENGED_CALLS);
+        assert_eq!(
+            calls.last().and_then(|call| call.input.args.get("path")),
+            Some(&format!("src/{}.rs", MAX_SCAVENGED_CALLS - 1))
+        );
+    }
+
+    #[test]
+    fn scavenge_caps_scanned_text_size() {
+        let beyond_limit_call =
+            r#"{"tool_name":"read_file","arguments":{"path":"after-limit.rs"}}"#;
+        let text = format!(
+            "{}{}",
+            "x".repeat(MAX_SCAVENGE_BYTES + 8),
+            beyond_limit_call
+        );
+
+        let (calls, notes) = scavenge_tool_calls(&text, &["read_file"]);
+        assert!(calls.is_empty());
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn repair_truncated_json_rejects_oversized_arguments() {
+        let oversized = format!(r#"{{"path":"{}""#, "a".repeat(MAX_REPAIRED_ARGUMENT_BYTES));
+
+        assert!(repair_truncated_json(&oversized).is_none());
+        assert!(parse_tool_arguments_with_repair(&oversized).is_err());
+    }
+
+    #[test]
     fn flattens_nested_object_schema_and_re_nests_arguments() {
         let properties = r#"{"target":{"type":"object","description":"Target file","properties":{"path":{"type":"string","description":"Path"},"range":{"type":"object","properties":{"start":{"type":"string"},"end":{"type":"string"}},"required":["start"]}},"required":["path","range"]},"dry_run":{"type":"string"}}"#;
         let required = r#"["target"]"#;
