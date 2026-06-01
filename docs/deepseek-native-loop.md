@@ -540,8 +540,9 @@ summaries with stable labels for thread, turn, item, usage, prompt-layer,
 permission, goal, and task events. `deepseek events diff <left-thread>
 <right-thread>` compares two runtime threads for event count, estimated cost,
 prompt cache hit rate, tool calls, failed tool calls, file modification evidence
-when paths were recorded, repair events, repeated-tool suppressions, and event
-kind deltas. Both commands support `--json` for regression evidence and demos.
+when paths were recorded in TUI text items or ACP/MCP structured tool-call JSON,
+repair events, repeated-tool suppressions, and event kind deltas. Both commands
+support `--json` for regression evidence and demos.
 `deepseek dogfood repair-cache-evidence` creates a deterministic local
 before/after run that exercises `tool_call_repair`, prompt-layer events, cache
 hit/miss usage, `events replay`, `events diff`, and `stats`. The Release Matrix

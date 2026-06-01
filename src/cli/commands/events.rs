@@ -6,7 +6,8 @@ use crate::config::load::load_or_default;
 use crate::core::runtime::{json_array, json_object, RuntimeEvent, RuntimeStore, UsageRecord};
 use crate::error::AppResult;
 use crate::util::json::{
-    json_as_array, json_as_object, json_as_string, json_as_u64, json_value_to_string, JsonValue,
+    json_as_array, json_as_object, json_as_string, json_as_u64, json_value_to_string,
+    parse_json_value, JsonValue,
 };
 
 const DEFAULT_REPLAY_LIMIT: usize = 200;
@@ -232,7 +233,7 @@ fn thread_event_metrics(store: &RuntimeStore, thread_id: &str) -> AppResult<Thre
             if is_file_mutating_tool(&tool_name) {
                 metrics.file_mutating_tool_calls =
                     metrics.file_mutating_tool_calls.saturating_add(1);
-                if let Some(path) = file_path_from_tool_item(&item.content) {
+                for path in file_paths_from_tool_item(&item.content) {
                     modified_files.insert(path);
                 }
             }
@@ -732,53 +733,161 @@ fn files_modified_delta(left: &ThreadEventMetrics, right: &ThreadEventMetrics) -
 }
 
 fn tool_name_from_item_content(content: &str) -> Option<String> {
-    content.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("tool:")
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    })
+    content
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("tool:")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| tool_name_from_json_item_content(content))
+}
+
+fn tool_name_from_json_item_content(content: &str) -> Option<String> {
+    let parsed = parse_json_value(content.trim()).ok()?;
+    let root = json_as_object(&parsed)?;
+    root.get("tool")
+        .or_else(|| root.get("name"))
+        .and_then(json_as_string)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn is_file_mutating_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "apply_patch" | "write_file" | "edit_file" | "fim_edit"
+        "apply_patch"
+            | "write_file"
+            | "edit_file"
+            | "fim_edit"
+            | "delete_file"
+            | "copy_file"
+            | "move_file"
+            | "pandoc_convert"
+            | "revert_turn"
     )
 }
 
-fn file_path_from_tool_item(content: &str) -> Option<String> {
+fn file_paths_from_tool_item(content: &str) -> Vec<String> {
+    let tool_name = tool_name_from_item_content(content);
+    let mut paths = file_paths_from_json_item_content(content, tool_name.as_deref());
+    if !paths.is_empty() {
+        return paths;
+    }
     for line in content.lines() {
         let trimmed = line.trim();
         if let Some(target) = trimmed.strip_prefix("target:") {
             let target = target.trim();
             if !target.is_empty() {
-                return Some(target.to_string());
+                push_unique_path(&mut paths, target);
             }
         }
         if let Some(input) = trimmed.strip_prefix("input:") {
-            if let Some(path) = path_from_input_fields(input) {
-                return Some(path);
+            push_paths_from_input_fields(&mut paths, tool_name.as_deref(), input);
+        }
+    }
+    paths
+}
+
+fn file_paths_from_json_item_content(content: &str, tool_name: Option<&str>) -> Vec<String> {
+    let Some(parsed) = parse_json_value(content.trim()).ok() else {
+        return Vec::new();
+    };
+    let Some(root) = json_as_object(&parsed) else {
+        return Vec::new();
+    };
+    let tool_name = tool_name
+        .or_else(|| {
+            root.get("tool")
+                .or_else(|| root.get("name"))
+                .and_then(json_as_string)
+        })
+        .unwrap_or("");
+    let Some(arguments) = root.get("arguments").and_then(json_as_object) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    push_paths_from_json_arguments(&mut paths, tool_name, arguments);
+    paths
+}
+
+fn push_paths_from_json_arguments(
+    paths: &mut Vec<String>,
+    tool_name: &str,
+    arguments: &BTreeMap<String, JsonValue>,
+) {
+    match tool_name {
+        "copy_file" => push_json_path(paths, arguments, "destination_path"),
+        "move_file" => {
+            push_json_path(paths, arguments, "source_path");
+            push_json_path(paths, arguments, "destination_path");
+        }
+        "pandoc_convert" => push_json_path(paths, arguments, "output_path"),
+        _ => {
+            for key in [
+                "path",
+                "target",
+                "file",
+                "output_path",
+                "destination_path",
+                "source_path",
+            ] {
+                push_json_path(paths, arguments, key);
             }
         }
     }
-    None
 }
 
-fn path_from_input_fields(input: &str) -> Option<String> {
+fn push_json_path(paths: &mut Vec<String>, arguments: &BTreeMap<String, JsonValue>, key: &str) {
+    if let Some(value) = arguments.get(key).and_then(json_as_string) {
+        push_unique_path(paths, value);
+    }
+}
+
+fn push_paths_from_input_fields(paths: &mut Vec<String>, tool_name: Option<&str>, input: &str) {
+    let mut fields = BTreeMap::new();
     for field in input.split(", ") {
         let Some((key, value)) = field.split_once('=') else {
             continue;
         };
-        if matches!(key.trim(), "path" | "target" | "file") {
-            let value = value.trim();
-            if !value.is_empty() && value != "{}" {
-                return Some(value.to_string());
+        fields.insert(key.trim().to_string(), value.trim().to_string());
+    }
+    match tool_name.unwrap_or("") {
+        "copy_file" => push_text_path(paths, &fields, "destination_path"),
+        "move_file" => {
+            push_text_path(paths, &fields, "source_path");
+            push_text_path(paths, &fields, "destination_path");
+        }
+        "pandoc_convert" => push_text_path(paths, &fields, "output_path"),
+        _ => {
+            for key in [
+                "path",
+                "target",
+                "file",
+                "output_path",
+                "destination_path",
+                "source_path",
+            ] {
+                push_text_path(paths, &fields, key);
             }
         }
     }
-    None
+}
+
+fn push_text_path(paths: &mut Vec<String>, fields: &BTreeMap<String, String>, key: &str) {
+    if let Some(value) = fields.get(key) {
+        push_unique_path(paths, value);
+    }
+}
+
+fn push_unique_path(paths: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if value.is_empty() || value == "{}" || paths.iter().any(|path| path == value) {
+        return;
+    }
+    paths.push(value.to_string());
 }
 
 fn delta_i64(right: u64, left: u64) -> i64 {
@@ -1027,6 +1136,146 @@ mod tests {
         assert!(rendered.contains("failed_tool_call_delta: +1"));
         assert!(rendered.contains("files_modified_delta: +1"));
         assert!(rendered.contains("repair_count_delta: +1"));
+    }
+
+    #[test]
+    fn diff_summary_extracts_structured_acp_file_write_paths() {
+        let store = temp_store("diff-acp-json-files");
+        let left = thread(&store, "Left");
+        let right = thread(&store, "Right");
+        let right_turn = store
+            .append_turn(&right.id, "assistant".to_string(), "right".to_string())
+            .unwrap();
+
+        store
+            .append_item(
+                &right.id,
+                Some(&right_turn.id),
+                "tool_call".to_string(),
+                Some("assistant".to_string()),
+                json_value_to_string(&json_object([
+                    ("tool", JsonValue::String("write_file".to_string())),
+                    (
+                        "arguments",
+                        json_object([
+                            ("path", JsonValue::String("src/acp.rs".to_string())),
+                            ("content", JsonValue::String("fn main() {}\n".to_string())),
+                        ]),
+                    ),
+                ])),
+                "completed".to_string(),
+            )
+            .unwrap();
+
+        let summary = events_diff_summary(
+            &store,
+            &EventsDiffArgs {
+                left_thread: left.id,
+                right_thread: right.id,
+                json: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.right.file_mutating_tool_calls, 1);
+        assert_eq!(summary.right.files_modified, vec!["src/acp.rs"]);
+        let root = diff_summary_to_json(&summary);
+        let JsonValue::Object(root) = root else {
+            panic!("diff summary should be an object");
+        };
+        assert!(matches!(
+            root.get("files_modified_delta"),
+            Some(JsonValue::Number(value)) if value == "1"
+        ));
+    }
+
+    #[test]
+    fn diff_summary_tracks_mcp_copy_move_delete_targets() {
+        let store = temp_store("diff-mcp-file-targets");
+        let left = thread(&store, "Left");
+        let right = thread(&store, "Right");
+        let right_turn = store
+            .append_turn(&right.id, "assistant".to_string(), "right".to_string())
+            .unwrap();
+
+        for (tool, arguments) in [
+            (
+                "copy_file",
+                json_object([
+                    (
+                        "source_path",
+                        JsonValue::String("src/source.rs".to_string()),
+                    ),
+                    (
+                        "destination_path",
+                        JsonValue::String("src/copied.rs".to_string()),
+                    ),
+                ]),
+            ),
+            (
+                "move_file",
+                json_object([
+                    ("source_path", JsonValue::String("src/old.rs".to_string())),
+                    (
+                        "destination_path",
+                        JsonValue::String("src/new.rs".to_string()),
+                    ),
+                ]),
+            ),
+            (
+                "delete_file",
+                json_object([("path", JsonValue::String("src/delete.rs".to_string()))]),
+            ),
+            (
+                "pandoc_convert",
+                json_object([
+                    (
+                        "source_path",
+                        JsonValue::String("docs/source.md".to_string()),
+                    ),
+                    ("target_format", JsonValue::String("html".to_string())),
+                    (
+                        "output_path",
+                        JsonValue::String("docs/source.html".to_string()),
+                    ),
+                ]),
+            ),
+        ] {
+            store
+                .append_item(
+                    &right.id,
+                    Some(&right_turn.id),
+                    "tool_call".to_string(),
+                    Some("assistant".to_string()),
+                    json_value_to_string(&json_object([
+                        ("tool", JsonValue::String(tool.to_string())),
+                        ("arguments", arguments),
+                    ])),
+                    "completed".to_string(),
+                )
+                .unwrap();
+        }
+
+        let summary = events_diff_summary(
+            &store,
+            &EventsDiffArgs {
+                left_thread: left.id,
+                right_thread: right.id,
+                json: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.right.file_mutating_tool_calls, 4);
+        assert_eq!(
+            summary.right.files_modified,
+            vec![
+                "docs/source.html".to_string(),
+                "src/copied.rs".to_string(),
+                "src/delete.rs".to_string(),
+                "src/new.rs".to_string(),
+                "src/old.rs".to_string(),
+            ]
+        );
+        assert!(render_diff_summary(&summary).contains("files_modified_delta: +5"));
     }
 
     #[test]
