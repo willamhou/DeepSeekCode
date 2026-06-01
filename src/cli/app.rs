@@ -5367,12 +5367,10 @@ fn parse_dogfood_subcommand(args: Vec<String>) -> Result<DogfoodAction, String> 
         }
         "report" => parse_dogfood_report_args(rest).map(DogfoodAction::Report),
         "export-benchmark" | "export-bench" => {
-            Ok(DogfoodAction::ExportBenchmark(parse_dogfood_export_args(rest)))
+            parse_dogfood_export_args(rest).map(DogfoodAction::ExportBenchmark)
         }
         "promote-benchmark" | "promote-bench" => {
-            Ok(DogfoodAction::PromoteBenchmark(parse_dogfood_promote_args(
-                rest,
-            )))
+            parse_dogfood_promote_args(rest).map(DogfoodAction::PromoteBenchmark)
         }
         other => Err(format!(
             "unknown dogfood sub-action `{other}`; expected run|external-fixture|external-evidence|repair-cache-evidence|replay-benchmark|live-plan|live-run|live-evidence|report|export-benchmark|promote-benchmark"
@@ -6089,7 +6087,7 @@ fn parse_dogfood_category_requirement(raw: &str) -> Result<DogfoodCategoryRequir
     })
 }
 
-fn parse_dogfood_export_args(args: Vec<String>) -> DogfoodExportArgs {
+fn parse_dogfood_export_args(args: Vec<String>) -> Result<DogfoodExportArgs, String> {
     let mut export = DogfoodExportArgs::default();
     let mut index = 0;
 
@@ -6101,28 +6099,30 @@ fn parse_dogfood_export_args(args: Vec<String>) -> DogfoodExportArgs {
                 continue;
             }
             "--limit" if index + 1 < args.len() => {
-                if let Ok(limit) = args[index + 1].parse::<usize>() {
-                    if (1..=500).contains(&limit) {
-                        export.limit = Some(limit);
-                    }
-                }
+                export.limit = Some(parse_required_usize("--limit", &args[index + 1], 1, 500)?);
                 index += 2;
                 continue;
             }
             "--outcome" if index + 1 < args.len() => {
-                export.outcome = parse_dogfood_outcome(&args[index + 1]);
+                export.outcome = Some(parse_dogfood_outcome_arg("--outcome", &args[index + 1])?);
                 index += 2;
                 continue;
             }
-            _ => {}
+            "--out" | "--limit" | "--outcome" => {
+                return Err(format!("{} requires a value", args[index]));
+            }
+            other => {
+                return Err(format!(
+                    "unknown flag for `dogfood export-benchmark`: {other}; expected --out|--limit|--outcome"
+                ));
+            }
         }
-        index += 1;
     }
 
-    export
+    Ok(export)
 }
 
-fn parse_dogfood_promote_args(args: Vec<String>) -> DogfoodPromoteArgs {
+fn parse_dogfood_promote_args(args: Vec<String>) -> Result<DogfoodPromoteArgs, String> {
     let mut promote = DogfoodPromoteArgs::default();
     let mut index = 0;
 
@@ -6134,16 +6134,12 @@ fn parse_dogfood_promote_args(args: Vec<String>) -> DogfoodPromoteArgs {
                 continue;
             }
             "--limit" if index + 1 < args.len() => {
-                if let Ok(limit) = args[index + 1].parse::<usize>() {
-                    if (1..=500).contains(&limit) {
-                        promote.limit = Some(limit);
-                    }
-                }
+                promote.limit = Some(parse_required_usize("--limit", &args[index + 1], 1, 500)?);
                 index += 2;
                 continue;
             }
             "--outcome" if index + 1 < args.len() => {
-                promote.outcome = parse_dogfood_outcome(&args[index + 1]);
+                promote.outcome = Some(parse_dogfood_outcome_arg("--outcome", &args[index + 1])?);
                 index += 2;
                 continue;
             }
@@ -6152,12 +6148,18 @@ fn parse_dogfood_promote_args(args: Vec<String>) -> DogfoodPromoteArgs {
                 index += 1;
                 continue;
             }
-            _ => {}
+            "--manifest" | "--limit" | "--outcome" => {
+                return Err(format!("{} requires a value", args[index]));
+            }
+            other => {
+                return Err(format!(
+                    "unknown flag for `dogfood promote-benchmark`: {other}; expected --manifest|--limit|--outcome|--dry-run"
+                ));
+            }
         }
-        index += 1;
     }
 
-    promote
+    Ok(promote)
 }
 
 fn parse_dogfood_outcome(raw: &str) -> Option<DogfoodOutcome> {
@@ -6168,6 +6170,10 @@ fn parse_dogfood_outcome(raw: &str) -> Option<DogfoodOutcome> {
         "manual" => Some(DogfoodOutcome::Manual),
         _ => None,
     }
+}
+
+fn parse_dogfood_outcome_arg(flag: &str, raw: &str) -> Result<DogfoodOutcome, String> {
+    parse_dogfood_outcome(raw).ok_or_else(|| format!("{flag} expects success|failed|stuck|manual"))
 }
 
 fn parse_common_flags(args: Vec<String>) -> (Option<String>, Vec<String>) {
@@ -7366,6 +7372,55 @@ mod tests {
     }
 
     #[test]
+    fn dogfood_export_benchmark_rejects_unknown_flags() {
+        let err =
+            parse_dogfood_subcommand(vec!["export-benchmark".to_string(), "--json".to_string()])
+                .unwrap_err();
+
+        assert!(err.contains("unknown flag for `dogfood export-benchmark`"));
+        assert!(err.contains("--out|--limit|--outcome"));
+    }
+
+    #[test]
+    fn dogfood_export_benchmark_rejects_invalid_limit_and_outcome() {
+        let limit = parse_dogfood_subcommand(vec![
+            "export-benchmark".to_string(),
+            "--limit".to_string(),
+            "0".to_string(),
+        ])
+        .unwrap_err();
+        assert!(limit.contains("--limit requires an integer between 1 and 500"));
+
+        let outcome = parse_dogfood_subcommand(vec![
+            "export-benchmark".to_string(),
+            "--outcome".to_string(),
+            "unknown".to_string(),
+        ])
+        .unwrap_err();
+        assert_eq!(outcome, "--outcome expects success|failed|stuck|manual");
+    }
+
+    #[test]
+    fn dogfood_export_benchmark_reports_missing_values() {
+        let out =
+            parse_dogfood_subcommand(vec!["export-benchmark".to_string(), "--out".to_string()])
+                .unwrap_err();
+        assert_eq!(out, "--out requires a value");
+
+        let limit =
+            parse_dogfood_subcommand(vec!["export-benchmark".to_string(), "--limit".to_string()])
+                .unwrap_err();
+        assert_eq!(limit, "--limit requires a value");
+
+        let outcome = parse_dogfood_subcommand(vec![
+            "export-benchmark".to_string(),
+            "--outcome".to_string(),
+        ])
+        .unwrap_err();
+        assert_eq!(outcome, "--outcome requires a value");
+    }
+
+    #[test]
     fn parses_dogfood_promote_benchmark_subcommand() {
         let parsed = parse_dogfood_subcommand(vec![
             "promote-benchmark".to_string(),
@@ -7387,6 +7442,57 @@ mod tests {
             }
             _ => panic!("expected dogfood promote args"),
         }
+    }
+
+    #[test]
+    fn dogfood_promote_benchmark_rejects_unknown_flags() {
+        let err =
+            parse_dogfood_subcommand(vec!["promote-benchmark".to_string(), "--json".to_string()])
+                .unwrap_err();
+
+        assert!(err.contains("unknown flag for `dogfood promote-benchmark`"));
+        assert!(err.contains("--manifest|--limit|--outcome|--dry-run"));
+    }
+
+    #[test]
+    fn dogfood_promote_benchmark_rejects_invalid_limit_and_outcome() {
+        let limit = parse_dogfood_subcommand(vec![
+            "promote-benchmark".to_string(),
+            "--limit".to_string(),
+            "many".to_string(),
+        ])
+        .unwrap_err();
+        assert!(limit.contains("--limit requires an integer between 1 and 500"));
+
+        let outcome = parse_dogfood_subcommand(vec![
+            "promote-benchmark".to_string(),
+            "--outcome".to_string(),
+            "unknown".to_string(),
+        ])
+        .unwrap_err();
+        assert_eq!(outcome, "--outcome expects success|failed|stuck|manual");
+    }
+
+    #[test]
+    fn dogfood_promote_benchmark_reports_missing_values() {
+        let manifest = parse_dogfood_subcommand(vec![
+            "promote-benchmark".to_string(),
+            "--manifest".to_string(),
+        ])
+        .unwrap_err();
+        assert_eq!(manifest, "--manifest requires a value");
+
+        let limit =
+            parse_dogfood_subcommand(vec!["promote-benchmark".to_string(), "--limit".to_string()])
+                .unwrap_err();
+        assert_eq!(limit, "--limit requires a value");
+
+        let outcome = parse_dogfood_subcommand(vec![
+            "promote-benchmark".to_string(),
+            "--outcome".to_string(),
+        ])
+        .unwrap_err();
+        assert_eq!(outcome, "--outcome requires a value");
     }
 
     #[test]
