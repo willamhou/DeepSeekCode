@@ -532,4 +532,49 @@ mod tests {
         assert!(root.get("digest").and_then(json_as_string).is_some());
         assert!(matches!(root.get("snapshots"), Some(JsonValue::Array(_))));
     }
+
+    #[test]
+    fn prompt_layer_payload_omits_raw_prompt_text() {
+        let request = ModelRequest {
+            system_prompt: "system prompt text that must stay hashed".to_string(),
+            task: "user task text that must stay hashed".to_string(),
+            profile_name: "rust".to_string(),
+            profile_hints: vec!["profile hint text that must stay hashed".to_string()],
+            primary_file: Some("src/private.rs".to_string()),
+            suggested_test_command: Some("cargo test private".to_string()),
+            available_tools: vec!["read_file".to_string()],
+            observations: vec![crate::model::protocol::Observation::ok(
+                "read_file",
+                "observation summary that must stay hashed",
+            )],
+            todos: Vec::new(),
+            planning_mode: false,
+            recent_steps: vec!["assistant step that must stay hashed".to_string()],
+            image_inputs: Vec::new(),
+        };
+
+        let snapshot = prompt_layers_for_request(1, &request);
+        let payload = json_value_to_string(&prompt_layers_event_payload(
+            "turn-1",
+            "usage-1",
+            &[snapshot],
+        ));
+
+        for raw in [
+            "system prompt text that must stay hashed",
+            "user task text that must stay hashed",
+            "profile hint text that must stay hashed",
+            "src/private.rs",
+            "cargo test private",
+            "observation summary that must stay hashed",
+            "assistant step that must stay hashed",
+        ] {
+            assert!(
+                !payload.contains(raw),
+                "prompt-layer payload leaked raw text: {raw}"
+            );
+        }
+        assert!(payload.contains("text_sha256"));
+        assert!(payload.contains("estimated_tokens"));
+    }
 }
