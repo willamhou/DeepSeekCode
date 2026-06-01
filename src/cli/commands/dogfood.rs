@@ -3660,17 +3660,17 @@ fn render_live_plan_text(plan: &LivePlan) -> String {
                 "  blocker: no replayable workdir-backed benchmark case for this category\n",
             );
         } else if !category.recommended_cases.is_empty() {
-            let dry_run_command = live_run_command_line(
+            let dry_run_command = live_run_command_line_for_category(
                 &plan.manifest_path,
-                Some(&category.category),
+                category,
                 category.recommended_cases.len(),
                 false,
                 None,
                 None,
             );
-            let execute_command = live_run_command_line(
+            let execute_command = live_run_command_line_for_category(
                 &plan.manifest_path,
-                Some(&category.category),
+                category,
                 category.recommended_cases.len(),
                 true,
                 None,
@@ -3752,9 +3752,9 @@ fn render_live_plan_json(plan: &LivePlan) -> String {
             if !category.recommended_cases.is_empty() {
                 root.insert(
                     "live_run_command".to_string(),
-                    JsonValue::String(live_run_command_line(
+                    JsonValue::String(live_run_command_line_for_category(
                         &plan.manifest_path,
-                        Some(&category.category),
+                        category,
                         category.recommended_cases.len(),
                         false,
                         None,
@@ -3763,9 +3763,9 @@ fn render_live_plan_json(plan: &LivePlan) -> String {
                 );
                 root.insert(
                     "live_run_execute_command".to_string(),
-                    JsonValue::String(live_run_command_line(
+                    JsonValue::String(live_run_command_line_for_category(
                         &plan.manifest_path,
-                        Some(&category.category),
+                        category,
                         category.recommended_cases.len(),
                         true,
                         None,
@@ -3836,20 +3836,20 @@ fn render_live_plan_json(plan: &LivePlan) -> String {
     json_value_to_string(&JsonValue::Object(root))
 }
 
-fn live_run_command_line(
+fn live_run_command_line_for_category(
     manifest_path: &Path,
-    category: Option<&str>,
+    category: &LiveCategoryPlan,
     limit: usize,
     execute: bool,
     api_key_file: Option<&str>,
     evidence_out: Option<&str>,
 ) -> String {
-    let categories = category
-        .map(|value| vec![value.to_string()])
-        .unwrap_or_default();
-    live_run_command_line_for_categories(
+    let categories = vec![category.category.clone()];
+    let target_categories = vec![live_category_target_arg(category)];
+    live_run_command_line_for_categories_and_targets(
         manifest_path,
         &categories,
+        &target_categories,
         limit,
         execute,
         false,
@@ -3858,9 +3858,10 @@ fn live_run_command_line(
     )
 }
 
-fn live_run_command_line_for_categories(
+fn live_run_command_line_for_categories_and_targets(
     manifest_path: &Path,
     categories: &[String],
+    target_categories: &[String],
     limit: usize,
     execute: bool,
     json: bool,
@@ -3879,6 +3880,10 @@ fn live_run_command_line_for_categories(
         command.push_str(" --evidence-out ");
         command.push_str(&shell_quote(evidence_out));
     }
+    for target_category in target_categories {
+        command.push_str(" --target-category ");
+        command.push_str(&shell_quote(target_category));
+    }
     for category in categories {
         command.push_str(" --category ");
         command.push_str(&shell_quote(category));
@@ -3892,6 +3897,15 @@ fn live_run_command_line_for_categories(
         command.push_str(" --execute");
     }
     command
+}
+
+fn live_category_target_arg(category: &LiveCategoryPlan) -> String {
+    format!(
+        "{}:{}:{}",
+        category.category,
+        category.target_runs,
+        format_percent_command_arg(category.target_success_rate)
+    )
 }
 
 fn render_live_run_plan_json(
@@ -3915,6 +3929,7 @@ fn render_live_run_plan_json(
         })
         .collect::<Vec<_>>();
     let online_ready = plan.model_transport == MODEL_TRANSPORT_ONLINE;
+    let target_categories = live_plan_target_args(plan);
     let execute_blocker = if selected.is_empty() {
         Some("no recommended live dogfood cases matched the requested filters")
     } else if !online_ready {
@@ -4017,9 +4032,10 @@ fn render_live_run_plan_json(
     );
     root.insert(
         "dry_run_command".to_string(),
-        JsonValue::String(live_run_command_line_for_categories(
+        JsonValue::String(live_run_command_line_for_categories_and_targets(
             &plan.manifest_path,
             requested_categories,
+            &target_categories,
             limit,
             false,
             true,
@@ -4029,9 +4045,10 @@ fn render_live_run_plan_json(
     );
     root.insert(
         "execute_command".to_string(),
-        JsonValue::String(live_run_command_line_for_categories(
+        JsonValue::String(live_run_command_line_for_categories_and_targets(
             &plan.manifest_path,
             requested_categories,
+            &target_categories,
             limit,
             true,
             false,
@@ -4142,6 +4159,13 @@ fn live_run_case_evidence_json(
     }
 
     JsonValue::Object(root)
+}
+
+fn live_plan_target_args(plan: &LivePlan) -> Vec<String> {
+    plan.category_plans
+        .iter()
+        .map(live_category_target_arg)
+        .collect()
 }
 
 fn mcp_loop_surface_from_records(records: &[DogfoodRecord]) -> Option<&'static str> {
@@ -6251,10 +6275,10 @@ mod tests {
         assert!(text.contains("replayable_unique 1; recommended_now 1"));
         assert!(text.contains("fixture-write-validate-rust-mini"));
         assert!(text.contains(
-            "dry_run: deepseek dogfood live-run --manifest .dscode/benchmarks.txt --category write_validate --limit 1"
+            "dry_run: deepseek dogfood live-run --manifest .dscode/benchmarks.txt --target-category write_validate:2:90 --category write_validate --limit 1"
         ));
         assert!(text.contains(
-            "execute: deepseek dogfood live-run --manifest .dscode/benchmarks.txt --category write_validate --limit 1 --execute"
+            "execute: deepseek dogfood live-run --manifest .dscode/benchmarks.txt --target-category write_validate:2:90 --category write_validate --limit 1 --execute"
         ));
         assert!(text.contains(
             "post_run_report_gate: deepseek dogfood report --limit 20 --require-live-runs 4 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category write_validate:2:90 --require-live-category recovery:1:90"
@@ -6370,6 +6394,9 @@ mod tests {
         assert!(json.contains("\"overall_needed_runs\":1"));
         assert!(json.contains("\"live_recency_refresh_needed\":true"));
         assert!(json.contains("\"live_recency_age_days\":8.0"));
+        assert!(json.contains(
+            "\"live_run_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --target-category mcp:1:90 --category mcp --limit 1\""
+        ));
     }
 
     #[test]
@@ -6410,10 +6437,10 @@ mod tests {
         assert!(json.contains("\"category\":\"pr_workflow\""));
         assert!(json.contains("\"recommended_cases\":[\"fixture-pr-retry-validate-rust-mini\"]"));
         assert!(json.contains(
-            "\"live_run_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --category pr_workflow --limit 1\""
+            "\"live_run_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --target-category pr_workflow:1:90 --category pr_workflow --limit 1\""
         ));
         assert!(json.contains(
-            "\"live_run_execute_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --category pr_workflow --limit 1 --execute\""
+            "\"live_run_execute_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --target-category pr_workflow:1:90 --category pr_workflow --limit 1 --execute\""
         ));
         assert!(json.contains(
             "\"post_run_report_command\":\"deepseek dogfood report --limit 20 --require-live-runs 1 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category pr_workflow:1:90\""
@@ -6460,10 +6487,10 @@ mod tests {
             "\"selected_cases\":[{\"category\":\"write_validate\",\"name\":\"write-1\"}]"
         ));
         assert!(json.contains(
-            "\"dry_run_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --category write_validate --limit 1 --json\""
+            "\"dry_run_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --target-category write_validate:25:90 --category write_validate --limit 1 --json\""
         ));
         assert!(json.contains(
-            "\"execute_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --category write_validate --limit 1 --execute\""
+            "\"execute_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --target-category write_validate:25:90 --category write_validate --limit 1 --execute\""
         ));
         assert!(json.contains(
             "\"post_run_report_command\":\"deepseek dogfood report --limit 100 --require-live-runs 100 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category write_validate:25:90\""
@@ -6514,10 +6541,10 @@ mod tests {
         assert!(json.contains("\"api_key_file\":\"/tmp/deepseek dogfood.key\""));
         assert!(json.contains("\"evidence_out\":\"/tmp/deepseek live evidence.json\""));
         assert!(json.contains(
-            "\"dry_run_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --api-key-file '/tmp/deepseek dogfood.key' --evidence-out '/tmp/deepseek live evidence.json' --category write_validate --limit 1 --json\""
+            "\"dry_run_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --api-key-file '/tmp/deepseek dogfood.key' --evidence-out '/tmp/deepseek live evidence.json' --target-category write_validate:25:90 --category write_validate --limit 1 --json\""
         ));
         assert!(json.contains(
-            "\"execute_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --api-key-file '/tmp/deepseek dogfood.key' --evidence-out '/tmp/deepseek live evidence.json' --category write_validate --limit 1 --execute\""
+            "\"execute_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --api-key-file '/tmp/deepseek dogfood.key' --evidence-out '/tmp/deepseek live evidence.json' --target-category write_validate:25:90 --category write_validate --limit 1 --execute\""
         ));
         assert!(json.contains(
             "\"post_run_report_command\":\"deepseek dogfood report --limit 100 --require-live-runs 100 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category write_validate:25:90\""
