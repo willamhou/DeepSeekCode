@@ -44,8 +44,8 @@ hardening gaps rather than architecture blockers:
   tool-call storm, empty read/search, validation-after-edit, and unproductive
   step signals; route events are forwarded through the loop, persisted by
   `exec` and runtime daemon task results, and summarized by `deepseek stats` as
-  preset/model route counts. It still needs dogfood calibration against real
-  failure modes.
+  preset/model route counts. Recurring dogfood calibration against real failure
+  modes remains an evidence cadence rather than a missing routing feature.
 - Parallel dispatch is deliberately conservative. Built-in local read tools and
   common runtime query tools now cover the initial and extended safe set, and
   MCP inventory/prompt/resource bridge tools have explicit read-only opt-in.
@@ -116,8 +116,11 @@ visible escalation, `/pro` for the next turn, and budget-aware session behavior.
 
 DeepSeekCode already has DeepSeek V4 pricing, usage cost estimates, first-class
 `flash | auto | pro` presets, visible escalation, runtime budget records, and
-local auto-escalation triggers for repair/failure recovery signals. The
-remaining work is dogfood calibration of the auto-escalation heuristic.
+local auto-escalation triggers for repair/failure recovery signals. The local
+auto-route heuristics have deterministic coverage for repeated repair,
+malformed tool-call recovery, tool-call storms, empty read/search loops,
+validation-after-edit failures, and unproductive assistant steps; recurring
+dogfood calibration remains the ongoing evidence cadence for real failures.
 
 Absorb:
 
