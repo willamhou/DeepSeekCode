@@ -1274,15 +1274,20 @@ fn push_tool_event(
 }
 
 fn tool_call_fingerprint(tool_name: &str, event_input: &BTreeMap<String, String>) -> String {
-    format!(
-        "{}:{}",
-        tool_name,
-        event_input
-            .iter()
-            .map(|(key, value)| format!("{key}={value}"))
-            .collect::<Vec<_>>()
-            .join("|")
-    )
+    let mut fingerprint = String::new();
+    push_fingerprint_field(&mut fingerprint, tool_name);
+    for (key, value) in event_input {
+        push_fingerprint_field(&mut fingerprint, key);
+        push_fingerprint_field(&mut fingerprint, value);
+    }
+    fingerprint
+}
+
+fn push_fingerprint_field(out: &mut String, value: &str) {
+    out.push_str(&value.len().to_string());
+    out.push(':');
+    out.push_str(value);
+    out.push(';');
 }
 
 /// Identity-only fingerprint for read-only inspection tools.
@@ -3903,6 +3908,20 @@ mod cr1_regression_test {
         assert!(
             !second.contains("repeated identical tool call detected"),
             "2nd call must NOT short-circuit (only the 3rd does); output: {second}"
+        );
+    }
+
+    #[test]
+    fn tool_call_fingerprint_is_delimiter_collision_safe() {
+        let left = BTreeMap::from([("a".to_string(), "b|c=d".to_string())]);
+        let right = BTreeMap::from([
+            ("a".to_string(), "b".to_string()),
+            ("c".to_string(), "d".to_string()),
+        ]);
+
+        assert_ne!(
+            super::tool_call_fingerprint("run_shell", &left),
+            super::tool_call_fingerprint("run_shell", &right)
         );
     }
 

@@ -218,9 +218,10 @@ fn run_subagent_request(
         None => child_task,
     };
 
+    let executed_child_task = child_task.clone();
     let result = AgentLoop::new(config.clone())
         .run_with(
-            TaskContext::new(child_task, request.skill.clone()),
+            TaskContext::new(executed_child_task.clone(), request.skill.clone()),
             AgentLoopOptions {
                 steps: request.steps,
                 initial_observations: Vec::new(),
@@ -250,7 +251,7 @@ fn run_subagent_request(
     let _ = hooks
         .subagent_stop(
             &request.task,
-            &request.task,
+            &executed_child_task,
             request.agent_name.as_deref(),
             &summary,
         )

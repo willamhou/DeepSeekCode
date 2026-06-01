@@ -790,10 +790,16 @@ mod tests {
         let find = "let x = 1;\nx";
         let replace = "let x = 2;\n    x";
         let (updated, tolerant) = apply_replacement(original, find, replace, false).unwrap();
-        assert!(tolerant, "indentation-only mismatch should use tolerant path");
+        assert!(
+            tolerant,
+            "indentation-only mismatch should use tolerant path"
+        );
         assert!(updated.contains("let x = 2;"));
         assert!(!updated.contains("let x = 1;"));
-        assert!(updated.ends_with('\n'), "trailing newline must be preserved");
+        assert!(
+            updated.ends_with('\n'),
+            "trailing newline must be preserved"
+        );
     }
 
     #[test]

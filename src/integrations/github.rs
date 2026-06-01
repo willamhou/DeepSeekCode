@@ -92,21 +92,7 @@ pub fn parse_pr_view_json(body: &str) -> AppResult<PrContext> {
         .and_then(json_as_string)
         .ok_or_else(|| app_error("pr view: missing string `baseRefName`"))?
         .to_string();
-    let repo_name = root
-        .get("headRepository")
-        .and_then(json_as_object)
-        .and_then(|map| map.get("name"))
-        .and_then(json_as_string)
-        .ok_or_else(|| app_error("pr view: missing string `headRepository.name`"))?
-        .to_string();
-    let repo_owner = root
-        .get("headRepositoryOwner")
-        .and_then(json_as_object)
-        .and_then(|map| map.get("login"))
-        .and_then(json_as_string)
-        .ok_or_else(|| app_error("pr view: missing string `headRepositoryOwner.login`"))?
-        .to_string();
-    let repo = format!("{repo_owner}/{repo_name}");
+    let repo = pr_base_repo_name_with_owner(&root)?;
     let changed_files = root
         .get("files")
         .and_then(json_as_array)
@@ -319,7 +305,7 @@ pub fn fetch_pr(reference: &PrRef) -> AppResult<PrContext> {
         "view",
         selector.arg.as_str(),
         "--json",
-        "number,title,headRefName,baseRefName,headRepository,headRepositoryOwner,files",
+        "number,title,url,headRefName,baseRefName,headRepository,headRepositoryOwner,files",
     ];
     if let Some(repo) = selector.repo.as_deref() {
         view_args.push("--repo");
@@ -360,6 +346,64 @@ pub fn parse_repo_permissions_json(body: &str) -> AppResult<RepoPermissions> {
 
 fn json_bool_field(map: &std::collections::BTreeMap<String, JsonValue>, key: &str) -> bool {
     matches!(map.get(key), Some(JsonValue::Bool(true)))
+}
+
+fn pr_base_repo_name_with_owner(
+    root: &std::collections::BTreeMap<String, JsonValue>,
+) -> AppResult<String> {
+    if let Some(url) = root.get("url").and_then(json_as_string) {
+        if let Some(repo) = repo_name_with_owner_from_pr_url(url) {
+            return Ok(repo);
+        }
+    }
+    if let Some(base) = root.get("baseRepository").and_then(json_as_object) {
+        if let Some(name_with_owner) = base.get("nameWithOwner").and_then(json_as_string) {
+            return Ok(name_with_owner.to_string());
+        }
+        if let (Some(owner), Some(name)) = (
+            base.get("owner")
+                .and_then(json_as_object)
+                .and_then(|owner| owner.get("login"))
+                .and_then(json_as_string),
+            base.get("name").and_then(json_as_string),
+        ) {
+            return Ok(format!("{owner}/{name}"));
+        }
+    }
+
+    let repo_name = root
+        .get("headRepository")
+        .and_then(json_as_object)
+        .and_then(|map| map.get("name"))
+        .and_then(json_as_string)
+        .ok_or_else(|| {
+            app_error(
+                "pr view: missing string `baseRepository.nameWithOwner` or `headRepository.name`",
+            )
+        })?;
+    let repo_owner = root
+        .get("headRepositoryOwner")
+        .and_then(json_as_object)
+        .and_then(|map| map.get("login"))
+        .and_then(json_as_string)
+        .ok_or_else(|| {
+            app_error(
+                "pr view: missing string `baseRepository.nameWithOwner` or `headRepositoryOwner.login`",
+            )
+        })?;
+    Ok(format!("{repo_owner}/{repo_name}"))
+}
+
+fn repo_name_with_owner_from_pr_url(url: &str) -> Option<String> {
+    let stripped = url.strip_prefix("https://github.com/")?;
+    let mut parts = stripped.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    let kind = parts.next()?;
+    if owner.is_empty() || repo.is_empty() || kind != "pull" {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
 }
 
 pub fn fetch_first_failed_job(
@@ -618,6 +662,7 @@ mod tests {
         let body = r#"{
             "number": 12,
             "title": "Add CRLF round-trip",
+            "url": "https://github.com/willamhou/DeepSeekCode/pull/12",
             "headRefName": "feat/crlf",
             "baseRefName": "main",
             "headRepository": {"name": "DeepSeekCode"},
@@ -640,6 +685,24 @@ mod tests {
                 "docs/roadmap.md".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn parse_pr_view_uses_base_repo_for_cross_repo_pr_operations() {
+        let body = r#"{
+            "number": 12,
+            "title": "Cross repo change",
+            "url": "https://github.com/base/DeepSeekCode/pull/12",
+            "headRefName": "feat/fork",
+            "baseRefName": "main",
+            "headRepository": {"name": "DeepSeekCode"},
+            "headRepositoryOwner": {"login": "fork-user"},
+            "files": []
+        }"#;
+
+        let parsed = parse_pr_view_json(body).unwrap();
+
+        assert_eq!(parsed.repo, "base/DeepSeekCode");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -2004,7 +2005,31 @@ fn default_verify_workdir() -> PathBuf {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    home_dir_from_env(|name| std::env::var_os(name))
+}
+
+fn home_dir_from_env(mut get_var: impl FnMut(&str) -> Option<OsString>) -> Option<PathBuf> {
+    if let Some(home) = non_empty_env_path(get_var("HOME")) {
+        return Some(home);
+    }
+    if let Some(profile) = non_empty_env_path(get_var("USERPROFILE")) {
+        return Some(profile);
+    }
+    let drive = get_var("HOMEDRIVE")?;
+    let path = get_var("HOMEPATH")?;
+    let mut combined = OsString::new();
+    combined.push(drive);
+    combined.push(path);
+    non_empty_env_path(Some(combined))
+}
+
+fn non_empty_env_path(value: Option<OsString>) -> Option<PathBuf> {
+    let value = value?;
+    if value.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(value))
+    }
 }
 
 fn git_commit() -> Option<String> {
@@ -2076,6 +2101,27 @@ mod tests {
     #[test]
     fn shell_quote_quotes_spaces() {
         assert_eq!(shell_quote("/tmp/Deepseek Code"), "'/tmp/Deepseek Code'");
+    }
+
+    #[test]
+    fn home_dir_from_env_uses_windows_profile_when_home_is_absent() {
+        let vars = BTreeMap::from([("USERPROFILE", OsString::from(r"C:\Users\deepseek"))]);
+
+        let home = home_dir_from_env(|name| vars.get(name).cloned()).unwrap();
+
+        assert_eq!(home, PathBuf::from(r"C:\Users\deepseek"));
+    }
+
+    #[test]
+    fn home_dir_from_env_uses_homedrive_and_homepath_fallback() {
+        let vars = BTreeMap::from([
+            ("HOMEDRIVE", OsString::from("C:")),
+            ("HOMEPATH", OsString::from(r"\Users\deepseek")),
+        ]);
+
+        let home = home_dir_from_env(|name| vars.get(name).cloned()).unwrap();
+
+        assert_eq!(home, PathBuf::from(r"C:\Users\deepseek"));
     }
 
     #[test]
