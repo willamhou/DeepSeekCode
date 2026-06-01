@@ -3071,19 +3071,10 @@ fn parse_tui_config_args(rest: &str) -> Result<TuiConfigCommand, String> {
         ["native"] => Ok(TuiConfigCommand::Editor(TuiConfigEditorMode::Native)),
         ["web"] => Ok(TuiConfigCommand::Editor(TuiConfigEditorMode::Web)),
         ["model"] | ["default_model"] => Ok(TuiConfigCommand::Model(TuiModelCommand::Show)),
-        ["model" | "default_model", "pick" | "picker"] => {
-            Ok(TuiConfigCommand::Model(TuiModelCommand::Pick))
-        }
-        ["model" | "default_model", "list" | "ls"] => {
-            Ok(TuiConfigCommand::Model(TuiModelCommand::List))
-        }
-        ["model" | "default_model", "show" | "status"] => {
-            Ok(TuiConfigCommand::Model(TuiModelCommand::Show))
-        }
-        ["model" | "default_model", model] if !model.starts_with('-') => {
-            Ok(TuiConfigCommand::Model(TuiModelCommand::Set {
-                model: (*model).to_string(),
-            }))
+        ["model" | "default_model", rest @ ..] => {
+            parse_tui_model_command(&format!("model {}", rest.join(" ")))
+                .unwrap_or_else(|| Err("config model expects model command arguments".to_string()))
+                .map(TuiConfigCommand::Model)
         }
         ["provider"] => Ok(TuiConfigCommand::Provider(TuiProviderCommand::Show)),
         ["provider", "pick" | "picker"] => Ok(TuiConfigCommand::Provider(TuiProviderCommand::Pick)),
@@ -3911,7 +3902,7 @@ const TUI_HELP_COMMANDS: &[TuiHelpCommandInfo] = &[
         category: "Config",
         name: "model",
         aliases: &[],
-        usage: "/model [pick|show|list|preset <auto|flash|pro>|name]",
+        usage: "/model [pick|show|list|preset <auto|flash|pro>|budget <show|off|MICROUSD|raise MICROUSD|+MICROUSD>|name]",
         description: "Pick, inspect, or update the selected workspace model.",
     },
     TuiHelpCommandInfo {
@@ -12387,7 +12378,10 @@ impl TuiApp {
             detail,
             "DeepSeekCode currently exposes config editing through focused commands:"
         );
-        let _ = writeln!(detail, "- /config model [pick|show|list|<name>]");
+        let _ = writeln!(
+            detail,
+            "- /config model [pick|show|list|preset <auto|flash|pro>|budget <show|off|MICROUSD|raise MICROUSD|+MICROUSD>|<name>]"
+        );
         let _ = writeln!(detail, "- /config provider [pick|show|list|<name> [model]]");
         let _ = writeln!(detail, "- /config profile [list|clear|<name>]");
         let _ = writeln!(detail, "- /config mode [agent|plan|yolo]");
@@ -13048,7 +13042,7 @@ impl TuiApp {
         let _ = writeln!(detail, "- /goal [objective [budget: N]|clear]");
         let _ = writeln!(
             detail,
-            "- /model [pick|show|list|preset <auto|flash|pro>|name]"
+            "- /model [pick|show|list|preset <auto|flash|pro>|budget <show|off|MICROUSD|raise MICROUSD|+MICROUSD>|name]"
         );
         let _ = writeln!(detail, "- /pro [off|show]");
         let _ = writeln!(detail, "- /provider [pick|show|list|name [model]]");
@@ -19666,7 +19660,9 @@ mod tests {
         assert_eq!(*kind, TuiMcpDetailKind::Settings);
         assert!(detail.contains("DeepSeekCode Settings"));
         assert!(detail.contains("/tmp/deepseek-settings/.dscode/config.toml"));
-        assert!(detail.contains("/model [pick|show|list|preset <auto|flash|pro>|name]"));
+        assert!(detail.contains(
+            "/model [pick|show|list|preset <auto|flash|pro>|budget <show|off|MICROUSD|raise MICROUSD|+MICROUSD>|name]"
+        ));
         assert!(detail.contains("/pro [off|show]"));
         assert!(detail.contains("/provider [pick|show|list|name [model]]"));
         assert!(detail.contains("/mcp manager"));
@@ -20127,6 +20123,35 @@ model.model = "deepseek-v4-pro"
         assert!(app.composer.is_empty());
 
         app.composer_focused = false;
+        run_palette_command(&mut app, "/config model preset pro");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Model {
+                workspace: "/tmp/deepseek-config".to_string(),
+                command: TuiModelCommand::Preset {
+                    preset: "pro".to_string(),
+                },
+            }]
+        );
+
+        run_palette_command(&mut app, "/config model budget raise 1000");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Model {
+                workspace: "/tmp/deepseek-config".to_string(),
+                command: TuiModelCommand::BudgetRaise { microusd: 1000 },
+            }]
+        );
+
+        run_palette_command(&mut app, "/config model budget off");
+        assert_eq!(
+            app.drain_actions(),
+            vec![TuiAction::Model {
+                workspace: "/tmp/deepseek-config".to_string(),
+                command: TuiModelCommand::BudgetOff,
+            }]
+        );
+
         run_palette_command(&mut app, "/config provider list");
         assert_eq!(
             app.drain_actions(),
@@ -20158,7 +20183,9 @@ model.model = "deepseek-v4-pro"
         let (kind, detail) = app.mcp_detail.as_ref().expect("config detail");
         assert_eq!(*kind, TuiMcpDetailKind::Settings);
         assert!(detail.contains("Requested Config Surface"));
-        assert!(detail.contains("/config model [pick|show|list|<name>]"));
+        assert!(detail.contains(
+            "/config model [pick|show|list|preset <auto|flash|pro>|budget <show|off|MICROUSD|raise MICROUSD|+MICROUSD>|<name>]"
+        ));
     }
 
     #[test]
