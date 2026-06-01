@@ -134,6 +134,7 @@ deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key \
   --category mcp \
   --limit 3 \
   --evidence-out .dscode/dogfood/live-evidence.json \
+  --benchmark-gate \
   --execute
 deepseek dogfood live-evidence --file .dscode/dogfood/live-evidence.json \
   --out .dscode/dogfood/live-evidence-verification.json \

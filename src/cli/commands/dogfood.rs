@@ -908,6 +908,7 @@ fn live_run_command(
                 &selected,
                 args.api_key_file.as_deref(),
                 args.evidence_out.as_deref(),
+                args.benchmark_gate,
             )
         );
         return Ok(());
@@ -3860,6 +3861,7 @@ fn live_run_command_line_for_category(
         false,
         api_key_file,
         evidence_out,
+        false,
     )
 }
 
@@ -3872,6 +3874,7 @@ fn live_run_command_line_for_categories_and_targets(
     json: bool,
     api_key_file: Option<&str>,
     evidence_out: Option<&str>,
+    benchmark_gate: bool,
 ) -> String {
     let mut command = format!(
         "deepseek dogfood live-run --manifest {}",
@@ -3884,6 +3887,9 @@ fn live_run_command_line_for_categories_and_targets(
     if let Some(evidence_out) = evidence_out {
         command.push_str(" --evidence-out ");
         command.push_str(&shell_quote(evidence_out));
+    }
+    if benchmark_gate {
+        command.push_str(" --benchmark-gate");
     }
     for target_category in target_categories {
         command.push_str(" --target-category ");
@@ -3920,6 +3926,7 @@ fn render_live_run_plan_json(
     selected: &[LiveRunCase],
     api_key_file: Option<&str>,
     evidence_out: Option<&str>,
+    benchmark_gate: bool,
 ) -> String {
     let selected_cases = selected
         .iter()
@@ -4046,6 +4053,7 @@ fn render_live_run_plan_json(
             true,
             api_key_file,
             evidence_out,
+            benchmark_gate,
         )),
     );
     root.insert(
@@ -4059,6 +4067,7 @@ fn render_live_run_plan_json(
             false,
             api_key_file,
             evidence_out,
+            benchmark_gate,
         )),
     );
     root.insert(
@@ -6481,7 +6490,7 @@ mod tests {
         };
         let requested = vec!["write_validate".to_string()];
         let selected = select_live_run_cases(&plan, &requested, 1);
-        let json = render_live_run_plan_json(&plan, &requested, 1, &selected, None, None);
+        let json = render_live_run_plan_json(&plan, &requested, 1, &selected, None, None, false);
 
         assert!(json.contains("\"kind\":\"deepseek.dogfood.live_run_plan.v1\""));
         assert!(json.contains("\"model_transport\":\"offline\""));
@@ -6586,16 +6595,17 @@ mod tests {
             &selected,
             Some(api_key_file),
             Some(evidence_out),
+            true,
         );
 
         assert!(json.contains("\"credential_source\":\"api_key_file\""));
         assert!(json.contains("\"api_key_file\":\"/tmp/deepseek dogfood.key\""));
         assert!(json.contains("\"evidence_out\":\"/tmp/deepseek live evidence.json\""));
         assert!(json.contains(
-            "\"dry_run_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --api-key-file '/tmp/deepseek dogfood.key' --evidence-out '/tmp/deepseek live evidence.json' --target-category write_validate:25:90 --category write_validate --limit 1 --json\""
+            "\"dry_run_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --api-key-file '/tmp/deepseek dogfood.key' --evidence-out '/tmp/deepseek live evidence.json' --benchmark-gate --target-category write_validate:25:90 --category write_validate --limit 1 --json\""
         ));
         assert!(json.contains(
-            "\"execute_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --api-key-file '/tmp/deepseek dogfood.key' --evidence-out '/tmp/deepseek live evidence.json' --target-category write_validate:25:90 --category write_validate --limit 1 --execute\""
+            "\"execute_command\":\"deepseek dogfood live-run --manifest .dscode/benchmarks.txt --api-key-file '/tmp/deepseek dogfood.key' --evidence-out '/tmp/deepseek live evidence.json' --benchmark-gate --target-category write_validate:25:90 --category write_validate --limit 1 --execute\""
         ));
         assert!(json.contains(
             "\"post_run_report_command\":\"deepseek dogfood report --limit 100 --require-live-runs 100 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category write_validate:25:90\""

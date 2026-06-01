@@ -100,7 +100,7 @@ deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --category mcp -
 deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --category mcp --limit 3
 # Add --execute only when you intend to spend online model calls:
 deepseek dogfood live-run --api-key-file /tmp/deepseek-live.key --category mcp --limit 3 \
-  --evidence-out .dscode/dogfood/live-evidence.json --execute
+  --evidence-out .dscode/dogfood/live-evidence.json --benchmark-gate --execute
 deepseek dogfood live-evidence --file .dscode/dogfood/live-evidence.json \
   --out .dscode/dogfood/live-evidence-verification.json \
   --require-benchmark-gate --require-report-gate \
