@@ -42,8 +42,9 @@ hardening gaps rather than architecture blockers:
   flows. Auto-escalation now covers repeated repair, malformed tool-call,
   tool-call storm, empty read/search, validation-after-edit, and unproductive
   step signals; route events are forwarded through the loop, persisted by
-  `exec`, and summarized by `deepseek stats` as preset/model route counts. It
-  still needs dogfood calibration against real failure modes.
+  `exec` and runtime daemon task results, and summarized by `deepseek stats` as
+  preset/model route counts. It still needs dogfood calibration against real
+  failure modes.
 - Parallel dispatch is deliberately conservative. Built-in local read tools and
   common runtime query tools now cover the initial and extended safe set, and
   MCP inventory/prompt/resource bridge tools have explicit read-only opt-in.
@@ -404,8 +405,8 @@ Deliver:
 - failed repair surfaced as a model-facing `tool_call_parse_failed`
   observation instead of a hard loop failure; landed;
 - repair runtime events; landed as structured `tool_call_repair` events,
-  runtime stream items, durable `exec` runtime events, and `exec --json` repair
-  notices;
+  runtime stream items, durable `exec` and runtime daemon task events, and
+  `exec --json` repair notices;
 - opt-in repair debug logs; landed via `DSCODE_DEBUG_TOOL_REPAIR=1`;
 - unit tests for malformed JSON, truncated JSON, scavenged calls, and unknown
   tool rejection; landed.
@@ -472,12 +473,13 @@ and `/pro show` to inspect it. Auto routing emits a visible escalation line/even
 using `deepseek-v4-pro`, and session budget enforcement warns at 80% and refuses
 new model calls once the in-loop estimated DeepSeek spend reaches
 `model.session_budget_microusd`. Runtime session/thread records now also persist
-`session_budget_microusd` from the active config; `exec` persists model route
-events, and `deepseek stats` reports `model_presets` and `model_routes`
-alongside raw model usage counts. TUI and daemon task turns restore prior
-durable usage cost before entering the agent loop, so budget warning/refusal
-survives process restarts while `deepseek config budget raise <MICROUSD>` raises
-the runtime limit and `deepseek config budget off` clears it.
+`session_budget_microusd` from the active config; `exec` and runtime daemon task
+results persist model route events, and `deepseek stats` reports
+`model_presets` and `model_routes` alongside raw model usage counts. TUI and
+daemon task turns restore prior durable usage cost before entering the agent
+loop, so budget warning/refusal survives process restarts while `deepseek
+config budget raise <MICROUSD>` raises the runtime limit and `deepseek config
+budget off` clears it.
 
 Deliver:
 

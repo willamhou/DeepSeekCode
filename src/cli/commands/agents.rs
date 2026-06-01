@@ -8975,8 +8975,46 @@ fn record_runtime_task_result(
             prompt_layers_event_payload(&assistant.id, &usage.id, &result.prompt_layers),
         )?;
     }
+    for repair in &result.tool_repairs {
+        store.append_thread_event(
+            &thread.id,
+            "tool_call_repair",
+            tool_repair_event(&repair.kind, &repair.detail),
+        )?;
+    }
+    for route in &result.model_routes {
+        store.append_thread_event(
+            &thread.id,
+            "model_route",
+            model_route_event(&route.preset, &route.model, &route.reason, route.escalated),
+        )?;
+    }
     store.update_task(&task.id, "completed".to_string(), message)?;
     Ok(assistant.id)
+}
+
+fn tool_repair_event(kind: &str, detail: &str) -> JsonValue {
+    JsonValue::Object(BTreeMap::from([
+        (
+            "type".to_string(),
+            JsonValue::String("tool_call_repair".to_string()),
+        ),
+        ("kind".to_string(), JsonValue::String(kind.to_string())),
+        ("detail".to_string(), JsonValue::String(detail.to_string())),
+    ]))
+}
+
+fn model_route_event(preset: &str, model: &str, reason: &str, escalated: bool) -> JsonValue {
+    JsonValue::Object(BTreeMap::from([
+        (
+            "type".to_string(),
+            JsonValue::String("model_route".to_string()),
+        ),
+        ("preset".to_string(), JsonValue::String(preset.to_string())),
+        ("model".to_string(), JsonValue::String(model.to_string())),
+        ("reason".to_string(), JsonValue::String(reason.to_string())),
+        ("escalated".to_string(), JsonValue::Bool(escalated)),
+    ]))
 }
 
 fn record_runtime_task_failure(
@@ -11673,8 +11711,16 @@ mod tests {
                 total_bytes: 12,
                 estimated_tokens: 3,
             }],
-            model_routes: Vec::new(),
-            tool_repairs: Vec::new(),
+            model_routes: vec![crate::core::loop_runtime::ModelRouteEvent {
+                preset: "auto".to_string(),
+                model: "deepseek-v4-pro".to_string(),
+                reason: "repeated repair signals".to_string(),
+                escalated: true,
+            }],
+            tool_repairs: vec![crate::core::loop_runtime::ToolRepairEvent {
+                kind: "truncated-json".to_string(),
+                detail: "repaired truncated tool arguments JSON".to_string(),
+            }],
         };
 
         let assistant_turn_id =
@@ -11702,6 +11748,19 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.kind == "prompt_layers_recorded"));
+        let repair_event = events
+            .iter()
+            .find(|event| event.kind == "tool_call_repair")
+            .expect("runtime task should persist repair evidence");
+        assert!(json_value_to_string(&repair_event.payload).contains("truncated-json"));
+        let route_event = events
+            .iter()
+            .find(|event| event.kind == "model_route")
+            .expect("runtime task should persist model route evidence");
+        let route_payload = json_value_to_string(&route_event.payload);
+        assert!(route_payload.contains(r#""preset":"auto""#));
+        assert!(route_payload.contains(r#""model":"deepseek-v4-pro""#));
+        assert!(route_payload.contains(r#""escalated":true"#));
     }
 
     #[test]

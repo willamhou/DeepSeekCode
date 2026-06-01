@@ -126,9 +126,10 @@ dogfood 证据。
    read-only parallel dispatch 和 stats/replay surfaces。tool-call repair
    初版已落地：可修复可恢复的截断 JSON 参数、从显式 JSON-shaped 文本中找回已知工具调用，
    支持 `model.tool_schema_flattening = "auto"` 下的 schema flatten/re-nest，并在
-   TUI runtime、exec durable runtime events、`exec --json` 和 `DSCODE_DEBUG_TOOL_REPAIR=1`
-   opt-in debug logs 中留下 repair 证据；不可修复的 malformed tool-call parse
-   failure 会转成下一步模型可见的 failed `model` observation，而不是直接硬失败；重复工具调用守卫已区分只读和写状态工具，
+   TUI runtime、exec durable runtime events、runtime daemon task events、
+   `exec --json` 和 `DSCODE_DEBUG_TOOL_REPAIR=1` opt-in debug logs 中留下
+   repair 证据；不可修复的 malformed tool-call parse failure 会转成下一步模型可见的
+   failed `model` observation，而不是直接硬失败；重复工具调用守卫已区分只读和写状态工具，
    prompt-layer diagnostics 与 `deepseek stats` MVP 也已接入 exec、TUI 和 runtime daemon
    turns，并可展示 model preset/route split、per-layer token/hash trend 与 cache-stable hash-change totals，
    `deepseek stats --require-prefix-stable` 可作为 cache-stable prompt layer hash
@@ -141,7 +142,8 @@ dogfood 证据。
    config budget +<MICROUSD>`、`deepseek config budget off` 和 TUI `model budget ...`
    会清晰处理 raise/disable runtime limit；auto escalation 已覆盖 repeated repair、
    malformed tool-call、tool-call storm、empty read/search、validation-after-edit 和
-   repeated unproductive step signals，默认 live dogfood plan/report/evidence gate
+   repeated unproductive step signals，exec 与 runtime daemon task result 会持久化
+   model route events，默认 live dogfood plan/report/evidence gate
    现在也要求 MCP dynamic/resource loop-surface 覆盖、至少 3 条 `mcp` live
    runs 的 gate，以及 7 天 live recency gate；首批真实 online MCP surface 样本已完成
    并通过 loop-surface 覆盖 gate，但 2026-06-01 复验显示 7 天 recency 需要刷新，
