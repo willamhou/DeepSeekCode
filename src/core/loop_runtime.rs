@@ -654,6 +654,7 @@ impl AgentLoop {
                     &mut observations,
                     &mut tool_events,
                     &mut recent_call_fingerprints,
+                    &mut recent_inspection_fingerprints,
                     REPEAT_WINDOW,
                 )? {
                     step_attempted_tool = true;
@@ -1529,6 +1530,7 @@ fn maybe_execute_parallel_safe_chunk<W: std::io::Write>(
     observations: &mut Vec<Observation>,
     tool_events: &mut Vec<ToolEvent>,
     recent_call_fingerprints: &mut Vec<String>,
+    recent_inspection_fingerprints: &mut Vec<String>,
     repeat_window: usize,
 ) -> AppResult<Option<usize>> {
     if hooks_enabled || !parallel_dispatch_enabled() || calls.len() < 2 {
@@ -1548,6 +1550,7 @@ fn maybe_execute_parallel_safe_chunk<W: std::io::Write>(
     }
 
     let mut simulated_fingerprints = recent_call_fingerprints.clone();
+    let mut simulated_inspection_fingerprints = recent_inspection_fingerprints.clone();
     let mut prepared = Vec::with_capacity(chunk_len);
     for call in &calls[..chunk_len] {
         check_cancelled(cancel_check)?;
@@ -1568,8 +1571,27 @@ fn maybe_execute_parallel_safe_chunk<W: std::io::Write>(
         if same_count_in_window > 0 {
             return Ok(None);
         }
+        let inspection_target = read_inspection_target(&call.tool_name, &event_input);
+        let inspection_count_in_window = inspection_target
+            .as_ref()
+            .map(|target| {
+                simulated_inspection_fingerprints
+                    .iter()
+                    .rev()
+                    .take(repeat_window)
+                    .filter(|fp| *fp == target)
+                    .count()
+            })
+            .unwrap_or(0);
+        if inspection_count_in_window > 0 {
+            return Ok(None);
+        }
         simulated_fingerprints.push(fingerprint);
         trim_recent_call_fingerprints(&mut simulated_fingerprints, repeat_window);
+        if let Some(target) = inspection_target {
+            simulated_inspection_fingerprints.push(target);
+            trim_recent_call_fingerprints(&mut simulated_inspection_fingerprints, repeat_window);
+        }
         prepared.push(PreparedParallelToolCall {
             tool_name: call.tool_name.clone(),
             input: call.input.clone(),
@@ -1578,6 +1600,7 @@ fn maybe_execute_parallel_safe_chunk<W: std::io::Write>(
     }
 
     *recent_call_fingerprints = simulated_fingerprints;
+    *recent_inspection_fingerprints = simulated_inspection_fingerprints;
     for call in &prepared {
         emit_tool_call(run_events, &call.tool_name, &call.event_input);
     }
@@ -4616,6 +4639,75 @@ mod cr1_regression_test {
             .iter()
             .all(|event| !event.output.contains("meta.parallel_dispatch=true")));
         assert_eq!(max_parallel_test_probe(probe), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_with_client_downgrades_parallel_chunk_for_repeated_inspection_target() {
+        let _env = EnvRestore::set(&[
+            ("DSCODE_TOOL_DISPATCH", "auto"),
+            ("DSCODE_PARALLEL_MAX", "4"),
+        ]);
+        let probe = "parallel_repeat_inspection_target";
+        reset_parallel_test_probe(probe);
+        let root = unique_tmp("parallel-repeat-inspection-target");
+        std::fs::create_dir_all(&root).unwrap();
+        let readme = root.join("README.md");
+        std::fs::write(&readme, "one\ntwo\nthree\n").unwrap();
+        let readme_arg = readme.display().to_string();
+
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("inspect same file twice".to_string(), None);
+        let client = ScriptedActionsClient {
+            captured_observations: RefCell::new(Vec::new()),
+            actions: vec![
+                ModelAction::CallTools(vec![
+                    ToolCallRequest {
+                        tool_name: "read_file".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("path", &readme_arg)
+                            .with_arg("max_lines", "1")
+                            .with_arg("_parallel_test_probe", probe)
+                            .with_arg("_parallel_test_delay_ms", "80"),
+                    },
+                    ToolCallRequest {
+                        tool_name: "read_file".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("path", &readme_arg)
+                            .with_arg("max_lines", "2")
+                            .with_arg("_parallel_test_probe", probe)
+                            .with_arg("_parallel_test_delay_ms", "80"),
+                    },
+                ]),
+                ModelAction::Finish,
+            ],
+            calls: RefCell::new(0),
+        };
+
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 2,
+                    emit_progress: false,
+                    persist_session: false,
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(result.tool_events.len(), 2);
+        assert!(result
+            .tool_events
+            .iter()
+            .all(|event| !event.output.contains("meta.parallel_dispatch=true")));
+        assert_eq!(
+            max_parallel_test_probe(probe),
+            0,
+            "same inspection target with different caps should fall back to serial repeat handling"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
