@@ -5410,11 +5410,7 @@ fn parse_dogfood_run_args(args: Vec<String>) -> Result<DogfoodRunArgs, String> {
                 continue;
             }
             "--budget" if index + 1 < args.len() => {
-                if let Ok(n) = args[index + 1].parse::<usize>() {
-                    if (1..=200).contains(&n) {
-                        budget = Some(n);
-                    }
-                }
+                budget = Some(parse_required_usize("--budget", &args[index + 1], 1, 200)?);
                 index += 2;
                 continue;
             }
@@ -5453,6 +5449,10 @@ fn parse_dogfood_run_args(args: Vec<String>) -> Result<DogfoodRunArgs, String> {
                 notes = Some(args[index + 1].clone());
                 index += 2;
                 continue;
+            }
+            "--from-benchmark" | "--manifest" | "--skill" | "--budget" | "--workdir"
+            | "--outcome" | "--notes" => {
+                return Err(format!("{} requires a value", args[index]));
             }
             _ => {}
         }
@@ -5508,11 +5508,7 @@ fn parse_dogfood_external_fixture_args(
                 continue;
             }
             "--budget" if index + 1 < args.len() => {
-                if let Ok(n) = args[index + 1].parse::<usize>() {
-                    if (1..=200).contains(&n) {
-                        budget = Some(n);
-                    }
-                }
+                budget = Some(parse_required_usize("--budget", &args[index + 1], 1, 200)?);
                 index += 2;
                 continue;
             }
@@ -5540,6 +5536,9 @@ fn parse_dogfood_external_fixture_args(
                 allow_offline = true;
                 index += 1;
                 continue;
+            }
+            "--workdir" | "--budget" | "--evidence-out" | "--notes" => {
+                return Err(format!("{} requires a value", args[index]));
             }
             _ => {}
         }
@@ -6887,6 +6886,44 @@ mod tests {
     }
 
     #[test]
+    fn dogfood_run_rejects_invalid_budget() {
+        let zero = parse_dogfood_subcommand(vec![
+            "run".to_string(),
+            "--budget".to_string(),
+            "0".to_string(),
+            "inspect".to_string(),
+        ])
+        .unwrap_err();
+        assert!(zero.contains("--budget requires an integer between 1 and 200"));
+
+        let non_number = parse_dogfood_subcommand(vec![
+            "run".to_string(),
+            "--budget".to_string(),
+            "many".to_string(),
+            "inspect".to_string(),
+        ])
+        .unwrap_err();
+        assert!(non_number.contains("--budget requires an integer between 1 and 200"));
+    }
+
+    #[test]
+    fn dogfood_run_reports_missing_values() {
+        for flag in [
+            "--from-benchmark",
+            "--manifest",
+            "--skill",
+            "--budget",
+            "--workdir",
+            "--outcome",
+            "--notes",
+        ] {
+            let err =
+                parse_dogfood_subcommand(vec!["run".to_string(), flag.to_string()]).unwrap_err();
+            assert_eq!(err, format!("{flag} requires a value"));
+        }
+    }
+
+    #[test]
     fn parses_dogfood_external_fixture_subcommand() {
         let parsed = parse_dogfood_subcommand(vec![
             "external-fixture".to_string(),
@@ -6941,6 +6978,41 @@ mod tests {
             DogfoodAction::Report(_) => panic!("expected external fixture args"),
             DogfoodAction::ExportBenchmark(_) => panic!("expected external fixture args"),
             DogfoodAction::PromoteBenchmark(_) => panic!("expected external fixture args"),
+        }
+    }
+
+    #[test]
+    fn dogfood_external_fixture_rejects_invalid_budget() {
+        let zero = parse_dogfood_subcommand(vec![
+            "external-fixture".to_string(),
+            "--workdir".to_string(),
+            "/tmp/external-repo".to_string(),
+            "--budget".to_string(),
+            "0".to_string(),
+            "validate".to_string(),
+        ])
+        .unwrap_err();
+        assert!(zero.contains("--budget requires an integer between 1 and 200"));
+
+        let non_number = parse_dogfood_subcommand(vec![
+            "external-fixture".to_string(),
+            "--workdir".to_string(),
+            "/tmp/external-repo".to_string(),
+            "--budget".to_string(),
+            "many".to_string(),
+            "validate".to_string(),
+        ])
+        .unwrap_err();
+        assert!(non_number.contains("--budget requires an integer between 1 and 200"));
+    }
+
+    #[test]
+    fn dogfood_external_fixture_reports_missing_values() {
+        for flag in ["--workdir", "--budget", "--evidence-out", "--notes"] {
+            let err =
+                parse_dogfood_subcommand(vec!["external-fixture".to_string(), flag.to_string()])
+                    .unwrap_err();
+            assert_eq!(err, format!("{flag} requires a value"));
         }
     }
 
