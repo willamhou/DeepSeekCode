@@ -1554,6 +1554,9 @@ fn maybe_execute_parallel_safe_chunk<W: std::io::Write>(
     let mut prepared = Vec::with_capacity(chunk_len);
     for call in &calls[..chunk_len] {
         check_cancelled(cancel_check)?;
+        if !policy.allows_tool(&call.tool_name) {
+            return Ok(None);
+        }
         if registry
             .permission_request_for(&call.tool_name, &call.input, policy)
             .is_some()
@@ -4707,6 +4710,98 @@ mod cr1_regression_test {
             max_parallel_test_probe(probe),
             0,
             "same inspection target with different caps should fall back to serial repeat handling"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_with_client_downgrades_parallel_chunk_for_policy_blocked_tool() {
+        let _env = EnvRestore::set(&[
+            ("DSCODE_TOOL_DISPATCH", "auto"),
+            ("DSCODE_PARALLEL_MAX", "4"),
+        ]);
+        let probe = "parallel_policy_blocked";
+        reset_parallel_test_probe(probe);
+        let root = unique_tmp("parallel-policy-blocked");
+        let skills = root.join("skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::fs::write(
+            skills.join("read-only.toml"),
+            r#"
+name = "read-only"
+description = "Only read one file"
+allowed_tools = ["read_file"]
+
+[policy]
+require_write_confirmation = false
+require_shell_confirmation = false
+shell_allowlist = []
+"#,
+        )
+        .unwrap();
+        let file = root.join("README.md");
+        std::fs::write(&file, "hello\n").unwrap();
+        let file_arg = file.display().to_string();
+
+        let mut cfg = crate::config::types::AppConfig::default();
+        cfg.workspace.user_skills_dir = skills.display().to_string();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new(
+            "inspect with a restricted skill".to_string(),
+            Some("read-only".to_string()),
+        );
+        let client = ScriptedActionsClient {
+            captured_observations: RefCell::new(Vec::new()),
+            actions: vec![
+                ModelAction::CallTools(vec![
+                    ToolCallRequest {
+                        tool_name: "read_file".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("path", &file_arg)
+                            .with_arg("_parallel_test_probe", probe)
+                            .with_arg("_parallel_test_delay_ms", "80"),
+                    },
+                    ToolCallRequest {
+                        tool_name: "git_status".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("_parallel_test_probe", probe)
+                            .with_arg("_parallel_test_delay_ms", "80"),
+                    },
+                ]),
+                ModelAction::Finish,
+            ],
+            calls: RefCell::new(0),
+        };
+
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 2,
+                    emit_progress: false,
+                    persist_session: false,
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(result.tool_events.len(), 2);
+        assert!(result
+            .tool_events
+            .iter()
+            .all(|event| !event.output.contains("meta.parallel_dispatch=true")));
+        assert!(matches!(
+            result.tool_events[1].status,
+            crate::model::protocol::ObservationStatus::Failed
+        ));
+        assert!(result.tool_events[1]
+            .output
+            .contains("tool blocked by policy: git_status"));
+        assert_eq!(
+            max_parallel_test_probe(probe),
+            0,
+            "policy-blocked read chunks must fall back to serial policy handling"
         );
         let _ = std::fs::remove_dir_all(root);
     }
