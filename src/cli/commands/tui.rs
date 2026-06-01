@@ -3506,7 +3506,7 @@ fn format_lsp_summary(summary: &DiagnosticsConfigSummary) -> String {
 
 fn format_model_config_summary(summary: &ModelConfigSummary) -> String {
     format!(
-        "DeepSeekCode Model Config ({})\n\nmodel.preset = {}\nmodel.model = {}\nmodel.reasoning_effort = {}\nmodel.session_budget_microusd = {}\nmodel.base_url = {}\nmodel.api_key_env = {}\n\nUse model to open the picker, model preset <auto|flash|pro> to update routing, model budget <MICROUSD|off|raise MICROUSD> to manage the session cost limit, model <name> to update model.model, or models for the offline catalog.",
+        "DeepSeekCode Model Config ({})\n\nmodel.preset = {}\nmodel.model = {}\nmodel.reasoning_effort = {}\nmodel.session_budget_microusd = {}\nmodel.base_url = {}\nmodel.api_key_env = {}\n\nUse model to open the picker, model preset <auto|flash|pro> to update routing, model budget <show|off|MICROUSD|raise MICROUSD|+MICROUSD> to inspect or manage the session cost limit, model <name> to update model.model, or models for the offline catalog.",
         summary.path.display(),
         summary.preset,
         summary.model,
@@ -10745,6 +10745,7 @@ allowed_tools = ["read_file"]
         assert!(output.contains("model budget raised: 1200 -> 2000 microusd"));
         let (_, detail) = app.mcp_detail_for_test().expect("model detail");
         assert!(detail.contains("model.session_budget_microusd = 2000"));
+        assert!(detail.contains("model budget <show|off|MICROUSD|raise MICROUSD|+MICROUSD>"));
 
         handle_tui_action(
             &store,

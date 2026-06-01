@@ -463,12 +463,12 @@ Status on 2026-05-24: initial model preset and budget controls landed.
 DeepSeekCode now stores `model.preset = "auto" | "flash" | "pro"` separately
 from the raw `model.model` marker, defaults new configs to the `auto` preset,
 and exposes `deepseek config preset [auto|flash|pro]`,
-`deepseek config budget [MICROUSD|off|raise MICROUSD|+MICROUSD]`, `deepseek run
---preset ...`, `deepseek exec --preset ...`, and `--pro-next` overrides. The TUI
-supports `model preset <auto|flash|pro>`, `model budget
-<MICROUSD|off|raise MICROUSD>`, `/pro` to arm DeepSeek V4 Pro for the next
-submitted user turn, `/pro off` to cancel the one-turn override, and `/pro show`
-to inspect it. Auto routing emits a visible escalation line/event before
+`deepseek config budget [show|off|MICROUSD|raise MICROUSD|+MICROUSD]`,
+`deepseek run --preset ...`, `deepseek exec --preset ...`, and `--pro-next`
+overrides. The TUI supports `model preset <auto|flash|pro>`, `model budget
+<show|off|MICROUSD|raise MICROUSD|+MICROUSD>`, `/pro` to arm DeepSeek V4 Pro
+for the next submitted user turn, `/pro off` to cancel the one-turn override,
+and `/pro show` to inspect it. Auto routing emits a visible escalation line/event before
 using `deepseek-v4-pro`, and session budget enforcement warns at 80% and refuses
 new model calls once the in-loop estimated DeepSeek spend reaches
 `model.session_budget_microusd`. Runtime session/thread records now also persist

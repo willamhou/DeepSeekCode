@@ -618,7 +618,7 @@ curl http://127.0.0.1:8765/runtime
 - `deepseek events replay <thread-id> [--limit <N>] [--json]` / `deepseek events diff <left-thread-id> <right-thread-id> [--json]`：把 runtime events/items/usage 转成可读 replay 或线程对比证据，覆盖 cost/cache/tool/failure/file-modification signals
 - `deepseek pr live-status <pr> [--require-write --json]`：只读检查真实 GitHub PR 是否具备 live review/retry fixture 前置条件
 - `deepseek config provider [show|list|<name> [model]]` / `deepseek config model [show|list|<model>]`：查看或切换首跑 provider/model 配置；例如 `deepseek config provider deepseek pro`
-- `deepseek config preset [show|auto|flash|pro]` / `deepseek config budget [show|off|MICROUSD|raise MICROUSD|+MICROUSD]`：查看或切换 DeepSeek V4 路由 preset，并设置、提高或关闭可选 session 估算成本预算；TUI/daemon runtime session 会把 active budget 同步到 session/thread metadata、跨进程恢复 durable usage 成本，TUI 里也可用 `model budget <MICROUSD|off|raise MICROUSD>`
+- `deepseek config preset [show|auto|flash|pro]` / `deepseek config budget [show|off|MICROUSD|raise MICROUSD|+MICROUSD]`：查看或切换 DeepSeek V4 路由 preset，并设置、提高或关闭可选 session 估算成本预算；TUI/daemon runtime session 会把 active budget 同步到 session/thread metadata、跨进程恢复 durable usage 成本，TUI 里也可用 `model budget <show|off|MICROUSD|raise MICROUSD|+MICROUSD>`
 - `deepseek config auth [ENV] --stdin`：从 stdin 安全写入 `.env`，避免把 API key 放进 shell argv
 - `deepseek config network allow|deny <host>`：把网络 host 策略写回项目 `.dscode/config.toml`，用于持久化 web/search/fetch 的允许或拒绝规则
 - `deepseek agents run-task <task-id>`：认领并执行 pending durable runtime task，写回同一 thread 的 turns/items/usage/status
