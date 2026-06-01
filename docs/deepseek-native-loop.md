@@ -462,7 +462,7 @@ Reason: it turns existing cache telemetry into actionable cache-first behavior.
 Status on 2026-05-24: initial model preset and budget controls landed.
 DeepSeekCode now stores `model.preset = "auto" | "flash" | "pro"` separately
 from the raw `model.model` marker, defaults new configs to the `auto` preset,
-and exposes `deepseek config preset [auto|flash|pro]`,
+and exposes `deepseek config preset [show|auto|flash|pro]`,
 `deepseek config budget [show|off|MICROUSD|raise MICROUSD|+MICROUSD]`,
 `deepseek run --preset ...`, `deepseek exec --preset ...`, and `--pro-next`
 overrides. The TUI supports `model preset <auto|flash|pro>`, `model budget

@@ -2645,7 +2645,7 @@ fn parse_config_budget_action(args: &[String]) -> Result<ConfigBudgetAction, Str
             let budget = value
                 .parse::<u64>()
                 .map_err(|_| {
-                    "config budget expects MICROUSD, off, raise MICROUSD, or +MICROUSD"
+                    "config budget expects show, off, MICROUSD, raise MICROUSD, or +MICROUSD"
                         .to_string()
                 })?;
             Ok(ConfigBudgetAction::SetMicrousd(budget))
@@ -9440,5 +9440,16 @@ mod tests {
         let err = Cli::from_argv(vec!["completion".to_string(), "pwsh".to_string()])
             .expect_err("parse should fail");
         assert!(err.contains("unknown completion shell"));
+    }
+
+    #[test]
+    fn cli_from_argv_config_budget_error_mentions_show_and_plus() {
+        let error = Cli::from_argv(vec![
+            "config".to_string(),
+            "budget".to_string(),
+            "soon".to_string(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("show, off, MICROUSD, raise MICROUSD, or +MICROUSD"));
     }
 }

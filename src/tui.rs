@@ -2180,7 +2180,8 @@ fn parse_tui_model_command(line: &str) -> Option<Result<TuiModelCommand, String>
                 .parse::<u64>()
                 .map(|microusd| TuiModelCommand::BudgetSet { microusd })
                 .map_err(|_| {
-                    "model budget expects MICROUSD, off, raise MICROUSD, or +MICROUSD".to_string()
+                    "model budget expects show, off, MICROUSD, raise MICROUSD, or +MICROUSD"
+                        .to_string()
                 }),
         ),
         [model] if !model.starts_with('-') => Some(Ok(TuiModelCommand::Set {
@@ -4218,9 +4219,11 @@ const TUI_COMMAND_COMPLETIONS: &[&str] = &[
     "model budget show",
     "model budget off",
     "model budget raise 1000",
+    "model budget +1000",
     "model auto",
     "pro",
     "pro off",
+    "pro show",
     "models",
     "provider",
     "provider show",
@@ -4599,9 +4602,11 @@ const TUI_COMPOSER_SLASH_COMPLETIONS: &[&str] = &[
     "/model budget show",
     "/model budget off",
     "/model budget raise 1000",
+    "/model budget +1000",
     "/model auto",
     "/pro",
     "/pro off",
+    "/pro show",
     "/models",
     "/provider",
     "/provider show",
@@ -25335,6 +25340,15 @@ model.api_key_env = "OPENAI_API_KEY"
         assert!(mcp.contains(&"/mcp reload".to_string()));
         assert!(mcp.contains(&"/mcp manager".to_string()));
 
+        let model_budget = composer_slash_completion_matches(&app, "/model budget ");
+        assert!(model_budget.contains(&"/model budget show".to_string()));
+        assert!(model_budget.contains(&"/model budget raise 1000".to_string()));
+        assert!(model_budget.contains(&"/model budget +1000".to_string()));
+
+        let pro = composer_slash_completion_matches(&app, "/pro ");
+        assert!(pro.contains(&"/pro off".to_string()));
+        assert!(pro.contains(&"/pro show".to_string()));
+
         let jobs = composer_slash_completion_matches(&app, "/jobs");
         assert!(jobs.contains(&"/jobs list".to_string()));
         assert!(jobs.contains(&"/jobs attach ".to_string()));
@@ -25746,6 +25760,20 @@ model.api_key_env = "OPENAI_API_KEY"
         assert_eq!(app.command_query, "mode agent");
         assert_eq!(app.command_cursor, app.command_query.len());
         assert_eq!(app.status, "command completed");
+    }
+
+    #[test]
+    fn command_palette_hints_include_budget_plus_and_pro_show() {
+        let app = TuiApp::new(Vec::new());
+
+        let budget = command_palette_completion_matches(&app, "model budget ");
+        assert!(budget.contains(&"model budget show".to_string()));
+        assert!(budget.contains(&"model budget raise 1000".to_string()));
+        assert!(budget.contains(&"model budget +1000".to_string()));
+
+        let pro = command_palette_completion_matches(&app, "pro ");
+        assert!(pro.contains(&"pro off".to_string()));
+        assert!(pro.contains(&"pro show".to_string()));
     }
 
     #[test]
