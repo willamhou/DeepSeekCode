@@ -3569,7 +3569,12 @@ fn select_live_run_cases(plan: &LivePlan, categories: &[String], limit: usize) -
             if selected.len() >= limit {
                 break;
             }
-            let Some(case) = category.recommended_cases.get(case_index) else {
+            let cases = if !category_filter.is_empty() && category.recommended_cases.is_empty() {
+                &category.replayable_cases
+            } else {
+                &category.recommended_cases
+            };
+            let Some(case) = cases.get(case_index) else {
                 continue;
             };
             selected.push(LiveRunCase {
@@ -6497,6 +6502,52 @@ mod tests {
         ));
         assert!(json.contains("\"evidence_gate\":{\"command\":\"deepseek dogfood report --limit 100 --require-live-runs 100 --require-live-success-rate 90 --require-live-recent-days 7 --require-live-category write_validate:25:90\""));
         assert!(json.contains("dogfood live-run --execute requires an online model transport"));
+    }
+
+    #[test]
+    fn live_run_explicit_category_can_refresh_replayable_cases_after_gate_is_satisfied() {
+        let plan = LivePlan {
+            ledger_path: PathBuf::from(".dscode/dogfood/ledger.jsonl"),
+            manifest_path: PathBuf::from(".dscode/benchmarks.txt"),
+            model_transport: MODEL_TRANSPORT_ONLINE.to_string(),
+            target_live_runs: 100,
+            target_live_success_rate: 90.0,
+            live_runs: 150,
+            live_success: 139,
+            live_recency_age_days: Some(0.0),
+            live_recency_refresh_needed: false,
+            category_plans: vec![LiveCategoryPlan {
+                category: "mcp".to_string(),
+                target_runs: 3,
+                target_success_rate: 90.0,
+                live_runs: 34,
+                live_success: 31,
+                needed_runs: 0,
+                additional_recommended_runs: 0,
+                replayable_cases: vec![
+                    "fixture-mcp-dynamic-readme".to_string(),
+                    "fixture-mcp-generic-call-readme".to_string(),
+                    "fixture-mcp-resource-workspace".to_string(),
+                ],
+                recommended_cases: Vec::new(),
+            }],
+        };
+        let requested = vec!["mcp".to_string()];
+        let selected = select_live_run_cases(&plan, &requested, 2);
+
+        assert_eq!(
+            selected,
+            vec![
+                LiveRunCase {
+                    category: "mcp".to_string(),
+                    name: "fixture-mcp-dynamic-readme".to_string(),
+                },
+                LiveRunCase {
+                    category: "mcp".to_string(),
+                    name: "fixture-mcp-generic-call-readme".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]

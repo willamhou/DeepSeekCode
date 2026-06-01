@@ -29,15 +29,16 @@ hardening gaps rather than architecture blockers:
   stats --require-prefix-stable` can fail CI/dogfood checks when prompt-layer
   evidence is missing or stable prompt-prefix layers change hash.
 - Tool-call repair has deterministic coverage, including model-facing failed
-  observations for malformed calls that cannot be repaired. The first real
-  online MCP loop-surface batch has also passed locally, with `mcp` at `27/30`
-  live successes and dynamic/resource surface coverage present. The remaining
-  work is recurring live DeepSeek-backed calibration across real gateways and
-  malformed-call edge cases. The default live dogfood plan includes an MCP
-  loop-surface target, and `live-evidence --require-loop-surface-gate` fails
-  closed unless evidence includes MCP dynamic/resource surface coverage plus an
-  `mcp` live gate of at least three runs. The default report/evidence gate also
-  requires a live model-backed row from the last seven days.
+  observations for malformed calls that cannot be repaired. The latest real
+  online MCP loop-surface batch passed locally on 2026-06-01, with `mcp` at
+  `31/34` live successes and dynamic/resource surface coverage present. The
+  remaining work is recurring live DeepSeek-backed calibration across real
+  gateways and malformed-call edge cases. The default live dogfood plan
+  includes an MCP loop-surface target, and
+  `live-evidence --require-loop-surface-gate` fails closed unless evidence
+  includes MCP dynamic/resource surface coverage plus an `mcp` live gate of at
+  least three runs. The default report/evidence gate also requires a live
+  model-backed row from the last seven days.
 - Model presets and session budgets work, including explicit budget raise/off
   flows. Auto-escalation now covers repeated repair, malformed tool-call,
   tool-call storm, empty read/search, validation-after-edit, and unproductive
@@ -52,14 +53,14 @@ hardening gaps rather than architecture blockers:
   each remote surface proves side-effect free. Parallel chunk telemetry is
   recorded on tool result events through `meta.parallel_*` lines.
 - Deterministic repair/cache evidence and prompt-prefix stability now run in
-  the release matrix and are uploaded as loop evidence artifacts. The first real
-  online MCP surface batch satisfied the local live plan/report/evidence gates:
-  MCP dynamic/resource loop-surface coverage is present and the `mcp` live
-  category is `27/30`. As of 2026-06-01 local verification, the seven-day live
-  recency gate needs one fresh model-backed dogfood row before the full
-  report/evidence gate passes again; `deepseek dogfood live-plan` surfaces that
-  refresh as a recommended live case. The remaining evidence work is recurring
-  live model-backed dogfood across real gateways and continued calibration.
+  the release matrix and are uploaded as loop evidence artifacts. The latest
+  real online MCP surface batch satisfied the local live plan/report/evidence
+  gates: MCP dynamic/resource loop-surface coverage is present, the `mcp` live
+  category is `31/34`, and the seven-day live recency gate is fresh as of
+  2026-06-01 local verification. `deepseek dogfood live-plan` now reports
+  `overall_needed_runs: 0` for the `mcp:3:90` target. The remaining evidence
+  work is recurring live model-backed dogfood across real gateways and
+  continued calibration.
 
 ## What To Absorb
 
