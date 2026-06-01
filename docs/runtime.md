@@ -981,8 +981,8 @@ thread-linked pending task per tick, and performs non-destructive compaction for
 threads whose latest usage record crosses the configured daemon compaction
 threshold. The default is 800k tokens with 8 tail turns preserved; tune it with
 `runtime.daemon_compaction_threshold_tokens` and
-`runtime.daemon_compaction_keep_tail_turns`, or set the threshold to `0` to
-disable automatic daemon compaction.
+`runtime.daemon_compaction_keep_tail_turns` (effective range `1..=200`), or set
+the threshold to `0` to disable automatic daemon compaction.
 Daemon JSON ticks include `executed_rlm_turns` and `failed_rlm_turns`; generic
 task execution intentionally skips `kind=rlm_process` so live RLM turns cannot
 bypass their payload, manifest, and event-log state machine. When the

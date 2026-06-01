@@ -453,7 +453,7 @@ Deliver:
   `deepseek stats --require-prefix-stable`; landed;
 - configurable daemon compaction threshold and keep-tail policy via
   `runtime.daemon_compaction_threshold_tokens` and
-  `runtime.daemon_compaction_keep_tail_turns`; landed.
+  `runtime.daemon_compaction_keep_tail_turns` (clamped to `1..=200`); landed.
 
 Reason: it turns existing cache telemetry into actionable cache-first behavior.
 

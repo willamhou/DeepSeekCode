@@ -12137,6 +12137,123 @@ mod tests {
     }
 
     #[test]
+    fn runtime_daemon_tick_disables_compaction_when_threshold_is_zero() {
+        let root = temp_root("runtime-daemon-compact-disabled");
+        let config_dir = root.join(".dscode");
+        let mut config = AppConfig::default();
+        config.workspace.config_dir = config_dir.display().to_string();
+        config.model.api_key_env = "DSCODE_TEST_NO_KEY".to_string();
+        config.runtime.daemon_compaction_threshold_tokens = 0;
+        let store = RuntimeStore::new(config_dir.join("runtime"));
+        let thread = store
+            .create_thread(
+                "Long context with disabled compaction".to_string(),
+                ".".to_string(),
+                "deepseek-v4-flash".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let mut latest_turn_id = String::new();
+        for index in 1..=10 {
+            latest_turn_id = store
+                .append_turn(&thread.id, "assistant".to_string(), format!("turn {index}"))
+                .unwrap()
+                .id;
+        }
+        store
+            .append_usage_with_cache(
+                &thread.id,
+                Some(&latest_turn_id),
+                "deepseek-v4-flash".to_string(),
+                "test".to_string(),
+                1_000_000,
+                25,
+                200_000,
+                800_000,
+            )
+            .unwrap();
+
+        let tick = run_runtime_daemon_tick(&config, &store, None, false).unwrap();
+
+        assert_eq!(tick.compacted_threads, 0);
+        assert!(!store
+            .read_events(&thread.id, 0)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "thread_compacted"));
+    }
+
+    #[test]
+    fn runtime_daemon_tick_respects_configured_compaction_keep_tail() {
+        let root = temp_root("runtime-daemon-compact-tail");
+        let config_dir = root.join(".dscode");
+        let mut config = AppConfig::default();
+        config.workspace.config_dir = config_dir.display().to_string();
+        config.model.api_key_env = "DSCODE_TEST_NO_KEY".to_string();
+        config.runtime.daemon_compaction_keep_tail_turns = 3;
+        let store = RuntimeStore::new(config_dir.join("runtime"));
+        let thread = store
+            .create_thread(
+                "Long context with custom tail".to_string(),
+                ".".to_string(),
+                "deepseek-v4-flash".to_string(),
+                "agent".to_string(),
+            )
+            .unwrap();
+        let mut latest_turn_id = String::new();
+        for index in 1..=10 {
+            latest_turn_id = store
+                .append_turn(&thread.id, "assistant".to_string(), format!("turn {index}"))
+                .unwrap()
+                .id;
+        }
+        store
+            .append_usage_with_cache(
+                &thread.id,
+                Some(&latest_turn_id),
+                "deepseek-v4-flash".to_string(),
+                "test".to_string(),
+                850_000,
+                25,
+                200_000,
+                650_000,
+            )
+            .unwrap();
+
+        let tick = run_runtime_daemon_tick(&config, &store, None, false).unwrap();
+
+        assert_eq!(tick.compacted_threads, 1);
+        let events = store.read_events(&thread.id, 0).unwrap();
+        let compaction_event = events
+            .iter()
+            .find(|event| event.kind == "thread_compacted")
+            .expect("expected compaction event");
+        let JsonValue::Object(payload) = &compaction_event.payload else {
+            panic!("expected object payload");
+        };
+        assert_eq!(
+            payload.get("keep_tail_turns").and_then(json_as_u64),
+            Some(3)
+        );
+        assert_eq!(
+            payload.get("summarized_turn_count").and_then(json_as_u64),
+            Some(7)
+        );
+        assert_eq!(
+            payload.get("kept_turn_count").and_then(json_as_u64),
+            Some(3)
+        );
+        let summary_items = store
+            .list_items(&thread.id, None)
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.item_type == "summary")
+            .collect::<Vec<_>>();
+        assert_eq!(summary_items.len(), 1);
+        assert!(summary_items[0].content.contains("Kept tail turns: 3"));
+    }
+
+    #[test]
     fn runtime_daemon_compaction_uses_model_summary_provider() {
         let root = temp_root("runtime-daemon-model-compact");
         let config_dir = root.join(".dscode");
