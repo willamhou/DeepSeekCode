@@ -20,8 +20,8 @@ future change explicitly carries the required license notice and review.
 
 The first DeepSeek-native loop slice has landed: repair, prompt-layer
 diagnostics, presets/budgets, parallel read dispatch, and stats/replay evidence
-all have code paths and deterministic tests. The remaining loop gaps are now
-hardening gaps rather than architecture blockers:
+all have code paths and deterministic tests. The open loop work is now
+recurring hardening and calibration, not missing feature implementation:
 
 - Cache-first behavior is observable and locally enforceable. Prompt-layer
   hashes, token estimates, cache hit/miss usage, configurable daemon
@@ -31,10 +31,10 @@ hardening gaps rather than architecture blockers:
 - Tool-call repair has deterministic coverage, including model-facing failed
   observations for malformed calls that cannot be repaired. The latest real
   online MCP loop-surface batch passed locally on 2026-06-01, with `mcp` at
-  `31/34` live successes and dynamic/resource surface coverage present. The
-  remaining work is recurring live DeepSeek-backed calibration across real
-  gateways and malformed-call edge cases. The default live dogfood plan
-  includes an MCP loop-surface target, and
+  `31/34` live successes and dynamic/resource surface coverage present.
+  Recurring live DeepSeek-backed calibration continues across real gateways and
+  malformed-call edge cases. The default live dogfood plan includes an MCP
+  loop-surface target, and
   `live-evidence --require-loop-surface-gate` fails closed unless evidence
   includes MCP dynamic/resource surface coverage plus an `mcp` live gate of at
   least three runs. The default report/evidence gate also requires a live
@@ -58,9 +58,9 @@ hardening gaps rather than architecture blockers:
   gates: MCP dynamic/resource loop-surface coverage is present, the `mcp` live
   category is `31/34`, and the seven-day live recency gate is fresh as of
   2026-06-01 local verification. `deepseek dogfood live-plan` now reports
-  `overall_needed_runs: 0` for the `mcp:3:90` target. The remaining evidence
-  work is recurring live model-backed dogfood across real gateways and
-  continued calibration.
+  `overall_needed_runs: 0` for the `mcp:3:90` target. Evidence work from here
+  is recurring live model-backed dogfood across real gateways and continued
+  calibration.
 
 ## What To Absorb
 
@@ -99,8 +99,8 @@ Reasonix has a repair pipeline for DeepSeek-style tool-call failures:
 DeepSeekCode already supports OpenAI-compatible and Anthropic-compatible tool
 calls, same-turn batch tool calls, and repeat-call detection in the agent loop.
 It now has a systematic repair module before parser failures become hard model
-failures; the remaining work is recurring live DeepSeek-backed calibration
-across more gateways and malformed-call edge cases.
+failures; ongoing work is recurring live DeepSeek-backed calibration across
+more gateways and malformed-call edge cases.
 
 Absorb:
 
