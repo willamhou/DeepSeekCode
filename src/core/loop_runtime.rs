@@ -3078,6 +3078,7 @@ mod cr1_regression_test {
     use std::fs;
     use std::path::PathBuf;
     use std::rc::Rc;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use crate::core::context::TaskContext;
@@ -4445,12 +4446,20 @@ mod cr1_regression_test {
     }
 
     struct EnvRestore {
+        _guard: MutexGuard<'static, ()>,
         values: Vec<(&'static str, Option<String>)>,
+    }
+
+    fn parallel_dispatch_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     impl EnvRestore {
         fn set(values: &[(&'static str, &'static str)]) -> Self {
+            let guard = parallel_dispatch_env_lock().lock().unwrap();
             let restore = Self {
+                _guard: guard,
                 values: values
                     .iter()
                     .map(|(key, _)| (*key, std::env::var(key).ok()))
@@ -4543,6 +4552,146 @@ mod cr1_regression_test {
             "expected at least two read-only tools in flight, max active was {}",
             max_parallel_test_probe(probe)
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_with_client_respects_parallel_dispatch_serial_env() {
+        let _env = EnvRestore::set(&[
+            ("DSCODE_TOOL_DISPATCH", "serial"),
+            ("DSCODE_PARALLEL_MAX", "4"),
+        ]);
+        let probe = "parallel_serial_env";
+        reset_parallel_test_probe(probe);
+        let root = unique_tmp("parallel_serial_env");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("README.md"), "hello\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").unwrap();
+        let root_arg = root.display().to_string();
+
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("inspect two independent listings".to_string(), None);
+        let client = ScriptedActionsClient {
+            captured_observations: RefCell::new(Vec::new()),
+            actions: vec![
+                ModelAction::CallTools(vec![
+                    ToolCallRequest {
+                        tool_name: "list_files".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("root", &root_arg)
+                            .with_arg("max_depth", "1")
+                            .with_arg("_parallel_test_probe", probe)
+                            .with_arg("_parallel_test_delay_ms", "80"),
+                    },
+                    ToolCallRequest {
+                        tool_name: "read_file".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("path", root.join("README.md").display().to_string())
+                            .with_arg("_parallel_test_probe", probe)
+                            .with_arg("_parallel_test_delay_ms", "80"),
+                    },
+                ]),
+                ModelAction::Finish,
+            ],
+            calls: RefCell::new(0),
+        };
+
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 2,
+                    emit_progress: false,
+                    persist_session: false,
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(result.tool_events.len(), 2);
+        assert!(result
+            .tool_events
+            .iter()
+            .all(|event| !event.output.contains("meta.parallel_dispatch=true")));
+        assert_eq!(max_parallel_test_probe(probe), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_with_client_caps_parallel_safe_chunk_by_env() {
+        let _env = EnvRestore::set(&[
+            ("DSCODE_TOOL_DISPATCH", "auto"),
+            ("DSCODE_PARALLEL_MAX", "2"),
+        ]);
+        let probe = "parallel_max_cap";
+        reset_parallel_test_probe(probe);
+        let root = unique_tmp("parallel_max_cap");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("README.md"), "hello\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").unwrap();
+        let root_arg = root.display().to_string();
+
+        let cfg = crate::config::types::AppConfig::default();
+        let agent = AgentLoop::new(cfg);
+        let context = TaskContext::new("inspect three independent reads".to_string(), None);
+        let client = ScriptedActionsClient {
+            captured_observations: RefCell::new(Vec::new()),
+            actions: vec![
+                ModelAction::CallTools(vec![
+                    ToolCallRequest {
+                        tool_name: "list_files".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("root", &root_arg)
+                            .with_arg("max_depth", "1")
+                            .with_arg("_parallel_test_probe", probe)
+                            .with_arg("_parallel_test_delay_ms", "80"),
+                    },
+                    ToolCallRequest {
+                        tool_name: "read_file".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("path", root.join("README.md").display().to_string())
+                            .with_arg("_parallel_test_probe", probe)
+                            .with_arg("_parallel_test_delay_ms", "80"),
+                    },
+                    ToolCallRequest {
+                        tool_name: "read_file".to_string(),
+                        input: ToolInput::new()
+                            .with_arg("path", root.join("src/lib.rs").display().to_string())
+                            .with_arg("_parallel_test_probe", probe)
+                            .with_arg("_parallel_test_delay_ms", "80"),
+                    },
+                ]),
+                ModelAction::Finish,
+            ],
+            calls: RefCell::new(0),
+        };
+
+        let result = agent
+            .run_with_client(
+                context,
+                AgentLoopOptions {
+                    steps: 2,
+                    emit_progress: false,
+                    persist_session: false,
+                    ..AgentLoopOptions::default()
+                },
+                &client,
+            )
+            .unwrap();
+
+        assert_eq!(result.tool_events.len(), 3);
+        assert!(result.tool_events[0]
+            .output
+            .contains("meta.parallel_chunk_size=2"));
+        assert!(result.tool_events[1]
+            .output
+            .contains("meta.parallel_chunk_size=2"));
+        assert!(!result.tool_events[2]
+            .output
+            .contains("meta.parallel_dispatch=true"));
+        assert_eq!(max_parallel_test_probe(probe), 2);
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -614,7 +614,7 @@ curl http://127.0.0.1:8765/runtime
 - `deepseek update download-plan [--version ... --base-url ... --platform ... --json]`：打印当前平台 release archive、checksum、验证和解压命令，可指向自有镜像目录
 - `deepseek update release-smoke [--version ... --repo ... --base-url ... --platform ... --out ... --keep-workdir --json]`：下载、校验并执行当前平台 release binary install smoke
 - `deepseek update publish-status [--dist ... --npm-dist ... --live-evidence-verification ... --strict --json]`：检查 npm/Homebrew 发布所需 token、tap 配置、平台包、release checksum 和 online dogfood evidence
-- `deepseek stats [--thread <id>|--session <id|name>] [--limit <N>] [--json]`：汇总 durable runtime usage、cache hit/miss、估算成本、model split、repair/suppression 和 prompt-layer 证据
+- `deepseek stats [--thread <id>|--session <id|name>] [--limit <N>] [--json] [--require-prefix-stable]`：汇总 durable runtime usage、cache hit/miss、估算成本、model split、repair/suppression 和 prompt-layer 证据；可用 `--require-prefix-stable` 对 cache-stable prompt layer hash 变化 fail closed
 - `deepseek events replay <thread-id> [--limit <N>] [--json]` / `deepseek events diff <left-thread-id> <right-thread-id> [--json]`：把 runtime events/items/usage 转成可读 replay 或线程对比证据，覆盖 cost/cache/tool/failure/file-modification signals
 - `deepseek pr live-status <pr> [--require-write --json]`：只读检查真实 GitHub PR 是否具备 live review/retry fixture 前置条件
 - `deepseek config provider [show|list|<name> [model]]` / `deepseek config model [show|list|<model>]`：查看或切换首跑 provider/model 配置；例如 `deepseek config provider deepseek pro`

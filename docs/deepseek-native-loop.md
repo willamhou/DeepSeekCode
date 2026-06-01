@@ -336,7 +336,7 @@ Dispatch algorithm:
 Config:
 
 ```text
-DSCODE_PARALLEL_MAX=4
+DSCODE_PARALLEL_MAX=4       # default max safe-read concurrency; capped at 16
 DSCODE_TOOL_DISPATCH=auto|serial
 ```
 
@@ -512,8 +512,9 @@ bridge calls `mcp_list_tools`, `mcp_list_prompts`, `mcp_get_prompt`,
 `mcp_list_resource_templates` are also opt-in parallel-safe. Results are
 written back in the original model-call order, mixed read/write batches fall
 back to serial execution at write barriers, `DSCODE_TOOL_DISPATCH=serial`
-disables the path, and `DSCODE_PARALLEL_MAX` caps concurrency. Tool events from
-this path include `meta.parallel_dispatch`, `meta.parallel_chunk_size`, and
+disables the path, and `DSCODE_PARALLEL_MAX` caps concurrency with a default of
+4 and a hard cap of 16. Tool events from this path include
+`meta.parallel_dispatch`, `meta.parallel_chunk_size`, and
 `meta.parallel_elapsed_ms` telemetry.
 
 Deliver:
