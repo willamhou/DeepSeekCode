@@ -5356,7 +5356,7 @@ fn parse_dogfood_subcommand(args: Vec<String>) -> Result<DogfoodAction, String> 
             parse_dogfood_repair_cache_evidence_args(rest)?,
         )),
         "replay-benchmark" | "replay-bench" => {
-            Ok(DogfoodAction::ReplayBenchmark(parse_dogfood_replay_args(rest)))
+            parse_dogfood_replay_args(rest).map(DogfoodAction::ReplayBenchmark)
         }
         "live-plan" | "plan-live" => {
             parse_dogfood_live_plan_args(rest).map(DogfoodAction::LivePlan)
@@ -5660,7 +5660,7 @@ fn parse_dogfood_repair_cache_evidence_args(
     Ok(evidence)
 }
 
-fn parse_dogfood_replay_args(args: Vec<String>) -> DogfoodReplayArgs {
+fn parse_dogfood_replay_args(args: Vec<String>) -> Result<DogfoodReplayArgs, String> {
     let mut replay = DogfoodReplayArgs::default();
     let mut index = 0;
 
@@ -5677,11 +5677,7 @@ fn parse_dogfood_replay_args(args: Vec<String>) -> DogfoodReplayArgs {
                 continue;
             }
             "--limit" if index + 1 < args.len() => {
-                if let Ok(limit) = args[index + 1].parse::<usize>() {
-                    if (1..=200).contains(&limit) {
-                        replay.limit = Some(limit);
-                    }
-                }
+                replay.limit = Some(parse_required_usize("--limit", &args[index + 1], 1, 200)?);
                 index += 2;
                 continue;
             }
@@ -5690,12 +5686,18 @@ fn parse_dogfood_replay_args(args: Vec<String>) -> DogfoodReplayArgs {
                 index += 1;
                 continue;
             }
-            _ => {}
+            "--manifest" | "--category" | "--limit" => {
+                return Err(format!("{} requires a value", args[index]));
+            }
+            other => {
+                return Err(format!(
+                    "unknown flag for `dogfood replay-benchmark`: {other}; expected --manifest|--category|--limit|--benchmark-gate"
+                ));
+            }
         }
-        index += 1;
     }
 
-    replay
+    Ok(replay)
 }
 
 fn parse_dogfood_live_plan_args(args: Vec<String>) -> Result<DogfoodLivePlanArgs, String> {
@@ -7135,6 +7137,57 @@ mod tests {
             DogfoodAction::ExportBenchmark(_) => panic!("expected replay args"),
             DogfoodAction::PromoteBenchmark(_) => panic!("expected replay args"),
         }
+    }
+
+    #[test]
+    fn dogfood_replay_benchmark_rejects_unknown_flags() {
+        let err =
+            parse_dogfood_subcommand(vec!["replay-benchmark".to_string(), "--json".to_string()])
+                .unwrap_err();
+
+        assert!(err.contains("unknown flag for `dogfood replay-benchmark`"));
+        assert!(err.contains("--manifest|--category|--limit|--benchmark-gate"));
+    }
+
+    #[test]
+    fn dogfood_replay_benchmark_rejects_invalid_limit() {
+        let zero = parse_dogfood_subcommand(vec![
+            "replay-benchmark".to_string(),
+            "--limit".to_string(),
+            "0".to_string(),
+        ])
+        .unwrap_err();
+        assert!(zero.contains("--limit requires an integer between 1 and 200"));
+
+        let non_number = parse_dogfood_subcommand(vec![
+            "replay-benchmark".to_string(),
+            "--limit".to_string(),
+            "many".to_string(),
+        ])
+        .unwrap_err();
+        assert!(non_number.contains("--limit requires an integer between 1 and 200"));
+    }
+
+    #[test]
+    fn dogfood_replay_benchmark_reports_missing_values() {
+        let manifest = parse_dogfood_subcommand(vec![
+            "replay-benchmark".to_string(),
+            "--manifest".to_string(),
+        ])
+        .unwrap_err();
+        assert_eq!(manifest, "--manifest requires a value");
+
+        let category = parse_dogfood_subcommand(vec![
+            "replay-benchmark".to_string(),
+            "--category".to_string(),
+        ])
+        .unwrap_err();
+        assert_eq!(category, "--category requires a value");
+
+        let limit =
+            parse_dogfood_subcommand(vec!["replay-benchmark".to_string(), "--limit".to_string()])
+                .unwrap_err();
+        assert_eq!(limit, "--limit requires a value");
     }
 
     #[test]
