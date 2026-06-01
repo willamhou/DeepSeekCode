@@ -1,6 +1,6 @@
 # DeepSeekCode 当前状态与后续路线
 
-最后更新：2026-05-25
+最后更新：2026-06-01
 
 ## 最终目标
 
@@ -43,7 +43,10 @@ dogfood 证据。
   `mcp 27/30`、`write_validate 37/41`、`recovery 26/28`、
   `pr_workflow 61/64`。默认 live report/evidence gate 现在要求 7 天内的
   model-backed run、MCP dynamic/resource loop-surface 覆盖，以及至少 3 条 `mcp`
-  live runs；这些 gate 当前均已通过。
+  live runs；MCP loop-surface 数量与覆盖仍满足 gate。2026-06-01 本地复验时，
+  最新 model-backed live run 已超过 7 天，7 天 recency gate 会 fail closed，
+  需要再跑至少 1 条 online dogfood；`deepseek dogfood live-plan --target-category mcp:3:90 --limit 2 --json` 现在会把这类 recency refresh 显示为
+  `overall_needed_runs: 1`。
 - README 首屏已切换到真实交互式 2048 过程录屏：终端 SVG 展示 `deepseek chat`
   从空 repo 接收用户 prompt、写出 `2048.html`、完成 shell 校验并总结运行方式；配套
   GIF/MP4 展示同一次生成结果的浏览器试玩。旧 scripted 2048、TUI 和 edit/test SVG
@@ -141,7 +144,8 @@ dogfood 证据。
    repeated unproductive step signals，默认 live dogfood plan/report/evidence gate
    现在也要求 MCP dynamic/resource loop-surface 覆盖、至少 3 条 `mcp` live
    runs 的 gate，以及 7 天 live recency gate；首批真实 online MCP surface 样本已完成
-   并通过 gate，剩余工作是继续做 recurring live calibration；同回合 batch 中的本地
+   并通过 loop-surface 覆盖 gate，但 2026-06-01 复验显示 7 天 recency 需要刷新，
+   剩余工作是继续做 recurring live calibration；同回合 batch 中的本地
    read/search/git/project-map/data-validation 工具、常见 runtime query 工具，以及
    MCP inventory/prompt/resource 只读桥接工具现在会在无 hooks/permission/repeat 的情况下
    按连续 read-only chunk 并发，并保持结果顺序，tool result 会记录 `meta.parallel_*`

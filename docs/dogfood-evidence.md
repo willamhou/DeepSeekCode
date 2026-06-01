@@ -118,6 +118,12 @@ The default live plan targets `write_validate`, `recovery`, `pr_workflow`, and
 `mcp`. The MCP slice includes dynamic remote tools, generic `mcp_call`, resource
 discovery/readback, and deny-recovery fixtures.
 
+The live report/evidence gate intentionally fails closed when the latest
+model-backed row is older than the configured recency window. If counts and
+MCP loop-surface coverage are already satisfied but the seven-day recency gate
+is stale, `deepseek dogfood live-plan` reports `overall_needed_runs: 1` and
+adds an `additional_recommended_runs` case for the refresh.
+
 When you intend to run online model-backed cases, provide the API key through a
 temporary file outside the repository:
 

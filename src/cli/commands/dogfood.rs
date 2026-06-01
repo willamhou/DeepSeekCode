@@ -850,6 +850,7 @@ fn live_plan_command(
             .unwrap_or(DEFAULT_LIVE_TARGET_SUCCESS_RATE),
         &targets,
         args.limit.unwrap_or(DEFAULT_LIVE_PLAN_LIMIT),
+        unix_now_secs()?,
     );
     if args.json {
         println!("{}", render_live_plan_json(&plan));
@@ -888,6 +889,7 @@ fn live_run_command(
             .unwrap_or(DEFAULT_LIVE_TARGET_SUCCESS_RATE),
         &targets,
         run_limit,
+        unix_now_secs()?,
     );
     let selected = select_live_run_cases(&plan, &args.categories, run_limit);
 
@@ -3329,6 +3331,8 @@ struct LivePlan {
     target_live_success_rate: f64,
     live_runs: usize,
     live_success: usize,
+    live_recency_age_days: Option<f64>,
+    live_recency_refresh_needed: bool,
     category_plans: Vec<LiveCategoryPlan>,
 }
 
@@ -3340,6 +3344,7 @@ struct LiveCategoryPlan {
     live_runs: usize,
     live_success: usize,
     needed_runs: usize,
+    additional_recommended_runs: usize,
     replayable_cases: Vec<String>,
     recommended_cases: Vec<String>,
 }
@@ -3378,6 +3383,7 @@ fn build_live_plan(
     target_live_success_rate: f64,
     targets: &[DogfoodCategoryRequirement],
     limit_per_category: usize,
+    now_secs: u64,
 ) -> LivePlan {
     let live_records = records
         .iter()
@@ -3388,7 +3394,8 @@ fn build_live_plan(
         .filter(|record| matches!(record.outcome, DogfoodOutcome::Success))
         .count();
     let live_stats = aggregate_category_stats_for(live_records.iter().copied());
-    let category_plans = targets
+    let recency = live_recency_status(&live_records, now_secs, DEFAULT_LIVE_RECENT_DAYS);
+    let mut category_plans = targets
         .iter()
         .map(|target| {
             let stats = live_stats
@@ -3402,16 +3409,6 @@ fn build_live_plan(
                 target.min_runs,
                 target.min_success_percent,
             );
-            let recommended_cases = if replayable_cases.is_empty() {
-                Vec::new()
-            } else {
-                replayable_cases
-                    .iter()
-                    .cycle()
-                    .take(needed_runs.min(limit_per_category))
-                    .cloned()
-                    .collect::<Vec<_>>()
-            };
             LiveCategoryPlan {
                 category: target.category.clone(),
                 target_runs: target.min_runs,
@@ -3419,11 +3416,58 @@ fn build_live_plan(
                 live_runs: stats.runs,
                 live_success: stats.success,
                 needed_runs,
+                additional_recommended_runs: 0,
                 replayable_cases,
-                recommended_cases,
+                recommended_cases: Vec::new(),
             }
         })
         .collect::<Vec<_>>();
+
+    let category_needed_total = category_plans
+        .iter()
+        .map(|category| category.needed_runs)
+        .sum::<usize>();
+    let mut additional_needed = if recency.refresh_needed && category_needed_total == 0 {
+        1
+    } else {
+        0
+    };
+    while additional_needed > 0 {
+        let mut assigned_this_pass = false;
+        for category in &mut category_plans {
+            if additional_needed == 0 {
+                break;
+            }
+            if category.replayable_cases.is_empty() {
+                continue;
+            }
+            category.additional_recommended_runs =
+                category.additional_recommended_runs.saturating_add(1);
+            additional_needed -= 1;
+            assigned_this_pass = true;
+        }
+        if !assigned_this_pass {
+            break;
+        }
+    }
+
+    for category in &mut category_plans {
+        let recommended_run_count = category
+            .needed_runs
+            .saturating_add(category.additional_recommended_runs)
+            .min(limit_per_category);
+        category.recommended_cases = if category.replayable_cases.is_empty() {
+            Vec::new()
+        } else {
+            category
+                .replayable_cases
+                .iter()
+                .cycle()
+                .take(recommended_run_count)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+    }
 
     LivePlan {
         ledger_path: ledger_path.to_path_buf(),
@@ -3433,8 +3477,54 @@ fn build_live_plan(
         target_live_success_rate,
         live_runs: live_records.len(),
         live_success,
+        live_recency_age_days: recency.age_days,
+        live_recency_refresh_needed: recency.refresh_needed,
         category_plans,
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LiveRecencyStatus {
+    age_days: Option<f64>,
+    refresh_needed: bool,
+}
+
+fn live_recency_status(
+    live_records: &[&DogfoodRecord],
+    now_secs: u64,
+    max_age_days: usize,
+) -> LiveRecencyStatus {
+    let Some(latest) = live_records
+        .iter()
+        .map(|record| record.timestamp_secs)
+        .max()
+    else {
+        return LiveRecencyStatus {
+            age_days: None,
+            refresh_needed: true,
+        };
+    };
+    if latest > now_secs {
+        return LiveRecencyStatus {
+            age_days: Some(0.0),
+            refresh_needed: false,
+        };
+    }
+    let age_secs = now_secs.saturating_sub(latest);
+    LiveRecencyStatus {
+        age_days: Some(age_secs as f64 / SECONDS_PER_DAY as f64),
+        refresh_needed: age_secs > (max_age_days as u64).saturating_mul(SECONDS_PER_DAY),
+    }
+}
+
+fn live_plan_overall_needed_runs(
+    target_live_runs: usize,
+    live_runs: usize,
+    recency_refresh_needed: bool,
+) -> usize {
+    target_live_runs
+        .saturating_sub(live_runs)
+        .max(usize::from(recency_refresh_needed))
 }
 
 fn needed_successful_live_runs_for_gate(
@@ -3531,8 +3621,23 @@ fn render_live_plan_text(plan: &LivePlan) -> String {
         rate_line(plan.live_success, plan.live_runs),
         plan.target_live_success_rate
     ));
-    let overall_needed = plan.target_live_runs.saturating_sub(plan.live_runs);
+    let overall_needed = live_plan_overall_needed_runs(
+        plan.target_live_runs,
+        plan.live_runs,
+        plan.live_recency_refresh_needed,
+    );
     out.push_str(&format!("overall_needed_runs: {overall_needed}\n\n"));
+    if let Some(age_days) = plan.live_recency_age_days {
+        out.push_str(&format!(
+            "live_recency: age {age_days:.1}d; max {}d; refresh_needed {}\n\n",
+            DEFAULT_LIVE_RECENT_DAYS, plan.live_recency_refresh_needed
+        ));
+    } else {
+        out.push_str(&format!(
+            "live_recency: no model-backed live runs; max {}d; refresh_needed true\n\n",
+            DEFAULT_LIVE_RECENT_DAYS
+        ));
+    }
     out.push_str(&format!(
         "post_run_report_gate: {}\n\n",
         live_report_gate_command(plan)
@@ -3619,6 +3724,10 @@ fn render_live_plan_json(plan: &LivePlan) -> String {
                 JsonValue::Number(category.needed_runs.to_string()),
             );
             root.insert(
+                "additional_recommended_runs".to_string(),
+                JsonValue::Number(category.additional_recommended_runs.to_string()),
+            );
+            root.insert(
                 "replayable_cases".to_string(),
                 JsonValue::Array(
                     category
@@ -3700,10 +3809,23 @@ fn render_live_plan_json(plan: &LivePlan) -> String {
     root.insert(
         "overall_needed_runs".to_string(),
         JsonValue::Number(
-            plan.target_live_runs
-                .saturating_sub(plan.live_runs)
-                .to_string(),
+            live_plan_overall_needed_runs(
+                plan.target_live_runs,
+                plan.live_runs,
+                plan.live_recency_refresh_needed,
+            )
+            .to_string(),
         ),
+    );
+    root.insert(
+        "live_recency_refresh_needed".to_string(),
+        JsonValue::Bool(plan.live_recency_refresh_needed),
+    );
+    root.insert(
+        "live_recency_age_days".to_string(),
+        plan.live_recency_age_days
+            .map(|age| JsonValue::Number(format!("{age:.1}")))
+            .unwrap_or(JsonValue::Null),
     );
     root.insert(
         "post_run_report_command".to_string(),
@@ -6118,6 +6240,7 @@ mod tests {
             90.0,
             &targets,
             3,
+            10,
         );
         let text = render_live_plan_text(&plan);
 
@@ -6184,6 +6307,7 @@ mod tests {
             90.0,
             &targets,
             10,
+            10,
         );
 
         let mcp = plan
@@ -6195,6 +6319,57 @@ mod tests {
         assert_eq!(mcp.live_success, 0);
         assert_eq!(mcp.needed_runs, 9);
         assert_eq!(mcp.recommended_cases.len(), 9);
+    }
+
+    #[test]
+    fn live_plan_recommends_refresh_when_live_recency_gate_is_stale() {
+        let now = 10 * SECONDS_PER_DAY;
+        let mut stale_mcp =
+            test_record(now - (8 * SECONDS_PER_DAY), "mcp", DogfoodOutcome::Success);
+        stale_mcp.model_transport = MODEL_TRANSPORT_ONLINE.to_string();
+        let summaries = vec![BenchmarkCaseSummary {
+            name: "fixture-mcp-dynamic-readme".to_string(),
+            task: "Use the dynamic MCP read_file tool".to_string(),
+            category: "mcp".to_string(),
+            skill: None,
+            workdir: Some("fixtures/rust-cli-mini".to_string()),
+            isolate_workdir: true,
+            budget: 2,
+            notes: None,
+            seed_observations: None,
+        }];
+        let targets = vec![DogfoodCategoryRequirement {
+            category: "mcp".to_string(),
+            min_runs: 1,
+            min_success_percent: 90.0,
+        }];
+
+        let plan = build_live_plan(
+            Path::new(".dscode/dogfood/ledger.jsonl"),
+            Path::new(".dscode/benchmarks.txt"),
+            &[stale_mcp],
+            &summaries,
+            MODEL_TRANSPORT_ONLINE,
+            1,
+            90.0,
+            &targets,
+            2,
+            now,
+        );
+        let json = render_live_plan_json(&plan);
+        let mcp = plan
+            .category_plans
+            .iter()
+            .find(|category| category.category == "mcp")
+            .unwrap();
+
+        assert!(plan.live_recency_refresh_needed);
+        assert_eq!(mcp.needed_runs, 0);
+        assert_eq!(mcp.additional_recommended_runs, 1);
+        assert_eq!(mcp.recommended_cases, vec!["fixture-mcp-dynamic-readme"]);
+        assert!(json.contains("\"overall_needed_runs\":1"));
+        assert!(json.contains("\"live_recency_refresh_needed\":true"));
+        assert!(json.contains("\"live_recency_age_days\":8.0"));
     }
 
     #[test]
@@ -6226,6 +6401,7 @@ mod tests {
             90.0,
             &targets,
             2,
+            10,
         );
         let json = render_live_plan_json(&plan);
 
@@ -6257,6 +6433,8 @@ mod tests {
             target_live_success_rate: 90.0,
             live_runs: 20,
             live_success: 19,
+            live_recency_age_days: Some(1.0),
+            live_recency_refresh_needed: false,
             category_plans: vec![LiveCategoryPlan {
                 category: "write_validate".to_string(),
                 target_runs: 25,
@@ -6264,6 +6442,7 @@ mod tests {
                 live_runs: 3,
                 live_success: 3,
                 needed_runs: 22,
+                additional_recommended_runs: 0,
                 replayable_cases: vec!["write-1".to_string(), "write-2".to_string()],
                 recommended_cases: vec!["write-1".to_string(), "write-2".to_string()],
             }],
@@ -6303,6 +6482,8 @@ mod tests {
             target_live_success_rate: 90.0,
             live_runs: 20,
             live_success: 19,
+            live_recency_age_days: Some(1.0),
+            live_recency_refresh_needed: false,
             category_plans: vec![LiveCategoryPlan {
                 category: "write_validate".to_string(),
                 target_runs: 25,
@@ -6310,6 +6491,7 @@ mod tests {
                 live_runs: 3,
                 live_success: 3,
                 needed_runs: 22,
+                additional_recommended_runs: 0,
                 replayable_cases: vec!["write-1".to_string()],
                 recommended_cases: vec!["write-1".to_string()],
             }],
@@ -6373,6 +6555,8 @@ mod tests {
             target_live_success_rate: 90.0,
             live_runs: 1,
             live_success: 1,
+            live_recency_age_days: Some(1.0),
+            live_recency_refresh_needed: false,
             category_plans: vec![LiveCategoryPlan {
                 category: "write_validate".to_string(),
                 target_runs: 2,
@@ -6380,6 +6564,7 @@ mod tests {
                 live_runs: 1,
                 live_success: 1,
                 needed_runs: 1,
+                additional_recommended_runs: 0,
                 replayable_cases: vec!["write-1".to_string()],
                 recommended_cases: vec!["write-1".to_string()],
             }],
@@ -6865,6 +7050,8 @@ mod tests {
             target_live_success_rate: 90.0,
             live_runs: 0,
             live_success: 0,
+            live_recency_age_days: None,
+            live_recency_refresh_needed: true,
             category_plans: vec![
                 LiveCategoryPlan {
                     category: "write_validate".to_string(),
@@ -6873,6 +7060,7 @@ mod tests {
                     live_runs: 0,
                     live_success: 0,
                     needed_runs: 25,
+                    additional_recommended_runs: 0,
                     replayable_cases: vec!["write-1".to_string(), "write-2".to_string()],
                     recommended_cases: vec!["write-1".to_string(), "write-2".to_string()],
                 },
@@ -6883,6 +7071,7 @@ mod tests {
                     live_runs: 0,
                     live_success: 0,
                     needed_runs: 25,
+                    additional_recommended_runs: 0,
                     replayable_cases: vec!["recover-1".to_string()],
                     recommended_cases: vec!["recover-1".to_string()],
                 },

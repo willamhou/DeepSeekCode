@@ -1,6 +1,6 @@
 # DeepSeek-Native Agent Loop Design
 
-Last updated: 2026-05-25
+Last updated: 2026-06-01
 
 This document records the DeepSeek-specific agent-loop ideas worth absorbing
 from external projects and turns them into a DeepSeekCode design plan.
@@ -52,11 +52,13 @@ hardening gaps rather than architecture blockers:
   recorded on tool result events through `meta.parallel_*` lines.
 - Deterministic repair/cache evidence and prompt-prefix stability now run in
   the release matrix and are uploaded as loop evidence artifacts. The first real
-  online MCP surface batch now satisfies the local live plan/report/evidence
-  gates: MCP dynamic/resource loop-surface coverage is present, the `mcp` live
-  category is `27/30`, and the seven-day live recency gate passes. The remaining
-  evidence work is recurring live model-backed dogfood across real gateways and
-  continued calibration.
+  online MCP surface batch satisfied the local live plan/report/evidence gates:
+  MCP dynamic/resource loop-surface coverage is present and the `mcp` live
+  category is `27/30`. As of 2026-06-01 local verification, the seven-day live
+  recency gate needs one fresh model-backed dogfood row before the full
+  report/evidence gate passes again; `deepseek dogfood live-plan` surfaces that
+  refresh as a recommended live case. The remaining evidence work is recurring
+  live model-backed dogfood across real gateways and continued calibration.
 
 ## What To Absorb
 
