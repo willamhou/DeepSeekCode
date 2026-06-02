@@ -12,7 +12,7 @@ DeepSeekCode は DeepSeek-first のターミナル code agent です。ローカ
 同じターミナルで作業を続ける流れを前提にしています。
 
 > Public beta status: Linux/macOS の dogfood とリポジトリ作業には今日から利用できます。
-> `v0.1.5` は GitHub Release binaries、検証済み GHCR image、TUI/service smoke gates、
+> `v0.1.6` は GitHub Release binaries、検証済み GHCR image、TUI/service smoke gates、
 > `deepseek quickstart`、release-binary smoke verifier、検証済み Homebrew tap、
 > 検証済み npm/npx install paths、README の model-backed launch media を含みます。
 > より大きな external repo evidence と broader hosted product proof は引き続き
@@ -108,11 +108,11 @@ deepseek doctor --json
 または release archive をダウンロード:
 
 ```bash
-deepseek update download-plan --version 0.1.5
+deepseek update download-plan --version 0.1.6
 curl -L -o deepseek-linux-x64.tar.gz \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.5/deepseek-linux-x64.tar.gz
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.6/deepseek-linux-x64.tar.gz
 curl -L -o deepseek-linux-x64.tar.gz.sha256 \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.5/deepseek-linux-x64.tar.gz.sha256
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.6/deepseek-linux-x64.tar.gz.sha256
 shasum -a 256 -c deepseek-linux-x64.tar.gz.sha256
 tar -xzf deepseek-linux-x64.tar.gz
 ./deepseek version
@@ -121,7 +121,7 @@ tar -xzf deepseek-linux-x64.tar.gz
 または公開済み container を実行:
 
 ```bash
-docker run --rm ghcr.io/willamhou/deepseekcode:0.1.5 version
+docker run --rm ghcr.io/willamhou/deepseekcode:0.1.6 version
 ```
 
 local checkout からインストール:
@@ -191,7 +191,7 @@ cargo test --lib -- --test-threads=1
 node scripts/check-secrets.js
 deepseek quickstart --json
 deepseek update publish-status --json
-deepseek update release-smoke --version 0.1.5 --json
+deepseek update release-smoke --version 0.1.6 --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
 

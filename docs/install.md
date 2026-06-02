@@ -90,7 +90,7 @@ cargo build --release
 cargo fmt --check
 cargo test -- --test-threads=1
 cargo package --allow-dirty
-deepseek benchmark
+DEEPSEEK_API_KEY= deepseek benchmark
 deepseek version
 deepseek doctor
 deepseek doctor --json
@@ -100,17 +100,19 @@ deepseek update package --bin target/release/deepseek
 
 完整发布流程见 [发布检查清单](./release.md)。
 
-`deepseek benchmark` 会同时检查：
+`DEEPSEEK_API_KEY= deepseek benchmark` 会同时检查：
 
 - benchmark case expectations
 - benchmark trend gate
 - dogfood live gate
 
-任一 gate 失败都应阻断 release。
+任一 gate 失败都应阻断 release。发布 gate 要显式设置
+`DEEPSEEK_API_KEY=`，避免本地 `.env` 里的在线凭证把 deterministic benchmark 变成
+live-model benchmark。
 `deepseek benchmark --category <name>` 和可重复的 `--case <name>` 可用于本地 targeted evidence；filtered run 只写 report，不推进 history，也不能替代发布前的完整 benchmark。
 
 如果新增 dogfood 失败已经完成排查，并且需要把当前 live snapshot 作为新的已知基线，必须显式运行
-`deepseek benchmark --accept-live-baseline`；普通发布检查不要使用这个选项。
+`DEEPSEEK_API_KEY= deepseek benchmark --accept-live-baseline`；普通发布检查不要使用这个选项。
 
 发布前还应至少回放一个普通写入验证任务和一个 retry 任务：
 

@@ -11,7 +11,7 @@ DeepSeekCode 是一个 DeepSeek-first 的终端 code agent，面向本地开发�
 阅读仓库、修改文件、运行检查、查看 diff，然后继续在同一个终端里迭代。
 
 > Public beta 状态：今天已经可以用于 Linux/macOS dogfood 和仓库内代码任务。
-> `v0.1.5` 已提供 GitHub Release 二进制、实测 GHCR 镜像、TUI/service smoke gate、
+> `v0.1.6` 已提供 GitHub Release 二进制、实测 GHCR 镜像、TUI/service smoke gate、
 > `deepseek quickstart`、release-binary smoke verifier、已验证的 Homebrew tap、
 > 已验证的 npm/npx 安装入口，以及真实 model-backed README 发布素材。更大型的
 > 外部仓库证据和更广的 hosted product proof 仍属于产品硬化工作。
@@ -104,11 +104,11 @@ deepseek doctor --json
 或者下载 release archive：
 
 ```bash
-deepseek update download-plan --version 0.1.5
+deepseek update download-plan --version 0.1.6
 curl -L -o deepseek-linux-x64.tar.gz \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.5/deepseek-linux-x64.tar.gz
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.6/deepseek-linux-x64.tar.gz
 curl -L -o deepseek-linux-x64.tar.gz.sha256 \
-  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.5/deepseek-linux-x64.tar.gz.sha256
+  https://github.com/willamhou/DeepSeekCode/releases/download/v0.1.6/deepseek-linux-x64.tar.gz.sha256
 shasum -a 256 -c deepseek-linux-x64.tar.gz.sha256
 tar -xzf deepseek-linux-x64.tar.gz
 ./deepseek version
@@ -117,7 +117,7 @@ tar -xzf deepseek-linux-x64.tar.gz
 或者运行已发布的容器镜像：
 
 ```bash
-docker run --rm ghcr.io/willamhou/deepseekcode:0.1.5 version
+docker run --rm ghcr.io/willamhou/deepseekcode:0.1.6 version
 ```
 
 本地 checkout 安装：
@@ -185,7 +185,7 @@ cargo test --lib -- --test-threads=1
 node scripts/check-secrets.js
 deepseek quickstart --json
 deepseek update publish-status --json
-deepseek update release-smoke --version 0.1.5 --json
+deepseek update release-smoke --version 0.1.6 --json
 deepseek tui --entrypoint-smoke --smoke-bin "$(command -v deepseek)"
 ```
 

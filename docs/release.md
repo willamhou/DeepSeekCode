@@ -44,7 +44,7 @@ cargo fmt --check
 cargo test -- --test-threads=1
 cargo package --allow-dirty
 node scripts/check-secrets.js
-deepseek benchmark
+DEEPSEEK_API_KEY= deepseek benchmark
 docs/demo/record-model-backed-demo.sh --dry-run
 docs/demo/record-model-backed-demo.sh --redaction-self-test
 docs/demo/verify-model-backed-demo.js --self-test
@@ -55,15 +55,20 @@ after_thread=$(node -e "const fs=require('fs'); const j=JSON.parse(fs.readFileSy
 deepseek stats --thread "$after_thread" --require-prefix-stable --json
 ```
 
-`deepseek benchmark` must pass all three layers:
+`DEEPSEEK_API_KEY= deepseek benchmark` must pass all three layers:
 
 - benchmark case expectations
 - benchmark trend gate
 - dogfood live gate
 
 The live gate blocks release when new dogfood failures, stuck runs, or manual interventions appear after the previous benchmark snapshot.
-Failed benchmark gates do not advance the saved benchmark history baseline. After triaging known live failures, use
-`deepseek benchmark --accept-live-baseline` only to intentionally accept the current dogfood snapshot; do not use it for normal release checks.
+Failed benchmark gates do not advance the saved benchmark history baseline. Set
+`DEEPSEEK_API_KEY=` for the release gate so local `.env` credentials do not turn
+the deterministic benchmark into a live-model benchmark run. After triaging
+known live failures, use
+`DEEPSEEK_API_KEY= deepseek benchmark --accept-live-baseline` only to
+intentionally accept the current dogfood snapshot; do not use it for normal
+release checks.
 `deepseek benchmark --category <name>` and repeatable `--case <name>` are for targeted evidence reports only; filtered runs skip history writes and full trend/live enforcement, so they do not replace the release benchmark.
 The Release Matrix packaging job also runs the deterministic repair/cache
 evidence command and `stats --require-prefix-stable`, then uploads the JSON
