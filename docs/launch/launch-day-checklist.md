@@ -7,16 +7,16 @@ small, evidence-backed public beta push, not a broad marketing blast.
 
 ```bash
 npm view @deepseek-code/cli version
-npx @deepseek-code/cli@0.1.5 version
+npx @deepseek-code/cli@0.1.6 version
 deepseek quickstart --json
-deepseek update release-smoke --version 0.1.5 --json
+deepseek update release-smoke --version 0.1.6 --json
 ```
 
 Known-good hosted evidence:
 
-- Release Matrix: <https://github.com/willamhou/DeepSeekCode/actions/runs/26380726246>
-- Release Smoke: <https://github.com/willamhou/DeepSeekCode/actions/runs/26380981708>
-- Homebrew Smoke: <https://github.com/willamhou/DeepSeekCode/actions/runs/26380934049>
+- Release Matrix: <https://github.com/willamhou/DeepSeekCode/actions/runs/26802630494>
+- Release Smoke: <https://github.com/willamhou/DeepSeekCode/actions/runs/26803043308>
+- Homebrew Smoke: <https://github.com/willamhou/DeepSeekCode/actions/runs/26803227609>
 - npm package: <https://www.npmjs.com/package/@deepseek-code/cli>
 
 ## 2. Verify The Landing Surface
@@ -24,7 +24,7 @@ Known-good hosted evidence:
 - README first screen shows the install path, public beta status, and 2048 demo.
 - README links to `docs/evidence.md`, `docs/current-status.md`, and
   `docs/install.md`.
-- `README.zh-CN.md` and `README.ja-JP.md` point to `v0.1.5`, not an older
+- `README.zh-CN.md` and `README.ja-JP.md` point to `v0.1.6`, not an older
   release.
 - The 2048 terminal SVG and gameplay GIF/MP4 render from GitHub.
 

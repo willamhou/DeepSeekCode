@@ -1,6 +1,6 @@
 # DeepSeekCode 当前状态与后续路线
 
-最后更新：2026-06-01
+最后更新：2026-06-02
 
 ## 最终目标
 
@@ -50,25 +50,26 @@ dogfood 证据。
   从空 repo 接收用户 prompt、写出 `2048.html`、完成 shell 校验并总结运行方式；配套
   GIF/MP4 展示同一次生成结果的浏览器试玩。旧 scripted 2048、TUI 和 edit/test SVG
   已降级为补充 demo/evidence。
-- `v0.1.5` 已发布 GitHub Release binaries，Release Matrix 的 build、GitHub Release、
-  npm publish、Homebrew tap、GHCR 和 packaging jobs 全部通过：
-  https://github.com/willamhou/DeepSeekCode/actions/runs/26380726246
-- `v0.1.5` release assets 覆盖 Linux x64、Linux arm64、macOS x64、macOS arm64 和
+- `v0.1.6` 已发布 GitHub Release binaries，Release Matrix 的 build、GitHub Release、
+  npm publish、Homebrew tap、GHCR 和 packaging jobs 全部通过。首个 attempt 的
+  `Docker Artifact Smoke` 因 Docker Hub base-image metadata `i/o timeout`
+  失败；failed jobs rerun 后 attempt 2 全绿：
+  https://github.com/willamhou/DeepSeekCode/actions/runs/26802630494
+- `v0.1.6` release assets 覆盖 Linux x64、Linux arm64、macOS x64、macOS arm64 和
   Windows x64；Linux arm64 build 在 hosted `ubuntu-24.04-arm` 上完整通过。
-- `v0.1.5` Release Smoke 已在干净 hosted Linux x64、Linux arm64、macOS x64 和
+- `v0.1.6` Release Smoke 已在干净 hosted Linux x64、Linux arm64、macOS x64 和
   macOS arm64 runner 上验证公开 release binary 下载、checksum、解压和 install smoke：
-  https://github.com/willamhou/DeepSeekCode/actions/runs/26380981708
-- `v0.1.5` GHCR image 已由 workflow 推送，公开 registry manifest 可读取：
-  `ghcr.io/willamhou/deepseekcode:v0.1.5` 的 OCI index digest 为
-  `sha256:183267daab4af83aa0c1da4a473b5f01596d6c32db1473efd454a5dcf93acd9a`。
+  https://github.com/willamhou/DeepSeekCode/actions/runs/26803043308
+- `v0.1.6` GHCR image 已由 workflow 推送，公开 registry manifest 可读取：
+  `ghcr.io/willamhou/deepseekcode:0.1.6` 的 OCI index digest 为
+  `sha256:63d3070c7bb74da4f234c1df33bd6e80ea9c222a637fdb510445f29e32a22b8c`。
 - Homebrew tap 已发布到 `willamhou/homebrew-deepseekcode`，canonical tap 命令
-  `brew tap willamhou/deepseekcode && brew install deepseek` 已通过 `v0.1.5`
+  `brew tap willamhou/deepseekcode && brew install deepseek` 已通过 `v0.1.6`
   macOS x64/arm64 Homebrew Smoke：
-  https://github.com/willamhou/DeepSeekCode/actions/runs/26380934049
-- `v0.1.5` npm/npx 已发布并验证：root wrapper 和五个平台包均已在 npm registry
-  可见，Release Matrix publish job `77649538711` 通过；`npm view`、`npx
-  @deepseek-code/cli@0.1.5 version` 和干净目录 `npm install
-  @deepseek-code/cli@0.1.5` 均验证到 `deepseek 0.1.5`。
+  https://github.com/willamhou/DeepSeekCode/actions/runs/26803227609
+- `v0.1.6` npm/npx 已发布并验证：root wrapper 和五个平台包均已在 npm registry
+  可见；`npm view`、`npx @deepseek-code/cli@0.1.6 version` 和干净目录
+  `npm install @deepseek-code/cli@0.1.6` 均验证到 `deepseek 0.1.6`。
 - PR #18 增加 `deepseek quickstart` / `deepseek onboarding` 首跑检查，并通过 CI：
   https://github.com/willamhou/DeepSeekCode/actions/runs/26335387193
 - PR #19 增加 `deepseek update release-smoke`，用于发布二进制复验，并通过 CI：
@@ -157,7 +158,7 @@ dogfood 证据。
    repair-cache-evidence --json` 已补齐确定性的 before/after repair/cache 证据。
 2. 保持 npm publish workflow 的幂等发布与 manual retry 路径可用；后续发布继续用
    `npm view`、`npx` 和干净安装 smoke 复验。
-3. 保持 `HOMEBREW_TAP_TOKEN` 和 `HOMEBREW_TAP_REPOSITORY` 可用；`v0.1.5`
+3. 保持 `HOMEBREW_TAP_TOKEN` 和 `HOMEBREW_TAP_REPOSITORY` 可用；`v0.1.6`
    tap formula 已自动刷新并通过 Homebrew Smoke，后续 tag 继续用同一路径复验。
 4. 在干净 Linux/macOS 机器上安装 systemd/launchd user services，记录
    `service-doctor --installed` 和 `service-smoke --installed` 证据。

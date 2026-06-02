@@ -5,13 +5,13 @@ Use these for X, LinkedIn, Bluesky, Discord, Slack, or project update channels.
 ## One-Liner
 
 ```text
-DeepSeekCode v0.1.5 is a public-beta, DeepSeek-first terminal code agent for Linux/macOS: npm/npx install, Homebrew, release binaries, GHCR, Linux arm64, and release-smoke evidence.
+DeepSeekCode v0.1.6 is a public-beta, DeepSeek-first terminal code agent for Linux/macOS: npm/npx install, Homebrew, release binaries, GHCR, Linux arm64, and release-smoke evidence.
 ```
 
 ## X Thread
 
 ```text
-DeepSeekCode v0.1.5 public beta is out.
+DeepSeekCode v0.1.6 public beta is out.
 
 It is a DeepSeek-first terminal code agent for local repository work: inspect files, edit code, run checks, review diffs, and keep the session in one terminal.
 
@@ -42,9 +42,9 @@ This release includes:
 - npm/npx wrapper packages
 
 Evidence:
-- Release Matrix: 26380726246
-- Release Smoke: 26380981708
-- Homebrew Smoke: 26380934049
+- Release Matrix: 26802630494
+- Release Smoke: 26803043308
+- Homebrew Smoke: 26803227609
 
 The goal is a Claude Code / Codex CLI-style workflow for DeepSeek users, not a plain chat wrapper.
 
@@ -61,11 +61,11 @@ I am looking for feedback from terminal-first coding-agent users: install fricti
 ## LinkedIn / Longer Update
 
 ```text
-I released DeepSeekCode v0.1.5 as a public beta.
+I released DeepSeekCode v0.1.6 as a public beta.
 
 DeepSeekCode is a DeepSeek-first terminal code agent for local repository work. It is built around a terminal-first loop: inspect a repo, edit files, run checks, review diffs, and continue from the same local session.
 
-The v0.1.5 release now has npm/npx packages, public GitHub Release binaries, Linux x64/arm64 and macOS x64/arm64 assets, a verified Homebrew tap, GHCR image publishing, and release-smoke checks against the published artifacts.
+The v0.1.6 release now has npm/npx packages, public GitHub Release binaries, Linux x64/arm64 and macOS x64/arm64 assets, a verified Homebrew tap, GHCR image publishing, and release-smoke checks against the published artifacts.
 
 The README also includes a real interactive 2048 demo: DeepSeekCode starts from an empty repo, writes the game, and the generated browser game is played locally.
 
@@ -89,9 +89,9 @@ Linux users can use the release archive or source install path documented in the
 This is still a public beta. Windows is not the current focus, and I want more real-world feedback from Linux/macOS terminal workflows.
 
 Release evidence:
-- Release Matrix: https://github.com/willamhou/DeepSeekCode/actions/runs/26380726246
-- Release Smoke: https://github.com/willamhou/DeepSeekCode/actions/runs/26380981708
-- Homebrew Smoke: https://github.com/willamhou/DeepSeekCode/actions/runs/26380934049
+- Release Matrix: https://github.com/willamhou/DeepSeekCode/actions/runs/26802630494
+- Release Smoke: https://github.com/willamhou/DeepSeekCode/actions/runs/26803043308
+- Homebrew Smoke: https://github.com/willamhou/DeepSeekCode/actions/runs/26803227609
 
 Repo:
 https://github.com/willamhou/DeepSeekCode
@@ -100,7 +100,7 @@ https://github.com/willamhou/DeepSeekCode
 ## Discord / Slack
 
 ```text
-I am dogfooding DeepSeekCode v0.1.5, a DeepSeek-first terminal code agent for Linux/macOS.
+I am dogfooding DeepSeekCode v0.1.6, a DeepSeek-first terminal code agent for Linux/macOS.
 
 npm install:
 npm install -g @deepseek-code/cli

@@ -28,13 +28,13 @@ deepseek version
 deepseek quickstart
 ```
 
-The `v0.1.5` tap formula was published to
-`willamhou/homebrew-deepseekcode` and Homebrew Smoke run `26380934049` verified
+The `v0.1.6` tap formula was published to
+`willamhou/homebrew-deepseekcode` and Homebrew Smoke run `26803227609` verified
 macOS x64 and macOS arm64 install plus `doctor --json`.
 
 ```bash
-deepseek update download-plan --version 0.1.5
-deepseek update release-smoke --version 0.1.5 --json
+deepseek update download-plan --version 0.1.6
+deepseek update release-smoke --version 0.1.6 --json
 ```
 
 ## Model-Backed Demo
@@ -126,16 +126,19 @@ deepseek update publish-status --json
 Hosted release gates build release binaries for Linux x64, Linux arm64, macOS
 x64, macOS arm64, and Windows x64. The release workflow also stages platform npm
 packages and publishes the root npm wrapper when `NPM_TOKEN` is configured.
-The `v0.1.5` Release Matrix run `26380726246` produced the GitHub Release
+The `v0.1.6` Release Matrix run `26802630494` produced the GitHub Release
 assets, published npm packages, updated the Homebrew tap, and pushed the GHCR
-image.
-The `v0.1.5` Release Smoke run `26380981708` verified public release archive
+image. The first attempt hit a transient Docker Hub metadata `i/o timeout` in
+`Docker Artifact Smoke`; rerunning failed jobs produced a green attempt 2.
+The `v0.1.6` Release Smoke run `26803043308` verified public release archive
 download, checksum, extraction, and install smoke on Linux x64, Linux arm64,
 macOS x64, and macOS arm64.
-For `v0.1.5`, registry and clean-machine smoke verified `deepseek 0.1.5`
-through both `npx @deepseek-code/cli@0.1.5 version` and a clean-directory
-`npm install @deepseek-code/cli@0.1.5`.
-Homebrew Smoke run `26380934049` verified the published tap on macOS x64 and
+For `v0.1.6`, registry and clean-machine smoke verified `deepseek 0.1.6`
+through both `npx @deepseek-code/cli@0.1.6 version` and a clean-directory
+`npm install @deepseek-code/cli@0.1.6`.
+The `ghcr.io/willamhou/deepseekcode:0.1.6` OCI index digest is
+`sha256:63d3070c7bb74da4f234c1df33bd6e80ea9c222a637fdb510445f29e32a22b8c`.
+Homebrew Smoke run `26803227609` verified the published tap on macOS x64 and
 macOS arm64.
 
 ## Known Limits
