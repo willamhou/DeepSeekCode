@@ -278,7 +278,22 @@ jobs:
 
       - name: Docker Artifact Smoke
         run: |
-          docker build -t deepseek-code:ci .
+          attempts=3
+          for attempt in $(seq 1 "$attempts"); do
+            if docker build -t deepseek-code:ci .; then
+              break
+            fi
+
+            if [ "$attempt" -eq "$attempts" ]; then
+              echo "Docker build failed after ${attempts} attempts."
+              exit 1
+            fi
+
+            sleep_seconds=$((attempt * 30))
+            echo "Docker build failed on attempt ${attempt}/${attempts}; retrying in ${sleep_seconds}s..."
+            sleep "$sleep_seconds"
+          done
+
           docker run --rm deepseek-code:ci version
 
       - name: Runtime Service Template Smoke
