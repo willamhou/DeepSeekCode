@@ -108,7 +108,10 @@ fn apply_text_replacement_with_session(
         warm_session,
     );
 
-    Ok(ToolOutput { summary })
+    Ok(ToolOutput {
+        summary,
+        ..ToolOutput::default()
+    })
 }
 
 /// Returns the updated text and whether a whitespace-tolerant fallback was used.
@@ -144,7 +147,10 @@ fn apply_replacement(
         }
     }
 
-    Err(app_error("find string not found in target file"))
+    let find_line_count = find.lines().count().max(1);
+    Err(app_error(format!(
+        "find string not found in target file (find was {find_line_count} line(s); reproducing a large block byte-for-byte is fragile — copy a smaller unique anchor of 1-3 lines around the change and retry)"
+    )))
 }
 
 /// Locate `find` in `original` comparing lines by trimmed content, and splice in
@@ -279,6 +285,7 @@ fn apply_unified_patch_with_session(
 
     Ok(ToolOutput {
         summary: output_summary,
+        ..ToolOutput::default()
     })
 }
 
@@ -780,6 +787,25 @@ mod tests {
     fn errors_when_find_is_missing() {
         let error = apply_replacement("hello", "missing", "x", false).unwrap_err();
         assert!(error.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn not_found_error_includes_find_line_count_and_small_anchor_guidance() {
+        // The error message must hand the model two actionable signals: how
+        // large its find block was, and the recipe that does work (a small
+        // unique anchor). Models that fail apply_patch tend to retry with the
+        // same too-large block; the line count + guidance steers the retry.
+        let find = "alpha\nbeta\ngamma\ndelta\nepsilon";
+        let error = apply_replacement("nothing matches here\n", find, "X", false).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("5 line(s)"),
+            "expected find line count in error: {message}"
+        );
+        assert!(
+            message.contains("1-3 lines"),
+            "expected small-anchor guidance in error: {message}"
+        );
     }
 
     #[test]
