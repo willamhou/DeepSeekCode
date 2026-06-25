@@ -60,20 +60,20 @@
 
 ## 下一条最推荐录屏
 
-优先录真实 bugfix，而不是再录一个纯 toy demo：
+优先录真实 bugfix，而不是再录一个纯 toy demo。**当前模型可靠区间是「单行/单文件 + 引导式 prompt」**——录屏选这个粒度，命中率最高；开放多文件自主修复目前不稳，不上宣传口径：
 
-1. 找一个小型真实 repo，保持任务边界清楚。
-2. 先手动跑测试，展示失败。
-3. 打开 `deepseek tui`。
-4. 输入任务：让 agent 定位失败测试并修复。
-5. 让 agent 搜索代码、修改文件、跑测试。
-6. 如果第一次测试失败，保留失败和自修过程，不要剪掉。
-7. 最终测试通过。
-8. 打开 `/diff` 展示 changed files、hunk preview、review/rollback next steps。
-9. 展示 rollback snapshot 或 `revert turn last` dry-run。
-10. 结尾显示 GitHub repo 和安装命令。
+1. 用一个边界明确的小 repo（单文件、单行 bug，比如算子写反、off-by-one），先手动 `cargo test` 展示失败。
+2. 打开 `deepseek tui`。
+3. 输入**点名 prompt**（"两条测试失败，找 src/lib.rs 的 bug，修好并重新跑测试"），不要给"自主修整个 repo"那种开放式 prompt。
+4. 让 agent 跑、改、复测。如果第一轮失败，保留失败和自修过程，不要剪掉。
+5. 最终测试通过；打开 `/diff` 展示 changed files、hunk preview。
+6. 展示 rollback snapshot 或 `revert turn last` dry-run。
+7. 结尾显示 GitHub repo 和安装命令。
 
-这个录屏比 2048 更能证明“真的能干活”。2048 用来吸引注意力；真实 bugfix 用来说服用户。
+参考已落盘的版本：[docs/demo/deepseek-code-calc-bugfix.gif](../demo/deepseek-code-calc-bugfix.gif)（`exec` 行式录到的同一类 take，stuck-directive 触发后 agent 用小锚点 `apply_patch` 修绿）。一键复现/重录：
+`docs/demo/record-calc-bugfix-exec.sh`（自动）或 `record-calc-bugfix-tui.sh`（手动录全屏 TUI）。
+
+这个录屏比 2048 更能证明"真的能干活"。2048 用来吸引注意力；引导式 bugfix 用来说服用户。**避免**承诺"agent 能自主修任何 bug"——那是当前模型做不稳的事，宣传期撞上就会翻车。
 
 ## 录屏注意事项
 

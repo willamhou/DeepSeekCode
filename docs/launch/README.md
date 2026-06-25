@@ -81,3 +81,11 @@ Be direct and specific. Ask for terminal workflow feedback, issue reports, and
 real repo dogfooding. Do not describe the project as fully equivalent to Claude
 Code or Codex CLI; it is a DeepSeek-first public beta with a comparable
 terminal-first workflow.
+
+Frame model-backed demos as **guided, scoped tasks** — a specific prompt that
+names the symptom and a small, well-bounded change — not "agent autonomously
+fixes any repo". Today's honest scope is greenfield generation (e.g. the 2048
+demo), single-file or single-line bugfixes (e.g. the calc bugfix demo at
+[docs/demo/deepseek-code-calc-bugfix.gif](../demo/deepseek-code-calc-bugfix.gif)),
+and focused features driven by clear prompts. Open-ended multi-file autonomous
+repair is model-bound and not the story the public beta makes.

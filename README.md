@@ -165,6 +165,14 @@ git.
   as serial barriers.
 - Recoverable DeepSeek-style malformed tool-call arguments are repaired through
   a bounded pipeline and recorded as observable runtime repair events.
+- Defensive loop-hardening for weak-model failure modes: redundant re-reads of
+  the same target are short-circuited even when size caps differ, a
+  stuck-directive forces an edit decision after sustained inspection without
+  progress, and `apply_patch` falls back to a unique-match whitespace-tolerant
+  splice when the model reproduces a find block that is close but not byte-exact.
+  See [docs/demo/deepseek-code-calc-bugfix.gif](./docs/demo/deepseek-code-calc-bugfix.gif)
+  for a recording where the stuck-directive fires and the agent then lands a
+  small-anchor `apply_patch`.
 - Runtime evidence commands: `deepseek stats`, `deepseek events replay`, and
   `deepseek events diff` summarize cost/cache/tool/failure traces without
   reading raw `.dscode/runtime` JSON.
@@ -189,6 +197,12 @@ place. The remaining gaps are mainly evidence depth and product hardening:
 
 - optional larger external repo fixtures beyond the disposable Python/Rust/Node
   samples.
+- **scope of autonomy is model-bound**: the agent is reliable on guided,
+  scoped tasks — greenfield generation (e.g. the 2048 demo), single-file or
+  single-line bugfixes (e.g. the calc bugfix demo), and focused features driven
+  by clear prompts. Open-ended multi-file autonomous repair is currently a
+  weaker surface. The defensive loop-hardening above keeps these failures
+  observable and recoverable, but doesn't close the model-side gap.
 
 Windows long-tail service proof, hosted IDE evidence, and installed service
 proof are broader product-hardening work. They are not blockers for the
@@ -220,8 +234,9 @@ For release and dogfood evidence, see:
 - [Current status](./docs/current-status.md)
 - Additional demos: [scripted 2048 capture](./docs/demo/deepseek-code-2048-terminal-demo.svg),
   [TUI recording](./docs/demo/deepseek-code-tui-demo.svg),
-  [TUI first-run UX evidence](./docs/demo/deepseek-code-tui-ux-evidence.svg), and
-  [model-backed edit/test loop](./docs/demo/deepseek-code-model-demo.svg)
+  [TUI first-run UX evidence](./docs/demo/deepseek-code-tui-ux-evidence.svg),
+  [model-backed edit/test loop](./docs/demo/deepseek-code-model-demo.svg), and
+  [guided calc bugfix (stuck-directive + small-anchor apply_patch)](./docs/demo/deepseek-code-calc-bugfix.gif)
 
 ## Documentation
 
